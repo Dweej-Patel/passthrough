@@ -167,6 +167,8 @@ struct FlowRenderer {
     let t: Double
 
     private var nodeY: CGFloat { 30 }
+    /// Half the distance between the download and upload lanes.
+    static let laneOffset: CGFloat = 3.5
     /// Nodes shrink a little as the VPN node slides in so four fit comfortably.
     private var nodeR: CGFloat { 22 - 3 * CGFloat(vpnProgress) }
     private var margin: CGFloat { state.perspective == .iphone ? 40 : 34 }
@@ -203,22 +205,30 @@ struct FlowRenderer {
             segments.append((x.phone + nodeR + 4, x.internet - nodeR - 4, false, state.linkUp))
         }
 
+        // Two lanes per hop: the upper carries download toward the Mac (teal),
+        // the lower carries upload away from it (violet).
+        let lane = Self.laneOffset
         for seg in segments {
-            var path = Path()
-            path.move(to: CGPoint(x: seg.from, y: y))
-            path.addLine(to: CGPoint(x: seg.to, y: y))
+            func line(_ dy: CGFloat) -> Path {
+                var p = Path(); p.move(to: CGPoint(x: seg.from, y: y + dy)); p.addLine(to: CGPoint(x: seg.to, y: y + dy)); return p
+            }
             if seg.encrypted && state.vpn != nil {
                 let sheath = vpnBlocked ? PTTheme.warning : PTTheme.up
-                ctx.stroke(path, with: .color(sheath.opacity((vpnLive ? 0.22 : 0.12) * vpnProgress)), style: StrokeStyle(lineWidth: 11, lineCap: .round))
+                ctx.stroke(line(0), with: .color(sheath.opacity((vpnLive ? 0.20 : 0.10) * vpnProgress)), style: StrokeStyle(lineWidth: 16, lineCap: .round))
                 if !vpnLive {
-                    ctx.stroke(path, with: .color(sheath.opacity(0.7 * vpnProgress)), style: StrokeStyle(lineWidth: 1.5, lineCap: .round, dash: [4, 5], dashPhase: CGFloat(-t * 20)))
+                    ctx.stroke(line(0), with: .color(sheath.opacity(0.6 * vpnProgress)), style: StrokeStyle(lineWidth: 1.5, lineCap: .round, dash: [4, 5], dashPhase: CGFloat(-t * 20)))
                 }
             }
-            let base = Color.primary.opacity(scheme == .dark ? 0.16 : 0.12)
-            if seg.carries || (seg.encrypted && state.vpn != nil) {
-                ctx.stroke(path, with: .color(base.opacity(linkAlpha)), style: StrokeStyle(lineWidth: 2, lineCap: .round))
+            let neutral = Color.primary.opacity(scheme == .dark ? 0.16 : 0.12)
+            if seg.carries {
+                let tint = (scheme == .dark ? 0.30 : 0.38) * linkAlpha
+                ctx.stroke(line(-lane), with: .color(PTTheme.down.opacity(tint)), style: StrokeStyle(lineWidth: 2, lineCap: .round))
+                ctx.stroke(line(lane), with: .color(PTTheme.up.opacity(tint)), style: StrokeStyle(lineWidth: 2, lineCap: .round))
+            } else if seg.encrypted && state.vpn != nil {
+                ctx.stroke(line(-lane), with: .color(neutral), style: StrokeStyle(lineWidth: 2, lineCap: .round))
+                ctx.stroke(line(lane), with: .color(neutral), style: StrokeStyle(lineWidth: 2, lineCap: .round))
             } else {
-                ctx.stroke(path, with: .color(base), style: StrokeStyle(lineWidth: 1.5, lineCap: .round, dash: [3, 6]))
+                ctx.stroke(line(0), with: .color(neutral), style: StrokeStyle(lineWidth: 1.5, lineCap: .round, dash: [3, 6]))
             }
         }
 
@@ -229,8 +239,8 @@ struct FlowRenderer {
                 let span = (from: first.from, to: last.to)
                 // Gaps where nodes sit: particles hide inside nodes so they appear to pass through.
                 let gaps: [ClosedRange<CGFloat>] = showVPN ? [(x.phone - nodeR)...(x.phone + nodeR), (x.vpn - nodeR)...(x.vpn + nodeR)] : [(x.phone - nodeR)...(x.phone + nodeR)]
-                drawStream(span: span, gaps: gaps, y: y, rate: state.downRate, travel: travel.down, towardMac: true, color: PTTheme.down)
-                drawStream(span: span, gaps: gaps, y: y, rate: state.upRate, travel: travel.up, towardMac: false, color: PTTheme.up)
+                drawStream(span: span, gaps: gaps, y: y - lane, rate: state.downRate, travel: travel.down, towardMac: true, color: PTTheme.down)
+                drawStream(span: span, gaps: gaps, y: y + lane, rate: state.upRate, travel: travel.up, towardMac: false, color: PTTheme.up)
             }
         } else if state.busy {
             // Connecting: a single scout pulse walks the USB wire.
@@ -296,7 +306,7 @@ struct FlowRenderer {
         let n = rate > 0 ? 1 + Int(4 * norm) : 1
         let spacing = len / Double(n)
         let streakLen = CGFloat(rate > 0 ? 14 + 22 * norm : 12)
-        let alpha = rate > 0 ? 0.42 + 0.3 * norm : 0.16
+        let alpha = rate > 0 ? 0.55 + 0.35 * norm : 0.22
         for i in 0..<n {
             var d = (travel + Double(i) * spacing + (rate > 0 ? 0 : (t * 14))).truncatingRemainder(dividingBy: len)
             if d < 0 { d += len }
