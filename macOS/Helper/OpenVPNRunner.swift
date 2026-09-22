@@ -72,9 +72,15 @@ final class OpenVPNRunner: VPNRunner {
             "--pull-filter", "ignore", "route-ipv6",
             "--pull-filter", "ignore", "ifconfig-ipv6",
             "--pull-filter", "ignore", "block-outside-dns",
+            // Servers push their own keepalive timers (NordVPN: ping 60 /
+            // ping-restart 180), which would leave a dead session unnoticed for
+            // three minutes after a cellular drop. Ignore them and use ours.
+            "--pull-filter", "ignore", "ping",
+            "--pull-filter", "ignore", "ping-restart",
             "--script-security", "0",
             "--nobind", "--persist-tun", "--persist-key",
-            "--ping-restart", "30",
+            "--ping", "10",
+            "--ping-restart", "25",
             "--connect-retry", "2", "10",
             "--auth-user-pass", "/dev/stdin",
             "--status", Self.statusPath, "5",
