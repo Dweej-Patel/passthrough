@@ -261,8 +261,9 @@ final class SessionCoordinator: ObservableObject {
                 pairingError = nil
             }
         case .paired(let token):
-            // 32 random bytes, base64: anything else is not a token this phone issued.
-            guard token.count == 44, token.allSatisfy({ $0.isASCII && ($0.isLetter || $0.isNumber || "+/=".contains($0)) }) else {
+            // 32 random bytes as unpadded URL-safe base64 (43 chars, see
+            // PairingRegistry.makeToken): anything else is not a token this phone issued.
+            guard token.count == 43, token.allSatisfy({ $0.isASCII && ($0.isLetter || $0.isNumber || "-_".contains($0)) }) else {
                 pairingInFlight = false
                 fail("The iPhone sent a malformed pairing token")
                 return
