@@ -17,6 +17,7 @@ struct MenuPanelView: View {
                 case .pairingRequired: PairingCard()
                 default: hero
                 }
+                FlowCard()
                 VPNRow()
                 KeepAwakeRow()
                 ThroughputPanel()
@@ -24,7 +25,7 @@ struct MenuPanelView: View {
             }
             .padding(16)
         }
-        .frame(width: 340)
+        .frame(width: 356)
     }
 
     // MARK: Header
@@ -243,6 +244,31 @@ struct KeepAwakeRow: View {
         }
         }
         .animation(.easeInOut(duration: 0.2), value: session.keepAwakeBlockedReason)
+    }
+}
+
+/// Live picture of the route traffic takes right now.
+struct FlowCard: View {
+    @EnvironmentObject private var session: SessionCoordinator
+
+    private var flowState: FlowMapState {
+        var vpn: FlowMapState.VPN?
+        if session.vpnWanted {
+            let v = session.vpn
+            vpn = FlowMapState.VPN(name: v.name.isEmpty ? (session.activeVPNProfile?.name ?? "VPN") : v.name,
+                                   engine: v.engineLabel.isEmpty ? (session.activeVPNProfile?.engine.label ?? "VPN") : v.engineLabel,
+                                   connected: v.isConnected, blocked: v.state == "blocked")
+        }
+        return FlowMapState(perspective: .mac, macName: session.macName, phoneName: session.phoneStatus?.deviceName ?? "iPhone",
+                            linkUp: session.phase.isConnected, busy: session.phase.isBusy, radio: session.phoneStatus?.radio,
+                            vpn: vpn, keepAwake: session.keepAwake, downRate: session.meter.downRate, upRate: session.meter.upRate,
+                            activeConnections: session.phoneActiveConnections)
+    }
+
+    var body: some View {
+        PTCard(padding: 8) {
+            FlowMap(state: flowState, height: 84)
+        }
     }
 }
 

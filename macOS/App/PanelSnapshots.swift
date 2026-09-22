@@ -22,7 +22,7 @@ enum PanelSnapshots {
             configure(session)
             for scheme in [ColorScheme.dark, .light] {
                 let view = MenuPanelView().environmentObject(session).environment(\.colorScheme, scheme)
-                    .frame(width: 340)
+                    .frame(width: 356)
                 let renderer = ImageRenderer(content: view)
                 renderer.scale = 2
                 if let image = renderer.nsImage, let tiff = image.tiffRepresentation,

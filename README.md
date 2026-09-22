@@ -26,6 +26,10 @@ Because the phone opens every connection with its own stack, the carrier sees th
 * The root helper accepts XPC only from apps signed by your team, and only ever talks to `127.0.0.1`.
 * The helper tears the tunnel down automatically if the menu bar app quits or crashes.
 
+## Flow map
+
+Both apps show a live map of the route traffic takes: Mac ⟶ USB ⟶ iPhone ⟶ radio ⟶ (VPN) ⟶ Internet. Particles ride the wires at a speed and density that follow the current throughput (teal toward the Mac, violet away from it), the VPN node slides in with a lock over the encrypted hop when the layer is on, the Mac gets a pulsing halo while keep-awake holds it up, and the USB hop shows the live rates. It is one `Canvas` driven by a `TimelineView` at up to 30 fps (15 fps when idle, fully paused when nothing is connected), with stateless particle math and no per-particle views, so it costs next to nothing (`PassthroughUI/FlowMap.swift`).
+
 ## Keep Mac awake
 
 A toggle in the menu panel (and Settings ▸ General) keeps the Mac from sleeping so long sessions survive when you step away — a download, a remote/Claude session, or the tunnel itself. It has two layers:

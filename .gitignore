@@ -21,3 +21,4 @@ docs/screenshots/
 # The prebuilt Vendor/HevSocks5Tunnel/ (lib + headers) IS committed.
 Vendor/hev-socks5-tunnel/
 Vendor/vpn-engines-src/
+build-ios/

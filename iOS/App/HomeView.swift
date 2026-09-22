@@ -14,6 +14,7 @@ struct HomeView: View {
                 VStack(spacing: 18) {
                     header
                     HeroCard(showPairing: $showPairing)
+                    FlowCard()
                     ThroughputCard()
                     UsageCard()
                     MacsCard(showPairing: $showPairing)
@@ -78,6 +79,32 @@ struct HomeView: View {
                 .multilineTextAlignment(.center)
         }
         .padding(.horizontal, 12)
+    }
+}
+
+// MARK: - Flow map
+
+/// Live picture of how a Mac's traffic moves through this phone.
+struct FlowCard: View {
+    @EnvironmentObject private var model: AppModel
+
+    private var flowState: FlowMapState {
+        let macs = model.stats.macs
+        let macName = macs.count > 1 ? "\(macs.count) Macs" : (macs.first?.name ?? "Mac")
+        return FlowMapState(perspective: .iphone, macName: macName, phoneName: model.deviceName,
+                            linkUp: model.state == .running && !macs.isEmpty,
+                            busy: model.state == .starting || (model.state == .running && macs.isEmpty),
+                            radio: model.radio, downRate: model.meter.downRate, upRate: model.meter.upRate,
+                            activeConnections: model.stats.active)
+    }
+
+    var body: some View {
+        PTCard(padding: 10) {
+            VStack(alignment: .leading, spacing: 4) {
+                PTSectionTitle("How it flows", icon: "point.3.connected.trianglepath.dotted").padding(.leading, 6)
+                FlowMap(state: flowState, height: 90)
+            }
+        }
     }
 }
 
