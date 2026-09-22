@@ -99,6 +99,14 @@ project.yml                XcodeGen spec that produces Passthrough.xcodeproj
 
 The Mac app runs unsandboxed (it needs the usbmuxd socket) with hardened runtime, and installs no persistent network settings: everything lives in the dynamic store and vanishes when the tunnel stops.
 
+## Failure recovery
+
+* The helper sweeps the system at every start: leftover kill-switch or VPN routes, dummy `feth` interfaces, a disabled sleep setting, stale network-service entries and engine files from a crashed run are all removed before it accepts clients. Network-service entries are published as temporary values, so configd drops them by itself if the helper dies.
+* The VPN layer has a 60 s connect deadline; an engine that never establishes a session is restarted with backoff, and a fatal failure (rejected credentials, bad profile) lifts the kill switch instead of leaving the Mac blackholed. Endpoint addresses are cached so reconnects under the kill switch need no DNS.
+* The Mac app keeps retrying the USB link (backoff capped at 30 s) for as long as a phone is attached, so starting the proxy on the phone later just works. Routes are removed before the loopback listener closes on disconnect.
+* On the phone, a UDP peer whose socket fails or never becomes viable is replaced on the next packet; a client that never completes the SOCKS handshake is dropped after 20 s; sessions are capped.
+* If launchd is still running the helper from an old bundle location, the app re-registers it from its current location the next time nothing is connected.
+
 ## Verifying without a phone
 
 The SOCKS server can run on the Mac for protocol testing:

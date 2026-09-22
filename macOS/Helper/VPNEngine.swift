@@ -126,6 +126,8 @@ final class VPNEngine {
         runner?.stop()
         runner = nil
         removeQuarterRoutes()
+        // Unconditional: never trust the in-memory flag on the way out.
+        rejectRoutesInstalled = true
         removeRejectRoutes()
         removeEndpointRoutes()
         clearDNS()
