@@ -1,0 +1,166 @@
+name: Passthrough
+options:
+  bundleIdPrefix: dev.dpatel.passthrough
+  deploymentTarget:
+    iOS: "17.0"
+    macOS: "14.0"
+  createIntermediateGroups: true
+  groupSortPosition: top
+  generateEmptyDirectories: true
+configFiles:
+  Debug: Config/Signing.xcconfig
+  Release: Config/Signing.xcconfig
+settings:
+  base:
+    SWIFT_VERSION: "5.0"
+    CODE_SIGN_STYLE: Automatic
+    MARKETING_VERSION: 1.0.0
+    CURRENT_PROJECT_VERSION: 1
+    ENABLE_USER_SCRIPT_SANDBOXING: NO
+    SWIFT_STRICT_CONCURRENCY: minimal
+    OTHER_SWIFT_FLAGS: "-Xfrontend -warn-long-expression-type-checking=400"
+packages:
+  PassthroughCore:
+    path: Packages/PassthroughCore
+
+targets:
+  # ───────────────────────── iOS ─────────────────────────
+  Passthrough:
+    type: application
+    platform: iOS
+    sources:
+      - path: iOS/App
+        excludes: ["Info.plist", "*.entitlements"]
+    dependencies:
+      - package: PassthroughCore
+        product: PassthroughCore
+      - package: PassthroughCore
+        product: PassthroughUI
+      - target: PassthroughTunnel
+    info:
+      path: iOS/App/Info.plist
+      properties:
+        CFBundleDisplayName: Passthrough
+        UILaunchScreen: {}
+        UISupportedInterfaceOrientations: [UIInterfaceOrientationPortrait]
+        UIUserInterfaceStyle: Automatic
+        ITSAppUsesNonExemptEncryption: false
+        UIApplicationSceneManifest:
+          UIApplicationSupportsMultipleScenes: false
+        NSLocalNetworkUsageDescription: Passthrough only listens on the USB link to your Mac.
+    entitlements:
+      path: iOS/App/Passthrough.entitlements
+      properties:
+        com.apple.developer.networking.networkextension: [packet-tunnel-provider]
+        com.apple.security.application-groups: [group.dev.dpatel.passthrough]
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: dev.dpatel.passthrough.ios
+        PRODUCT_NAME: Passthrough
+        TARGETED_DEVICE_FAMILY: "1"
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME: AccentColor
+        INFOPLIST_KEY_UILaunchScreen_Generation: YES
+
+  PassthroughTunnel:
+    type: app-extension
+    platform: iOS
+    sources:
+      - path: iOS/Tunnel
+        excludes: ["Info.plist", "*.entitlements"]
+    dependencies:
+      - package: PassthroughCore
+        product: PassthroughCore
+    info:
+      path: iOS/Tunnel/Info.plist
+      properties:
+        CFBundleDisplayName: Passthrough Tunnel
+        NSExtension:
+          NSExtensionPointIdentifier: com.apple.networkextension.packet-tunnel
+          NSExtensionPrincipalClass: $(PRODUCT_MODULE_NAME).PacketTunnelProvider
+    entitlements:
+      path: iOS/Tunnel/PassthroughTunnel.entitlements
+      properties:
+        com.apple.developer.networking.networkextension: [packet-tunnel-provider]
+        com.apple.security.application-groups: [group.dev.dpatel.passthrough]
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: dev.dpatel.passthrough.ios.tunnel
+        PRODUCT_NAME: PassthroughTunnel
+
+  # ───────────────────────── macOS ─────────────────────────
+  PassthroughMac:
+    type: application
+    platform: macOS
+    sources:
+      - path: macOS/App
+        excludes: ["Info.plist", "*.entitlements", "*.plist"]
+      - path: macOS/Shared
+      - path: macOS/App/dev.dpatel.passthrough.helper.plist
+        buildPhase:
+          copyFiles:
+            destination: wrapper
+            subpath: Contents/Library/LaunchDaemons
+    dependencies:
+      - package: PassthroughCore
+        product: PassthroughCore
+      - package: PassthroughCore
+        product: PassthroughUI
+      - package: PassthroughCore
+        product: USBMux
+      - target: PassthroughHelper
+        embed: true
+        link: false
+        codeSign: true
+        copy:
+          destination: executables
+    info:
+      path: macOS/App/Info.plist
+      properties:
+        CFBundleDisplayName: Passthrough
+        LSUIElement: true
+        LSMinimumSystemVersion: "14.0"
+        NSHumanReadableCopyright: ""
+        ITSAppUsesNonExemptEncryption: false
+    entitlements:
+      path: macOS/App/PassthroughMac.entitlements
+      properties: {}
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: dev.dpatel.passthrough.mac
+        PRODUCT_NAME: Passthrough
+        ENABLE_HARDENED_RUNTIME: YES
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME: AccentColor
+        COMBINE_HIDPI_IMAGES: YES
+
+  PassthroughHelper:
+    type: tool
+    platform: macOS
+    sources:
+      - path: macOS/Helper
+      - path: macOS/Shared
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: dev.dpatel.passthrough.helper
+        PRODUCT_NAME: PassthroughHelper
+        ENABLE_HARDENED_RUNTIME: YES
+        SWIFT_INCLUDE_PATHS: $(SRCROOT)/Vendor/HevSocks5Tunnel/include
+        LIBRARY_SEARCH_PATHS: $(SRCROOT)/Vendor/HevSocks5Tunnel/lib
+        OTHER_LDFLAGS: ["-lhev-socks5-tunnel", "-lresolv"]
+        CREATE_INFOPLIST_SECTION_IN_BINARY: YES
+        INFOPLIST_FILE: macOS/Helper/Info.plist
+        ARCHS: arm64
+        EXCLUDED_ARCHS: x86_64
+
+schemes:
+  Passthrough:
+    build:
+      targets: { Passthrough: all }
+    run:
+      config: Debug
+  PassthroughMac:
+    build:
+      targets: { PassthroughMac: all }
+    run:
+      config: Debug
