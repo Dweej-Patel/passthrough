@@ -14,6 +14,8 @@ enum PanelSnapshots {
             ("3-pairing", { $0.debugApply(phase: .pairingRequired, device: true, status: DeviceStatus(deviceName: "My iPhone", radio: "5G", battery: 0.82, hosting: "background")) }),
             ("4-connected", { $0.debugApply(phase: .connected, device: true, status: DeviceStatus(deviceName: "My iPhone", radio: "5G", battery: 0.82, hosting: "background"), traffic: true) }),
             ("5-helper", { $0.debugApply(phase: .helperRequired, device: true) }),
+            ("6-vpn", { $0.debugApply(phase: .connected, device: true, status: DeviceStatus(deviceName: "My iPhone", radio: "5G", battery: 0.82, hosting: "background"), traffic: true, vpn: "connected") }),
+            ("7-vpn-blocked", { $0.debugApply(phase: .connected, device: true, status: DeviceStatus(deviceName: "My iPhone", radio: "5G", battery: 0.82, hosting: "background"), traffic: true, vpn: "blocked") }),
         ]
         for (name, configure) in states {
             let session = SessionCoordinator()

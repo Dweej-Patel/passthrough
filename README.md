@@ -37,9 +37,34 @@ It is **off by default**, sits directly under the passthrough switch, and works 
 
 **Low-battery auto-off:** in Settings ▸ General you set a battery percentage (default 20%). When keep-awake is on and the Mac is on battery power, it switches keep-awake off automatically at that level so a closed laptop can sleep instead of draining. It does not trigger on AC power. Turning keep-awake **on** while already at or below the limit is refused up front (the toggle stays off), and a warning appears under the toggle stating the current level and the limit.
 
-The menu-bar icon shows four states from the two toggles: a phone (plain when passthrough is off, radiating when connected) plus a coffee cup that appears when keep-awake is on.
+The menu-bar icon composes the three toggles: a phone (plain when passthrough is off, radiating when connected), a lock while the VPN layer is connected, and a coffee cup while keep-awake is on.
 
 Caution: a closed, running Mac in a bag can overheat and drain the battery — use lid-closed on power or in open air.
+
+## VPN layer
+
+A third toggle, under the passthrough switch, wraps everything the Mac sends in one encrypted VPN flow on top of the passthrough. The iPhone and the carrier then see a single UDP (or TCP) stream to a VPN server instead of the Mac's individual connections, which removes the destination and fingerprint signals that could otherwise hint at tethering. It also works without passthrough, over Wi-Fi or Ethernet, like any VPN client.
+
+Two engines are bundled inside the app (`Contents/MacOS/`), so nothing else needs installing:
+
+* **WireGuard** via `wireguard-go` (MIT). Import a standard wg-quick style `.conf`.
+* **OpenVPN** via the `openvpn` 2.6 binary (GPLv2, run as a separate process). Import any `.ovpn`, or use **Settings ▸ VPN ▸ Add NordVPN…**, which fetches Nord's official manual-setup profile for their recommended server (optionally in a chosen country, UDP or TCP 443) and stores your Nord *service credentials* in the Keychain. "Pick a fresh recommended server" re-fetches later.
+
+How it is layered (all in the root helper, `VPNEngine.swift`):
+
+* The engine's utun owns four `/2` routes (`0.0.0.0/2` … `192.0.0.0/2`, and the IPv6 equivalents). Longest prefix wins, so they beat the passthrough's `/1` routes without touching them.
+* Each VPN endpoint gets a `/32` host route through the underlay (the passthrough utun when it is up, otherwise the current default gateway), so the encrypted flow itself never loops into the VPN.
+* DNS: over the passthrough the helper swaps the passthrough service's resolvers for the ones the VPN pushed (Nord's, or your WireGuard `DNS =`); over Wi-Fi it publishes the VPN interface as the primary service.
+* Passthrough connecting or disconnecting underneath restarts the VPN session automatically so the flow follows the new underlay.
+* **Kill switch** (default on): while the VPN is down the `/2` routes become reject routes, so nothing falls back to the bare underlay until the session is back. With it off, traffic falls through to the passthrough/Wi-Fi meanwhile. The helper retries with backoff; an auth failure or bad profile stops with the reason shown under the toggle.
+* Engines are signed on copy with your Team ID and the helper verifies that signature before executing them as root, since the app bundle sits in a user-writable location.
+* OpenVPN credentials go to the engine over stdin (`--auth-user-pass /dev/stdin`), never to disk or the process list; the profile text is written to a root-only file under `/var/run/passthrough` for the duration of the session.
+
+Rebuild the engines with `scripts/build-vpn-engines.sh` (needs `brew install go openssl@3 lzo lz4`); the OpenVPN build links OpenSSL, LZO and LZ4 statically so the binary depends only on system libraries. Licences are in `Vendor/VPNEngines/licenses`.
+
+Prefer WireGuard when you control the endpoint (home router/Pi) and OpenVPN UDP for NordVPN; use the TCP 443 profile only on networks that block UDP.
+
+Diagnostics: `PASSTHROUGH_NO_AUTOCONNECT=1` launches the app without taking over the network; `PASSTHROUGH_VPN_TEST=<file>` (plus `PASSTHROUGH_VPN_TEST_USER/PASS`) imports that profile as a temporary one and turns the VPN layer on, which is how the engines are exercised without clicking through the UI.
 
 ## Layout
 
@@ -53,6 +78,7 @@ macOS/Helper               Root helper: utun + tun2socks + routes + DNS
 macOS/Shared               XPC protocol shared by app and helper
 Vendor/HevSocks5Tunnel     Prebuilt tun2socks engine (arm64) + headers
 Vendor/hev-socks5-tunnel   Engine source (MIT), rebuilt with scripts/build-hev.sh
+Vendor/VPNEngines          Prebuilt wireguard-go + openvpn (arm64) for the VPN layer, plus licences
 project.yml                XcodeGen spec that produces Passthrough.xcodeproj
 ```
 

@@ -118,6 +118,46 @@ final class HelperClient {
         }
     }
 
+    struct VPNConfig {
+        var engine: String
+        var name: String
+        var config: String
+        var username: String
+        var password: String
+        var killSwitch: Bool
+    }
+
+    func startVPN(_ config: VPNConfig) async throws {
+        let dict: [String: Any] = [
+            VPNConfigKey.engine: config.engine,
+            VPNConfigKey.name: config.name,
+            VPNConfigKey.config: config.config,
+            VPNConfigKey.username: config.username,
+            VPNConfigKey.password: config.password,
+            VPNConfigKey.killSwitch: config.killSwitch,
+        ]
+        try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
+            guard let proxy = proxy() else { cont.resume(throwing: HelperError.unreachable); return }
+            let done = Locked(false)
+            proxy.startVPN(configuration: dict) { ok, detail in
+                guard !done.exchange(true) else { return }
+                ok ? cont.resume() : cont.resume(throwing: HelperError.startFailed(detail))
+            }
+            DispatchQueue.global().asyncAfter(deadline: .now() + 20) {
+                if !done.exchange(true) { cont.resume(throwing: HelperError.unreachable) }
+            }
+        }
+    }
+
+    func stopVPN() async {
+        await withCheckedContinuation { cont in
+            guard let proxy = proxy() else { cont.resume(); return }
+            let done = Locked(false)
+            proxy.stopVPN { if !done.exchange(true) { cont.resume() } }
+            DispatchQueue.global().asyncAfter(deadline: .now() + 8) { if !done.exchange(true) { cont.resume() } }
+        }
+    }
+
     func setDisableSleep(_ on: Bool) async -> Bool {
         await withCheckedContinuation { cont in
             guard let proxy = proxy() else { cont.resume(returning: false); return }

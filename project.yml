@@ -101,6 +101,18 @@ targets:
           copyFiles:
             destination: wrapper
             subpath: Contents/Library/LaunchDaemons
+      # VPN-layer engines, spawned by the root helper. Signed on copy so the
+      # helper can verify they carry our Team ID before executing them as root.
+      - path: Vendor/VPNEngines/bin/wireguard-go
+        buildPhase:
+          copyFiles:
+            destination: executables
+        attributes: [CodeSignOnCopy]
+      - path: Vendor/VPNEngines/bin/openvpn
+        buildPhase:
+          copyFiles:
+            destination: executables
+        attributes: [CodeSignOnCopy]
     dependencies:
       - package: PassthroughCore
         product: PassthroughCore

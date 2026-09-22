@@ -9,6 +9,10 @@ import Foundation
     func getStatus(reply: @escaping ([String: Any]) -> Void)
     /// Disables/enables ALL system sleep (incl. lid-close) via pmset. Root only.
     func setDisableSleep(_ on: Bool, reply: @escaping (Bool) -> Void)
+    /// VPN layer: runs a bundled WireGuard/OpenVPN engine on top of whatever
+    /// network is current (the passthrough tunnel when it is up).
+    func startVPN(configuration: [String: Any], reply: @escaping (Bool, String) -> Void)
+    func stopVPN(reply: @escaping () -> Void)
     func quit()
 }
 
@@ -16,7 +20,7 @@ public enum HelperConstants {
     public static let machService = "dev.dpatel.passthrough.helper"
     public static let plistName = "dev.dpatel.passthrough.helper.plist"
     /// Bump together with the helper binary so the app can detect stale daemons.
-    public static let version = "1.1.0"
+    public static let version = "1.2.0"
 }
 
 /// Keys of the configuration dictionary handed to `startTunnel`.
@@ -38,4 +42,37 @@ public enum TunnelStatusKey {
     public static let rxPackets = "rxPackets"
     public static let txPackets = "txPackets"
     public static let since = "since"
+}
+
+/// Keys of the configuration dictionary handed to `startVPN`.
+public enum VPNConfigKey {
+    /// "wireguard" or "openvpn".
+    public static let engine = "engine"
+    /// Display name (e.g. "NordVPN · us9591").
+    public static let name = "name"
+    /// Full config text (.conf for WireGuard, .ovpn for OpenVPN).
+    public static let config = "config"
+    public static let username = "username"
+    public static let password = "password"
+    /// Block all traffic (instead of falling back to the underlay) while the VPN is down.
+    public static let killSwitch = "killSwitch"
+}
+
+/// Keys of the `vpn` sub-dictionary in `getStatus`.
+public enum VPNStatusKey {
+    public static let vpn = "vpn"
+    /// "off", "starting", "connected", "reconnecting", "blocked", "failed".
+    public static let state = "state"
+    public static let interface = "interface"
+    public static let engine = "engine"
+    public static let name = "name"
+    public static let rxBytes = "rxBytes"
+    public static let txBytes = "txBytes"
+    public static let since = "since"
+    public static let error = "error"
+    public static let underlay = "underlay"
+    public static let dns = "dns"
+    public static let endpoint = "endpoint"
+    /// Seconds since the last WireGuard handshake (WireGuard only).
+    public static let handshakeAge = "handshakeAge"
 }

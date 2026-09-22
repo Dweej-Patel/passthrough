@@ -13,7 +13,7 @@ struct PassthroughMacApp: App {
                 .environmentObject(session)
         } label: {
             // Four states: phone shows passthrough on/off, cup shows keep-awake on/off.
-            Image(nsImage: MenuBarIcon.image(passthroughOn: session.phase.isConnected, keepAwake: session.keepAwake))
+            Image(nsImage: MenuBarIcon.image(passthroughOn: session.phase.isConnected, vpnOn: session.vpn.isConnected, keepAwake: session.keepAwake))
         }
         .menuBarExtraStyle(.window)
 

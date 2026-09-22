@@ -4,6 +4,8 @@ import Foundation
 final class HelperService: NSObject, PassthroughHelperProtocol {
     private let engine = TunnelEngine()
     private let queue = DispatchQueue(label: "dev.dpatel.passthrough.helper")
+    private lazy var vpn = VPNEngine(queue: queue, tunnel: engine)
+    private var vpnOwner: ObjectIdentifier?
     private var owner: ObjectIdentifier?
     private var clients: Set<ObjectIdentifier> = []
     private var sleepDisabled = false
@@ -17,10 +19,16 @@ final class HelperService: NSObject, PassthroughHelperProtocol {
     func clientGone(_ id: ObjectIdentifier) {
         queue.async {
             self.clients.remove(id)
+            if self.vpnOwner == id, self.vpn.isActive {
+                HelperLog.info("owning client disconnected; stopping VPN layer")
+                self.vpn.stop()
+                self.vpnOwner = nil
+            }
             if self.owner == id {
                 HelperLog.info("owning client disconnected; stopping tunnel")
                 self.engine.stop()
                 self.owner = nil
+                self.vpn.underlayChanged()
             }
             if self.clients.isEmpty && self.sleepDisabled {
                 HelperLog.info("last client gone; re-enabling system sleep")
@@ -74,6 +82,7 @@ final class HelperService: NSObject, PassthroughHelperProtocol {
                 try self.engine.start(config)
                 self.owner = caller
                 reply(true, self.engine.interfaceName ?? "")
+                self.vpn.underlayChanged()
             } catch {
                 HelperLog.error("start failed: \(error.localizedDescription)")
                 self.engine.stop()
@@ -84,21 +93,58 @@ final class HelperService: NSObject, PassthroughHelperProtocol {
 
     func stopTunnel(reply: @escaping () -> Void) {
         queue.async {
+            let wasRunning = self.engine.isRunning
             self.engine.stop()
             self.owner = nil
             reply()
+            if wasRunning { self.vpn.underlayChanged() }
         }
     }
 
     func getStatus(reply: @escaping ([String: Any]) -> Void) {
         queue.async {
-            reply(self.engine.status())
+            var status = self.engine.status()
+            status[VPNStatusKey.vpn] = self.vpn.status()
+            reply(status)
+        }
+    }
+
+    func startVPN(configuration: [String: Any], reply: @escaping (Bool, String) -> Void) {
+        let caller = NSXPCConnection.current().map { ObjectIdentifier($0) }
+        queue.async {
+            guard let engineName = configuration[VPNConfigKey.engine] as? String,
+                  let engine = VPNEngine.Config.Engine(rawValue: engineName),
+                  let text = configuration[VPNConfigKey.config] as? String, !text.isEmpty else {
+                reply(false, "Invalid VPN configuration"); return
+            }
+            var config = VPNEngine.Config(engine: engine, name: configuration[VPNConfigKey.name] as? String ?? engineName, configText: text)
+            config.username = configuration[VPNConfigKey.username] as? String ?? ""
+            config.password = configuration[VPNConfigKey.password] as? String ?? ""
+            config.killSwitch = configuration[VPNConfigKey.killSwitch] as? Bool ?? true
+            do {
+                try self.vpn.start(config)
+                self.vpnOwner = caller
+                reply(true, "")
+            } catch {
+                HelperLog.error("vpn start failed: \(error.localizedDescription)")
+                self.vpn.stop()
+                reply(false, error.localizedDescription)
+            }
+        }
+    }
+
+    func stopVPN(reply: @escaping () -> Void) {
+        queue.async {
+            self.vpn.stop()
+            self.vpnOwner = nil
+            reply()
         }
     }
 
     func quit() {
         queue.async {
             if self.sleepDisabled { self.applyDisableSleep(false) }
+            self.vpn.stop()
             self.engine.stop()
             HelperLog.info("quit requested")
             exit(0)

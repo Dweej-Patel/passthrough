@@ -17,6 +17,7 @@ struct MenuPanelView: View {
                 case .pairingRequired: PairingCard()
                 default: hero
                 }
+                VPNRow()
                 KeepAwakeRow()
                 ThroughputPanel()
                 footer
@@ -242,6 +243,93 @@ struct KeepAwakeRow: View {
         }
         }
         .animation(.easeInOut(duration: 0.2), value: session.keepAwakeBlockedReason)
+    }
+}
+
+/// The VPN layer toggle: one encrypted flow on top of the passthrough.
+struct VPNRow: View {
+    @EnvironmentObject private var session: SessionCoordinator
+    @Environment(\.openSettings) private var openSettings
+
+    private var hasProfile: Bool { session.activeVPNProfile != nil }
+    private var isOn: Bool { session.vpnWanted }
+
+    private var subtitle: String {
+        let v = session.vpn
+        guard isOn else {
+            if let p = session.activeVPNProfile { return "Off · \(p.name)" }
+            return "No profile yet · set one up in Settings"
+        }
+        switch v.state {
+        case "starting": return "Connecting to \(v.name)…"
+        case "connected":
+            var parts = [v.name]
+            if let u = v.underlay { parts.append("over \(u)") }
+            if let d = v.duration { parts.append(ByteFormat.duration(d)) }
+            return parts.joined(separator: " · ")
+        case "reconnecting": return "Session dropped · reconnecting…"
+        case "blocked": return "Down · traffic blocked · reconnecting…"
+        default: return v.name
+        }
+    }
+
+    private var tint: Color {
+        guard isOn else { return .secondary }
+        switch session.vpn.state {
+        case "connected": return PTTheme.success
+        case "blocked", "reconnecting": return PTTheme.warning
+        default: return .secondary
+        }
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            Button {
+                if hasProfile { session.setVPN(!isOn) } else { openSettings() }
+            } label: {
+                HStack(spacing: 10) {
+                    Group {
+                        if session.vpn.isBusy {
+                            ProgressView().controlSize(.small)
+                        } else {
+                            Image(systemName: session.vpn.isConnected ? "lock.shield.fill" : "lock.shield")
+                                .font(.system(size: 15, weight: .semibold))
+                                .foregroundStyle(session.vpn.isConnected ? AnyShapeStyle(PTTheme.accent) : AnyShapeStyle(Color.secondary))
+                        }
+                    }
+                    .frame(width: 20)
+                    VStack(alignment: .leading, spacing: 1) {
+                        HStack(spacing: 6) {
+                            Text("VPN layer").font(.subheadline.weight(.medium))
+                            if session.vpn.isConnected {
+                                PTPill(session.vpn.engineLabel, tint: PTTheme.success)
+                            } else if session.vpnKillSwitch, isOn {
+                                PTPill("Kill switch", tint: .secondary)
+                            }
+                        }
+                        Text(subtitle).font(.caption2).foregroundStyle(tint).lineLimit(1)
+                    }
+                    Spacer()
+                    MiniSwitch(isOn: isOn)
+                }
+                .padding(.horizontal, 12).padding(.vertical, 9)
+                .background(Color.primary.opacity(0.04), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+            }
+            .buttonStyle(.plain)
+            .help("Wraps everything the Mac sends in one encrypted VPN flow (WireGuard or OpenVPN) on top of the passthrough, so the carrier only ever sees a VPN.")
+            if let error = session.vpnError {
+                HStack(alignment: .top, spacing: 6) {
+                    Image(systemName: "exclamationmark.triangle.fill").font(.caption2)
+                    Text(error).font(.caption2)
+                    Spacer(minLength: 0)
+                }
+                .foregroundStyle(PTTheme.warning)
+                .padding(.horizontal, 12).padding(.top, 6)
+                .transition(.opacity)
+            }
+        }
+        .animation(.easeInOut(duration: 0.2), value: session.vpnError)
+        .animation(.easeInOut(duration: 0.2), value: session.vpn.state)
     }
 }
 

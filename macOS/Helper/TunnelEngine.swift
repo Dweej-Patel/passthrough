@@ -46,6 +46,22 @@ final class TunnelEngine {
     private var engineAlive = false
 
     var isRunning: Bool { thread != nil && isEngineAlive }
+    var ipv4Gateway: String? { config?.ipv4Gateway }
+    /// DNS servers the VPN layer wants used instead of the configured ones.
+    private var dnsOverride: [String]?
+
+    /// Re-publishes the tunnel's DNS entry with the VPN's resolvers (or the
+    /// configured ones when `servers` is nil). No-op while the tunnel is down.
+    func setDNSOverride(_ servers: [String]?) {
+        dnsOverride = servers
+        guard isRunning, let config, storeKeys.contains("State:/Network/Service/\(Self.serviceID)/DNS"),
+              let store = SCDynamicStoreCreate(nil, "Passthrough" as CFString, nil, nil) else { return }
+        let key = "State:/Network/Service/\(Self.serviceID)/DNS" as CFString
+        let value = [kSCPropNetDNSServerAddresses as String: servers ?? config.dns] as CFDictionary
+        if !SCDynamicStoreSetValue(store, key, value) {
+            HelperLog.warn("failed to update DNS: \(String(cString: SCErrorString(SCError())))")
+        }
+    }
     private var isEngineAlive: Bool { alive.lock(); defer { alive.unlock() }; return engineAlive }
     private func setEngineAlive(_ v: Bool) { alive.lock(); engineAlive = v; alive.unlock() }
 
@@ -280,7 +296,7 @@ final class TunnelEngine {
                 "PrimaryRank": "First",
             ]),
             ("\(base)/DNS", [
-                kSCPropNetDNSServerAddresses as String: config.dns,
+                kSCPropNetDNSServerAddresses as String: dnsOverride ?? config.dns,
             ]),
             (base, [
                 "PrimaryRank": "First",

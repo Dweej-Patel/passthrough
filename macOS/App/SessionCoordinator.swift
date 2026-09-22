@@ -63,6 +63,16 @@ final class SessionCoordinator: ObservableObject {
     /// Set when keep-awake can't be turned on (or was auto-disabled) due to low battery.
     @Published private(set) var keepAwakeBlockedReason: String?
 
+    // VPN layer (bundled WireGuard/OpenVPN run by the helper on top of the passthrough)
+    @Published private(set) var vpn = VPNStatus()
+    @Published private(set) var vpnWanted = false
+    @Published private(set) var vpnError: String?
+    @Published private(set) var vpnProfiles: [VPNProfile] = VPNProfileStore.load()
+    @AppStorage("vpnKillSwitch") var vpnKillSwitch = true
+    @AppStorage("vpnAutoStart") var vpnAutoStart = false
+    @AppStorage("vpnActiveProfile") var vpnActiveProfileID = ""
+    var activeVPNProfile: VPNProfile? { vpnProfiles.first { $0.id.uuidString == vpnActiveProfileID } ?? vpnProfiles.first }
+
     private let helper = HelperClient()
     private let power = PowerManager()
     private let queue = DispatchQueue(label: "dev.dpatel.passthrough.mac")
@@ -99,6 +109,12 @@ final class SessionCoordinator: ObservableObject {
             }
         }
         helperAvailability = helper.availability
+        // Diagnostics: PASSTHROUGH_NO_AUTOCONNECT=1 keeps a fresh launch from
+        // taking over the network; PASSTHROUGH_VPN_TEST=<conf> starts the VPN
+        // layer from that file (as a temporary profile) so it can be exercised
+        // without clicking through the UI.
+        let env = ProcessInfo.processInfo.environment
+        if env["PASSTHROUGH_NO_AUTOCONNECT"] != nil || env["PASSTHROUGH_VPN_TEST"] != nil { suppressAutoConnect = true }
         startDeviceWatch()
         ticker = Timer.publish(every: 1, on: .main, in: .common).autoconnect().sink { [weak self] _ in self?.tick() }
         NotificationCenter.default.publisher(for: .passthroughWillTerminate)
@@ -106,10 +122,30 @@ final class SessionCoordinator: ObservableObject {
             .store(in: &cancellables)
         power.apply(keepAwake)
         Task { await ensureHelperCurrent(); applyLidClose(keepAwake) }
-        if let raw = ProcessInfo.processInfo.environment["PASSTHROUGH_DIRECT_SOCKS"], let port = UInt16(raw) {
+        if let raw = env["PASSTHROUGH_DIRECT_SOCKS"], let port = UInt16(raw) {
             Task { await self.directDiagnosticConnect(socksPort: port) }
         }
+        if let path = env["PASSTHROUGH_VPN_TEST"] {
+            Task {
+                try? await Task.sleep(for: .seconds(1))
+                do {
+                    try self.importProfile(from: URL(fileURLWithPath: path))
+                    if let p = self.vpnProfiles.last {
+                        self.temporaryProfile = p
+                        self.vpnActiveProfileID = p.id.uuidString
+                        if let user = env["PASSTHROUGH_VPN_TEST_USER"], let pass = env["PASSTHROUGH_VPN_TEST_PASS"] {
+                            self.setCredentials(username: user, password: pass, for: p)
+                        }
+                        ptLog(.info, "DIAG: VPN test profile \(p.name); turning VPN layer on")
+                        self.setVPN(true)
+                    }
+                } catch { ptLog(.error, "DIAG: \(error.localizedDescription)") }
+            }
+        }
     }
+
+    private var suppressAutoConnect = false
+    private var temporaryProfile: VPNProfile?
 
     // MARK: Device watching
 
@@ -131,7 +167,7 @@ final class SessionCoordinator: ObservableObject {
             if device == nil {
                 device = d
                 phase = .deviceFound
-                if autoConnect { connect() }
+                if autoConnect, !suppressAutoConnect { connect() }
             }
         case .detached(let id):
             devices[id] = nil
@@ -139,7 +175,7 @@ final class SessionCoordinator: ObservableObject {
                 ptLog(.info, "iPhone detached")
                 teardown(to: devices.values.first.map { _ in .deviceFound } ?? .noDevice)
                 device = devices.values.first
-                if device != nil, autoConnect { connect() }
+                if device != nil, autoConnect, !suppressAutoConnect { connect() }
             }
         case .failed(let error):
             ptLog(.error, "usbmuxd watch failed: \(error.localizedDescription); retrying")
@@ -250,6 +286,7 @@ final class SessionCoordinator: ObservableObject {
             sessionRx = 0; sessionTx = 0
             phase = .connected
             ptLog(.info, "Connected: Mac traffic now flows over USB via \(iface)")
+            if vpnAutoStart, !vpnWanted, activeVPNProfile != nil { setVPN(true) }
         } catch {
             fail(error.localizedDescription)
         }
@@ -358,7 +395,158 @@ final class SessionCoordinator: ObservableObject {
         wantsConnection = false
         control?.close()
         forwarder?.stop()
-        Task { await helper.stopTunnel(); helper.invalidate() }
+        let vpnOn = vpnWanted
+        if let temporaryProfile { deleteProfile(temporaryProfile) }
+        Task { if vpnOn { await helper.stopVPN() }; await helper.stopTunnel(); helper.invalidate() }
+    }
+
+    // MARK: VPN layer
+
+    /// Turn the VPN layer on/off. The helper runs the engine and owns the
+    /// routing; it also restarts the session by itself when passthrough
+    /// connects or disconnects underneath it.
+    func setVPN(_ on: Bool) {
+        vpnError = nil
+        guard on else {
+            vpnWanted = false
+            vpn = VPNStatus()
+            Task { await helper.stopVPN() }
+            return
+        }
+        guard let profile = activeVPNProfile else {
+            vpnError = "Add a VPN profile in Settings ▸ VPN first."
+            return
+        }
+        guard let text = VPNProfileStore.config(for: profile), !text.isEmpty else {
+            vpnError = "The profile's configuration is missing. Remove it and add it again."
+            return
+        }
+        let creds = VPNProfileStore.credentials(for: profile)
+        if profile.needsCredentials, creds.username.isEmpty || creds.password.isEmpty {
+            vpnError = "\(profile.name) needs a username and password. Enter them in Settings ▸ VPN."
+            return
+        }
+        vpnWanted = true
+        vpn = VPNStatus(state: "starting", name: profile.name, engine: profile.engine.rawValue)
+        let config = HelperClient.VPNConfig(engine: profile.engine.rawValue, name: profile.name, config: text,
+                                            username: creds.username, password: creds.password, killSwitch: vpnKillSwitch)
+        Task {
+            helperAvailability = helper.availability
+            if helperAvailability == .notRegistered { helperAvailability = helper.register() }
+            guard helperAvailability == .ready else {
+                vpnWanted = false; vpn = VPNStatus()
+                vpnError = "Approve the helper in System Settings before turning the VPN layer on."
+                phase = phase.isConnected ? phase : .helperRequired
+                return
+            }
+            await ensureHelperCurrent()
+            guard vpnWanted else { return }
+            do {
+                try await helper.startVPN(config)
+                ptLog(.info, "VPN layer starting: \(profile.name) (\(profile.engine.label))")
+                await refreshVPNStatus()
+            } catch {
+                vpnWanted = false
+                vpn = VPNStatus()
+                vpnError = error.localizedDescription
+                ptLog(.error, "VPN layer failed to start: \(error.localizedDescription)")
+            }
+        }
+    }
+
+    private func refreshVPNStatus() async {
+        let status = await helper.status()
+        guard vpnWanted else { return }
+        let parsed = VPNStatus(from: status[VPNStatusKey.vpn] as? [String: Any] ?? [:])
+        if parsed.state == "failed" {
+            vpnWanted = false
+            vpnError = parsed.error ?? "The VPN layer stopped."
+            vpn = VPNStatus()
+            ptLog(.error, "VPN layer stopped: \(vpnError ?? "")")
+            Task { await helper.stopVPN() }
+            return
+        }
+        if parsed.state == "off" && vpn.state != "starting" {
+            // Helper lost it (restart/crash); surface and reset.
+            vpnWanted = false
+            vpnError = "The VPN layer was stopped by the helper."
+            vpn = VPNStatus()
+            return
+        }
+        if parsed.isConnected, !vpn.isConnected {
+            ptLog(.info, "VPN layer connected on \(parsed.interface ?? "?") over \(parsed.underlay ?? "?")")
+        }
+        if parsed.state != "off" { vpn = parsed }
+    }
+
+    // Profiles
+
+    private func persistProfiles() { VPNProfileStore.save(vpnProfiles) }
+
+    func selectProfile(_ profile: VPNProfile) { vpnActiveProfileID = profile.id.uuidString }
+
+    func addProfile(_ profile: VPNProfile, config: String, username: String = "", password: String = "") {
+        VPNProfileStore.setConfig(config, for: profile)
+        if !username.isEmpty || !password.isEmpty { VPNProfileStore.setCredentials(username: username, password: password, for: profile) }
+        vpnProfiles.append(profile)
+        persistProfiles()
+        if vpnProfiles.count == 1 || activeVPNProfile == nil { vpnActiveProfileID = profile.id.uuidString }
+    }
+
+    func updateProfile(_ profile: VPNProfile) {
+        guard let i = vpnProfiles.firstIndex(where: { $0.id == profile.id }) else { return }
+        vpnProfiles[i] = profile
+        persistProfiles()
+    }
+
+    func setCredentials(username: String, password: String, for profile: VPNProfile) {
+        VPNProfileStore.setCredentials(username: username, password: password, for: profile)
+        objectWillChange.send()
+    }
+
+    func deleteProfile(_ profile: VPNProfile) {
+        if vpnWanted, activeVPNProfile?.id == profile.id { setVPN(false) }
+        VPNProfileStore.deleteSecrets(for: profile)
+        vpnProfiles.removeAll { $0.id == profile.id }
+        persistProfiles()
+        if vpnActiveProfileID == profile.id.uuidString { vpnActiveProfileID = vpnProfiles.first?.id.uuidString ?? "" }
+    }
+
+    func importProfile(from url: URL) throws {
+        let text = try String(contentsOf: url, encoding: .utf8)
+        let profile = try VPNProfileStore.importProfile(named: url.lastPathComponent, text: text)
+        addProfile(profile, config: text)
+        ptLog(.info, "Imported VPN profile \(profile.name) (\(profile.engine.label))")
+    }
+
+    /// Creates (or refreshes) a NordVPN profile from Nord's recommended server.
+    func addNordProfile(username: String, password: String, countryID: Int?, countryName: String?, tcp: Bool) async throws {
+        let server = try await NordVPN.recommend(countryID: countryID, tcp: tcp)
+        let text = try await NordVPN.profileText(for: server, tcp: tcp)
+        var profile = VPNProfile(name: "NordVPN · \(server.hostname.split(separator: ".").first ?? "server")", engine: .openvpn, source: .nordvpn)
+        profile.server = server.hostname
+        profile.location = server.locationText
+        profile.nordProtocol = tcp ? "tcp" : "udp"
+        profile.nordCountryID = countryID
+        profile.nordCountryName = countryName
+        profile.needsCredentials = true
+        addProfile(profile, config: text, username: username, password: password)
+        vpnActiveProfileID = profile.id.uuidString
+        ptLog(.info, "Added NordVPN profile \(server.hostname) (\(server.locationText), load \(server.load)%)")
+    }
+
+    func refreshNordServer(_ profile: VPNProfile) async throws {
+        let tcp = profile.nordProtocol == "tcp"
+        let server = try await NordVPN.recommend(countryID: profile.nordCountryID, tcp: tcp)
+        let text = try await NordVPN.profileText(for: server, tcp: tcp)
+        var updated = profile
+        updated.name = "NordVPN · \(server.hostname.split(separator: ".").first ?? "server")"
+        updated.server = server.hostname
+        updated.location = server.locationText
+        VPNProfileStore.setConfig(text, for: updated)
+        updateProfile(updated)
+        ptLog(.info, "NordVPN profile now uses \(server.hostname) (\(server.locationText), load \(server.load)%)")
+        if vpnWanted, activeVPNProfile?.id == profile.id { setVPN(false); setVPN(true) }
     }
 
     // MARK: Helper version management
@@ -386,11 +574,31 @@ final class SessionCoordinator: ObservableObject {
     private func tick() {
         checkBattery()
         healthTick += 1
-        if phase.isConnected, healthTick % 3 == 0 {
+        if phase.isConnected || vpnWanted, healthTick % 3 == 0 {
             let gen = generation
+            let checkTunnel = phase.isConnected
             Task {
                 let status = await helper.status()
-                guard gen == self.generation, self.phase.isConnected else { return }
+                if self.vpnWanted {
+                    let parsed = VPNStatus(from: status[VPNStatusKey.vpn] as? [String: Any] ?? [:])
+                    if parsed.state == "failed" {
+                        self.vpnWanted = false
+                        self.vpnError = parsed.error ?? "The VPN layer stopped."
+                        self.vpn = VPNStatus()
+                        ptLog(.error, "VPN layer stopped: \(self.vpnError ?? "")")
+                        await self.helper.stopVPN()
+                    } else if parsed.state == "off", !status.isEmpty {
+                        self.vpnWanted = false
+                        self.vpnError = "The VPN layer was stopped by the helper."
+                        self.vpn = VPNStatus()
+                    } else if parsed.state != "off" {
+                        if parsed.isConnected, !self.vpn.isConnected {
+                            ptLog(.info, "VPN layer connected on \(parsed.interface ?? "?") over \(parsed.underlay ?? "?")")
+                        }
+                        self.vpn = parsed
+                    }
+                }
+                guard checkTunnel, gen == self.generation, self.phase.isConnected else { return }
                 if (status[TunnelStatusKey.running] as? Bool) == false {
                     self.fail("The tunnel helper stopped unexpectedly; reconnecting")
                 }
@@ -450,10 +658,16 @@ final class SessionCoordinator: ObservableObject {
     }
 
     /// Puts the coordinator into a synthetic state for previews and snapshots.
-    func debugApply(phase: Phase, device: Bool = false, status: DeviceStatus? = nil, traffic: Bool = false) {
+    func debugApply(phase: Phase, device: Bool = false, status: DeviceStatus? = nil, traffic: Bool = false, vpn vpnState: String? = nil) {
         ticker?.cancel()
         listenConnection?.cancel()
         self.phase = phase
+        if let vpnState {
+            vpnWanted = true
+            var v = VPNStatus(state: vpnState, name: "NordVPN · us9591", engine: "openvpn")
+            v.interface = "utun9"; v.underlay = "iPhone"; v.since = Date().addingTimeInterval(-612)
+            vpn = v
+        }
         self.device = device ? USBMux.Device(id: 1, udid: "preview", connectionType: "USB", productID: 0) : nil
         phoneStatus = status
         if traffic {
@@ -472,4 +686,44 @@ final class SessionCoordinator: ObservableObject {
             sessionRx = rx; sessionTx = tx
         }
     }
+}
+
+/// The helper's view of the VPN layer, as reported by `getStatus`.
+struct VPNStatus: Equatable {
+    var state = "off"
+    var name = ""
+    var engine = ""
+    var interface: String?
+    var since: Date?
+    var rx: Int64 = 0
+    var tx: Int64 = 0
+    var error: String?
+    var underlay: String?
+    var handshakeAge: Int?
+    var dns: [String] = []
+    var endpoint: String?
+
+    init(state: String = "off", name: String = "", engine: String = "") {
+        self.state = state; self.name = name; self.engine = engine
+    }
+
+    init(from dict: [String: Any]) {
+        state = dict[VPNStatusKey.state] as? String ?? "off"
+        name = dict[VPNStatusKey.name] as? String ?? ""
+        engine = dict[VPNStatusKey.engine] as? String ?? ""
+        interface = dict[VPNStatusKey.interface] as? String
+        if let t = dict[VPNStatusKey.since] as? Double { since = Date(timeIntervalSince1970: t) }
+        rx = Int64(dict[VPNStatusKey.rxBytes] as? Int ?? 0)
+        tx = Int64(dict[VPNStatusKey.txBytes] as? Int ?? 0)
+        error = dict[VPNStatusKey.error] as? String
+        underlay = dict[VPNStatusKey.underlay] as? String
+        handshakeAge = dict[VPNStatusKey.handshakeAge] as? Int
+        dns = dict[VPNStatusKey.dns] as? [String] ?? []
+        endpoint = dict[VPNStatusKey.endpoint] as? String
+    }
+
+    var isConnected: Bool { state == "connected" }
+    var isBusy: Bool { state == "starting" || state == "reconnecting" || state == "blocked" }
+    var engineLabel: String { engine == "wireguard" ? "WireGuard" : engine == "openvpn" ? "OpenVPN" : engine }
+    var duration: TimeInterval? { since.map { Date().timeIntervalSince($0) } }
 }

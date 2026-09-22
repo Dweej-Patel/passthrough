@@ -9,10 +9,11 @@ struct SettingsView: View {
     var body: some View {
         TabView {
             GeneralSettings().tabItem { Label("General", systemImage: "gearshape") }
+            VPNSettings().tabItem { Label("VPN", systemImage: "lock.shield") }
             NetworkSettings().tabItem { Label("Network", systemImage: "network") }
             DiagnosticsSettings().tabItem { Label("Diagnostics", systemImage: "stethoscope") }
         }
-        .frame(width: 460, height: 380)
+        .frame(width: 500, height: 520)
     }
 }
 

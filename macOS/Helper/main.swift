@@ -35,6 +35,12 @@ final class ListenerDelegate: NSObject, NSXPCListenerDelegate {
 enum CodeSigning {
     /// Builds a requirement that only accepts apps signed by the same team as this helper.
     static func requirementForOwnTeam() -> String? {
+        guard let team = ownTeamIdentifier() else { return nil }
+        return "anchor apple generic and certificate leaf[subject.OU] = \"\(team)\" and identifier \"dev.dpatel.passthrough.mac\""
+    }
+
+    /// The Team ID this helper is signed with, or nil for unsigned dev builds.
+    static func ownTeamIdentifier() -> String? {
         var code: SecCode?
         guard SecCodeCopySelf([], &code) == errSecSuccess, let code else { return nil }
         var staticCode: SecStaticCode?
@@ -43,7 +49,7 @@ enum CodeSigning {
         guard SecCodeCopySigningInformation(staticCode, SecCSFlags(rawValue: kSecCSSigningInformation), &info) == errSecSuccess,
               let dict = info as? [String: Any],
               let team = dict[kSecCodeInfoTeamIdentifier as String] as? String, !team.isEmpty else { return nil }
-        return "anchor apple generic and certificate leaf[subject.OU] = \"\(team)\" and identifier \"dev.dpatel.passthrough.mac\""
+        return team
     }
 }
 

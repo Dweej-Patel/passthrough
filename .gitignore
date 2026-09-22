@@ -20,3 +20,4 @@ docs/screenshots/
 # Vendored tun2socks SOURCE (has its own .git); fetch with scripts/build-hev.sh.
 # The prebuilt Vendor/HevSocks5Tunnel/ (lib + headers) IS committed.
 Vendor/hev-socks5-tunnel/
+Vendor/vpn-engines-src/
