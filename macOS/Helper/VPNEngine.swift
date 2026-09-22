@@ -265,7 +265,7 @@ final class VPNEngine {
             if parts[0] == "gateway" { gateway = parts[1] }
             if parts[0] == "interface" { interface = parts[1] }
         }
-        guard let interface, !interface.isEmpty else { return nil }
+        guard let interface, !interface.isEmpty, !interface.hasPrefix("lo") else { return nil }
         if let g = gateway, g.hasPrefix("link#") || g.contains("utun") { gateway = nil }
         return Underlay(interface: interface, gateway: gateway, isPassthrough: false)
     }

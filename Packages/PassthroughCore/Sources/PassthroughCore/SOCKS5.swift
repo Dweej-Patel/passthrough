@@ -477,17 +477,29 @@ private final class Session: @unchecked Sendable {
 
     private func peer(for address: SOCKS5.Address) -> UDPPeer {
         if let existing = udpPeers[address] {
-            existing.lastActivity = Date()
-            return existing
+            if !existing.dead {
+                existing.lastActivity = Date()
+                return existing
+            }
+            // The old socket failed or never became viable (radio asleep, cell
+            // handoff): replace it, otherwise every later datagram would queue
+            // on a corpse forever and e.g. DNS would silently stop working.
+            existing.cancel()
+            udpPeers[address] = nil
         }
         if udpPeers.count >= server.configuration.maxUDPPeersPerSession, let oldest = udpPeers.min(by: { $0.value.lastActivity < $1.value.lastActivity }) {
             oldest.value.cancel()
             udpPeers[oldest.key] = nil
         }
-        let peer = UDPPeer(address: address, parameters: server.remoteParameters(tcp: false), queue: queue) { [weak self] datagram in
+        let peer = UDPPeer(address: address, parameters: server.remoteParameters(tcp: false), queue: queue,
+                           waitTimeout: TimeInterval(server.configuration.connectTimeout)) { [weak self] datagram in
             guard let self, !self.closed else { return }
             self.server.counter.addRx(datagram.count)
             self.write(SOCKS5.frameDatagram(address: address.raw, payload: datagram))
+        }
+        peer.onDead = { [weak self, weak peer] in
+            guard let self, let peer, self.udpPeers[address] === peer else { return }
+            self.udpPeers[address] = nil
         }
         udpPeers[address] = peer
         return peer
@@ -521,25 +533,51 @@ private final class Session: @unchecked Sendable {
 /// One outbound UDP "socket" for a given destination inside a forwarding session.
 private final class UDPPeer: @unchecked Sendable {
     private let connection: NWConnection
+    private let queue: DispatchQueue
     private var ready = false
     private var pending: [Data] = []
+    private var waitTimer: DispatchSourceTimer?
+    private let waitTimeout: TimeInterval
+    /// Set once the socket failed or never became viable; the session replaces it.
+    private(set) var dead = false
     var lastActivity = Date()
+    var onDead: (() -> Void)?
     private let onDatagram: (Data) -> Void
 
-    init(address: SOCKS5.Address, parameters: NWParameters, queue: DispatchQueue, onDatagram: @escaping (Data) -> Void) {
+    init(address: SOCKS5.Address, parameters: NWParameters, queue: DispatchQueue, waitTimeout: TimeInterval, onDatagram: @escaping (Data) -> Void) {
         self.onDatagram = onDatagram
+        self.queue = queue
+        self.waitTimeout = waitTimeout
         connection = NWConnection(host: address.host, port: address.port, using: parameters)
         connection.stateUpdateHandler = { [weak self] state in
             guard let self else { return }
             switch state {
             case .ready:
+                self.waitTimer?.cancel(); self.waitTimer = nil
                 self.ready = true
                 let queued = self.pending
                 self.pending = []
                 queued.forEach { self.send($0) }
                 self.receiveLoop()
-            case .failed, .cancelled:
-                self.pending = []
+            case .waiting(let error):
+                // No viable path right now (radio waking, handoff). Give it a
+                // bounded chance, then declare the peer dead so it gets replaced.
+                if case .posix(let code) = error, code == .ECONNREFUSED || code == .EHOSTUNREACH || code == .ENETUNREACH {
+                    self.markDead("waiting: \(error)"); return
+                }
+                guard self.waitTimer == nil else { return }
+                let timer = DispatchSource.makeTimerSource(queue: self.queue)
+                timer.schedule(deadline: .now() + self.waitTimeout)
+                timer.setEventHandler { [weak self] in
+                    guard let self, !self.ready else { return }
+                    self.markDead("no viable path after \(Int(self.waitTimeout))s")
+                }
+                timer.resume()
+                self.waitTimer = timer
+            case .failed(let error):
+                self.markDead("failed: \(error)")
+            case .cancelled:
+                self.markDead(nil)
             default:
                 break
             }
@@ -547,8 +585,19 @@ private final class UDPPeer: @unchecked Sendable {
         connection.start(queue: queue)
     }
 
+    private func markDead(_ why: String?) {
+        guard !dead else { return }
+        dead = true
+        waitTimer?.cancel(); waitTimer = nil
+        pending = []
+        if let why { ptLog(.debug, "UDP peer dropped (\(why))") }
+        connection.cancel()
+        onDead?()
+    }
+
     func send(_ datagram: Data) {
         lastActivity = Date()
+        guard !dead else { return }
         guard ready else {
             if pending.count < 64 { pending.append(datagram) }
             return
@@ -558,7 +607,11 @@ private final class UDPPeer: @unchecked Sendable {
 
     private func receiveLoop() {
         connection.receiveMessage { [weak self] data, _, _, error in
-            guard let self, error == nil else { return }
+            guard let self else { return }
+            if let error {
+                if case .posix(.ECANCELED) = error {} else { self.markDead("receive: \(error)") }
+                return
+            }
             if let data, !data.isEmpty {
                 self.lastActivity = Date()
                 self.onDatagram(data)
@@ -567,5 +620,9 @@ private final class UDPPeer: @unchecked Sendable {
         }
     }
 
-    func cancel() { connection.cancel() }
+    func cancel() {
+        waitTimer?.cancel(); waitTimer = nil
+        dead = true
+        connection.cancel()
+    }
 }

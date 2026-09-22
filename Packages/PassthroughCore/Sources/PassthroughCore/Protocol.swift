@@ -84,7 +84,10 @@ public struct ProviderStats: Codable, Sendable, Equatable {
 extension PassthroughProtocol {
     /// Shared log file in the App Group container, appended by the app and the extension.
     public static var sharedLogURL: URL? {
-        FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: appGroup)?.appendingPathComponent("passthrough.log")
+        // Under Library/ so `devicectl device copy from` can pull it for diagnostics.
+        guard let dir = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: appGroup)?.appendingPathComponent("Library", isDirectory: true) else { return nil }
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        return dir.appendingPathComponent("passthrough.log")
     }
 }
 
