@@ -371,8 +371,9 @@ final class VPNEngine {
 
     private func removeQuarterRoutes() {
         guard quarterRoutesOn != nil else { return }
-        for q in Self.v4Quarters { _ = try? Shell.run("/sbin/route", ["-q", "-n", "delete", "-inet", q], quiet: true) }
-        for q in Self.v6Quarters { _ = try? Shell.run("/sbin/route", ["-q", "-n", "delete", "-inet6", q], quiet: true) }
+        let v4 = RouteTable.present(v6: false), v6 = RouteTable.present(v6: true)
+        for q in Self.v4Quarters { RouteTable.deleteIfPresent(q, v6: false, table: v4) }
+        for q in Self.v6Quarters { RouteTable.deleteIfPresent(q, v6: true, table: v6) }
         quarterRoutesOn = nil
     }
 
@@ -381,12 +382,13 @@ final class VPNEngine {
     private func installRejectRoutes() {
         guard !rejectRoutesInstalled else { return }
         removeQuarterRoutes()
+        let v4 = RouteTable.present(v6: false), v6 = RouteTable.present(v6: true)
         for q in Self.v4Quarters {
-            _ = try? Shell.run("/sbin/route", ["-q", "-n", "delete", "-inet", q], quiet: true)
+            RouteTable.deleteIfPresent(q, v6: false, table: v4)
             _ = try? Shell.run("/sbin/route", ["-q", "-n", "add", "-inet", q, "127.0.0.1", "-reject"])
         }
         for q in Self.v6Quarters {
-            _ = try? Shell.run("/sbin/route", ["-q", "-n", "delete", "-inet6", q], quiet: true)
+            RouteTable.deleteIfPresent(q, v6: true, table: v6)
             _ = try? Shell.run("/sbin/route", ["-q", "-n", "add", "-inet6", q, "::1", "-reject"])
         }
         rejectRoutesInstalled = true
@@ -395,8 +397,9 @@ final class VPNEngine {
 
     private func removeRejectRoutes() {
         guard rejectRoutesInstalled else { return }
-        for q in Self.v4Quarters { _ = try? Shell.run("/sbin/route", ["-q", "-n", "delete", "-inet", q], quiet: true) }
-        for q in Self.v6Quarters { _ = try? Shell.run("/sbin/route", ["-q", "-n", "delete", "-inet6", q], quiet: true) }
+        let v4 = RouteTable.present(v6: false), v6 = RouteTable.present(v6: true)
+        for q in Self.v4Quarters { RouteTable.deleteIfPresent(q, v6: false, table: v4) }
+        for q in Self.v6Quarters { RouteTable.deleteIfPresent(q, v6: true, table: v6) }
         rejectRoutesInstalled = false
     }
 

@@ -61,6 +61,36 @@ enum Shell {
     static func isIPv6(_ ip: String) -> Bool { ip.contains(":") }
 }
 
+/// Exact-match queries against the kernel routing table, so a delete never
+/// touches a route we didn't add (`route delete` on a missing prefix is not
+/// something to rely on) and cleanup reports only what was really there.
+enum RouteTable {
+    /// netstat prints classful abbreviations for our IPv4 quarter prefixes.
+    private static let names: [String: String] = [
+        "0.0.0.0/2": "0/2", "64.0.0.0/2": "64/2", "128.0.0.0/2": "128.0/2", "192.0.0.0/2": "192.0.0/2",
+    ]
+
+    static func present(v6: Bool) -> Set<String> {
+        let table = Shell.capture("/usr/sbin/netstat", ["-rn", "-f", v6 ? "inet6" : "inet"])
+        return Set(table.split(separator: "\n").compactMap { line -> String? in
+            let first = line.split(separator: " ", maxSplits: 1).first.map(String.init)
+            return first.flatMap { $0.contains("/") ? $0 : nil }
+        })
+    }
+
+    static func exists(_ prefix: String, v6: Bool, in table: Set<String>) -> Bool {
+        table.contains(names[prefix] ?? prefix)
+    }
+
+    /// Deletes `prefix` only if it is really in the table. Returns true if removed.
+    @discardableResult
+    static func deleteIfPresent(_ prefix: String, v6: Bool, table: Set<String>? = nil) -> Bool {
+        let table = table ?? present(v6: v6)
+        guard exists(prefix, v6: v6, in: table) else { return false }
+        return (try? Shell.run("/sbin/route", ["-q", "-n", "delete", v6 ? "-inet6" : "-inet", prefix], quiet: true)) != nil
+    }
+}
+
 /// Undo anything a previous helper instance may have left in the kernel or
 /// system settings if it crashed: reject/VPN routes, keepalive interfaces,
 /// disabled sleep, stale network-service keys, engine state files. Run once at
@@ -68,10 +98,11 @@ enum Shell {
 enum RecoverySweep {
     static func run() {
         var cleaned: [String] = []
-        for q in ["0.0.0.0/2", "64.0.0.0/2", "128.0.0.0/2", "192.0.0.0/2"] where (try? Shell.run("/sbin/route", ["-q", "-n", "delete", "-inet", q], quiet: true)) != nil {
+        let v4 = RouteTable.present(v6: false), v6 = RouteTable.present(v6: true)
+        for q in ["0.0.0.0/2", "64.0.0.0/2", "128.0.0.0/2", "192.0.0.0/2"] where RouteTable.deleteIfPresent(q, v6: false, table: v4) {
             cleaned.append(q)
         }
-        for q in ["::/2", "4000::/2", "8000::/2", "c000::/2"] where (try? Shell.run("/sbin/route", ["-q", "-n", "delete", "-inet6", q], quiet: true)) != nil {
+        for q in ["::/2", "4000::/2", "8000::/2", "c000::/2"] where RouteTable.deleteIfPresent(q, v6: true, table: v6) {
             cleaned.append(q)
         }
         for name in Shell.capture("/sbin/ifconfig", ["-l"]).split(separator: " ").map(String.init) where name.hasPrefix("feth") {
