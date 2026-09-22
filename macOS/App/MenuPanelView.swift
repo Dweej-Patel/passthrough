@@ -8,6 +8,21 @@ struct MenuPanelView: View {
     @Environment(\.openSettings) private var openSettings
 
     var body: some View {
+        Group {
+            if session.panelVisible {
+                panel
+            } else {
+                // Closed: MenuBarExtra keeps this view alive; don't lay out or
+                // rasterise the chart and blur for a panel nobody can see.
+                Color.clear.frame(width: 356, height: 120)
+            }
+        }
+        .background(WindowVisibilityObserver { visible in
+            if session.panelVisible != visible { session.panelVisible = visible }
+        })
+    }
+
+    private var panel: some View {
         ZStack {
             PTBackground(glow: session.phase.isConnected ? 1 : 0.5)
             VStack(spacing: 14) {
@@ -26,8 +41,6 @@ struct MenuPanelView: View {
             .padding(16)
         }
         .frame(width: 356)
-        .onAppear { session.panelVisible = true }
-        .onDisappear { session.panelVisible = false }
     }
 
     // MARK: Header

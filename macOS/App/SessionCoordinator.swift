@@ -702,6 +702,7 @@ final class SessionCoordinator: ObservableObject {
     func debugApply(phase: Phase, device: Bool = false, status: DeviceStatus? = nil, traffic: Bool = false, vpn vpnState: String? = nil) {
         ticker?.cancel()
         listenConnection?.cancel()
+        panelVisible = true
         self.phase = phase
         if let vpnState {
             vpnWanted = true

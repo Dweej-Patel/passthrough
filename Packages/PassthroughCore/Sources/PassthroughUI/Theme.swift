@@ -49,6 +49,9 @@ public struct PTBackground: View {
                     .blur(radius: 100)
                     .offset(x: geo.size.width * 0.45, y: geo.size.height * 0.45)
             }
+            // Rasterise the two blurred glows on the GPU once per change instead
+            // of convolving them on the CPU every time the view updates.
+            .drawingGroup()
         }
         .ignoresSafeArea()
         .animation(.easeInOut(duration: 1.2), value: glow)
