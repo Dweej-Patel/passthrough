@@ -91,9 +91,6 @@ public struct FlowMap: View {
                 NodeSymbol(icon: "globe", label: "Internet", tint: Color.secondary, dim: !state.linkUp).tag(FlowSymbol.internet)
                 WireLabel("USB").tag(FlowSymbol.usbLabel)
                 WireLabel(state.radio ?? "cellular").tag(FlowSymbol.radioLabel)
-                WireLabel(state.vpn?.engine ?? "VPN").tag(FlowSymbol.vpnLabel)
-                RateTag(rate: state.downRate, down: true).tag(FlowSymbol.downRate)
-                RateTag(rate: state.upRate, down: false).tag(FlowSymbol.upRate)
                 Image(systemName: "lock.fill").font(.system(size: 9, weight: .bold)).foregroundStyle(PTTheme.up).tag(FlowSymbol.lock)
                 Image(systemName: "cup.and.saucer.fill").font(.system(size: 10, weight: .bold)).foregroundStyle(PTTheme.warning).tag(FlowSymbol.cup)
                 Image(systemName: "cable.connector.slash").font(.system(size: 10, weight: .semibold)).foregroundStyle(.tertiary).tag(FlowSymbol.unplugged)
@@ -128,7 +125,7 @@ public struct FlowMap: View {
 }
 
 /// Symbols the canvas resolves (rendered once per frame, cached by SwiftUI).
-enum FlowSymbol: Hashable { case mac, phone, vpn, internet, usbLabel, radioLabel, vpnLabel, downRate, upRate, lock, cup, unplugged }
+enum FlowSymbol: Hashable { case mac, phone, vpn, internet, usbLabel, radioLabel, lock, cup, unplugged }
 
 /// Integrates particle travel over time with smoothed speeds so rate changes
 /// never make particles jump. A class so the canvas can update it while drawing.
@@ -232,17 +229,16 @@ struct FlowRenderer {
                 let span = (from: first.from, to: last.to)
                 // Gaps where nodes sit: particles hide inside nodes so they appear to pass through.
                 let gaps: [ClosedRange<CGFloat>] = showVPN ? [(x.phone - nodeR)...(x.phone + nodeR), (x.vpn - nodeR)...(x.vpn + nodeR)] : [(x.phone - nodeR)...(x.phone + nodeR)]
-                drawStream(span: span, gaps: gaps, y: y - 3.5, rate: state.downRate, travel: travel.down, towardMac: true, color: PTTheme.down)
-                drawStream(span: span, gaps: gaps, y: y + 3.5, rate: state.upRate, travel: travel.up, towardMac: false, color: PTTheme.up)
+                drawStream(span: span, gaps: gaps, y: y, rate: state.downRate, travel: travel.down, towardMac: true, color: PTTheme.down)
+                drawStream(span: span, gaps: gaps, y: y, rate: state.upRate, travel: travel.up, towardMac: false, color: PTTheme.up)
             }
         } else if state.busy {
             // Connecting: a single scout pulse walks the USB wire.
             let seg = segments[0]
             let len = seg.to - seg.from
             let phase = CGFloat((t * 0.7).truncatingRemainder(dividingBy: 1))
-            let px = seg.from + len * phase
-            ctx.fill(Path(ellipseIn: CGRect(x: px - 3, y: y - 3, width: 6, height: 6)), with: .color(PTTheme.accentStart.opacity(0.9)))
-            ctx.fill(Path(ellipseIn: CGRect(x: px - 7, y: y - 7, width: 14, height: 14)), with: .color(PTTheme.accentStart.opacity(0.18)))
+            let head = seg.from + len * phase
+            streak(head: head, tail: max(seg.from, head - 18), y: y, color: PTTheme.accentStart, alpha: 0.7)
         }
 
         // Keep-awake halo on the Mac.
@@ -279,16 +275,10 @@ struct FlowRenderer {
         if let usb = ctx.resolveSymbol(id: FlowSymbol.usbLabel) { ctx.draw(usb, at: CGPoint(x: (x.mac + x.phone) / 2, y: labelY)) }
         let radioMid = showVPN ? (x.phone + x.vpn) / 2 : (x.phone + x.internet) / 2
         if let radio = ctx.resolveSymbol(id: FlowSymbol.radioLabel) { ctx.draw(radio, at: CGPoint(x: radioMid, y: labelY)) }
-        if showVPN, state.vpn != nil {
-            // Lock + engine name ride above the encrypted radio hop.
+        if showVPN, state.vpn != nil, let lock = ctx.resolveSymbol(id: FlowSymbol.lock) {
+            // A small lock above the encrypted radio hop; the engine is named in the VPN row.
             var c = ctx; c.opacity = vpnProgress
-            if let lock = ctx.resolveSymbol(id: FlowSymbol.lock) { c.draw(lock, at: CGPoint(x: radioMid, y: y - 21)) }
-            if let label = ctx.resolveSymbol(id: FlowSymbol.vpnLabel) { c.draw(label, at: CGPoint(x: radioMid, y: y - 11)) }
-        }
-        if state.linkUp {
-            let left = x.mac + nodeR + 6
-            if let d = ctx.resolveSymbol(id: FlowSymbol.downRate) { ctx.draw(d, at: CGPoint(x: left, y: y - 22), anchor: .leading) }
-            if let u = ctx.resolveSymbol(id: FlowSymbol.upRate) { ctx.draw(u, at: CGPoint(x: left, y: y - 10), anchor: .leading) }
+            c.draw(lock, at: CGPoint(x: radioMid, y: y - 12))
         }
     }
 
@@ -296,25 +286,36 @@ struct FlowRenderer {
         if let sym = ctx.resolveSymbol(id: id) { ctx.draw(sym, at: CGPoint(x: point.x, y: point.y + symbolOffset)) }
     }
 
-    /// One stream of particles across the whole carried span.
+    /// One direction of flow: soft gradient streaks that fade in along the wire,
+    /// so the traffic reads as light moving through the cable rather than dots.
     private func drawStream(span: (from: CGFloat, to: CGFloat), gaps: [ClosedRange<CGFloat>], y: CGFloat,
                             rate: Double, travel: Double, towardMac: Bool, color: Color) {
         let len = Double(span.to - span.from)
         guard len > 10 else { return }
-        let n = rate > 0 ? 2 + Int(6 * FlowClock.norm(rate)) : 1
+        let norm = FlowClock.norm(rate)
+        let n = rate > 0 ? 1 + Int(4 * norm) : 1
         let spacing = len / Double(n)
+        let streakLen = CGFloat(rate > 0 ? 14 + 22 * norm : 12)
+        let alpha = rate > 0 ? 0.42 + 0.3 * norm : 0.16
         for i in 0..<n {
-            var d = (travel + Double(i) * spacing + (rate > 0 ? 0 : (t * 18))).truncatingRemainder(dividingBy: len)
+            var d = (travel + Double(i) * spacing + (rate > 0 ? 0 : (t * 14))).truncatingRemainder(dividingBy: len)
             if d < 0 { d += len }
-            let px = towardMac ? span.to - CGFloat(d) : span.from + CGFloat(d)
-            if gaps.contains(where: { $0.contains(px) }) { continue }
-            let alpha = rate > 0 ? 0.95 : 0.35
-            let r: CGFloat = rate > 0 ? 2.6 : 2
-            ctx.fill(Path(ellipseIn: CGRect(x: px - r, y: y - r, width: 2 * r, height: 2 * r)), with: .color(color.opacity(alpha)))
-            if rate > 0 {
-                ctx.fill(Path(ellipseIn: CGRect(x: px - r * 2.4, y: y - r * 2.4, width: r * 4.8, height: r * 4.8)), with: .color(color.opacity(0.16)))
-            }
+            let head = towardMac ? span.to - CGFloat(d) : span.from + CGFloat(d)
+            if gaps.contains(where: { $0.contains(head) }) { continue }
+            let tail = towardMac ? min(span.to, head + streakLen) : max(span.from, head - streakLen)
+            streak(head: head, tail: tail, y: y, color: color, alpha: alpha)
         }
+    }
+
+    /// A short line whose colour fades from nothing at the tail to `alpha` at the head.
+    private func streak(head: CGFloat, tail: CGFloat, y: CGFloat, color: Color, alpha: Double) {
+        var path = Path()
+        path.move(to: CGPoint(x: tail, y: y))
+        path.addLine(to: CGPoint(x: head, y: y))
+        let shading = GraphicsContext.Shading.linearGradient(
+            Gradient(colors: [color.opacity(0), color.opacity(alpha)]),
+            startPoint: CGPoint(x: tail, y: y), endPoint: CGPoint(x: head, y: y))
+        ctx.stroke(path, with: shading, style: StrokeStyle(lineWidth: 2.5, lineCap: .round))
     }
 }
 
@@ -347,18 +348,5 @@ private struct WireLabel: View {
     var body: some View {
         Text(text.uppercased()).font(.system(size: 8, weight: .semibold, design: .rounded)).tracking(0.8)
             .foregroundStyle(.tertiary)
-    }
-}
-
-private struct RateTag: View {
-    let rate: Double
-    let down: Bool
-    var body: some View {
-        let r = ByteFormat.rate(rate)
-        HStack(spacing: 2) {
-            Image(systemName: down ? "arrow.down" : "arrow.up").font(.system(size: 7, weight: .bold))
-            Text("\(r.value) \(r.unit)").font(.system(size: 9, weight: .semibold, design: .rounded)).monospacedDigit()
-        }
-        .foregroundStyle(rate > 0 ? (down ? PTTheme.down : PTTheme.up) : Color.secondary.opacity(0.6))
     }
 }
