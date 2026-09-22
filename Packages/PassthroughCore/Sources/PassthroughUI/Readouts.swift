@@ -111,7 +111,9 @@ public struct PairingCodeTiles: View {
 /// Diagnostics log list.
 public struct LogList: View {
     let entries: [PassthroughLog.Entry]
-    public init(entries: [PassthroughLog.Entry]) { self.entries = entries }
+    public init(entries: [PassthroughLog.Entry], showDebug: Bool = true) {
+        self.entries = showDebug ? entries : entries.filter { $0.level != .debug }
+    }
     public var body: some View {
         ScrollViewReader { proxy in
             ScrollView {

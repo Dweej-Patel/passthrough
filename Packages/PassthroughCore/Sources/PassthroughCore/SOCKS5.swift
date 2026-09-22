@@ -19,6 +19,32 @@ public enum SOCKS5 {
         public let port: NWEndpoint.Port
         public let raw: Data
 
+        /// Private, loopback, link-local or multicast: never reachable through
+        /// the phone's uplink, so refuse up front instead of waiting on the radio.
+        public var isLocalOnly: Bool {
+            switch host {
+            case .ipv4(let a):
+                let b = [UInt8](a.rawValue)
+                guard b.count == 4 else { return false }
+                if b[0] == 10 || b[0] == 127 || b[0] == 0 { return true }
+                if b[0] == 172, (16...31).contains(b[1]) { return true }
+                if b[0] == 192, b[1] == 168 { return true }
+                if b[0] == 169, b[1] == 254 { return true }
+                if b[0] == 100, (64...127).contains(b[1]) { return true }   // CGNAT space
+                if b[0] >= 224 { return true }
+                return false
+            case .ipv6(let a):
+                let b = [UInt8](a.rawValue)
+                guard b.count == 16 else { return false }
+                if b[0] == 0xfe, (b[1] & 0xc0) == 0x80 { return true }      // fe80::/10
+                if (b[0] & 0xfe) == 0xfc { return true }                    // fc00::/7
+                if b[0] == 0xff { return true }                             // multicast
+                return b.dropLast().allSatisfy { $0 == 0 } && b.last == 1   // ::1
+            default:
+                return false
+            }
+        }
+
         public init?(raw: Data) {
             guard let first = raw.first else { return nil }
             let body = raw.dropFirst()
@@ -93,6 +119,8 @@ public final class SOCKS5Server: @unchecked Sendable {
         public var handshakeTimeout: TimeInterval = 20
         /// Hard cap on concurrent sessions (the extension has a tight memory budget).
         public var maxSessions = 4096
+        /// Refuse private/link-local/multicast destinations (never reachable via the uplink).
+        public var refuseLocalDestinations = true
         public init() {}
     }
 
@@ -107,6 +135,14 @@ public final class SOCKS5Server: @unchecked Sendable {
     private var listeners: [NWListener] = []
     private var sessions: [ObjectIdentifier: Session] = [:]
     public private(set) var isRunning = false
+    /// Tracks whether cellular is actually usable right now. With "cellular
+    /// only", a moment where the radio's data path is down would otherwise
+    /// fail every connection with "network is down"; instead we fall back to
+    /// whatever path the phone has until cellular is viable again.
+    private var cellularMonitor: NWPathMonitor?
+    private let cellularLock = NSLock()
+    private var cellularUsable = true
+    public var isCellularUsable: Bool { cellularLock.lock(); defer { cellularLock.unlock() }; return cellularUsable }
 
     public init(configuration: Configuration = Configuration(), authenticator: Authenticator?) {
         self.configuration = configuration
@@ -131,6 +167,7 @@ public final class SOCKS5Server: @unchecked Sendable {
             if listeners.isEmpty, let lastError { throw lastError }
             isRunning = true
             ptLog(.info, "SOCKS5 listening on port \(configuration.port) (\(listeners.count) listener(s))")
+            if configuration.cellularOnly { startCellularMonitor() }
         }
     }
 
@@ -166,10 +203,29 @@ public final class SOCKS5Server: @unchecked Sendable {
         return listener
     }
 
+    private func startCellularMonitor() {
+        let monitor = NWPathMonitor(requiredInterfaceType: .cellular)
+        monitor.pathUpdateHandler = { [weak self] path in
+            guard let self else { return }
+            let usable = path.status == .satisfied
+            self.cellularLock.lock()
+            let changed = usable != self.cellularUsable
+            self.cellularUsable = usable
+            self.cellularLock.unlock()
+            if changed {
+                ptLog(usable ? .info : .warning, usable ? "Cellular data is usable again; new connections use cellular"
+                                                       : "Cellular data is not usable right now; new connections use any available network until it is back")
+            }
+        }
+        monitor.start(queue: stateQueue)
+        cellularMonitor = monitor
+    }
+
     public func stop() {
         stateQueue.sync {
             guard isRunning else { return }
             isRunning = false
+            cellularMonitor?.cancel(); cellularMonitor = nil
             listeners.forEach { $0.cancel() }
             listeners = []
             let open = Array(sessions.values)
@@ -224,7 +280,7 @@ public final class SOCKS5Server: @unchecked Sendable {
         } else {
             params = NWParameters.udp
         }
-        if configuration.cellularOnly {
+        if configuration.cellularOnly, isCellularUsable {
             params.requiredInterfaceType = .cellular
         }
         params.preferNoProxies = true
@@ -251,6 +307,8 @@ private final class Session: @unchecked Sendable {
     private var countedOpen = false
     private var halfClosures = 0
     private var user: String = ""
+    /// Last destination this session talked to, for log lines.
+    private var remoteLabel = "remote"
 
     init(server: SOCKS5Server, client: NWConnection) {
         self.server = server
@@ -369,6 +427,11 @@ private final class Session: @unchecked Sendable {
     private func dispatch(command: UInt8, address: SOCKS5.Address) {
         switch command {
         case SOCKS5.Command.connect:
+            if server.configuration.refuseLocalDestinations, address.isLocalOnly {
+                ptLog(.debug, "refused \(address): private/local address, not reachable via the phone")
+                write(SOCKS5.reply(SOCKS5.Reply.networkUnreachable)) { self.close(reason: "local-only destination") }
+                return
+            }
             connect(to: address)
         case SOCKS5.Command.forwardUDP where server.configuration.allowUDP:
             startUDPForwarding()
@@ -380,6 +443,7 @@ private final class Session: @unchecked Sendable {
     // MARK: CONNECT
 
     private func connect(to address: SOCKS5.Address) {
+        remoteLabel = "\(address)"
         let remote = NWConnection(host: address.host, port: address.port, using: server.remoteParameters(tcp: true))
         self.remote = remote
         var replied = false
@@ -395,7 +459,7 @@ private final class Session: @unchecked Sendable {
             case .dns: code = SOCKS5.Reply.hostUnreachable
             default: code = SOCKS5.Reply.generalFailure
             }
-            ptLog(.debug, "connect \(address) failed: \(error)")
+            ptLog(.debug, "connect to \(address) failed: \(Self.describe(error))")
             self.write(SOCKS5.reply(code)) { self.close(reason: "connect failed") }
         }
         remote.stateUpdateHandler = { [weak self] state in
@@ -443,7 +507,7 @@ private final class Session: @unchecked Sendable {
         source.receive(minimumIncompleteLength: 1, maximumLength: 256 * 1024) { [weak self] data, _, isComplete, error in
             guard let self, !self.closed else { return }
             if let error {
-                if case .posix(.ECANCELED) = error {} else { ptLog(.debug, "pump error: \(error)") }
+                if case .posix(.ECANCELED) = error {} else { ptLog(.debug, "stream to \(self.remoteLabel) ended: \(Self.describe(error))") }
                 self.close(reason: "stream error")
                 return
             }
@@ -490,11 +554,33 @@ private final class Session: @unchecked Sendable {
             read(headerLength - 3) { [self] addrBytes in
                 guard let address = SOCKS5.Address(raw: addrBytes) else { close(reason: "bad udp address"); return }
                 read(payloadLength) { [self] payload in
+                    if server.configuration.refuseLocalDestinations, address.isLocalOnly {
+                        // Silently drop LAN/multicast probes; nothing on cellular can answer.
+                        readDatagramFrame(); return
+                    }
                     server.counter.addTx(payload.count)
                     peer(for: address).send(payload)
                     readDatagramFrame()
                 }
             }
+        }
+    }
+
+    /// Human wording for the errors that show up in the diagnostics log.
+    static func describe(_ error: NWError) -> String {
+        switch error {
+        case .posix(let code):
+            switch code {
+            case .ECONNRESET: return "connection reset by the far end"
+            case .ETIMEDOUT: return "timed out"
+            case .ECONNREFUSED: return "connection refused"
+            case .ENETDOWN: return "network is down (cellular not available)"
+            case .ENETUNREACH: return "network unreachable"
+            case .EHOSTUNREACH: return "host unreachable"
+            default: return String(describing: code)
+            }
+        case .dns(let code): return "DNS error \(code)"
+        default: return String(describing: error)
         }
     }
 
@@ -514,6 +600,7 @@ private final class Session: @unchecked Sendable {
             oldest.value.cancel()
             udpPeers[oldest.key] = nil
         }
+        remoteLabel = "\(address)"
         let peer = UDPPeer(address: address, parameters: server.remoteParameters(tcp: false), queue: queue,
                            waitTimeout: TimeInterval(server.configuration.connectTimeout)) { [weak self] datagram in
             guard let self, !self.closed else { return }
@@ -568,9 +655,11 @@ private final class UDPPeer: @unchecked Sendable {
     var lastActivity = Date()
     var onDead: (() -> Void)?
     private let onDatagram: (Data) -> Void
+    private let label: String
 
     init(address: SOCKS5.Address, parameters: NWParameters, queue: DispatchQueue, waitTimeout: TimeInterval, onDatagram: @escaping (Data) -> Void) {
         self.onDatagram = onDatagram
+        self.label = "\(address)"
         self.queue = queue
         self.waitTimeout = waitTimeout
         connection = NWConnection(host: address.host, port: address.port, using: parameters)
@@ -588,19 +677,19 @@ private final class UDPPeer: @unchecked Sendable {
                 // No viable path right now (radio waking, handoff). Give it a
                 // bounded chance, then declare the peer dead so it gets replaced.
                 if case .posix(let code) = error, code == .ECONNREFUSED || code == .EHOSTUNREACH || code == .ENETUNREACH {
-                    self.markDead("waiting: \(error)"); return
+                    self.markDead("waiting: \(Session.describe(error))"); return
                 }
                 guard self.waitTimer == nil else { return }
                 let timer = DispatchSource.makeTimerSource(queue: self.queue)
                 timer.schedule(deadline: .now() + self.waitTimeout)
                 timer.setEventHandler { [weak self] in
                     guard let self, !self.ready else { return }
-                    self.markDead("no viable path after \(Int(self.waitTimeout))s")
+                    self.markDead("no route for \(Int(self.waitTimeout))s (radio asleep or destination unreachable)")
                 }
                 timer.resume()
                 self.waitTimer = timer
             case .failed(let error):
-                self.markDead("failed: \(error)")
+                self.markDead(Session.describe(error))
             case .cancelled:
                 self.markDead(nil)
             default:
@@ -615,7 +704,7 @@ private final class UDPPeer: @unchecked Sendable {
         dead = true
         waitTimer?.cancel(); waitTimer = nil
         pending = []
-        if let why { ptLog(.debug, "UDP peer dropped (\(why))") }
+        if let why { ptLog(.debug, "UDP to \(label) reset: \(why)") }
         connection.cancel()
         onDead?()
     }
@@ -634,7 +723,7 @@ private final class UDPPeer: @unchecked Sendable {
         connection.receiveMessage { [weak self] data, _, _, error in
             guard let self else { return }
             if let error {
-                if case .posix(.ECANCELED) = error {} else { self.markDead("receive: \(error)") }
+                if case .posix(.ECANCELED) = error {} else { self.markDead(Session.describe(error)) }
                 return
             }
             if let data, !data.isEmpty {

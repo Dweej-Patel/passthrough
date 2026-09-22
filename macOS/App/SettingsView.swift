@@ -117,19 +117,21 @@ struct NetworkSettings: View {
 
 struct DiagnosticsSettings: View {
     @EnvironmentObject private var session: SessionCoordinator
+    @AppStorage("showDebugLog") private var showDebugLog = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack {
                 Text("Log").font(.headline)
                 Spacer()
+                Toggle("Debug detail", isOn: $showDebugLog).toggleStyle(.checkbox).font(.caption)
                 Button("Copy") {
                     let text = session.logEntries.map { "\($0.date.formatted(.dateTime.hour().minute().second())) \($0.level.rawValue) \($0.message)" }.joined(separator: "\n")
                     NSPasteboard.general.clearContents()
                     NSPasteboard.general.setString(text, forType: .string)
                 }
             }
-            LogList(entries: session.logEntries)
+            LogList(entries: session.logEntries, showDebug: showDebugLog)
             Text("Helper logs go to the unified log: `log stream --predicate 'process == \"PassthroughHelper\"'`.")
                 .font(.caption).foregroundStyle(.secondary)
         }

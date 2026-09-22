@@ -97,6 +97,7 @@ final class SOCKS5ServerTests: XCTestCase {
     override func setUpWithError() throws {
         port = freePort()
         var config = SOCKS5Server.Configuration()
+        config.refuseLocalDestinations = false   // tests talk to loopback echo servers
         config.port = port
         server = SOCKS5Server(configuration: config) { user, pass in user == "mac" && pass == "secret" }
         try server.start()

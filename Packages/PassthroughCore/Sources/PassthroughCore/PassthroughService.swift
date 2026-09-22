@@ -9,6 +9,8 @@ public final class PassthroughService: @unchecked Sendable {
         public var cellularOnly = false
         public var allowUDP = true
         public var disableAuth = false
+        /// Dev servers on a Mac legitimately talk to loopback/LAN targets.
+        public var refuseLocalDestinations = true
         public init() {}
     }
 
@@ -36,6 +38,7 @@ public final class PassthroughService: @unchecked Sendable {
         config.port = options.socksPort
         config.cellularOnly = options.cellularOnly
         config.allowUDP = options.allowUDP
+        config.refuseLocalDestinations = options.refuseLocalDestinations
         let registry = self.registry
         var authenticator: SOCKS5Server.Authenticator? = nil
         if !options.disableAuth {

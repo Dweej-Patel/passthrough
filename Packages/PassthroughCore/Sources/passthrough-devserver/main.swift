@@ -17,6 +17,7 @@ let seedToken = CommandLine.arguments.dropFirst(4).first ?? "dev-token"
 defaults.set(try? JSONEncoder().encode([PairedClient(id: seedID, name: "Dev client", tokenHash: PairingRegistry.hash(token: seedToken), pairedAt: Date())]), forKey: PairingRegistry.clientsKey)
 
 var options = PassthroughService.Options()
+options.refuseLocalDestinations = false
 options.disableAuth = CommandLine.arguments.contains("noauth")
 options.socksPort = socksPort
 options.controlPort = controlPort

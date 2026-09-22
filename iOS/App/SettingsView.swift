@@ -6,6 +6,7 @@ struct SettingsView: View {
     @EnvironmentObject private var model: AppModel
     @Environment(\.dismiss) private var dismiss
     @State private var showLog = false
+    @AppStorage("showDebugLog") private var showDebugLog = false
 
     var body: some View {
         NavigationStack {
@@ -50,8 +51,9 @@ struct SettingsView: View {
                             Text("Nothing logged yet. Start the proxy and connect a Mac; the extension's messages appear here.")
                                 .font(.footnote).foregroundStyle(.secondary)
                         } else {
-                            LogList(entries: model.logEntries).frame(height: 260)
+                            LogList(entries: model.logEntries, showDebug: showDebugLog).frame(height: 260)
                         }
+                        Toggle("Show debug detail", isOn: $showDebugLog)
                         HStack {
                             Button("Copy log") {
                                 UIPasteboard.general.string = model.logEntries.map { "\($0.date.formatted(.dateTime.hour().minute().second())) \($0.level.rawValue) \($0.message)" }.joined(separator: "\n")
