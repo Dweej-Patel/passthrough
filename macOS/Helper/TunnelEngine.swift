@@ -49,6 +49,17 @@ final class TunnelEngine {
     var ipv4Gateway: String? { config?.ipv4Gateway }
     /// DNS servers the VPN layer wants used instead of the configured ones.
     private var dnsOverride: [String]?
+    /// "First" normally; "Last" while the VPN layer is primary on top of us.
+    private var primaryRank = "First"
+
+    /// Demote/promote this service so a VPN layered on top can own the default
+    /// route (clients like Tailscale bind to the default-route interface).
+    func setPrimaryRank(_ rank: String) {
+        guard primaryRank != rank else { return }
+        primaryRank = rank
+        guard isRunning, let config, let name = interfaceName, !storeKeys.isEmpty else { return }
+        publishNetworkService(name: name, config: config)
+    }
 
     /// Re-publishes the tunnel's DNS entry with the VPN's resolvers (or the
     /// configured ones when `servers` is nil). No-op while the tunnel is down.
@@ -293,13 +304,13 @@ final class TunnelEngine {
                 kSCPropNetIPv4DestAddresses as String: [config.ipv4Gateway],
                 kSCPropNetIPv4Router as String: config.ipv4Gateway,
                 kSCPropInterfaceName as String: name,
-                "PrimaryRank": "First",
+                "PrimaryRank": primaryRank,
             ]),
             ("\(base)/DNS", [
                 kSCPropNetDNSServerAddresses as String: dnsOverride ?? config.dns,
             ]),
             (base, [
-                "PrimaryRank": "First",
+                "PrimaryRank": primaryRank,
                 kSCPropUserDefinedName as String: "Passthrough (iPhone USB)",
             ]),
         ]
@@ -309,7 +320,7 @@ final class TunnelEngine {
                 kSCPropNetIPv6PrefixLength as String: [128],
                 kSCPropNetIPv6Router as String: config.ipv6Gateway,
                 kSCPropInterfaceName as String: name,
-                "PrimaryRank": "First",
+                "PrimaryRank": primaryRank,
             ]))
         }
         storeKeys = []

@@ -121,6 +121,7 @@ final class HelperService: NSObject, PassthroughHelperProtocol {
             config.username = configuration[VPNConfigKey.username] as? String ?? ""
             config.password = configuration[VPNConfigKey.password] as? String ?? ""
             config.killSwitch = configuration[VPNConfigKey.killSwitch] as? Bool ?? true
+            config.blockIPv6 = configuration[VPNConfigKey.blockIPv6] as? Bool ?? true
             do {
                 try self.vpn.start(config)
                 self.vpnOwner = caller

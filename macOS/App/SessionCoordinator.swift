@@ -69,6 +69,7 @@ final class SessionCoordinator: ObservableObject {
     @Published private(set) var vpnError: String?
     @Published private(set) var vpnProfiles: [VPNProfile] = VPNProfileStore.load()
     @AppStorage("vpnKillSwitch") var vpnKillSwitch = true
+    @AppStorage("vpnBlockIPv6") var vpnBlockIPv6 = true
     @AppStorage("vpnAutoStart") var vpnAutoStart = false
     @AppStorage("vpnActiveProfile") var vpnActiveProfileID = ""
     var activeVPNProfile: VPNProfile? { vpnProfiles.first { $0.id.uuidString == vpnActiveProfileID } ?? vpnProfiles.first }
@@ -429,7 +430,7 @@ final class SessionCoordinator: ObservableObject {
         vpnWanted = true
         vpn = VPNStatus(state: "starting", name: profile.name, engine: profile.engine.rawValue)
         let config = HelperClient.VPNConfig(engine: profile.engine.rawValue, name: profile.name, config: text,
-                                            username: creds.username, password: creds.password, killSwitch: vpnKillSwitch)
+                                            username: creds.username, password: creds.password, killSwitch: vpnKillSwitch, blockIPv6: vpnBlockIPv6)
         Task {
             helperAvailability = helper.availability
             if helperAvailability == .notRegistered { helperAvailability = helper.register() }

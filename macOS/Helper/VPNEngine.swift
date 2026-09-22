@@ -42,6 +42,8 @@ final class VPNEngine {
         var username = ""
         var password = ""
         var killSwitch = true
+        /// Reject IPv6 while the VPN is up if the VPN can't carry it (else it leaks to the underlay).
+        var blockIPv6 = true
         var fallbackDNS = ["1.1.1.1", "1.0.0.1"]
     }
 
@@ -229,6 +231,7 @@ final class VPNEngine {
         runner = nil
         removeQuarterRoutes()
         removeEndpointRoutes()
+        clearDNS()
         if config?.killSwitch == true { installRejectRoutes() }
         let timer = DispatchSource.makeTimerSource(queue: queue)
         timer.schedule(deadline: .now() + delay)
@@ -307,18 +310,33 @@ final class VPNEngine {
         if quarterRoutesOn == iface { return }
         removeQuarterRoutes()
         for q in Self.v4Quarters {
-            _ = try? Shell.run("/sbin/route", ["-q", "-n", "add", "-inet", q, "-interface", iface])
+            do { try Shell.run("/sbin/route", ["-q", "-n", "add", "-inet", q, "-interface", iface]) }
+            catch { HelperLog.warn("vpn: route \(q) → \(iface) failed: \(error.localizedDescription)") }
         }
+        // IPv6: most VPN servers (NordVPN included) hand out no IPv6, and the
+        // kernel refuses a v6 route through an interface with no v6 address. In
+        // that case reject v6 outright so it can never fall back to the underlay;
+        // apps fall through to IPv4 immediately (Happy Eyeballs).
+        let hasV6 = Shell.capture("/sbin/ifconfig", [iface]).contains("inet6 ")
+        var v6Rejected = false, v6Open = false
         for q in Self.v6Quarters {
-            _ = try? Shell.run("/sbin/route", ["-q", "-n", "add", "-inet6", q, "-interface", iface])
+            if hasV6, (try? Shell.run("/sbin/route", ["-q", "-n", "add", "-inet6", q, "-interface", iface], quiet: true)) != nil { continue }
+            if config?.blockIPv6 ?? true {
+                _ = try? Shell.run("/sbin/route", ["-q", "-n", "add", "-inet6", q, "::1", "-reject"], quiet: true)
+                v6Rejected = true
+            } else {
+                v6Open = true
+            }
         }
+        if v6Rejected { HelperLog.info("vpn: \(iface) carries no IPv6; IPv6 is blocked while the VPN is on") }
+        if v6Open { HelperLog.warn("vpn: \(iface) carries no IPv6 and IPv6 blocking is off; IPv6 traffic bypasses the VPN") }
         quarterRoutesOn = iface
     }
 
     private func removeQuarterRoutes() {
-        guard let iface = quarterRoutesOn else { return }
-        for q in Self.v4Quarters { _ = try? Shell.run("/sbin/route", ["-q", "-n", "delete", "-inet", q, "-interface", iface], quiet: true) }
-        for q in Self.v6Quarters { _ = try? Shell.run("/sbin/route", ["-q", "-n", "delete", "-inet6", q, "-interface", iface], quiet: true) }
+        guard quarterRoutesOn != nil else { return }
+        for q in Self.v4Quarters { _ = try? Shell.run("/sbin/route", ["-q", "-n", "delete", "-inet", q], quiet: true) }
+        for q in Self.v6Quarters { _ = try? Shell.run("/sbin/route", ["-q", "-n", "delete", "-inet6", q], quiet: true) }
         quarterRoutesOn = nil
     }
 
@@ -346,15 +364,17 @@ final class VPNEngine {
         rejectRoutesInstalled = false
     }
 
-    // MARK: DNS
+    // MARK: Network service (default route + DNS)
 
-    /// Over the passthrough: swap the passthrough service's DNS for the VPN's.
-    /// Over Wi-Fi/Ethernet: publish the VPN interface as a first-ranked service.
+    /// Publishes the VPN interface as the first-ranked network service so it
+    /// owns the system default route and DNS. Over the passthrough this also
+    /// demotes the passthrough service: clients that bind to the default-route
+    /// interface (Tailscale does) must land on the VPN, not the bare underlay.
     private func applyDNS(_ servers: [String], interface: String, address: String?, gateway: String?) {
         activeDNS = servers
         if underlay?.isPassthrough == true {
             tunnel.setDNSOverride(servers)
-            return
+            tunnel.setPrimaryRank("Last")
         }
         guard let store = SCDynamicStoreCreate(nil, "PassthroughVPN" as CFString, nil, nil) else { return }
         let base = "State:/Network/Service/\(Self.serviceID)"
@@ -380,6 +400,7 @@ final class VPNEngine {
     private func clearDNS() {
         activeDNS = []
         tunnel.setDNSOverride(nil)
+        tunnel.setPrimaryRank("First")
         guard !publishedKeys.isEmpty, let store = SCDynamicStoreCreate(nil, "PassthroughVPN" as CFString, nil, nil) else { return }
         for key in publishedKeys { SCDynamicStoreRemoveValue(store, key as CFString) }
         publishedKeys = []

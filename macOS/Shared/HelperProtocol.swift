@@ -20,7 +20,7 @@ public enum HelperConstants {
     public static let machService = "dev.dpatel.passthrough.helper"
     public static let plistName = "dev.dpatel.passthrough.helper.plist"
     /// Bump together with the helper binary so the app can detect stale daemons.
-    public static let version = "1.2.0"
+    public static let version = "1.2.2"
 }
 
 /// Keys of the configuration dictionary handed to `startTunnel`.
@@ -56,6 +56,8 @@ public enum VPNConfigKey {
     public static let password = "password"
     /// Block all traffic (instead of falling back to the underlay) while the VPN is down.
     public static let killSwitch = "killSwitch"
+    /// When the VPN carries no IPv6, reject IPv6 instead of letting it fall through to the underlay.
+    public static let blockIPv6 = "blockIPv6"
 }
 
 /// Keys of the `vpn` sub-dictionary in `getStatus`.

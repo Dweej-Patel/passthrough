@@ -49,11 +49,13 @@ struct VPNSettings: View {
             Section {
                 Toggle("Kill switch: block all traffic if the VPN drops", isOn: $session.vpnKillSwitch)
                     .disabled(session.vpnWanted)
+                Toggle("Block IPv6 while the VPN is on", isOn: $session.vpnBlockIPv6)
+                    .disabled(session.vpnWanted)
                 Toggle("Turn the VPN layer on whenever passthrough connects", isOn: $session.vpnAutoStart)
             } header: {
                 Text("Behaviour")
             } footer: {
-                Text("With the kill switch on, nothing leaves the Mac while the VPN is reconnecting; with it off, traffic falls back to the passthrough or Wi-Fi in the meantime. Changes to the kill switch apply on the next VPN start.")
+                Text("Kill switch: nothing leaves the Mac while the VPN is reconnecting; off, traffic falls back to the passthrough or Wi-Fi meanwhile. Block IPv6: most VPN servers (NordVPN included) carry no IPv6, so without this IPv6 traffic would bypass the VPN and reach the carrier directly; apps fall back to IPv4 instantly. Turn it off only if you need IPv6 and accept that. Both apply on the next VPN start.")
             }
 
             if !session.vpnProfiles.isEmpty {

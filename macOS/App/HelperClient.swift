@@ -125,6 +125,7 @@ final class HelperClient {
         var username: String
         var password: String
         var killSwitch: Bool
+        var blockIPv6: Bool
     }
 
     func startVPN(_ config: VPNConfig) async throws {
@@ -135,6 +136,7 @@ final class HelperClient {
             VPNConfigKey.username: config.username,
             VPNConfigKey.password: config.password,
             VPNConfigKey.killSwitch: config.killSwitch,
+            VPNConfigKey.blockIPv6: config.blockIPv6,
         ]
         try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
             guard let proxy = proxy() else { cont.resume(throwing: HelperError.unreachable); return }
