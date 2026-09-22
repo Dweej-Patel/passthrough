@@ -17,6 +17,8 @@ protocol VPNRunner: AnyObject {
     var onEvent: ((VPNRunnerEvent) -> Void)? { get set }
     /// Hosts/ports the engine will talk to; routed through the underlay before start.
     var endpoints: [(host: String, port: Int)] { get }
+    /// host → first resolved IP, filled in by the orchestrator before `start()`.
+    var endpointIPs: [String: String] { get set }
     /// Configures the interface once the runner reports it exists (address, mtu…).
     func start() throws
     func stop()
@@ -87,8 +89,14 @@ final class VPNEngine {
     private var activeDNS: [String] = []
     private var publishedKeys: [String] = []
     private var retryTimer: DispatchSourceTimer?
+    private var deadlineTimer: DispatchSourceTimer?
     private var retryAttempt = 0
     private var generation = 0
+    /// Last good resolution per host, so reconnects under the kill switch need no DNS.
+    private var resolvedCache: [String: [String]] = [:]
+    private lazy var store: SCDynamicStore? = SCDynamicStoreCreate(nil, "PassthroughVPN" as CFString, nil, nil)
+    /// How long a fresh session may sit in `starting` before it's treated as failed.
+    private static let connectDeadline: TimeInterval = 60
 
     init(queue: DispatchQueue, tunnel: TunnelEngine) {
         self.queue = queue
@@ -113,6 +121,7 @@ final class VPNEngine {
         HelperLog.info("vpn: stopping")
         generation += 1
         retryTimer?.cancel(); retryTimer = nil
+        deadlineTimer?.cancel(); deadlineTimer = nil
         runner?.onEvent = nil
         runner?.stop()
         runner = nil
@@ -164,7 +173,7 @@ final class VPNEngine {
         state = .starting
         interfaceName = nil
 
-        let runner: VPNRunner
+        var runner: VPNRunner
         switch config.engine {
         case .wireguard: runner = try WireGuardRunner(configText: config.configText, queue: queue)
         case .openvpn: runner = try OpenVPNRunner(configText: config.configText, username: config.username, password: config.password, queue: queue)
@@ -172,7 +181,7 @@ final class VPNEngine {
 
         guard let underlay = detectUnderlay() else { throw VPNError.noUnderlay }
         self.underlay = underlay
-        try installEndpointRoutes(for: runner.endpoints, underlay: underlay)
+        runner.endpointIPs = try installEndpointRoutes(for: runner.endpoints, underlay: underlay)
         if config.killSwitch { installRejectRoutes() }
 
         runner.onEvent = { [weak self] event in
@@ -181,6 +190,21 @@ final class VPNEngine {
         }
         self.runner = runner
         try runner.start()
+        // An engine that never reports connected (server unreachable, UDP
+        // blocked) must not leave the kill switch engaged forever.
+        deadlineTimer?.cancel()
+        let deadline = DispatchSource.makeTimerSource(queue: queue)
+        deadline.schedule(deadline: .now() + Self.connectDeadline)
+        deadline.setEventHandler { [weak self] in
+            guard let self, self.generation == gen, self.state == .starting else { return }
+            HelperLog.warn("vpn: no session after \(Int(Self.connectDeadline))s; restarting")
+            self.runner?.onEvent = nil
+            self.runner?.stop()
+            self.runner = nil
+            self.handle(.exited(fatal: nil))
+        }
+        deadline.resume()
+        deadlineTimer = deadline
         HelperLog.info("vpn: \(config.engine.rawValue) starting over \(underlay.isPassthrough ? "the iPhone" : underlay.interface)")
     }
 
@@ -190,6 +214,7 @@ final class VPNEngine {
         case .log(let line):
             HelperLog.info("vpn[\(config.engine.rawValue)]: \(line)")
         case .connected(let iface, let address, let gateway, let dns, _):
+            deadlineTimer?.cancel(); deadlineTimer = nil
             interfaceName = iface
             if startedAt == nil { startedAt = Date() }
             retryAttempt = 0
@@ -203,11 +228,13 @@ final class VPNEngine {
             HelperLog.warn("vpn: session lost (\(why)); engine is reconnecting")
             state = .reconnecting
         case .exited(let fatal):
+            deadlineTimer?.cancel(); deadlineTimer = nil
             runner?.onEvent = nil
             runner = nil
             removeQuarterRoutes()
-            if config.killSwitch { installRejectRoutes() }
             if let fatal {
+                // Nothing a retry can fix: don't keep the Mac blackholed.
+                removeRejectRoutes()
                 lastError = fatal
                 state = .failed
                 HelperLog.error("vpn: \(fatal)")
@@ -215,6 +242,7 @@ final class VPNEngine {
                 clearDNS()
                 return
             }
+            if config.killSwitch { installRejectRoutes() }
             retryAttempt += 1
             let delay = min(30.0, pow(2.0, Double(min(retryAttempt, 5))))
             lastError = "The VPN engine stopped; reconnecting in \(Int(delay))s"
@@ -226,6 +254,7 @@ final class VPNEngine {
 
     private func restart(after delay: TimeInterval) {
         retryTimer?.cancel()
+        deadlineTimer?.cancel(); deadlineTimer = nil
         runner?.onEvent = nil
         runner?.stop()
         runner = nil
@@ -270,17 +299,21 @@ final class VPNEngine {
         return Underlay(interface: interface, gateway: gateway, isPassthrough: false)
     }
 
-    private func installEndpointRoutes(for endpoints: [(host: String, port: Int)], underlay: Underlay) throws {
+    /// Pins each endpoint through the underlay; returns host → first IP.
+    @discardableResult
+    private func installEndpointRoutes(for endpoints: [(host: String, port: Int)], underlay: Underlay) throws -> [String: String] {
         removeEndpointRoutes()
         var ips: [String] = []
+        var byHost: [String: String] = [:]
         for endpoint in endpoints {
             let literal = endpoint.host.trimmingCharacters(in: CharacterSet(charactersIn: "[]"))
             var resolved = Shell.resolve(literal)
-            if resolved.isEmpty, rejectRoutesInstalled {
-                // Name resolution needs the underlay; lift the block just for the lookup.
-                removeRejectRoutes(); resolved = Shell.resolve(literal); installRejectRoutes()
+            if resolved.isEmpty, let cached = resolvedCache[literal] {
+                resolved = cached   // kill switch up: reuse the last good answer, no DNS needed
             }
             guard !resolved.isEmpty else { throw VPNError.unresolvable(endpoint.host) }
+            resolvedCache[literal] = resolved
+            byHost[endpoint.host] = resolved[0]
             for ip in resolved where !ips.contains(ip) { ips.append(ip) }
         }
         for ip in ips {
@@ -294,6 +327,7 @@ final class VPNEngine {
                 endpointRoutes.append((ip, underlay.interface, nil))
             }
         }
+        return byHost
     }
 
     private func removeEndpointRoutes() {
@@ -376,7 +410,7 @@ final class VPNEngine {
             tunnel.setDNSOverride(servers)
             tunnel.setPrimaryRank("Last")
         }
-        guard let store = SCDynamicStoreCreate(nil, "PassthroughVPN" as CFString, nil, nil) else { return }
+        guard let store else { return }
         let base = "State:/Network/Service/\(Self.serviceID)"
         var entries: [(String, [String: Any])] = [
             ("\(base)/DNS", [kSCPropNetDNSServerAddresses as String: servers]),
@@ -392,7 +426,7 @@ final class VPNEngine {
             ]))
         }
         publishedKeys = []
-        for (key, value) in entries where SCDynamicStoreSetValue(store, key as CFString, value as CFDictionary) {
+        for (key, value) in entries where SCDynamicStoreAddTemporaryValue(store, key as CFString, value as CFDictionary) || SCDynamicStoreSetValue(store, key as CFString, value as CFDictionary) {
             publishedKeys.append(key)
         }
     }
@@ -401,7 +435,7 @@ final class VPNEngine {
         activeDNS = []
         tunnel.setDNSOverride(nil)
         tunnel.setPrimaryRank("First")
-        guard !publishedKeys.isEmpty, let store = SCDynamicStoreCreate(nil, "PassthroughVPN" as CFString, nil, nil) else { return }
+        guard !publishedKeys.isEmpty, let store else { return }
         for key in publishedKeys { SCDynamicStoreRemoveValue(store, key as CFString) }
         publishedKeys = []
     }

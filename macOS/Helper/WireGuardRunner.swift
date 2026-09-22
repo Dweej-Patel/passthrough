@@ -25,6 +25,10 @@ final class WireGuardRunner: VPNRunner {
 
     var onEvent: ((VPNRunnerEvent) -> Void)?
     var endpoints: [(host: String, port: Int)] { parsed.peers.map { ($0.endpointHost, $0.endpointPort) } }
+    var endpointIPs: [String: String] = [:]
+    /// UAPI socket I/O blocks (up to 3 s); keep it off the helper's XPC queue.
+    private let ioQueue = DispatchQueue(label: "dev.dpatel.passthrough.wg.io", qos: .utility)
+    private let statsLock = NSLock()
 
     private let parsed: Parsed
     private let queue: DispatchQueue
@@ -151,9 +155,9 @@ final class WireGuardRunner: VPNRunner {
         process.terminationHandler = nil
         if process.isRunning {
             process.terminate()
-            let deadline = Date().addingTimeInterval(3)
-            while process.isRunning, Date() < deadline { usleep(50_000) }
-            if process.isRunning { kill(process.processIdentifier, SIGKILL) }
+            DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 3) {
+                if process.isRunning { kill(process.processIdentifier, SIGKILL) }
+            }
         }
         self.process = nil
         try? FileManager.default.removeItem(atPath: Self.nameFile)
@@ -205,9 +209,11 @@ final class WireGuardRunner: VPNRunner {
         for peer in parsed.peers {
             lines.append("public_key=\(peer.publicKeyHex)")
             if let psk = peer.presharedKeyHex { lines.append("preshared_key=\(psk)") }
-            if let ip = Shell.resolve(peer.endpointHost).first {
-                lines.append("endpoint=\(Shell.isIPv6(ip) ? "[\(ip)]" : ip):\(peer.endpointPort)")
+            // Resolved by the orchestrator before the kill switch went up.
+            guard let ip = endpointIPs[peer.endpointHost] ?? Shell.resolve(peer.endpointHost).first else {
+                throw VPNEngine.VPNError.unresolvable(peer.endpointHost)
             }
+            lines.append("endpoint=\(Shell.isIPv6(ip) ? "[\(ip)]" : ip):\(peer.endpointPort)")
             lines.append("persistent_keepalive_interval=\(peer.keepalive ?? 25)")
             lines.append("replace_allowed_ips=true")
             for allowed in peer.allowedIPs { lines.append("allowed_ip=\(allowed)") }
@@ -237,8 +243,15 @@ final class WireGuardRunner: VPNRunner {
     }
 
     private func waitForHandshake(attempt: Int) {
-        let stats = readStats()
-        lastStats = stats
+        ioQueue.async { [weak self] in
+            guard let self else { return }
+            let stats = self.readStats()
+            self.queue.async { self.evaluateHandshake(stats, attempt: attempt) }
+        }
+    }
+
+    private func evaluateHandshake(_ stats: (Int, Int, Int?), attempt: Int) {
+        guard !stopping else { return }
         if let age = stats.2, age < 60 {
             connected = true
             let firstV4 = parsed.addresses.first { !Shell.isIPv6($0) }?.split(separator: "/").first.map(String.init)
@@ -260,21 +273,28 @@ final class WireGuardRunner: VPNRunner {
         timer.schedule(deadline: .now() + 10, repeating: 10)
         timer.setEventHandler { [weak self] in
             guard let self else { return }
-            self.lastStats = self.readStats()
-            if let age = self.lastStats.2, age > 180 {
-                self.onEvent?(.log("no handshake for \(age)s; restarting"))
-                self.cancelTimers()
-                self.stopAndReport()
+            self.ioQueue.async { [weak self] in
+                guard let self else { return }
+                let stats = self.readStats()
+                self.queue.async {
+                    guard !self.stopping else { return }
+                    if let age = stats.2, age > 180 {
+                        self.onEvent?(.log("no handshake for \(age)s; restarting"))
+                        self.cancelTimers()
+                        self.stopAndReport()
+                    }
+                }
             }
         }
         timer.resume()
         healthTimer = timer
     }
 
-    func stats() -> (Int, Int, Int?) { lastStats }
+    func stats() -> (Int, Int, Int?) { statsLock.lock(); defer { statsLock.unlock() }; return lastStats }
 
+    /// Blocking; call on `ioQueue` only. Caches the result for `stats()`.
     private func readStats() -> (Int, Int, Int?) {
-        guard let name = interfaceName, let reply = try? uapi("get=1\n\n", socket: "/var/run/wireguard/\(name).sock") else { return lastStats }
+        guard let name = interfaceName, let reply = try? uapi("get=1\n\n", socket: "/var/run/wireguard/\(name).sock") else { return stats() }
         var rx = 0, tx = 0, handshake: Int? = nil
         for line in reply.split(separator: "\n") {
             let parts = line.split(separator: "=", maxSplits: 1)
@@ -286,6 +306,7 @@ final class WireGuardRunner: VPNRunner {
             default: break
             }
         }
+        statsLock.lock(); lastStats = (rx, tx, handshake); statsLock.unlock()
         return (rx, tx, handshake)
     }
 

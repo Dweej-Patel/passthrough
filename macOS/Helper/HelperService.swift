@@ -105,6 +105,7 @@ final class HelperService: NSObject, PassthroughHelperProtocol {
         queue.async {
             var status = self.engine.status()
             status[VPNStatusKey.vpn] = self.vpn.status()
+            status[TunnelStatusKey.helperPath] = Bundle.main.executableURL?.path ?? ""
             reply(status)
         }
     }

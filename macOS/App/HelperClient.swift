@@ -53,6 +53,22 @@ final class HelperClient {
         invalidate()
     }
 
+    /// launchd remembers the bundle that registered the daemon. If this app now
+    /// runs from a different location (e.g. moved to /Applications after a dev
+    /// build registered it), re-register so the helper launches from here.
+    func reregisterIfStale(helperPath: String) async -> Bool {
+        let mine = Bundle.main.bundleURL.standardizedFileURL.path
+        guard !helperPath.isEmpty, !helperPath.hasPrefix(mine + "/") else { return false }
+        ptLog(.warning, "Helper runs from \(helperPath), not this bundle; re-registering")
+        try? await service.unregister()
+        invalidate()
+        do { try service.register() } catch {
+            let nsError = error as NSError
+            if nsError.code != 3 { ptLog(.error, "Helper re-registration failed: \(error.localizedDescription)"); return false }
+        }
+        return true
+    }
+
     static func openLoginItemsSettings() {
         SMAppService.openSystemSettingsLoginItems()
     }

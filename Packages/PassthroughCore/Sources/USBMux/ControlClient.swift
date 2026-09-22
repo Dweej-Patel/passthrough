@@ -109,6 +109,7 @@ public final class ControlClient: @unchecked Sendable {
         connection?.receive(minimumIncompleteLength: 1, maximumLength: 64 * 1024) { [weak self] data, _, isComplete, error in
             guard let self, !self.closed else { return }
             if let data { self.buffer.append(data) }
+            if self.buffer.count > 256 * 1024 { self.finish(NWError.posix(.EMSGSIZE)); return }
             while let newline = self.buffer.firstIndex(of: 0x0A) {
                 let line = self.buffer.subdata(in: self.buffer.startIndex..<newline)
                 self.buffer.removeSubrange(self.buffer.startIndex...newline)

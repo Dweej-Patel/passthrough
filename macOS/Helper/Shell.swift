@@ -1,4 +1,5 @@
 import Foundation
+import SystemConfiguration
 
 /// Small process helpers shared by the tunnel and VPN engines.
 enum Shell {
@@ -58,6 +59,43 @@ enum Shell {
     }
 
     static func isIPv6(_ ip: String) -> Bool { ip.contains(":") }
+}
+
+/// Undo anything a previous helper instance may have left in the kernel or
+/// system settings if it crashed: reject/VPN routes, keepalive interfaces,
+/// disabled sleep, stale network-service keys, engine state files. Run once at
+/// startup before accepting clients.
+enum RecoverySweep {
+    static func run() {
+        var cleaned: [String] = []
+        for q in ["0.0.0.0/2", "64.0.0.0/2", "128.0.0.0/2", "192.0.0.0/2"] where (try? Shell.run("/sbin/route", ["-q", "-n", "delete", "-inet", q], quiet: true)) != nil {
+            cleaned.append(q)
+        }
+        for q in ["::/2", "4000::/2", "8000::/2", "c000::/2"] where (try? Shell.run("/sbin/route", ["-q", "-n", "delete", "-inet6", q], quiet: true)) != nil {
+            cleaned.append(q)
+        }
+        for name in Shell.capture("/sbin/ifconfig", ["-l"]).split(separator: " ").map(String.init) where name.hasPrefix("feth") {
+            if Shell.capture("/sbin/ifconfig", [name]).contains("10.83.0.1"), (try? Shell.run("/sbin/ifconfig", [name, "destroy"], quiet: true)) != nil {
+                cleaned.append(name)
+            }
+        }
+        if Shell.capture("/usr/bin/pmset", ["-g"]).contains("SleepDisabled\t\t1") || Shell.capture("/usr/bin/pmset", ["-g"]).contains("SleepDisabled 1") {
+            _ = try? Shell.run("/usr/bin/pmset", ["-a", "disablesleep", "0"], quiet: true)
+            cleaned.append("disablesleep")
+        }
+        if let store = SCDynamicStoreCreate(nil, "PassthroughSweep" as CFString, nil, nil) {
+            for service in ["dev.dpatel.passthrough.tunnel", "dev.dpatel.passthrough.vpn"] {
+                for suffix in ["", "/IPv4", "/IPv6", "/DNS"] {
+                    let key = "State:/Network/Service/\(service)\(suffix)" as CFString
+                    if SCDynamicStoreCopyValue(store, key) != nil, SCDynamicStoreRemoveValue(store, key) { cleaned.append(String(key)) }
+                }
+            }
+        }
+        for file in ["openvpn.conf", "openvpn.status", "wg.name"] {
+            try? FileManager.default.removeItem(atPath: BundledEngines.stateDirectory + "/" + file)
+        }
+        if !cleaned.isEmpty { HelperLog.warn("recovered leftovers from a previous run: \(cleaned.joined(separator: ", "))") }
+    }
 }
 
 /// Where the bundled engines live: next to the helper inside Passthrough.app.

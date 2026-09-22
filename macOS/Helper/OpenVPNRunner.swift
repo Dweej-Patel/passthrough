@@ -8,6 +8,7 @@ import Foundation
 final class OpenVPNRunner: VPNRunner {
     var onEvent: ((VPNRunnerEvent) -> Void)?
     private(set) var endpoints: [(host: String, port: Int)] = []
+    var endpointIPs: [String: String] = [:]
 
     private let configText: String
     private let username: String
@@ -116,9 +117,10 @@ final class OpenVPNRunner: VPNRunner {
         process.terminationHandler = nil
         if process.isRunning {
             process.terminate()
-            let deadline = Date().addingTimeInterval(4)
-            while process.isRunning, Date() < deadline { usleep(50_000) }
-            if process.isRunning { kill(process.processIdentifier, SIGKILL) }
+            // Don't block the helper's queue waiting; escalate to SIGKILL later if needed.
+            DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 4) {
+                if process.isRunning { kill(process.processIdentifier, SIGKILL) }
+            }
         }
         self.process = nil
         cleanupFiles()

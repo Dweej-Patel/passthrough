@@ -31,6 +31,7 @@ public enum USBMux {
         case malformedResponse
         case result(Int)
         case cancelled
+        case timeout
 
         public var errorDescription: String? {
             switch self {
@@ -44,6 +45,7 @@ public enum USBMux {
                 default: return "usbmuxd error \(code)"
                 }
             case .cancelled: return "Cancelled"
+            case .timeout: return "usbmuxd did not answer in time"
             }
         }
     }
@@ -109,10 +111,14 @@ public enum USBMux {
                     if let error { handler(.failed(error)); connection.cancel(); return }
                     readLoop(connection, handler: handler)
                 })
-            case .failed(let error):
+            case .failed(let error), .waiting(let error):
+                // Terminal for our purposes: drop the handler (it captures the
+                // connection) and cancel so nothing lingers; the caller restarts.
+                connection.stateUpdateHandler = nil
+                connection.cancel()
                 handler(.failed(error))
-            case .waiting(let error):
-                handler(.failed(error))
+            case .cancelled:
+                connection.stateUpdateHandler = nil
             default: break
             }
         }
@@ -160,6 +166,8 @@ public enum USBMux {
             connection.stateUpdateHandler = nil
             completion(result)
         }
+        // usbmuxd accepted the socket but never answers (wedged, device mid-reset).
+        queue.asyncAfter(deadline: .now() + 10) { finish(.failure(MuxError.timeout)) }
         connection.stateUpdateHandler = { state in
             switch state {
             case .ready:

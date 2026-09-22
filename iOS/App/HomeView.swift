@@ -87,6 +87,7 @@ struct HomeView: View {
 /// Live picture of how a Mac's traffic moves through this phone.
 struct FlowCard: View {
     @EnvironmentObject private var model: AppModel
+    @Environment(\.scenePhase) private var scenePhase
 
     private var flowState: FlowMapState {
         let macs = model.stats.macs
@@ -102,7 +103,7 @@ struct FlowCard: View {
         PTCard(padding: 10) {
             VStack(alignment: .leading, spacing: 4) {
                 PTSectionTitle("How it flows", icon: "point.3.connected.trianglepath.dotted").padding(.leading, 6)
-                FlowMap(state: flowState, height: 90)
+                FlowMap(state: flowState, height: 90, active: scenePhase == .active)
             }
         }
     }

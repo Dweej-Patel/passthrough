@@ -62,16 +62,24 @@ final class TunnelController {
     func fetchStats() async -> ProviderStats? {
         guard let session = manager?.connection as? NETunnelProviderSession, session.status == .connected else { return nil }
         return await withCheckedContinuation { continuation in
+            let done = NSLock()
+            var resumed = false
+            func finish(_ value: ProviderStats?) {
+                done.lock(); defer { done.unlock() }
+                guard !resumed else { return }
+                resumed = true
+                continuation.resume(returning: value)
+            }
             do {
                 try session.sendProviderMessage(Data("stats".utf8)) { data in
-                    guard let data, let stats = try? JSONDecoder().decode(ProviderStats.self, from: data) else {
-                        continuation.resume(returning: nil); return
-                    }
-                    continuation.resume(returning: stats)
+                    guard let data, let stats = try? JSONDecoder().decode(ProviderStats.self, from: data) else { finish(nil); return }
+                    finish(stats)
                 }
             } catch {
-                continuation.resume(returning: nil)
+                finish(nil)
             }
+            // The extension can be killed between the status check and its reply.
+            DispatchQueue.global().asyncAfter(deadline: .now() + 2) { finish(nil) }
         }
     }
 }

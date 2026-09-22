@@ -30,6 +30,8 @@ public final class PassthroughLog: @unchecked Sendable {
     private var fileURL: URL?
     private var fileHandle: FileHandle?
     private var appendedSinceCheck = 0
+    /// File I/O happens here, never on the network queues that log.
+    private let fileQueue = DispatchQueue(label: "dev.dpatel.passthrough.log.file", qos: .utility)
     public var onAppend: (@Sendable (Entry) -> Void)?
 
     /// Mirror every entry to `url` (appended, one line per entry). Call once at
@@ -56,8 +58,9 @@ public final class PassthroughLog: @unchecked Sendable {
         lock.lock()
         entries.append(entry)
         if entries.count > capacity { entries.removeFirst(entries.count - capacity) }
-        persist(entry)
+        let hasFile = fileHandle != nil
         lock.unlock()
+        if hasFile { fileQueue.async { [self] in self.persist(entry) } }
         onAppend?(entry)
     }
 
@@ -67,13 +70,15 @@ public final class PassthroughLog: @unchecked Sendable {
     }
 
     public func clear() {
-        lock.lock(); entries.removeAll()
-        if let fileURL {
-            try? fileHandle?.close()
-            try? Data().write(to: fileURL)
-            fileHandle = try? FileHandle(forWritingTo: fileURL)
+        lock.lock(); entries.removeAll(); lock.unlock()
+        fileQueue.sync {
+            lock.lock(); defer { lock.unlock() }
+            if let fileURL {
+                try? fileHandle?.close()
+                try? Data().write(to: fileURL)
+                fileHandle = try? FileHandle(forWritingTo: fileURL)
+            }
         }
-        lock.unlock()
     }
 
     /// Reads the shared file back (last `capacity` lines), oldest first.
@@ -94,7 +99,9 @@ public final class PassthroughLog: @unchecked Sendable {
 
     // MARK: File format: "<epoch>\t<level>\t<message>" (newlines in message escaped)
 
+    /// Runs on `fileQueue`.
     private func persist(_ entry: Entry) {
+        lock.lock(); defer { lock.unlock() }
         guard let handle = fileHandle else { return }
         let safe = entry.message.replacingOccurrences(of: "\n", with: "\\n")
         let line = "\(entry.date.timeIntervalSince1970)\t\(entry.level.rawValue)\t\(safe)\n"

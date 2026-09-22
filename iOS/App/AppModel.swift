@@ -66,7 +66,13 @@ final class AppModel: ObservableObject {
         // log lives in a shared file both processes append to.
         if let url = PassthroughProtocol.sharedLogURL { log.attachFile(url) }
         refreshLog(force: true)
-        log.onAppend = { [weak self] _ in Task { @MainActor in self?.refreshLog(force: true) } }
+        log.onAppend = { [weak self] entry in
+            Task { @MainActor in
+                guard let self else { return }
+                self.logEntries.append(entry)
+                if self.logEntries.count > 400 { self.logEntries.removeFirst(self.logEntries.count - 400) }
+            }
+        }
         registry.onChange = { [weak self] in Task { @MainActor in self?.pairedClients = self?.registry.clients ?? [] } }
         UIDevice.current.isBatteryMonitoringEnabled = true
         pathMonitor.pathUpdateHandler = { [weak self] path in
@@ -241,8 +247,10 @@ final class AppModel: ObservableObject {
         radio = (phoneIsOnWiFi && !cellularOnly) ? "Wi-Fi" : cellular
         let level = UIDevice.current.batteryLevel
         batteryLevel = level >= 0 ? Double(level) : nil
-        Self.groupDefaults.set(radio, forKey: SharedKeys.radio)
-        Self.groupDefaults.set(batteryLevel, forKey: SharedKeys.battery)
+        // Cross-process defaults writes are not free; only when something changed.
+        if Self.groupDefaults.string(forKey: SharedKeys.radio) != radio { Self.groupDefaults.set(radio, forKey: SharedKeys.radio) }
+        let storedBattery = Self.groupDefaults.object(forKey: SharedKeys.battery) as? Double
+        if storedBattery != batteryLevel { Self.groupDefaults.set(batteryLevel, forKey: SharedKeys.battery) }
     }
 
     static func radioLabel(_ tech: String?) -> String? {

@@ -65,6 +65,7 @@ guard getuid() == 0 else {
     exit(1)
 }
 
+RecoverySweep.run()
 let delegate = ListenerDelegate()
 let listener = NSXPCListener(machServiceName: HelperConstants.machService)
 listener.delegate = delegate

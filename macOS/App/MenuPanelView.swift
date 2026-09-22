@@ -26,6 +26,8 @@ struct MenuPanelView: View {
             .padding(16)
         }
         .frame(width: 356)
+        .onAppear { session.panelVisible = true }
+        .onDisappear { session.panelVisible = false }
     }
 
     // MARK: Header
@@ -267,7 +269,7 @@ struct FlowCard: View {
 
     var body: some View {
         PTCard(padding: 8) {
-            FlowMap(state: flowState, height: 84)
+            FlowMap(state: flowState, height: 84, active: session.panelVisible)
         }
     }
 }

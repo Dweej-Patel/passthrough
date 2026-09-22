@@ -20,7 +20,7 @@ public enum HelperConstants {
     public static let machService = "dev.dpatel.passthrough.helper"
     public static let plistName = "dev.dpatel.passthrough.helper.plist"
     /// Bump together with the helper binary so the app can detect stale daemons.
-    public static let version = "1.2.2"
+    public static let version = "1.2.3"
 }
 
 /// Keys of the configuration dictionary handed to `startTunnel`.
@@ -42,6 +42,8 @@ public enum TunnelStatusKey {
     public static let rxPackets = "rxPackets"
     public static let txPackets = "txPackets"
     public static let since = "since"
+    /// Absolute path of the running helper binary (to detect a stale registration).
+    public static let helperPath = "helperPath"
 }
 
 /// Keys of the configuration dictionary handed to `startVPN`.

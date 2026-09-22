@@ -89,6 +89,10 @@ public final class SOCKS5Server: @unchecked Sendable {
         public var udpIdleTimeout: TimeInterval = 60
         public var maxUDPPeersPerSession = 512
         public var connectTimeout: Int = 15
+        /// A client that never finishes the SOCKS handshake is dropped after this.
+        public var handshakeTimeout: TimeInterval = 20
+        /// Hard cap on concurrent sessions (the extension has a tight memory budget).
+        public var maxSessions = 4096
         public init() {}
     }
 
@@ -143,6 +147,10 @@ public final class SOCKS5Server: @unchecked Sendable {
         let listener = host == nil ? try NWListener(using: params, on: port) : try NWListener(using: params)
         listener.newConnectionHandler = { [weak self] connection in
             guard let self else { connection.cancel(); return }
+            if self.activeSessions >= self.configuration.maxSessions {
+                ptLog(.warning, "SOCKS session cap reached (\(self.configuration.maxSessions)); refusing")
+                connection.cancel(); return
+            }
             let session = Session(server: self, client: connection)
             self.stateQueue.async { self.sessions[ObjectIdentifier(session)] = session }
             session.start()
@@ -237,6 +245,8 @@ private final class Session: @unchecked Sendable {
     private var remote: NWConnection?
     private var udpPeers: [SOCKS5.Address: UDPPeer] = [:]
     private var udpTimer: DispatchSourceTimer?
+    private var handshakeTimer: DispatchSourceTimer?
+    private var waitTimer: DispatchSourceTimer?
     private var closed = false
     private var countedOpen = false
     private var halfClosures = 0
@@ -256,7 +266,17 @@ private final class Session: @unchecked Sendable {
             }
         }
         client.start(queue: queue)
+        let timer = DispatchSource.makeTimerSource(queue: queue)
+        timer.schedule(deadline: .now() + server.configuration.handshakeTimeout)
+        timer.setEventHandler { [weak self] in self?.close(reason: "handshake timeout") }
+        timer.resume()
+        handshakeTimer = timer
         readGreeting()
+    }
+
+    /// The request was answered; the handshake watchdog is no longer needed.
+    private func handshakeDone() {
+        handshakeTimer?.cancel(); handshakeTimer = nil
     }
 
     // MARK: Byte reading
@@ -363,11 +383,10 @@ private final class Session: @unchecked Sendable {
         let remote = NWConnection(host: address.host, port: address.port, using: server.remoteParameters(tcp: true))
         self.remote = remote
         var replied = false
-        var waitTimer: DispatchSourceTimer?
         let fail: (NWError) -> Void = { [weak self] error in
             guard let self, !replied else { return }
             replied = true
-            waitTimer?.cancel()
+            self.waitTimer?.cancel()
             let code: UInt8
             switch error {
             case .posix(.ECONNREFUSED): code = SOCKS5.Reply.connectionRefused
@@ -385,7 +404,8 @@ private final class Session: @unchecked Sendable {
             case .ready:
                 guard !replied else { return }
                 replied = true
-                waitTimer?.cancel()
+                self.waitTimer?.cancel(); self.waitTimer = nil
+                self.handshakeDone()
                 self.countedOpen = true
                 self.server.counter.connectionOpened()
                 self.write(SOCKS5.reply(SOCKS5.Reply.succeeded)) {
@@ -395,7 +415,7 @@ private final class Session: @unchecked Sendable {
             case .waiting(let error):
                 // The path is not viable yet (e.g. iOS is waking the cellular radio
                 // because Wi-Fi is up and we require cellular). Give it a chance.
-                guard !replied, waitTimer == nil else { return }
+                guard !replied, self.waitTimer == nil else { return }
                 if case .posix(let code) = error, code == .ECONNREFUSED || code == .ECONNRESET {
                     fail(error)   // a definitive answer from the far end; no point waiting
                     return
@@ -404,11 +424,13 @@ private final class Session: @unchecked Sendable {
                 timer.schedule(deadline: .now() + .seconds(self.server.configuration.connectTimeout))
                 timer.setEventHandler { fail(error) }
                 timer.resume()
-                waitTimer = timer
+                self.waitTimer = timer
             case .failed(let error):
+                remote.stateUpdateHandler = nil
                 guard !replied else { self.close(reason: "remote failed"); return }
                 fail(error)
             case .cancelled:
+                remote.stateUpdateHandler = nil
                 self.close(reason: "remote cancelled")
             default:
                 break
@@ -456,6 +478,7 @@ private final class Session: @unchecked Sendable {
         timer.setEventHandler { [weak self] in self?.pruneIdlePeers() }
         timer.resume()
         udpTimer = timer
+        handshakeDone()
         write(SOCKS5.reply(SOCKS5.Reply.succeeded)) { self.readDatagramFrame() }
     }
 
@@ -522,6 +545,8 @@ private final class Session: @unchecked Sendable {
             client.cancel()
             remote?.cancel()
             udpTimer?.cancel()
+            handshakeTimer?.cancel()
+            waitTimer?.cancel()
             udpPeers.values.forEach { $0.cancel() }
             udpPeers.removeAll()
             if countedOpen { server.counter.connectionClosed() }

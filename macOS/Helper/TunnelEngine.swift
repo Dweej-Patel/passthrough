@@ -37,7 +37,10 @@ final class TunnelEngine {
     private var fd: Int32 = -1
     private(set) var interfaceName: String?
     private var thread: Thread?
-    private let exited = DispatchSemaphore(value: 0)
+    private var exited = DispatchSemaphore(value: 0)
+    /// Kept for the tunnel's lifetime: values are published as *temporary* so
+    /// configd drops them by itself if this process dies.
+    private lazy var store: SCDynamicStore? = SCDynamicStoreCreate(nil, "Passthrough" as CFString, nil, nil)
     private var config: Config?
     private var startedAt: Date?
     private var storeKeys: [String] = []
@@ -65,8 +68,7 @@ final class TunnelEngine {
     /// configured ones when `servers` is nil). No-op while the tunnel is down.
     func setDNSOverride(_ servers: [String]?) {
         dnsOverride = servers
-        guard isRunning, let config, storeKeys.contains("State:/Network/Service/\(Self.serviceID)/DNS"),
-              let store = SCDynamicStoreCreate(nil, "Passthrough" as CFString, nil, nil) else { return }
+        guard isRunning, let config, storeKeys.contains("State:/Network/Service/\(Self.serviceID)/DNS"), let store else { return }
         let key = "State:/Network/Service/\(Self.serviceID)/DNS" as CFString
         let value = [kSCPropNetDNSServerAddresses as String: servers ?? config.dns] as CFDictionary
         if !SCDynamicStoreSetValue(store, key, value) {
@@ -98,6 +100,8 @@ final class TunnelEngine {
         let bytes = Array(yaml.utf8)
         let tunFD = fd
         setEngineAlive(true)
+        let exited = DispatchSemaphore(value: 0)
+        self.exited = exited
         let thread = Thread { [exited, weak self] in
             let result = bytes.withUnsafeBufferPointer { buf in
                 hev_socks5_tunnel_main_from_str(buf.baseAddress, UInt32(buf.count), tunFD)
@@ -138,18 +142,20 @@ final class TunnelEngine {
             _ = try? run("/sbin/route", ["-q", "-n", "delete", "-inet6", "::/1", "-interface", name])
             _ = try? run("/sbin/route", ["-q", "-n", "delete", "-inet6", "8000::/1", "-interface", name])
         }
+        var engineGone = true
         if thread != nil {
             if isEngineAlive {
                 hev_socks5_tunnel_quit()
-                if exited.wait(timeout: .now() + 3) != .success {
-                    HelperLog.warn("engine did not stop in time")
+                if exited.wait(timeout: .now() + 8) != .success {
+                    HelperLog.error("engine did not stop in time; leaving its descriptor open")
+                    engineGone = false
                 }
-            } else {
-                _ = exited.wait(timeout: .now())
             }
             thread = nil
         }
-        if fd >= 0 { close(fd); fd = -1 }
+        // Never close the utun while the engine thread might still use it.
+        if fd >= 0, engineGone { close(fd) }
+        fd = -1
         interfaceName = nil
         startedAt = nil
         config = nil
@@ -293,7 +299,7 @@ final class TunnelEngine {
     /// Registers the utun as a first-ranked network service so macOS treats the
     /// Mac as online, elects it primary, and hands mDNSResponder our DNS servers.
     private func publishNetworkService(name: String, config: Config) {
-        guard let store = SCDynamicStoreCreate(nil, "Passthrough" as CFString, nil, nil) else {
+        guard let store else {
             HelperLog.warn("SCDynamicStoreCreate failed; DNS may not resolve")
             return
         }
@@ -325,7 +331,8 @@ final class TunnelEngine {
         }
         storeKeys = []
         for (key, value) in entries {
-            if SCDynamicStoreSetValue(store, key as CFString, value as CFDictionary) {
+            // Temporary first (auto-removed if we die); SetValue when it already exists.
+            if SCDynamicStoreAddTemporaryValue(store, key as CFString, value as CFDictionary) || SCDynamicStoreSetValue(store, key as CFString, value as CFDictionary) {
                 storeKeys.append(key)
             } else {
                 HelperLog.warn("failed to set \(key): \(String(cString: SCErrorString(SCError())))")
@@ -334,7 +341,7 @@ final class TunnelEngine {
     }
 
     private func retractNetworkService() {
-        guard !storeKeys.isEmpty, let store = SCDynamicStoreCreate(nil, "Passthrough" as CFString, nil, nil) else { return }
+        guard !storeKeys.isEmpty, let store else { return }
         for key in storeKeys { SCDynamicStoreRemoveValue(store, key as CFString) }
         storeKeys = []
     }

@@ -63,6 +63,9 @@ final class SessionCoordinator: ObservableObject {
     /// Set when keep-awake can't be turned on (or was auto-disabled) due to low battery.
     @Published private(set) var keepAwakeBlockedReason: String?
 
+    /// True while the menu-bar panel is on screen; animations stop otherwise.
+    @Published var panelVisible = false
+
     // VPN layer (bundled WireGuard/OpenVPN run by the helper on top of the passthrough)
     @Published private(set) var vpn = VPNStatus()
     @Published private(set) var vpnWanted = false
@@ -84,6 +87,9 @@ final class SessionCoordinator: ObservableObject {
     private var ticker: AnyCancellable?
     private var cancellables: Set<AnyCancellable> = []
     private var retryTask: Task<Void, Never>?
+    private var watchRestartTask: Task<Void, Never>?
+    private var statusPollInFlight = false
+    private var vpnGeneration = 0
     private var retryAttempts = 0
     private var generation = 0
     private var wantsConnection = false
@@ -164,6 +170,7 @@ final class SessionCoordinator: ObservableObject {
         case .attached(let d):
             guard d.isUSB else { return }
             devices[d.id] = d
+            retryAttempts = 0
             ptLog(.info, "iPhone attached over USB (\(d.udid.prefix(8))…)")
             if device == nil {
                 device = d
@@ -179,8 +186,15 @@ final class SessionCoordinator: ObservableObject {
                 if device != nil, autoConnect, !suppressAutoConnect { connect() }
             }
         case .failed(let error):
+            // Coalesce: a connection can report waiting then failed; one restart only.
+            guard watchRestartTask == nil else { return }
             ptLog(.error, "usbmuxd watch failed: \(error.localizedDescription); retrying")
-            Task { try? await Task.sleep(for: .seconds(3)); self.startDeviceWatch() }
+            watchRestartTask = Task { [weak self] in
+                try? await Task.sleep(for: .seconds(3))
+                guard let self else { return }
+                self.watchRestartTask = nil
+                self.startDeviceWatch()
+            }
         }
     }
 
@@ -327,9 +341,10 @@ final class SessionCoordinator: ObservableObject {
         ptLog(.error, message)
         let hadTunnel = phase.isConnected
         teardown(to: .error(message))
-        if wantsConnection, device != nil, hadTunnel || retryAttempts < 5 {
-            scheduleRetry()
-        }
+        _ = hadTunnel
+        // Never give up while the user wants the link and a phone is attached:
+        // the phone side may simply not be running yet. Backoff caps at 30 s.
+        if wantsConnection, device != nil { scheduleRetry() }
     }
 
     private func scheduleRetry() {
@@ -349,14 +364,19 @@ final class SessionCoordinator: ObservableObject {
         let hadTunnel = phase.isConnected || tunnelInterface != nil
         control?.close()
         control = nil
-        forwarder?.stop()
-        forwarder = nil
+        let forwarder = self.forwarder
+        self.forwarder = nil
         tunnelInterface = nil
         connectedSince = nil
         phoneActiveConnections = 0
         pairingInFlight = false
         phase = next
-        if hadTunnel { Task { await helper.stopTunnel() } }
+        // Routes first, then the loopback listener: while the utun still owns the
+        // default route, a closed listener would just refuse every connection.
+        Task {
+            if hadTunnel { await helper.stopTunnel() }
+            forwarder?.stop()
+        }
     }
 
     /// Turn keep-awake on/off with a low-battery precheck. If the battery is at
@@ -408,6 +428,7 @@ final class SessionCoordinator: ObservableObject {
     /// connects or disconnects underneath it.
     func setVPN(_ on: Bool) {
         vpnError = nil
+        vpnGeneration += 1
         guard on else {
             vpnWanted = false
             vpn = VPNStatus()
@@ -554,8 +575,21 @@ final class SessionCoordinator: ObservableObject {
 
     private func ensureHelperCurrent() async {
         guard helper.availability == .ready else { return }
-        guard let v = await helper.version(), v != HelperConstants.version else { return }
-        ptLog(.warning, "Helper version \(v) ≠ \(HelperConstants.version); restarting helper")
+        guard let v = await helper.version() else { return }
+        var restart = false
+        if v != HelperConstants.version {
+            ptLog(.warning, "Helper version \(v) ≠ \(HelperConstants.version); restarting helper")
+            restart = true
+        }
+        // Only re-home the daemon when nothing is running through it.
+        if !phase.isConnected, !vpnWanted, Bundle.main.bundleURL.path.hasPrefix("/Applications/") {
+            let status = await helper.status()
+            if let path = status[TunnelStatusKey.helperPath] as? String, await helper.reregisterIfStale(helperPath: path) {
+                helperAvailability = helper.availability
+                restart = true
+            }
+        }
+        guard restart else { return }
         helper.quitHelper()
         // Wait for launchd to respawn the new binary before we drive it.
         for _ in 0..<10 {
@@ -573,14 +607,20 @@ final class SessionCoordinator: ObservableObject {
     private var healthTick = 0
 
     private func tick() {
-        checkBattery()
         healthTick += 1
-        if phase.isConnected || vpnWanted, healthTick % 3 == 0 {
+        // Idle (nothing connected, panel closed): do the housekeeping every 10 s only.
+        let busy = phase.isConnected || phase.isBusy || vpnWanted || panelVisible
+        if !busy, healthTick % 10 != 0 { return }
+        if healthTick % 10 == 1 || keepAwakeBlockedReason != nil { checkBattery() }
+        if phase.isConnected || vpnWanted, healthTick % 3 == 0, !statusPollInFlight {
             let gen = generation
+            let vpnGen = vpnGeneration
             let checkTunnel = phase.isConnected
+            statusPollInFlight = true
             Task {
                 let status = await helper.status()
-                if self.vpnWanted {
+                self.statusPollInFlight = false
+                if self.vpnWanted, vpnGen == self.vpnGeneration {
                     let parsed = VPNStatus(from: status[VPNStatusKey.vpn] as? [String: Any] ?? [:])
                     if parsed.state == "failed" {
                         self.vpnWanted = false

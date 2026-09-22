@@ -39,15 +39,20 @@ public struct FlowMapState: Equatable {
 }
 
 /// Animated picture of the path traffic takes: Mac ⟶ USB ⟶ iPhone ⟶ radio ⟶ (VPN) ⟶ Internet.
-/// Particles ride the wires at a speed and density that follow live throughput
-/// (teal toward the Mac, violet away from it); the VPN node slides in when the
-/// layer is on, and a halo marks the Mac while keep-awake holds it up.
+/// Streaks of light ride two lanes per hop (teal toward the Mac for download,
+/// violet away for upload) at a speed and density that follow live throughput;
+/// the VPN node slides in when the layer is on; a halo marks the Mac while
+/// keep-awake holds it up.
 ///
-/// Cost: one `Canvas` redrawn by a `TimelineView` at ≤30 fps (15 fps when idle),
-/// fully paused when nothing is connected or animating. No per-particle views.
+/// Cost model: the per-frame layer is a `Canvas` drawing only paths (wires,
+/// streaks, halo) under a `TimelineView` at ≤24 fps (12 when idle), paused
+/// while nothing moves or the view isn't on screen. Nodes, icons and labels
+/// live in an ordinary SwiftUI layer that re-renders only when state changes.
 public struct FlowMap: View {
     public var state: FlowMapState
     public var height: CGFloat
+    /// False when the hosting panel is hidden; stops the timeline entirely.
+    public var active: Bool
 
     @Environment(\.colorScheme) private var scheme
     @State private var clock = FlowClock()
@@ -55,54 +60,46 @@ public struct FlowMap: View {
     @State private var linkChangedAt = Date.distantPast
     @State private var settleTick = 0
 
-    public init(state: FlowMapState, height: CGFloat = 120) {
+    public init(state: FlowMapState, height: CGFloat = 96, active: Bool = true) {
         self.state = state
         self.height = height
+        self.active = active
     }
 
     private var transitioning: Bool {
         Date().timeIntervalSince(vpnChangedAt) < 0.8 || Date().timeIntervalSince(linkChangedAt) < 0.8
     }
     private var paused: Bool {
-        !state.linkUp && !state.busy && !state.keepAwake && state.vpn == nil && !transitioning
+        !active || (!state.linkUp && !state.busy && !state.keepAwake && state.vpn == nil && !transitioning)
     }
     private var interval: TimeInterval {
-        (state.downRate + state.upRate) > 0 || state.busy || transitioning ? 1.0 / 30.0 : 1.0 / 15.0
+        (state.downRate + state.upRate) > 0 || state.busy || transitioning ? 1.0 / 24.0 : 1.0 / 12.0
     }
 
     public var body: some View {
-        TimelineView(.animation(minimumInterval: interval, paused: paused)) { timeline in
-            let now = timeline.date
-            Canvas(rendersAsynchronously: false) { ctx, size in
-                let vpnP = Self.progress(since: vpnChangedAt, now: now, target: state.vpn != nil)
-                let linkP = Self.progress(since: linkChangedAt, now: now, target: state.linkUp)
-                let travel = clock.advance(now: now, down: state.downRate, up: state.upRate)
-                FlowRenderer(ctx: ctx, size: size, state: state, scheme: scheme, vpnProgress: vpnP, linkProgress: linkP,
-                             travel: travel, t: now.timeIntervalSinceReferenceDate).draw()
-            } symbols: {
-                NodeSymbol(icon: "laptopcomputer", label: state.perspective == .iphone && state.activeConnections > 0 && state.macName == "Mac" ? "Mac" : state.macName,
-                           tint: nodeTint(active: state.linkUp), dim: !state.linkUp && state.perspective == .iphone).tag(FlowSymbol.mac)
-                NodeSymbol(icon: "iphone.gen3", label: state.phoneName, tint: nodeTint(active: state.linkUp || state.perspective == .iphone),
-                           dim: !state.linkUp && state.perspective == .mac).tag(FlowSymbol.phone)
-                NodeSymbol(icon: state.vpn?.blocked == true ? "exclamationmark.shield.fill" : "lock.shield.fill",
-                           label: state.vpn.map { String($0.name.split(separator: "·").first ?? "VPN").trimmingCharacters(in: .whitespaces) } ?? "VPN",
-                           tint: state.vpn?.blocked == true ? PTTheme.warning : (state.vpn?.connected == true ? PTTheme.success : Color.secondary),
-                           dim: state.vpn?.connected != true).tag(FlowSymbol.vpn)
-                NodeSymbol(icon: "globe", label: "Internet", tint: Color.secondary, dim: !state.linkUp).tag(FlowSymbol.internet)
-                WireLabel("USB").tag(FlowSymbol.usbLabel)
-                WireLabel(state.radio ?? "cellular").tag(FlowSymbol.radioLabel)
-                Image(systemName: "lock.fill").font(.system(size: 9, weight: .bold)).foregroundStyle(PTTheme.up).tag(FlowSymbol.lock)
-                Image(systemName: "cup.and.saucer.fill").font(.system(size: 10, weight: .bold)).foregroundStyle(PTTheme.warning).tag(FlowSymbol.cup)
-                Image(systemName: "cable.connector.slash").font(.system(size: 10, weight: .semibold)).foregroundStyle(.tertiary).tag(FlowSymbol.unplugged)
+        GeometryReader { geo in
+            ZStack {
+                TimelineView(.animation(minimumInterval: interval, paused: paused)) { timeline in
+                    let now = timeline.date
+                    Canvas(rendersAsynchronously: false) { ctx, size in
+                        let vpnP = FlowGeometry.progress(since: vpnChangedAt, now: now, target: state.vpn != nil)
+                        let linkP = FlowGeometry.progress(since: linkChangedAt, now: now, target: state.linkUp)
+                        let travel = clock.advance(now: now, down: state.downRate, up: state.upRate)
+                        FlowWires(ctx: ctx, geometry: FlowGeometry(state: state, width: size.width, vpnProgress: vpnP),
+                                  state: state, scheme: scheme, linkProgress: linkP, travel: travel,
+                                  t: now.timeIntervalSinceReferenceDate).draw()
+                    }
+                }
+                FlowNodes(state: state, geometry: FlowGeometry(state: state, width: geo.size.width, vpnProgress: state.vpn != nil ? 1 : 0))
+                    .animation(.easeOut(duration: FlowGeometry.transitionDuration), value: state.vpn != nil)
             }
         }
         .frame(height: height)
         .onChange(of: state.vpn != nil) { _, _ in vpnChangedAt = Date(); settleLater() }
         .onChange(of: state.linkUp) { _, _ in linkChangedAt = Date(); settleLater() }
+        .accessibilityElement(children: .ignore)
         .accessibilityLabel(accessibilityText)
     }
-
-    private func nodeTint(active: Bool) -> Color { active ? PTTheme.accentStart : Color.secondary }
 
     /// Forces one re-evaluation after a transition so `paused` can flip back on.
     private func settleLater() {
@@ -115,20 +112,41 @@ public struct FlowMap: View {
         if let vpn = state.vpn { s += vpn.connected ? ", encrypted through \(vpn.name)" : ", VPN \(vpn.name) connecting" }
         return s
     }
+}
 
-    /// 0…1 eased progress toward `target` since the last toggle.
+/// Node positions shared by the wire canvas and the node layer.
+struct FlowGeometry {
+    static let transitionDuration: TimeInterval = 0.55
+    static let nodeY: CGFloat = 30
+    static let laneOffset: CGFloat = 3.5
+    let state: FlowMapState
+    let width: CGFloat
+    let vpnProgress: Double
+
+    /// Nodes shrink a little as the VPN node slides in so four fit comfortably.
+    var nodeR: CGFloat { 22 - 3 * CGFloat(vpnProgress) }
+    var margin: CGFloat { state.perspective == .iphone ? 40 : 34 }
+
+    var mac: CGFloat { spread(3, 0) }
+    var phone: CGFloat { spread(3, 1) + (spread(4, 1) - spread(3, 1)) * CGFloat(vpnProgress) }
+    var vpn: CGFloat { spread(4, 2) }
+    var internet: CGFloat { spread(3, 2) }
+    var showVPN: Bool { vpnProgress > 0.01 }
+    var radioMid: CGFloat { showVPN ? (phone + vpn) / 2 : (phone + internet) / 2 }
+
+    private func spread(_ n: Int, _ i: Int) -> CGFloat { margin + (width - 2 * margin) * CGFloat(i) / CGFloat(n - 1) }
+
+    /// 0…1 eased progress toward `target` since the last toggle (cubic ease-out,
+    /// matching the SwiftUI animation on the node layer).
     static func progress(since: Date, now: Date, target: Bool) -> Double {
-        let raw = min(1, max(0, now.timeIntervalSince(since) / 0.55))
+        let raw = min(1, max(0, now.timeIntervalSince(since) / transitionDuration))
         let eased = 1 - pow(1 - raw, 3)
         return target ? eased : 1 - eased
     }
 }
 
-/// Symbols the canvas resolves (rendered once per frame, cached by SwiftUI).
-enum FlowSymbol: Hashable { case mac, phone, vpn, internet, usbLabel, radioLabel, lock, cup, unplugged }
-
 /// Integrates particle travel over time with smoothed speeds so rate changes
-/// never make particles jump. A class so the canvas can update it while drawing.
+/// never make streaks jump. A class so the canvas can update it while drawing.
 final class FlowClock {
     private var last: Date?
     private var speedDown = 0.0, speedUp = 0.0
@@ -155,68 +173,43 @@ final class FlowClock {
     }
 }
 
-/// All drawing for one frame.
-struct FlowRenderer {
+/// Per-frame drawing: only paths. No text, no symbols, no view layout.
+struct FlowWires {
     let ctx: GraphicsContext
-    let size: CGSize
+    let geometry: FlowGeometry
     let state: FlowMapState
     let scheme: ColorScheme
-    let vpnProgress: Double
     let linkProgress: Double
     let travel: (down: Double, up: Double)
     let t: Double
 
-    private var nodeY: CGFloat { 30 }
-    /// Half the distance between the download and upload lanes.
-    static let laneOffset: CGFloat = 3.5
-    /// Nodes shrink a little as the VPN node slides in so four fit comfortably.
-    private var nodeR: CGFloat { 22 - 3 * CGFloat(vpnProgress) }
-    private var margin: CGFloat { state.perspective == .iphone ? 40 : 34 }
-    /// Symbol images are 44 (circle) + 4 + ~12 (label) tall; this centres the circle on the wire.
-    private var symbolOffset: CGFloat { 8 }
-
-    /// Node x positions: 3 nodes (Mac, phone, Internet) morphing to 4 with the VPN inserted.
-    private var xs: (mac: CGFloat, phone: CGFloat, vpn: CGFloat, internet: CGFloat) {
-        let w = size.width
-        func spread(_ n: Int, _ i: Int) -> CGFloat { margin + (w - 2 * margin) * CGFloat(i) / CGFloat(n - 1) }
-        let p = CGFloat(vpnProgress)
-        let mac = spread(3, 0)
-        let phone = spread(3, 1) + (spread(4, 1) - spread(3, 1)) * p
-        let internet = spread(3, 2)
-        let vpn = spread(4, 2)
-        return (mac, phone, vpn, internet)
-    }
-
     func draw() {
-        let x = xs
-        let y = nodeY
-        let showVPN = vpnProgress > 0.01
+        let g = geometry
+        let y = FlowGeometry.nodeY
+        let r = g.nodeR
         let vpnLive = state.vpn?.connected == true && !(state.vpn?.blocked ?? false)
         let vpnBlocked = state.vpn?.blocked == true
         let linkAlpha = 0.25 + 0.75 * linkProgress
+        let lane = FlowGeometry.laneOffset
 
-        // Wires
         var segments: [(from: CGFloat, to: CGFloat, encrypted: Bool, carries: Bool)] = []
-        segments.append((x.mac + nodeR + 4, x.phone - nodeR - 4, showVPN, state.linkUp))
-        if showVPN {
-            segments.append((x.phone + nodeR + 4, x.vpn - nodeR - 4, true, state.linkUp))
-            segments.append((x.vpn + nodeR + 4, x.internet - nodeR - 4, false, state.linkUp && vpnLive))
+        segments.append((g.mac + r + 4, g.phone - r - 4, g.showVPN, state.linkUp))
+        if g.showVPN {
+            segments.append((g.phone + r + 4, g.vpn - r - 4, true, state.linkUp))
+            segments.append((g.vpn + r + 4, g.internet - r - 4, false, state.linkUp && vpnLive))
         } else {
-            segments.append((x.phone + nodeR + 4, x.internet - nodeR - 4, false, state.linkUp))
+            segments.append((g.phone + r + 4, g.internet - r - 4, false, state.linkUp))
         }
 
-        // Two lanes per hop: the upper carries download toward the Mac (teal),
-        // the lower carries upload away from it (violet).
-        let lane = Self.laneOffset
         for seg in segments {
             func line(_ dy: CGFloat) -> Path {
                 var p = Path(); p.move(to: CGPoint(x: seg.from, y: y + dy)); p.addLine(to: CGPoint(x: seg.to, y: y + dy)); return p
             }
             if seg.encrypted && state.vpn != nil {
                 let sheath = vpnBlocked ? PTTheme.warning : PTTheme.up
-                ctx.stroke(line(0), with: .color(sheath.opacity((vpnLive ? 0.20 : 0.10) * vpnProgress)), style: StrokeStyle(lineWidth: 16, lineCap: .round))
+                ctx.stroke(line(0), with: .color(sheath.opacity((vpnLive ? 0.20 : 0.10) * g.vpnProgress)), style: StrokeStyle(lineWidth: 16, lineCap: .round))
                 if !vpnLive {
-                    ctx.stroke(line(0), with: .color(sheath.opacity(0.6 * vpnProgress)), style: StrokeStyle(lineWidth: 1.5, lineCap: .round, dash: [4, 5], dashPhase: CGFloat(-t * 20)))
+                    ctx.stroke(line(0), with: .color(sheath.opacity(0.6 * g.vpnProgress)), style: StrokeStyle(lineWidth: 1.5, lineCap: .round, dash: [4, 5], dashPhase: CGFloat(-t * 20)))
                 }
             }
             let neutral = Color.primary.opacity(scheme == .dark ? 0.16 : 0.12)
@@ -232,18 +225,15 @@ struct FlowRenderer {
             }
         }
 
-        // Particles: teal toward the Mac (down), violet away (up); each stream on its own lane.
         if state.linkUp {
             let carrying = segments.filter(\.carries)
             if let first = carrying.first, let last = carrying.last {
                 let span = (from: first.from, to: last.to)
-                // Gaps where nodes sit: particles hide inside nodes so they appear to pass through.
-                let gaps: [ClosedRange<CGFloat>] = showVPN ? [(x.phone - nodeR)...(x.phone + nodeR), (x.vpn - nodeR)...(x.vpn + nodeR)] : [(x.phone - nodeR)...(x.phone + nodeR)]
+                let gaps: [ClosedRange<CGFloat>] = g.showVPN ? [(g.phone - r)...(g.phone + r), (g.vpn - r)...(g.vpn + r)] : [(g.phone - r)...(g.phone + r)]
                 drawStream(span: span, gaps: gaps, y: y - lane, rate: state.downRate, travel: travel.down, towardMac: true, color: PTTheme.down)
                 drawStream(span: span, gaps: gaps, y: y + lane, rate: state.upRate, travel: travel.up, towardMac: false, color: PTTheme.up)
             }
         } else if state.busy {
-            // Connecting: a single scout pulse walks the USB wire.
             let seg = segments[0]
             let len = seg.to - seg.from
             let phase = CGFloat((t * 0.7).truncatingRemainder(dividingBy: 1))
@@ -251,53 +241,16 @@ struct FlowRenderer {
             streak(head: head, tail: max(seg.from, head - 18), y: y, color: PTTheme.accentStart, alpha: 0.7)
         }
 
-        // Keep-awake halo on the Mac.
         if state.keepAwake {
             let pulse = 0.5 + 0.5 * sin(t * 2.2)
-            let r = nodeR + 6 + CGFloat(3 * pulse)
-            ctx.stroke(Path(ellipseIn: CGRect(x: x.mac - r, y: y - r, width: 2 * r, height: 2 * r)),
-                       with: .color(PTTheme.warning.opacity(0.28 + 0.18 * pulse)), lineWidth: 2)
-            ctx.fill(Path(ellipseIn: CGRect(x: x.mac - r, y: y - r, width: 2 * r, height: 2 * r)), with: .color(PTTheme.warning.opacity(0.05 + 0.04 * pulse)))
-        }
-
-        // Nodes
-        place(.mac, at: CGPoint(x: x.mac, y: y))
-        place(.phone, at: CGPoint(x: x.phone, y: y))
-        if showVPN {
-            var c = ctx
-            c.opacity = vpnProgress
-            let s = 0.7 + 0.3 * vpnProgress
-            c.translateBy(x: x.vpn, y: y)
-            c.scaleBy(x: s, y: s)
-            c.translateBy(x: -x.vpn, y: -y)
-            if let sym = c.resolveSymbol(id: FlowSymbol.vpn) { c.draw(sym, at: CGPoint(x: x.vpn, y: y + symbolOffset)) }
-        }
-        place(.internet, at: CGPoint(x: x.internet, y: y))
-        if state.keepAwake, let cup = ctx.resolveSymbol(id: FlowSymbol.cup) {
-            ctx.draw(cup, at: CGPoint(x: x.mac + nodeR - 2, y: y - nodeR + 2))
-        }
-        if !state.linkUp && !state.busy && state.perspective == .mac, let sym = ctx.resolveSymbol(id: FlowSymbol.unplugged) {
-            ctx.draw(sym, at: CGPoint(x: (x.mac + x.phone) / 2, y: y - 12))
-        }
-
-        // Wire labels below the wires, rate tags above the USB wire.
-        let labelY = y + 15
-        if let usb = ctx.resolveSymbol(id: FlowSymbol.usbLabel) { ctx.draw(usb, at: CGPoint(x: (x.mac + x.phone) / 2, y: labelY)) }
-        let radioMid = showVPN ? (x.phone + x.vpn) / 2 : (x.phone + x.internet) / 2
-        if let radio = ctx.resolveSymbol(id: FlowSymbol.radioLabel) { ctx.draw(radio, at: CGPoint(x: radioMid, y: labelY)) }
-        if showVPN, state.vpn != nil, let lock = ctx.resolveSymbol(id: FlowSymbol.lock) {
-            // A small lock above the encrypted radio hop; the engine is named in the VPN row.
-            var c = ctx; c.opacity = vpnProgress
-            c.draw(lock, at: CGPoint(x: radioMid, y: y - 12))
+            let hr = r + 6 + CGFloat(3 * pulse)
+            let rect = CGRect(x: g.mac - hr, y: y - hr, width: 2 * hr, height: 2 * hr)
+            ctx.stroke(Path(ellipseIn: rect), with: .color(PTTheme.warning.opacity(0.28 + 0.18 * pulse)), lineWidth: 2)
+            ctx.fill(Path(ellipseIn: rect), with: .color(PTTheme.warning.opacity(0.05 + 0.04 * pulse)))
         }
     }
 
-    private func place(_ id: FlowSymbol, at point: CGPoint) {
-        if let sym = ctx.resolveSymbol(id: id) { ctx.draw(sym, at: CGPoint(x: point.x, y: point.y + symbolOffset)) }
-    }
-
-    /// One direction of flow: soft gradient streaks that fade in along the wire,
-    /// so the traffic reads as light moving through the cable rather than dots.
+    /// One direction of flow: soft gradient streaks that fade in along the wire.
     private func drawStream(span: (from: CGFloat, to: CGFloat), gaps: [ClosedRange<CGFloat>], y: CGFloat,
                             rate: Double, travel: Double, towardMac: Bool, color: Color) {
         let len = Double(span.to - span.from)
@@ -317,7 +270,6 @@ struct FlowRenderer {
         }
     }
 
-    /// A short line whose colour fades from nothing at the tail to `alpha` at the head.
     private func streak(head: CGFloat, tail: CGFloat, y: CGFloat, color: Color, alpha: Double) {
         var path = Path()
         path.move(to: CGPoint(x: tail, y: y))
@@ -329,13 +281,62 @@ struct FlowRenderer {
     }
 }
 
-// MARK: - Symbols
+/// Nodes, icons and labels: plain SwiftUI, re-rendered only when state changes.
+private struct FlowNodes: View {
+    let state: FlowMapState
+    let geometry: FlowGeometry
 
-private struct NodeSymbol: View {
+    private var vpnLabel: String {
+        guard let vpn = state.vpn else { return "VPN" }
+        return String(vpn.name.split(separator: "·").first ?? "VPN").trimmingCharacters(in: .whitespaces)
+    }
+    private var vpnTint: Color {
+        guard let vpn = state.vpn else { return .secondary }
+        return vpn.blocked ? PTTheme.warning : (vpn.connected ? PTTheme.success : .secondary)
+    }
+
+    var body: some View {
+        let g = geometry
+        let y = FlowGeometry.nodeY
+        let active = PTTheme.accentStart
+        ZStack {
+            NodeView(icon: "laptopcomputer", label: state.macName, tint: state.linkUp ? active : .secondary,
+                     dim: !state.linkUp && state.perspective == .iphone, radius: g.nodeR)
+                .position(x: g.mac, y: y + 8)
+            NodeView(icon: "iphone.gen3", label: state.phoneName, tint: (state.linkUp || state.perspective == .iphone) ? active : .secondary,
+                     dim: !state.linkUp && state.perspective == .mac, radius: g.nodeR)
+                .position(x: g.phone, y: y + 8)
+            if state.vpn != nil {
+                NodeView(icon: state.vpn?.blocked == true ? "exclamationmark.shield.fill" : "lock.shield.fill", label: vpnLabel,
+                         tint: vpnTint, dim: state.vpn?.connected != true, radius: g.nodeR)
+                    .position(x: g.vpn, y: y + 8)
+                    .transition(.scale(scale: 0.6).combined(with: .opacity))
+                Image(systemName: "lock.fill").font(.system(size: 9, weight: .bold)).foregroundStyle(PTTheme.up)
+                    .position(x: g.radioMid, y: y - 12)
+                    .transition(.opacity)
+            }
+            NodeView(icon: "globe", label: "Internet", tint: .secondary, dim: !state.linkUp, radius: g.nodeR)
+                .position(x: g.internet, y: y + 8)
+            WireLabel("USB").position(x: (g.mac + g.phone) / 2, y: y + 15)
+            WireLabel(state.radio ?? "cellular").position(x: g.radioMid, y: y + 15)
+            if state.keepAwake {
+                Image(systemName: "cup.and.saucer.fill").font(.system(size: 10, weight: .bold)).foregroundStyle(PTTheme.warning)
+                    .position(x: g.mac + g.nodeR - 2, y: y - g.nodeR + 2)
+            }
+            if !state.linkUp && !state.busy && state.perspective == .mac {
+                Image(systemName: "cable.connector.slash").font(.system(size: 10, weight: .semibold)).foregroundStyle(.tertiary)
+                    .position(x: (g.mac + g.phone) / 2, y: y - 12)
+            }
+        }
+    }
+}
+
+private struct NodeView: View {
     let icon: String
     let label: String
     let tint: Color
     let dim: Bool
+    let radius: CGFloat
     @Environment(\.colorScheme) private var scheme
     var body: some View {
         VStack(spacing: 4) {
@@ -344,7 +345,7 @@ private struct NodeSymbol: View {
                 Circle().strokeBorder(tint.opacity(dim ? 0.2 : 0.5), lineWidth: 1.2)
                 Image(systemName: icon).font(.system(size: 17, weight: .semibold)).foregroundStyle(tint)
             }
-            .frame(width: 44, height: 44)
+            .frame(width: radius * 2, height: radius * 2)
             Text(label).font(.system(size: 9.5, weight: .medium, design: .rounded)).lineLimit(1).foregroundStyle(.secondary)
                 .frame(width: 66)
         }
