@@ -96,7 +96,7 @@ project.yml                XcodeGen spec that produces Passthrough.xcodeproj
 ## Setup
 
 1. `brew install xcodegen` (already done if you built once), then `xcodegen generate`.
-2. Copy `Config/Signing.xcconfig.example` to `Config/Signing.xcconfig` and set your Team ID (`DEVELOPMENT_TEAM = XXXXXXXXXX`), then regenerate. `Signing.xcconfig` is gitignored so your Team ID stays local. The `.xcodeproj` is generated (also gitignored); run `xcodegen generate` after cloning.
+2. The Mac app uses the data-protection keychain, which needs a provisioning profile: build once with `xcodebuild … -allowProvisioningUpdates -allowProvisioningDeviceRegistration` (or run it from Xcode) so your Mac is registered and the profile is created. Copy `Config/Signing.xcconfig.example` to `Config/Signing.xcconfig` and set your Team ID (`DEVELOPMENT_TEAM = XXXXXXXXXX`), then regenerate. `Signing.xcconfig` is gitignored so your Team ID stays local. The `.xcodeproj` is generated (also gitignored); run `xcodegen generate` after cloning.
 3. In Xcode, the bundle IDs default to `dev.dpatel.passthrough.*`. Change `bundleIdPrefix` in `project.yml` if you want your own, and update the same string in `PassthroughProtocol.appGroup`, `TunnelController.providerBundleID`, `HelperConstants`, and the daemon plist.
 4. Xcode will create the App IDs, the App Group (`group.dev.dpatel.passthrough`) and the Network Extension (packet tunnel) capability automatically with automatic signing. If it complains, enable *Network Extensions* and *App Groups* for both iOS identifiers in the developer portal.
 5. **iPhone:** run the `Passthrough` scheme on a real device. Tap the power button. iOS asks once to add the VPN configuration.
