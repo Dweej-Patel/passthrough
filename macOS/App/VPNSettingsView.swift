@@ -119,6 +119,7 @@ private struct ProfileDetail: View {
     @State private var username = ""
     @State private var password = ""
     @State private var saved = false
+    @State private var saveFailed = false
     @State private var countries: [NordVPN.Country] = []
     @State private var countryID: Int? = nil
     @State private var cityID: Int? = nil
@@ -178,11 +179,12 @@ private struct ProfileDetail: View {
                 SecureField("Password", text: $password)
                 HStack {
                     Button("Save credentials") {
-                        session.setCredentials(username: username, password: password, for: profile)
-                        saved = true
+                        saveFailed = !session.setCredentials(username: username, password: password, for: profile)
+                        saved = !saveFailed
                     }
                     .disabled(username.isEmpty || password.isEmpty)
                     if saved { Label("Saved to Keychain", systemImage: "checkmark").font(.caption).foregroundStyle(.secondary) }
+                    if saveFailed { Label("Could not save to the Keychain (see Diagnostics)", systemImage: "exclamationmark.triangle.fill").font(.caption).foregroundStyle(PTTheme.danger) }
                 }
             }
         } header: {

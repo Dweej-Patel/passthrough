@@ -452,6 +452,16 @@ final class SessionCoordinator: ObservableObject {
             return
         }
         guard let text = VPNProfileStore.config(for: profile), !text.isEmpty else {
+            if profile.source == .nordvpn {
+                // Re-fetch Nord's profile for the same choice, then try again.
+                vpnError = nil
+                vpn = VPNStatus(state: "starting", name: profile.name, engine: profile.engine.rawValue)
+                vpnWanted = true
+                Task {
+                    do { try await refreshNordServer(profile) } catch { vpnWanted = false; vpn = VPNStatus(); vpnError = error.localizedDescription }
+                }
+                return
+            }
             vpnError = "The profile's configuration is missing. Remove it and add it again."
             return
         }
@@ -531,9 +541,11 @@ final class SessionCoordinator: ObservableObject {
         persistProfiles()
     }
 
-    func setCredentials(username: String, password: String, for profile: VPNProfile) {
-        VPNProfileStore.setCredentials(username: username, password: password, for: profile)
+    @discardableResult
+    func setCredentials(username: String, password: String, for profile: VPNProfile) -> Bool {
+        let ok = VPNProfileStore.setCredentials(username: username, password: password, for: profile)
         objectWillChange.send()
+        return ok
     }
 
     func deleteProfile(_ profile: VPNProfile) {
@@ -605,7 +617,10 @@ final class SessionCoordinator: ObservableObject {
         VPNProfileStore.setConfig(text, for: updated)
         updateProfile(updated)
         ptLog(.info, "NordVPN profile now uses \(server.hostname) (\(server.locationText), load \(server.load)%)")
-        if vpnWanted, activeVPNProfile?.id == profile.id { setVPN(false); setVPN(true) }
+        if vpnWanted, activeVPNProfile?.id == profile.id {
+            vpnWanted = false
+            Task { await helper.stopVPN(); setVPN(true) }
+        }
     }
 
     // MARK: Helper version management

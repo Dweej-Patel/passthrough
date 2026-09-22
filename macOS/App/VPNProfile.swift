@@ -59,9 +59,11 @@ enum VPNProfileStore {
     static func credentials(for profile: VPNProfile) -> (username: String, password: String) {
         (Keychain.read("vpn.\(profile.id.uuidString).user") ?? "", Keychain.read("vpn.\(profile.id.uuidString).pass") ?? "")
     }
-    static func setCredentials(username: String, password: String, for profile: VPNProfile) {
-        Keychain.write(username, account: "vpn.\(profile.id.uuidString).user")
-        Keychain.write(password, account: "vpn.\(profile.id.uuidString).pass")
+    @discardableResult
+    static func setCredentials(username: String, password: String, for profile: VPNProfile) -> Bool {
+        let a = Keychain.write(username, account: "vpn.\(profile.id.uuidString).user")
+        let b = Keychain.write(password, account: "vpn.\(profile.id.uuidString).pass")
+        return a && b
     }
 
     static func deleteSecrets(for profile: VPNProfile) {

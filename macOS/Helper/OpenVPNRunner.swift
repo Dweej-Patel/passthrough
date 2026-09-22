@@ -58,7 +58,7 @@ final class OpenVPNRunner: VPNRunner {
             // --config, so they win): AEAD or CBC only, TLS 1.2+, no compression.
             "--data-ciphers", "AES-256-GCM:AES-128-GCM:CHACHA20-POLY1305:AES-256-CBC:AES-128-CBC",
             "--tls-version-min", "1.2",
-            "--allow-compression", "stub-only",
+            "--allow-compression", "asym",
             "--remote-cert-tls", "server",
             // Servers push their own keepalive timers (NordVPN: ping 60 /
             // ping-restart 180), which would leave a dead session unnoticed for

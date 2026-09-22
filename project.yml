@@ -136,7 +136,9 @@ targets:
         ITSAppUsesNonExemptEncryption: false
     entitlements:
       path: macOS/App/PassthroughMac.entitlements
-      properties: {}
+      properties:
+        # Needed for the data-protection keychain (kSecUseDataProtectionKeychain).
+        keychain-access-groups: [$(AppIdentifierPrefix)dev.dpatel.passthrough.mac]
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: dev.dpatel.passthrough.mac

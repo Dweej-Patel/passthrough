@@ -1,5 +1,6 @@
 import Foundation
 import Security
+import PassthroughCore
 
 /// Stores the per-Mac access token issued by the iPhone.
 enum Keychain {
@@ -31,20 +32,40 @@ enum Keychain {
         legacy[kSecMatchLimit as String] = kSecMatchLimitOne
         guard SecItemCopyMatching(legacy as CFDictionary, &item) == errSecSuccess, let data = item as? Data,
               let value = String(data: data, encoding: .utf8) else { return nil }
-        write(value, account: account)
-        SecItemDelete(base(account, modern: false) as CFDictionary)
+        // Only retire the legacy copy once the new one demonstrably exists.
+        if write(value, account: account), readModern(account) == value {
+            SecItemDelete(base(account, modern: false) as CFDictionary)
+        }
         return value
     }
 
-    static func write(_ value: String, account: String) {
+    private static func readModern(_ account: String) -> String? {
+        var query = base(account)
+        query[kSecReturnData as String] = true
+        query[kSecMatchLimit as String] = kSecMatchLimitOne
+        var item: CFTypeRef?
+        guard SecItemCopyMatching(query as CFDictionary, &item) == errSecSuccess, let data = item as? Data else { return nil }
+        return String(data: data, encoding: .utf8)
+    }
+
+    /// Returns false (and logs why) if the item could not be stored, so callers
+    /// never claim "saved" for something that isn't.
+    @discardableResult
+    static func write(_ value: String, account: String) -> Bool {
         let data = Data(value.utf8)
-        let status = SecItemUpdate(base(account) as CFDictionary, [kSecValueData as String: data] as CFDictionary)
+        var status = SecItemUpdate(base(account) as CFDictionary, [kSecValueData as String: data] as CFDictionary)
         if status == errSecItemNotFound {
             var add = base(account)
             add[kSecValueData as String] = data
             add[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
-            SecItemAdd(add as CFDictionary, nil)
+            status = SecItemAdd(add as CFDictionary, nil)
         }
+        if status != errSecSuccess {
+            let why = SecCopyErrorMessageString(status, nil) as String? ?? "\(status)"
+            ptLog(.error, "Keychain write for \(account.split(separator: ".").first ?? "item") failed: \(why)")
+            return false
+        }
+        return true
     }
 
     static func delete(_ account: String) {
