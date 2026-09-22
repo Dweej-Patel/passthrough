@@ -60,8 +60,12 @@ public final class PairingRegistry: @unchecked Sendable {
     // MARK: Pairing code
 
     /// Generates a fresh six digit code, valid for `PassthroughProtocol.pairingCodeLifetime`.
+    private var failedAttempts = 0
+    private static let maxAttempts = 5
+
     @discardableResult
     public func issueCode() -> (code: String, expiry: Date) {
+        lock.lock(); failedAttempts = 0; lock.unlock()
         var value: UInt32 = 0
         _ = withUnsafeMutableBytes(of: &value) { SecRandomCopyBytes(kSecRandomDefault, 4, $0.baseAddress!) }
         let code = String(format: "%06d", value % 1_000_000)
@@ -98,7 +102,18 @@ public final class PairingRegistry: @unchecked Sendable {
         lock.unlock()
         guard let stored else { return .failure(.expired) }
         guard expiry > Date() else { clearCode(); return .failure(.expired) }
-        guard constantTimeEquals(stored, code.trimmingCharacters(in: .whitespaces)) else { return .failure(.badCode) }
+        guard constantTimeEquals(stored, code.trimmingCharacters(in: .whitespaces)) else {
+            // A six-digit code must not be brute-forceable over the cable: a
+            // handful of wrong guesses burns the code; the user shows a new one.
+            lock.lock(); failedAttempts += 1; let n = failedAttempts; lock.unlock()
+            if n >= Self.maxAttempts {
+                ptLog(.warning, "Pairing code withdrawn after \(n) wrong attempts")
+                clearCode()
+                return .failure(.expired)
+            }
+            return .failure(.badCode)
+        }
+        guard clientID.count <= 64, name.count <= 64 else { return .failure(.badCode) }
 
         let token = Self.makeToken()
         lock.lock()

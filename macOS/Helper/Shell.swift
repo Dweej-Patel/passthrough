@@ -146,24 +146,37 @@ enum BundledEngines {
         try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: stateDirectory)
     }
 
-    /// Refuses to launch an engine that isn't signed by our own team (when the
-    /// helper itself is team-signed): the bundle lives in a user-writable place
-    /// and this helper runs as root.
+    /// The app bundle lives in a user-writable place and this helper runs as
+    /// root, so an engine is never executed from the bundle. It is copied into
+    /// the root-only state directory, the *copy* is verified (strictly, and by
+    /// identifier as well as Team ID) and the copy is what gets executed, so
+    /// nothing can be swapped between check and exec.
+    static func stagedEngine(_ url: URL) throws -> URL {
+        guard FileManager.default.isExecutableFile(atPath: url.path) else { throw EngineFileError.missing(url.lastPathComponent) }
+        try prepareStateDirectory()
+        let binDir = URL(fileURLWithPath: stateDirectory).appendingPathComponent("bin", isDirectory: true)
+        try FileManager.default.createDirectory(at: binDir, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+        let staged = binDir.appendingPathComponent(url.lastPathComponent)
+        try? FileManager.default.removeItem(at: staged)
+        try FileManager.default.copyItem(at: url, to: staged)
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: staged.path)
+        try verifySignature(of: staged)
+        return staged
+    }
+
     static func verifySignature(of url: URL) throws {
-        guard FileManager.default.isExecutableFile(atPath: url.path) else {
-            throw EngineFileError.missing(url.lastPathComponent)
-        }
-        guard let team = CodeSigning.ownTeamIdentifier() else { return }
+        guard let team = CodeSigning.ownTeamIdentifier() else { throw EngineFileError.unsigned(url.lastPathComponent) }
         var staticCode: SecStaticCode?
         guard SecStaticCodeCreateWithPath(url as CFURL, [], &staticCode) == errSecSuccess, let staticCode else {
             throw EngineFileError.unsigned(url.lastPathComponent)
         }
         var requirement: SecRequirement?
-        let text = "anchor apple generic and certificate leaf[subject.OU] = \"\(team)\"" as CFString
+        let text = "anchor apple generic and certificate leaf[subject.OU] = \"\(team)\" and identifier \"\(url.lastPathComponent)\"" as CFString
         guard SecRequirementCreateWithString(text, [], &requirement) == errSecSuccess, let requirement else {
             throw EngineFileError.unsigned(url.lastPathComponent)
         }
-        guard SecStaticCodeCheckValidity(staticCode, [], requirement) == errSecSuccess else {
+        let flags = SecCSFlags(rawValue: kSecCSStrictValidate | kSecCSCheckAllArchitectures | kSecCSCheckNestedCode)
+        guard SecStaticCodeCheckValidity(staticCode, flags, requirement) == errSecSuccess else {
             throw EngineFileError.unsigned(url.lastPathComponent)
         }
     }

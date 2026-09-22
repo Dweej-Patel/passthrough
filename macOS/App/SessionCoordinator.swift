@@ -120,7 +120,13 @@ final class SessionCoordinator: ObservableObject {
         // taking over the network; PASSTHROUGH_VPN_TEST=<conf> starts the VPN
         // layer from that file (as a temporary profile) so it can be exercised
         // without clicking through the UI.
-        let env = ProcessInfo.processInfo.environment
+        // Diagnostic hooks are only read when the app was launched with
+        // --diagnostics, so environment variables alone can't steer a normal launch.
+        #if DEBUG
+        let env = CommandLine.arguments.contains("--diagnostics") ? ProcessInfo.processInfo.environment : [:]
+        #else
+        let env: [String: String] = [:]
+        #endif
         if env["PASSTHROUGH_NO_AUTOCONNECT"] != nil || env["PASSTHROUGH_VPN_TEST"] != nil { suppressAutoConnect = true }
         startDeviceWatch()
         ticker = Timer.publish(every: 1, on: .main, in: .common).autoconnect().sink { [weak self] _ in self?.tick() }
@@ -255,6 +261,12 @@ final class SessionCoordinator: ObservableObject {
                 pairingError = nil
             }
         case .paired(let token):
+            // 32 random bytes, base64: anything else is not a token this phone issued.
+            guard token.count == 44, token.allSatisfy({ $0.isASCII && ($0.isLetter || $0.isNumber || "+/=".contains($0)) }) else {
+                pairingInFlight = false
+                fail("The iPhone sent a malformed pairing token")
+                return
+            }
             Keychain.write(token, account: "token")
             pairingInFlight = false
             pairingError = nil
@@ -481,11 +493,9 @@ final class SessionCoordinator: ObservableObject {
         guard vpnWanted else { return }
         let parsed = VPNStatus(from: status[VPNStatusKey.vpn] as? [String: Any] ?? [:])
         if parsed.state == "failed" {
-            vpnWanted = false
-            vpnError = parsed.error ?? "The VPN layer stopped."
-            vpn = VPNStatus()
-            ptLog(.error, "VPN layer stopped: \(vpnError ?? "")")
-            Task { await helper.stopVPN() }
+            vpnError = (parsed.error ?? "The VPN layer failed.") + (vpnKillSwitch ? " Traffic stays blocked until you turn the VPN layer off." : "")
+            vpn = parsed
+            ptLog(.error, "VPN layer failed: \(parsed.error ?? "")")
             return
         }
         if parsed.state == "off" && vpn.state != "starting" {
@@ -657,11 +667,13 @@ final class SessionCoordinator: ObservableObject {
                         self.sessionRx = parsed.rx; self.sessionTx = parsed.tx
                     }
                     if parsed.state == "failed" {
-                        self.vpnWanted = false
-                        self.vpnError = parsed.error ?? "The VPN layer stopped."
-                        self.vpn = VPNStatus()
-                        ptLog(.error, "VPN layer stopped: \(self.vpnError ?? "")")
-                        await self.helper.stopVPN()
+                        // Stay "on" with the block in place: only an explicit toggle
+                        // off lifts the kill switch after a fatal failure.
+                        if self.vpn.state != "failed" {
+                            ptLog(.error, "VPN layer failed: \(parsed.error ?? "")")
+                            self.vpnError = (parsed.error ?? "The VPN layer failed.") + (self.vpnKillSwitch ? " Traffic stays blocked until you turn the VPN layer off." : "")
+                        }
+                        self.vpn = parsed
                     } else if parsed.state == "off", !status.isEmpty {
                         self.vpnWanted = false
                         self.vpnError = "The VPN layer was stopped by the helper."

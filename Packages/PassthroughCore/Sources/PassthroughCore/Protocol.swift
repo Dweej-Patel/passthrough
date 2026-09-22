@@ -100,6 +100,8 @@ public enum SharedKeys {
     public static let allowUDP = "settings.allowUDP"
     public static let socksPort = "settings.socksPort"
     public static let controlPort = "settings.controlPort"
+    /// True while "cellular only" is temporarily using another network.
+    public static let cellularFallback = "state.cellularFallback"
     public static let usageMonthRx = "usage.month.rx"
     public static let usageMonthTx = "usage.month.tx"
     public static let usageMonthStart = "usage.month.start"

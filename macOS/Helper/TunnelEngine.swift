@@ -226,6 +226,10 @@ final class TunnelEngine {
             "  udp: 'tcp'",
         ]
         if !c.username.isEmpty {
+            // Quoted YAML scalars parsed by a root process: only plain
+            // base64/uuid characters are accepted (enforced again in HelperService).
+            let safe = { (s: String) in s.allSatisfy { $0.isASCII && ($0.isLetter || $0.isNumber || "+/=-_".contains($0)) } }
+            precondition(safe(c.username) && safe(c.password), "credentials contain characters that are not allowed")
             lines.append("  username: '\(c.username)'")
             lines.append("  password: '\(c.password)'")
         }

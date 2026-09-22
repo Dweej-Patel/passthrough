@@ -75,6 +75,8 @@ final class HelperService: NSObject, PassthroughHelperProtocol {
             config.socksPort = UInt16(configuration[TunnelConfigKey.socksPort] as? Int ?? 17890)
             config.username = configuration[TunnelConfigKey.username] as? String ?? ""
             config.password = configuration[TunnelConfigKey.password] as? String ?? ""
+            let safe = { (s: String) in s.count <= 64 && s.allSatisfy { $0.isASCII && ($0.isLetter || $0.isNumber || "+/=-_".contains($0)) } }
+            guard safe(config.username), safe(config.password) else { reply(false, "Invalid credentials format"); return }
             config.ipv6 = configuration[TunnelConfigKey.ipv6] as? Bool ?? true
             config.dns = configuration[TunnelConfigKey.dns] as? [String] ?? ["1.1.1.1", "1.0.0.1"]
             config.mtu = configuration[TunnelConfigKey.mtu] as? Int ?? 8500

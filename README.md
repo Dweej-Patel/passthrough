@@ -23,7 +23,13 @@ Because the phone opens every connection with its own stack, the carrier sees th
 * The phone never listens on Wi-Fi or cellular. usbmuxd only forwards from a Mac the phone has trusted.
 * Each Mac pairs once with a six-digit code shown on the phone (single use, five minutes). The phone issues a 256-bit token; the Mac keeps it in its Keychain, the phone keeps only a SHA-256 hash.
 * Every SOCKS5 connection authenticates with that token, so no other process on the Mac can ride the proxy.
-* The root helper accepts XPC only from apps signed by your team, and only ever talks to `127.0.0.1`.
+* The root helper accepts XPC only from apps signed by your team (an unsigned helper refuses every client), and only ever talks to `127.0.0.1`.
+* Imported OpenVPN profiles are never handed to the root `openvpn` process as-is. They are tokenised with OpenVPN's own rules, checked against an allowlist of client directives with typed arguments, limited to inline certificate blocks, and re-emitted canonically; anything that could run code, touch files, open a control socket, weaken crypto or route around the endpoint pinning is refused with a specific message. The helper also forces AEAD/CBC ciphers only, TLS 1.2+, no compression and `remote-cert-tls server` on the command line.
+* Engine binaries are copied into the root-only state directory and that copy is verified (strict validation, Team ID and identifier) before it is executed, so nothing can be swapped between check and exec.
+* NordVPN profiles are accepted only if their certificate authority is Nord's (pinned by hash) and they pin the exact server that was requested.
+* Pairing codes are withdrawn after five wrong guesses; tokens are validated for format before use; the control channel is capped at eight peers.
+* A fatal VPN failure (rejected credentials, bad profile) keeps the kill switch engaged until you turn the layer off, so no peer can "fail" you into the clear. Kill-switch routes flip atomically between reject and the VPN interface.
+* Profiles, keys and credentials live in the data-protection keychain, this device only.
 * The helper tears the tunnel down automatically if the menu bar app quits or crashes.
 
 ## Flow map

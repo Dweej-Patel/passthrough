@@ -18,7 +18,10 @@ final class ListenerDelegate: NSObject, NSXPCListenerDelegate {
                 return false
             }
         } else {
-            HelperLog.warn("Helper is not signed with a team; accepting any local client (development only)")
+            // Without a Team ID there is no way to tell our app from any other
+            // local process, and this helper runs as root. Refuse.
+            HelperLog.error("Helper is not signed with a Team ID; refusing all clients. Set DEVELOPMENT_TEAM in Config/Signing.xcconfig.")
+            return false
         }
         connection.exportedInterface = NSXPCInterface(with: PassthroughHelperProtocol.self)
         connection.exportedObject = service

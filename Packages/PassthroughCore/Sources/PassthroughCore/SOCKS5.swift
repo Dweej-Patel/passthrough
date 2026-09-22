@@ -24,25 +24,38 @@ public enum SOCKS5 {
         public var isLocalOnly: Bool {
             switch host {
             case .ipv4(let a):
-                let b = [UInt8](a.rawValue)
-                guard b.count == 4 else { return false }
-                if b[0] == 10 || b[0] == 127 || b[0] == 0 { return true }
-                if b[0] == 172, (16...31).contains(b[1]) { return true }
-                if b[0] == 192, b[1] == 168 { return true }
-                if b[0] == 169, b[1] == 254 { return true }
-                if b[0] == 100, (64...127).contains(b[1]) { return true }   // CGNAT space
-                if b[0] >= 224 { return true }
-                return false
+                return Self.isLocalV4([UInt8](a.rawValue))
             case .ipv6(let a):
                 let b = [UInt8](a.rawValue)
                 guard b.count == 16 else { return false }
                 if b[0] == 0xfe, (b[1] & 0xc0) == 0x80 { return true }      // fe80::/10
                 if (b[0] & 0xfe) == 0xfc { return true }                    // fc00::/7
                 if b[0] == 0xff { return true }                             // multicast
-                return b.dropLast().allSatisfy { $0 == 0 } && b.last == 1   // ::1
+                if b.allSatisfy({ $0 == 0 }) { return true }                // ::
+                if b.dropLast().allSatisfy({ $0 == 0 }) && b.last == 1 { return true }   // ::1
+                // IPv4-mapped (::ffff:a.b.c.d), IPv4-compatible and NAT64 (64:ff9b::/96): classify the embedded v4.
+                let mapped = b[0..<10].allSatisfy { $0 == 0 } && b[10] == 0xff && b[11] == 0xff
+                let compat = b[0..<12].allSatisfy { $0 == 0 }
+                let nat64 = b[0] == 0x00 && b[1] == 0x64 && b[2] == 0xff && b[3] == 0x9b && b[4..<12].allSatisfy { $0 == 0 }
+                if mapped || compat || nat64 { return Self.isLocalV4(Array(b[12..<16])) }
+                if b[0] == 0x20, b[1] == 0x02 { return true }               // 2002::/16 (6to4, wraps v4)
+                return false
+            case .name(let host, _):
+                let h = host.lowercased()
+                return h == "localhost" || h.hasSuffix(".localhost") || h.hasSuffix(".local") || h.hasSuffix(".home.arpa") || h.hasSuffix(".internal")
             default:
                 return false
             }
+        }
+
+        static func isLocalV4(_ b: [UInt8]) -> Bool {
+            guard b.count == 4 else { return false }
+            if b[0] == 10 || b[0] == 127 || b[0] == 0 { return true }
+            if b[0] == 172, (16...31).contains(b[1]) { return true }
+            if b[0] == 192, b[1] == 168 { return true }
+            if b[0] == 169, b[1] == 254 { return true }
+            if b[0] == 100, (64...127).contains(b[1]) { return true }   // CGNAT space
+            return b[0] >= 224
         }
 
         public init?(raw: Data) {
@@ -145,6 +158,11 @@ public final class SOCKS5Server: @unchecked Sendable {
     private var cellularMonitor: NWPathMonitor?
     private let cellularLock = NSLock()
     private var cellularUsable = true
+    private var cellularGraceTimer: DispatchSourceTimer?
+    /// How long cellular must be unusable before we fall back to another network.
+    public var cellularFallbackGrace: TimeInterval = 10
+    /// Called (on an internal queue) when the effective fallback state changes.
+    public var onCellularUsableChange: (@Sendable (Bool) -> Void)?
     public var isCellularUsable: Bool { cellularLock.lock(); defer { cellularLock.unlock() }; return cellularUsable }
 
     public init(configuration: Configuration = Configuration(), authenticator: Authenticator?) {
@@ -210,24 +228,40 @@ public final class SOCKS5Server: @unchecked Sendable {
         let monitor = NWPathMonitor(requiredInterfaceType: .cellular)
         monitor.pathUpdateHandler = { [weak self] path in
             guard let self else { return }
-            let usable = path.status == .satisfied
-            self.cellularLock.lock()
-            let changed = usable != self.cellularUsable
-            self.cellularUsable = usable
-            self.cellularLock.unlock()
-            if changed {
-                ptLog(usable ? .info : .warning, usable ? "Cellular data is usable again; new connections use cellular"
-                                                       : "Cellular data is not usable right now; new connections use any available network until it is back")
+            let satisfied = path.status == .satisfied
+            self.cellularGraceTimer?.cancel(); self.cellularGraceTimer = nil
+            if satisfied {
+                self.setCellularUsable(true)
+            } else {
+                // Brief blips (handoffs) must not push traffic onto another network;
+                // only a sustained outage does, and it is announced.
+                let timer = DispatchSource.makeTimerSource(queue: self.stateQueue)
+                timer.schedule(deadline: .now() + self.cellularFallbackGrace)
+                timer.setEventHandler { [weak self] in self?.setCellularUsable(false) }
+                timer.resume()
+                self.cellularGraceTimer = timer
             }
         }
         monitor.start(queue: stateQueue)
         cellularMonitor = monitor
     }
 
+    private func setCellularUsable(_ usable: Bool) {
+        cellularLock.lock()
+        let changed = usable != cellularUsable
+        cellularUsable = usable
+        cellularLock.unlock()
+        guard changed else { return }
+        ptLog(usable ? .info : .warning, usable ? "Cellular data is usable again; new connections use cellular"
+                                               : "Cellular data has been unusable for \(Int(cellularFallbackGrace))s; new connections use any available network until it is back")
+        onCellularUsableChange?(usable)
+    }
+
     public func stop() {
         stateQueue.sync {
             guard isRunning else { return }
             isRunning = false
+            cellularGraceTimer?.cancel(); cellularGraceTimer = nil
             cellularMonitor?.cancel(); cellularMonitor = nil
             listeners.forEach { $0.cancel() }
             listeners = []

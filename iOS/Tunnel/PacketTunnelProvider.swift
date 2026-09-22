@@ -29,6 +29,8 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
                          hosting: "background")
         }
 
+        service.onCellularUsableChange = { usable in defaults.set(!usable, forKey: SharedKeys.cellularFallback) }
+        defaults.set(false, forKey: SharedKeys.cellularFallback)
         let settings = NEPacketTunnelNetworkSettings(tunnelRemoteAddress: "10.255.255.1")
         let ipv4 = NEIPv4Settings(addresses: ["10.255.255.2"], subnetMasks: ["255.255.255.255"])
         ipv4.includedRoutes = [NEIPv4Route(destinationAddress: "10.255.255.1", subnetMask: "255.255.255.255")]

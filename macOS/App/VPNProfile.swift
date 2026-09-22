@@ -1,4 +1,5 @@
 import Foundation
+import CryptoKit
 import PassthroughCore
 
 /// A saved VPN configuration for the VPN layer. Metadata lives in UserDefaults;
@@ -121,10 +122,12 @@ enum NordVPN {
     enum NordError: LocalizedError {
         case noServer
         case badResponse
+        case untrusted(String)
         var errorDescription: String? {
             switch self {
             case .noServer: return "NordVPN returned no OpenVPN server for that choice."
             case .badResponse: return "NordVPN's server directory did not respond as expected."
+            case .untrusted(let why): return "Refused the downloaded profile: \(why)."
             }
         }
     }
@@ -151,13 +154,35 @@ enum NordVPN {
         return server
     }
 
+    /// SHA-256 of the <ca> block Nord ships in every manual-setup profile
+    /// ("NordVPN Root CA"). A profile whose CA differs is not Nord's, whatever
+    /// the transport said.
+    static let expectedCASHA256 = "0f3e5da3a16471b1885bc1cfbc1965796e0c23b95c4af5beaa75bb4bab629a03"
+
     static func profileText(for server: Server, tcp: Bool) async throws -> String {
         let proto = tcp ? "tcp" : "udp"
-        let url = URL(string: "https://downloads.nordcdn.com/configs/files/ovpn_\(proto)/servers/\(server.hostname).\(proto).ovpn")!
-        let (data, response) = try await URLSession.shared.data(from: url)
-        guard (response as? HTTPURLResponse)?.statusCode == 200, let text = String(data: data, encoding: .utf8), text.contains("<ca>") else {
+        // The hostname comes from Nord's JSON; never let it shape the URL beyond a server name.
+        let host = server.hostname.lowercased()
+        guard host.hasSuffix(".nordvpn.com"), host.count < 64,
+              host.allSatisfy({ $0.isASCII && ($0.isLetter || $0.isNumber || $0 == "." || $0 == "-") }),
+              let url = URL(string: "https://downloads.nordcdn.com/configs/files/ovpn_\(proto)/servers/\(host).\(proto).ovpn") else {
             throw NordError.badResponse
         }
+        let (data, response) = try await URLSession.shared.data(from: url)
+        guard (response as? HTTPURLResponse)?.statusCode == 200, let text = String(data: data, encoding: .utf8) else { throw NordError.badResponse }
+        // Identity pinning: Nord's CA, and a certificate name that is this very server.
+        guard let caStart = text.range(of: "<ca>\n"), let caEnd = text.range(of: "</ca>", range: caStart.upperBound..<text.endIndex) else { throw NordError.badResponse }
+        let ca = String(text[caStart.upperBound..<caEnd.lowerBound]).trimmingCharacters(in: .whitespacesAndNewlines)
+        guard SHA256.hex(ca) == expectedCASHA256 else { throw NordError.untrusted("its certificate authority is not NordVPN's") }
+        guard text.contains("remote-cert-tls server"), text.contains("verify-x509-name CN=\(host)") else {
+            throw NordError.untrusted("it does not pin the server \(host)")
+        }
         return text
+    }
+}
+
+private enum SHA256 {
+    static func hex(_ text: String) -> String {
+        CryptoKit.SHA256.hash(data: Data(text.utf8)).map { String(format: "%02x", $0) }.joined()
     }
 }

@@ -15,8 +15,6 @@
 	<array>
 		<string>dev.dpatel.passthrough.mac</string>
 	</array>
-	<key>StandardErrorPath</key>
-	<string>/var/log/passthrough-helper.log</string>
 	<key>ProcessType</key>
 	<string>Interactive</string>
 </dict>

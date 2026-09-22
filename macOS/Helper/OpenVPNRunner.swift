@@ -30,35 +30,17 @@ final class OpenVPNRunner: VPNRunner {
     private static let statusPath = BundledEngines.stateDirectory + "/openvpn.status"
 
     init(configText: String, username: String, password: String, queue: DispatchQueue) throws {
-        self.configText = configText
+        let profile = try OpenVPNProfile(text: configText)
+        self.configText = profile.canonicalText
         self.username = username
         self.password = password
         self.queue = queue
-        var mtu: Int?
-        var inBlock = false
-        for raw in configText.split(whereSeparator: \.isNewline) {
-            let line = raw.trimmingCharacters(in: .whitespaces)
-            if line.hasPrefix("<") { inBlock = !line.hasPrefix("</"); continue }
-            guard !inBlock, !line.hasPrefix("#"), !line.hasPrefix(";") else { continue }
-            let parts = line.split(separator: " ").map(String.init)
-            guard let key = parts.first else { continue }
-            switch key {
-            case "remote" where parts.count >= 2:
-                endpoints.append((parts[1], parts.count >= 3 ? Int(parts[2]) ?? 1194 : 1194))
-            case "tun-mtu" where parts.count >= 2: mtu = Int(parts[1])
-            default: break
-            }
-        }
-        configMTU = mtu
-        guard !endpoints.isEmpty else { throw VPNEngine.VPNError.badConfig("no 'remote' line in the .ovpn profile") }
-        guard configText.contains("<ca>") || configText.contains("\nca ") else {
-            throw VPNEngine.VPNError.badConfig("the .ovpn profile has no CA certificate (inline <ca> expected)")
-        }
+        self.endpoints = profile.endpoints
+        self.configMTU = profile.tunMTU
     }
 
     func start() throws {
-        let binary = BundledEngines.openvpn
-        try BundledEngines.verifySignature(of: binary)
+        let binary = try BundledEngines.stagedEngine(BundledEngines.openvpn)
         try configText.write(toFile: Self.configPath, atomically: true, encoding: .utf8)
         try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: Self.configPath)
         try? FileManager.default.removeItem(atPath: Self.statusPath)
@@ -72,6 +54,12 @@ final class OpenVPNRunner: VPNRunner {
             "--pull-filter", "ignore", "route-ipv6",
             "--pull-filter", "ignore", "ifconfig-ipv6",
             "--pull-filter", "ignore", "block-outside-dns",
+            // Crypto floor regardless of what the profile says (these come after
+            // --config, so they win): AEAD or CBC only, TLS 1.2+, no compression.
+            "--data-ciphers", "AES-256-GCM:AES-128-GCM:CHACHA20-POLY1305:AES-256-CBC:AES-128-CBC",
+            "--tls-version-min", "1.2",
+            "--allow-compression", "stub-only",
+            "--remote-cert-tls", "server",
             // Servers push their own keepalive timers (NordVPN: ping 60 /
             // ping-restart 180), which would leave a dead session unnoticed for
             // three minutes after a cellular drop. Ignore them and use ours.
@@ -148,27 +136,38 @@ final class OpenVPNRunner: VPNRunner {
         line = line.trimmingCharacters(in: .whitespaces)
         guard !line.isEmpty else { return }
 
-        if let range = line.range(of: "Opened utun device ") {
-            interfaceName = String(line[range.upperBound...]).trimmingCharacters(in: .whitespaces)
-        } else if let range = line.range(of: "PUSH: Received control message: '") {
-            let body = line[range.upperBound...].dropLast(line.hasSuffix("'") ? 1 : 0)
+        // Only anchored matches decide anything: log lines can echo server-
+        // controlled text (certificate names, pushed options), and a matched
+        // "fatal" must never be something a peer can forge.
+        if line.hasPrefix("Opened utun device ") {
+            let name = String(line.dropFirst("Opened utun device ".count)).trimmingCharacters(in: .whitespaces)
+            if name.hasPrefix("utun"), name.dropFirst(4).allSatisfy(\.isNumber) { interfaceName = name }
+        } else if line.hasPrefix("PUSH: Received control message: '") {
+            let body = line.dropFirst("PUSH: Received control message: '".count).dropLast(line.hasSuffix("'") ? 1 : 0)
             parsePush(String(body))
-        } else if line.contains("Initialization Sequence Completed") {
+        } else if line.hasPrefix("Initialization Sequence Completed") {
             bringUp()
-        } else if line.contains("AUTH_FAILED") {
+        } else if line.hasPrefix("AUTH: Received control message: AUTH_FAILED") {
             fatalReason = "The VPN server rejected the username and password."
-        } else if line.contains("Cannot allocate TUN/TAP dev") || line.contains("Cannot open utun") {
+        } else if line.hasPrefix("Cannot allocate TUN/TAP dev") || line.hasPrefix("Cannot open utun") {
             fatalReason = "OpenVPN could not create a tunnel interface."
-        } else if line.contains("VERIFY ERROR") || line.contains("certificate verify failed") {
+        } else if line.hasPrefix("VERIFY ERROR") || line.hasPrefix("OpenSSL: error") && line.contains("certificate verify failed") {
             fatalReason = "The VPN server's certificate did not verify."
-        } else if line.contains("Options error") || line.contains("Use --help for more info") {
-            fatalReason = "OpenVPN rejected the profile: \(line)"
-        } else if line.contains("Inactivity timeout") || line.contains("Connection reset") || line.contains("SIGUSR1[soft") {
+        } else if line.hasPrefix("Options error") {
+            fatalReason = "OpenVPN rejected the profile."
+        } else if line.hasPrefix("Inactivity timeout") || line.hasPrefix("Connection reset") || line.hasPrefix("SIGUSR1[soft") || line.hasPrefix("[") && line.contains("Inactivity timeout") {
             if wasConnected { onEvent?(.reconnecting(line)) }
         }
         if !line.hasPrefix("VERIFY") && !line.hasPrefix("++") && !line.contains("Socket Buffers") {
             onEvent?(.log(line))
         }
+    }
+
+    /// Dotted-quad check for anything scraped from server-pushed text before it
+    /// reaches ifconfig or the DNS configuration.
+    static func isIPv4(_ s: String) -> Bool {
+        let parts = s.split(separator: ".", omittingEmptySubsequences: false)
+        return parts.count == 4 && parts.allSatisfy { p in p.count <= 3 && !p.isEmpty && p.allSatisfy(\.isNumber) && Int(p)! <= 255 }
     }
 
     private func parsePush(_ body: String) {
@@ -177,9 +176,9 @@ final class OpenVPNRunner: VPNRunner {
             let parts = option.trimmingCharacters(in: .whitespaces).split(separator: " ").map(String.init)
             guard let key = parts.first else { continue }
             switch key {
-            case "dhcp-option" where parts.count >= 3 && parts[1].uppercased() == "DNS": pushedDNS.append(parts[2])
-            case "ifconfig" where parts.count >= 3: pushedAddress = parts[1]; pushedPeerOrMask = parts[2]
-            case "route-gateway" where parts.count >= 2: pushedGateway = parts[1]
+            case "dhcp-option" where parts.count >= 3 && parts[1].uppercased() == "DNS" && Self.isIPv4(parts[2]): pushedDNS.append(parts[2])
+            case "ifconfig" where parts.count >= 3 && Self.isIPv4(parts[1]) && Self.isIPv4(parts[2]): pushedAddress = parts[1]; pushedPeerOrMask = parts[2]
+            case "route-gateway" where parts.count >= 2 && Self.isIPv4(parts[1]): pushedGateway = parts[1]
             default: break
             }
         }

@@ -165,6 +165,8 @@ final class AppModel: ObservableObject {
                          battery: defaults.object(forKey: SharedKeys.battery) as? Double,
                          hosting: "foreground")
         }
+        service.onCellularUsableChange = { usable in defaults.set(!usable, forKey: SharedKeys.cellularFallback) }
+        defaults.set(false, forKey: SharedKeys.cellularFallback)
         do {
             try service.start()
             localService = service
@@ -244,7 +246,8 @@ final class AppModel: ObservableObject {
         let tech = techs.values.first
         let cellular = Self.radioLabel(tech)
         // What the Mac's traffic will actually ride on.
-        radio = (phoneIsOnWiFi && !cellularOnly) ? "Wi-Fi" : cellular
+        let fallback = cellularOnly && state == .running && Self.groupDefaults.bool(forKey: SharedKeys.cellularFallback)
+        radio = fallback ? "Wi-Fi (cell down)" : ((phoneIsOnWiFi && !cellularOnly) ? "Wi-Fi" : cellular)
         let level = UIDevice.current.batteryLevel
         batteryLevel = level >= 0 ? Double(level) : nil
         // Cross-process defaults writes are not free; only when something changed.

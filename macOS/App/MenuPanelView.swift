@@ -315,6 +315,7 @@ struct VPNRow: View {
             return parts.joined(separator: " · ")
         case "reconnecting": return "Session dropped · reconnecting…"
         case "blocked": return "Down · traffic blocked · reconnecting…"
+        case "failed": return session.vpnKillSwitch ? "Failed · traffic blocked · turn off to release" : "Failed"
         default: return v.name
         }
     }
@@ -324,6 +325,7 @@ struct VPNRow: View {
         switch session.vpn.state {
         case "connected": return PTTheme.success
         case "blocked", "reconnecting": return PTTheme.warning
+        case "failed": return PTTheme.danger
         default: return .secondary
         }
     }

@@ -87,6 +87,7 @@ public final class ControlServer: @unchecked Sendable {
         let listener = try NWListener(using: params)
         listener.newConnectionHandler = { [weak self] connection in
             guard let self else { connection.cancel(); return }
+            guard self.peers.count < 8 else { connection.cancel(); return }   // a handful of Macs, not a flood
             let peer = Peer(server: self, connection: connection)
             self.peers[ObjectIdentifier(peer)] = peer
             peer.start(on: self.queue)

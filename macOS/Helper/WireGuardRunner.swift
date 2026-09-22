@@ -108,8 +108,7 @@ final class WireGuardRunner: VPNRunner {
     // MARK: Process
 
     func start() throws {
-        let binary = BundledEngines.wireguardGo
-        try BundledEngines.verifySignature(of: binary)
+        let binary = try BundledEngines.stagedEngine(BundledEngines.wireguardGo)
         try? FileManager.default.removeItem(atPath: Self.nameFile)
         let process = Process()
         process.executableURL = binary
@@ -222,6 +221,7 @@ final class WireGuardRunner: VPNRunner {
         guard reply.contains("errno=0") else { throw VPNEngine.VPNError.badConfig("engine rejected the configuration (\(reply.trimmingCharacters(in: .whitespacesAndNewlines)))") }
 
         for address in parsed.addresses {
+            guard Self.isCIDR(address) else { throw VPNEngine.VPNError.badConfig("invalid Address '\(address)'") }
             if Shell.isIPv6(address) {
                 try Shell.run("/sbin/ifconfig", [name, "inet6", address, "alias"])
             } else {
@@ -231,6 +231,16 @@ final class WireGuardRunner: VPNRunner {
         }
         try Shell.run("/sbin/ifconfig", [name, "mtu", "\(parsed.mtu ?? 1420)", "up"])
         configured = true
+    }
+
+    /// Strict IPv4/IPv6 [/prefix] check so nothing odd reaches ifconfig's argv.
+    static func isCIDR(_ s: String) -> Bool {
+        let parts = s.split(separator: "/", omittingEmptySubsequences: false)
+        guard (1...2).contains(parts.count) else { return false }
+        if parts.count == 2, Int(parts[1]) == nil || Int(parts[1])! < 0 || Int(parts[1])! > 128 { return false }
+        let ip = String(parts[0])
+        if OpenVPNRunner.isIPv4(ip) { return true }
+        return ip.count <= 45 && ip.contains(":") && ip.allSatisfy { $0.isHexDigit || $0 == ":" }
     }
 
     /// A point-to-point "destination" that differs from our own address so the

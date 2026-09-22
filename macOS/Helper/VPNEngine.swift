@@ -131,6 +131,7 @@ final class VPNEngine {
         removeRejectRoutes()
         removeEndpointRoutes()
         clearDNS()
+        resolvedCache = [:]
         config = nil
         state = .off
         interfaceName = nil
@@ -183,6 +184,13 @@ final class VPNEngine {
 
         guard let underlay = detectUnderlay() else { throw VPNError.noUnderlay }
         self.underlay = underlay
+        // Kill switch first whenever no name resolution is needed (IP-literal
+        // endpoints, or cached answers), so there is no unprotected moment.
+        let needsDNS = runner.endpoints.contains { ep in
+            let h = ep.host.trimmingCharacters(in: CharacterSet(charactersIn: "[]"))
+            return !(OpenVPNRunner.isIPv4(h) || Shell.isIPv6(h)) && resolvedCache[h] == nil
+        }
+        if config.killSwitch, !needsDNS { installRejectRoutes() }
         runner.endpointIPs = try installEndpointRoutes(for: runner.endpoints, underlay: underlay)
         if config.killSwitch { installRejectRoutes() }
 
@@ -235,13 +243,14 @@ final class VPNEngine {
             runner = nil
             removeQuarterRoutes()
             if let fatal {
-                // Nothing a retry can fix: don't keep the Mac blackholed.
-                removeRejectRoutes()
+                // Nothing a retry can fix. With the kill switch on, traffic stays
+                // blocked until the user turns the layer off (stopVPN lifts it):
+                // a peer must never be able to "fail" us into the clear.
+                if config.killSwitch { installRejectRoutes() }
                 lastError = fatal
                 state = .failed
                 HelperLog.error("vpn: \(fatal)")
                 removeEndpointRoutes()
-                clearDNS()
                 return
             }
             if config.killSwitch { installRejectRoutes() }
@@ -260,10 +269,10 @@ final class VPNEngine {
         runner?.onEvent = nil
         runner?.stop()
         runner = nil
-        removeQuarterRoutes()
+        // Flip to reject first (atomic per prefix), then tear down the rest.
+        if config?.killSwitch == true { installRejectRoutes() } else { removeQuarterRoutes() }
         removeEndpointRoutes()
-        clearDNS()
-        if config?.killSwitch == true { installRejectRoutes() }
+        retractOwnService()
         let timer = DispatchSource.makeTimerSource(queue: queue)
         timer.schedule(deadline: .now() + delay)
         timer.setEventHandler { [weak self] in
@@ -325,6 +334,7 @@ final class VPNEngine {
                 resolved = cached   // kill switch up: reuse the last good answer, no DNS needed
             }
             guard !resolved.isEmpty else { throw VPNError.unresolvable(endpoint.host) }
+            if resolvedCache.count > 16 { resolvedCache = [:] }
             resolvedCache[literal] = resolved
             byHost[endpoint.host] = resolved[0]
             for ip in resolved where !ips.contains(ip) { ips.append(ip) }
@@ -353,25 +363,37 @@ final class VPNEngine {
 
     // MARK: /2 routes + kill switch
 
+    /// Points a quarter prefix at `target` atomically: `route change` when the
+    /// prefix exists (e.g. as a reject route), `route add` otherwise. Traffic for
+    /// that prefix is never unrouted in between.
+    private func setQuarter(_ q: String, v6: Bool, target: [String], table: Set<String>) -> Bool {
+        let family = v6 ? "-inet6" : "-inet"
+        if RouteTable.exists(q, v6: v6, in: table),
+           (try? Shell.run("/sbin/route", ["-q", "-n", "change", family, q] + target, quiet: true)) != nil { return true }
+        return (try? Shell.run("/sbin/route", ["-q", "-n", "add", family, q] + target, quiet: true)) != nil
+    }
+
     private func installQuarterRoutes(on iface: String) {
         if quarterRoutesOn == iface { return }
-        removeQuarterRoutes()
-        for q in Self.v4Quarters {
-            do { try Shell.run("/sbin/route", ["-q", "-n", "add", "-inet", q, "-interface", iface]) }
-            catch { HelperLog.warn("vpn: route \(q) → \(iface) failed: \(error.localizedDescription)") }
+        let v4 = RouteTable.present(v6: false)
+        for q in Self.v4Quarters where !setQuarter(q, v6: false, target: ["-interface", iface], table: v4) {
+            HelperLog.warn("vpn: route \(q) → \(iface) failed")
         }
+        rejectRoutesInstalled = false
         // IPv6: most VPN servers (NordVPN included) hand out no IPv6, and the
         // kernel refuses a v6 route through an interface with no v6 address. In
         // that case reject v6 outright so it can never fall back to the underlay;
         // apps fall through to IPv4 immediately (Happy Eyeballs).
         let hasV6 = Shell.capture("/sbin/ifconfig", [iface]).contains("inet6 ")
         var v6Rejected = false, v6Open = false
+        let v6 = RouteTable.present(v6: true)
         for q in Self.v6Quarters {
-            if hasV6, (try? Shell.run("/sbin/route", ["-q", "-n", "add", "-inet6", q, "-interface", iface], quiet: true)) != nil { continue }
+            if hasV6, setQuarter(q, v6: true, target: ["-interface", iface], table: v6) { continue }
             if config?.blockIPv6 ?? true {
-                _ = try? Shell.run("/sbin/route", ["-q", "-n", "add", "-inet6", q, "::1", "-reject"], quiet: true)
+                _ = setQuarter(q, v6: true, target: ["::1", "-reject"], table: v6)
                 v6Rejected = true
             } else {
+                RouteTable.deleteIfPresent(q, v6: true, table: v6)
                 v6Open = true
             }
         }
@@ -392,16 +414,10 @@ final class VPNEngine {
     /// into a reject route so nothing leaks onto the underlay.
     private func installRejectRoutes() {
         guard !rejectRoutesInstalled else { return }
-        removeQuarterRoutes()
         let v4 = RouteTable.present(v6: false), v6 = RouteTable.present(v6: true)
-        for q in Self.v4Quarters {
-            RouteTable.deleteIfPresent(q, v6: false, table: v4)
-            _ = try? Shell.run("/sbin/route", ["-q", "-n", "add", "-inet", q, "127.0.0.1", "-reject"])
-        }
-        for q in Self.v6Quarters {
-            RouteTable.deleteIfPresent(q, v6: true, table: v6)
-            _ = try? Shell.run("/sbin/route", ["-q", "-n", "add", "-inet6", q, "::1", "-reject"])
-        }
+        for q in Self.v4Quarters { _ = setQuarter(q, v6: false, target: ["127.0.0.1", "-reject"], table: v4) }
+        for q in Self.v6Quarters { _ = setQuarter(q, v6: true, target: ["::1", "-reject"], table: v6) }
+        quarterRoutesOn = nil
         rejectRoutesInstalled = true
         HelperLog.info("vpn: kill switch engaged (traffic blocked until the VPN is back)")
     }
@@ -450,6 +466,13 @@ final class VPNEngine {
     private func clearDNS() {
         activeDNS = []
         tunnel.setDNSOverride(nil)
+        retractOwnService()
+    }
+
+    /// Drop only our own published service (so the underlay can be re-detected)
+    /// while keeping the VPN's resolvers on the passthrough during a reconnect:
+    /// queries must never fall back to the bare underlay's DNS mid-session.
+    private func retractOwnService() {
         tunnel.setPrimaryRank("First")
         guard !publishedKeys.isEmpty, let store else { return }
         for key in publishedKeys { SCDynamicStoreRemoveValue(store, key as CFString) }
