@@ -81,6 +81,13 @@ public struct ProviderStats: Codable, Sendable, Equatable {
 }
 
 /// Keys the iOS app and extension share through the App Group defaults.
+extension PassthroughProtocol {
+    /// Shared log file in the App Group container, appended by the app and the extension.
+    public static var sharedLogURL: URL? {
+        FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: appGroup)?.appendingPathComponent("passthrough.log")
+    }
+}
+
 public enum SharedKeys {
     public static let deviceName = "device.name"
     public static let radio = "device.radio"

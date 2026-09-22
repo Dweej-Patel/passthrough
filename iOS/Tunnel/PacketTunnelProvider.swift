@@ -7,8 +7,14 @@ import PassthroughCore
 final class PacketTunnelProvider: NEPacketTunnelProvider {
     private var service: PassthroughService?
 
+    override init() {
+        super.init()
+        if let url = PassthroughProtocol.sharedLogURL { PassthroughLog.shared.attachFile(url) }
+    }
+
     override func startTunnel(options: [String: NSObject]?, completionHandler: @escaping (Error?) -> Void) {
         let defaults = UserDefaults(suiteName: PassthroughProtocol.appGroup) ?? .standard
+        ptLog(.info, "Extension starting")
         let config = (protocolConfiguration as? NETunnelProviderProtocol)?.providerConfiguration ?? [:]
         var serviceOptions = PassthroughService.Options()
         serviceOptions.cellularOnly = config["cellularOnly"] as? Bool ?? false

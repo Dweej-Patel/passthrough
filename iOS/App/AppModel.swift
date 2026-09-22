@@ -58,12 +58,15 @@ final class AppModel: ObservableObject {
     @Published private(set) var phoneIsOnWiFi = false
     private var cancellables: Set<AnyCancellable> = []
 
+    private var logFileDate: Date?
+
     init() {
         pairedClients = registry.clients
-        logEntries = log.snapshot()
-        log.onAppend = { [weak self] entry in
-            Task { @MainActor in self?.logEntries.append(entry); if (self?.logEntries.count ?? 0) > 400 { self?.logEntries.removeFirst() } }
-        }
+        // The servers run in the tunnel extension, a separate process, so the
+        // log lives in a shared file both processes append to.
+        if let url = PassthroughProtocol.sharedLogURL { log.attachFile(url) }
+        refreshLog(force: true)
+        log.onAppend = { [weak self] _ in Task { @MainActor in self?.refreshLog(force: true) } }
         registry.onChange = { [weak self] in Task { @MainActor in self?.pairedClients = self?.registry.clients ?? [] } }
         UIDevice.current.isBatteryMonitoringEnabled = true
         pathMonitor.pathUpdateHandler = { [weak self] path in
@@ -188,8 +191,27 @@ final class AppModel: ObservableObject {
 
     // MARK: Ticking
 
+    /// Re-reads the shared log when the extension has written to it.
+    func refreshLog(force: Bool = false) {
+        let stamp = log.persistedModificationDate
+        guard force || stamp != logFileDate else { return }
+        logFileDate = stamp
+        let persisted = log.loadPersisted()
+        logEntries = persisted.isEmpty ? log.snapshot() : persisted
+    }
+
+    func clearLog() {
+        log.clear()
+        logEntries = []
+        logFileDate = log.persistedModificationDate
+    }
+
+    private var logTick = 0
+
     private func tick() async {
         refreshDeviceFacts()
+        logTick += 1
+        if logTick % 2 == 0 { refreshLog() }
         if let pairingCode, pairingCode.expiry <= Date() { self.pairingCode = nil }
         guard state == .running else { return }
         let fresh: ProviderStats?

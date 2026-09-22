@@ -46,9 +46,18 @@ struct SettingsView: View {
                 .disabled(model.state.isActive)
                 Section("Diagnostics") {
                     DisclosureGroup("Log", isExpanded: $showLog) {
-                        LogList(entries: model.logEntries).frame(height: 260)
-                        Button("Copy log") {
-                            UIPasteboard.general.string = model.logEntries.map { "\($0.date.formatted(.dateTime.hour().minute().second())) \($0.level.rawValue) \($0.message)" }.joined(separator: "\n")
+                        if model.logEntries.isEmpty {
+                            Text("Nothing logged yet. Start the proxy and connect a Mac; the extension's messages appear here.")
+                                .font(.footnote).foregroundStyle(.secondary)
+                        } else {
+                            LogList(entries: model.logEntries).frame(height: 260)
+                        }
+                        HStack {
+                            Button("Copy log") {
+                                UIPasteboard.general.string = model.logEntries.map { "\($0.date.formatted(.dateTime.hour().minute().second())) \($0.level.rawValue) \($0.message)" }.joined(separator: "\n")
+                            }
+                            Spacer()
+                            Button("Clear", role: .destructive) { model.clearLog() }
                         }
                     }
                 }
