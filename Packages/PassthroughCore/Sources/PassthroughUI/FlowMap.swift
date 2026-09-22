@@ -29,12 +29,18 @@ public struct FlowMapState: Equatable {
     public var downRate: Double
     public var upRate: Double
     public var activeConnections: Int
+    /// The VPN runs over the Mac's own Wi-Fi/Ethernet (passthrough off): the
+    /// middle node becomes the local network instead of the iPhone.
+    public var viaWiFi: Bool
+    /// Label for that local network ("Wi-Fi", "Ethernet").
+    public var localNetworkName: String
 
     public init(perspective: Perspective, macName: String = "Mac", phoneName: String = "iPhone", linkUp: Bool = false, busy: Bool = false,
-                radio: String? = nil, vpn: VPN? = nil, keepAwake: Bool = false, downRate: Double = 0, upRate: Double = 0, activeConnections: Int = 0) {
+                radio: String? = nil, vpn: VPN? = nil, keepAwake: Bool = false, downRate: Double = 0, upRate: Double = 0, activeConnections: Int = 0,
+                viaWiFi: Bool = false, localNetworkName: String = "Wi-Fi") {
         self.perspective = perspective; self.macName = macName; self.phoneName = phoneName; self.linkUp = linkUp; self.busy = busy
         self.radio = radio; self.vpn = vpn; self.keepAwake = keepAwake; self.downRate = downRate; self.upRate = upRate
-        self.activeConnections = activeConnections
+        self.activeConnections = activeConnections; self.viaWiFi = viaWiFi; self.localNetworkName = localNetworkName
     }
 }
 
@@ -303,9 +309,15 @@ private struct FlowNodes: View {
             NodeView(icon: "laptopcomputer", label: state.macName, tint: state.linkUp ? active : .secondary,
                      dim: !state.linkUp && state.perspective == .iphone, radius: g.nodeR)
                 .position(x: g.mac, y: y + 8)
-            NodeView(icon: "iphone.gen3", label: state.phoneName, tint: (state.linkUp || state.perspective == .iphone) ? active : .secondary,
-                     dim: !state.linkUp && state.perspective == .mac, radius: g.nodeR)
-                .position(x: g.phone, y: y + 8)
+            if state.viaWiFi {
+                NodeView(icon: "wifi.router", label: state.localNetworkName, tint: state.linkUp ? active : .secondary,
+                         dim: !state.linkUp, radius: g.nodeR)
+                    .position(x: g.phone, y: y + 8)
+            } else {
+                NodeView(icon: "iphone.gen3", label: state.phoneName, tint: (state.linkUp || state.perspective == .iphone) ? active : .secondary,
+                         dim: !state.linkUp && state.perspective == .mac, radius: g.nodeR)
+                    .position(x: g.phone, y: y + 8)
+            }
             if state.vpn != nil {
                 NodeView(icon: state.vpn?.blocked == true ? "exclamationmark.shield.fill" : "lock.shield.fill", label: vpnLabel,
                          tint: vpnTint, dim: state.vpn?.connected != true, radius: g.nodeR)
@@ -317,13 +329,13 @@ private struct FlowNodes: View {
             }
             NodeView(icon: "globe", label: "Internet", tint: .secondary, dim: !state.linkUp, radius: g.nodeR)
                 .position(x: g.internet, y: y + 8)
-            WireLabel("USB").position(x: (g.mac + g.phone) / 2, y: y + 15)
-            WireLabel(state.radio ?? "cellular").position(x: g.radioMid, y: y + 15)
+            WireLabel(state.viaWiFi ? state.localNetworkName : "USB").position(x: (g.mac + g.phone) / 2, y: y + 15)
+            if !state.viaWiFi { WireLabel(state.radio ?? "cellular").position(x: g.radioMid, y: y + 15) }
             if state.keepAwake {
                 Image(systemName: "cup.and.saucer.fill").font(.system(size: 10, weight: .bold)).foregroundStyle(PTTheme.warning)
                     .position(x: g.mac + g.nodeR - 2, y: y - g.nodeR + 2)
             }
-            if !state.linkUp && !state.busy && state.perspective == .mac {
+            if !state.linkUp && !state.busy && state.perspective == .mac && !state.viaWiFi {
                 Image(systemName: "cable.connector.slash").font(.system(size: 10, weight: .semibold)).foregroundStyle(.tertiary)
                     .position(x: (g.mac + g.phone) / 2, y: y - 12)
             }

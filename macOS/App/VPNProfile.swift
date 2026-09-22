@@ -24,6 +24,8 @@ struct VPNProfile: Codable, Identifiable, Equatable {
     /// NordVPN: chosen country, nil = fastest anywhere.
     var nordCountryID: Int?
     var nordCountryName: String?
+    var nordCityID: Int?
+    var nordCityName: String?
     /// OpenVPN profiles that ask for a username/password.
     var needsCredentials = false
     var createdAt = Date()
@@ -112,6 +114,8 @@ enum NordVPN {
         let id: Int
         let name: String
         let code: String
+        let cities: [City]
+        struct City: Decodable, Identifiable, Hashable { let id: Int; let name: String }
     }
 
     enum NordError: LocalizedError {
@@ -132,13 +136,14 @@ enum NordVPN {
     }
 
     /// Nord's own "recommended" pick: lowest load near you, optionally within a country.
-    static func recommend(countryID: Int?, tcp: Bool) async throws -> Server {
+    static func recommend(countryID: Int?, cityID: Int? = nil, tcp: Bool) async throws -> Server {
         var components = URLComponents(string: "https://api.nordvpn.com/v1/servers/recommendations")!
         var items = [
             URLQueryItem(name: "filters[servers_technologies][identifier]", value: tcp ? "openvpn_tcp" : "openvpn_udp"),
             URLQueryItem(name: "limit", value: "1"),
         ]
         if let countryID { items.append(URLQueryItem(name: "filters[country_id]", value: String(countryID))) }
+        if let cityID { items.append(URLQueryItem(name: "filters[city_id]", value: String(cityID))) }
         components.queryItems = items
         let (data, response) = try await URLSession.shared.data(from: components.url!)
         guard (response as? HTTPURLResponse)?.statusCode == 200 else { throw NordError.badResponse }

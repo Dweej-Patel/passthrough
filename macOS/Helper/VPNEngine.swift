@@ -154,7 +154,7 @@ final class VPNEngine {
         if let interfaceName { dict[VPNStatusKey.interface] = interfaceName }
         if let startedAt { dict[VPNStatusKey.since] = startedAt.timeIntervalSince1970 }
         if let lastError { dict[VPNStatusKey.error] = lastError }
-        if let underlay { dict[VPNStatusKey.underlay] = underlay.isPassthrough ? "iPhone" : underlay.interface }
+        if let underlay { dict[VPNStatusKey.underlay] = underlay.isPassthrough ? "iPhone" : Self.friendlyName(for: underlay.interface) }
         if !activeDNS.isEmpty { dict[VPNStatusKey.dns] = activeDNS }
         if let first = endpointRoutes.first { dict[VPNStatusKey.endpoint] = first.ip }
         if let runner, state == .connected || state == .reconnecting {
@@ -282,6 +282,17 @@ final class VPNEngine {
     }
 
     // MARK: Underlay + endpoint routes
+
+    /// "Wi-Fi" / "Ethernet" for a BSD interface name, via the hardware-port list.
+    static func friendlyName(for interface: String) -> String {
+        let ports = Shell.capture("/usr/sbin/networksetup", ["-listallhardwareports"])
+        var lastPort = ""
+        for line in ports.split(separator: "\n") {
+            if line.hasPrefix("Hardware Port: ") { lastPort = String(line.dropFirst("Hardware Port: ".count)) }
+            if line == "Device: \(interface)" { return lastPort.isEmpty ? interface : lastPort }
+        }
+        return interface
+    }
 
     private func detectUnderlay() -> Underlay? {
         if tunnel.isRunning, let name = tunnel.interfaceName {

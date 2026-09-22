@@ -270,7 +270,7 @@ final class WireGuardRunner: VPNRunner {
     /// WireGuard has no session; a stale handshake is the only sign it's dead.
     private func startHealthTimer() {
         let timer = DispatchSource.makeTimerSource(queue: queue)
-        timer.schedule(deadline: .now() + 10, repeating: 10)
+        timer.schedule(deadline: .now() + 2, repeating: 2)
         timer.setEventHandler { [weak self] in
             guard let self else { return }
             self.ioQueue.async { [weak self] in

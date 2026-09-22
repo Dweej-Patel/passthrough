@@ -122,10 +122,13 @@ private struct ProfileDetail: View {
         Section {
             LabeledContent("Engine") { Text(profile.engine.label) }
             if let server = profile.server, !server.isEmpty { LabeledContent("Server") { Text(server).textSelection(.enabled) } }
-            if let location = profile.location, !location.isEmpty { LabeledContent("Location") { Text(location) } }
+            if let location = profile.location, !location.isEmpty { LabeledContent("Server location") { Text(location) } }
             if profile.source == .nordvpn {
                 LabeledContent("Protocol") { Text(profile.nordProtocol == "tcp" ? "OpenVPN TCP (port 443)" : "OpenVPN UDP") }
-                LabeledContent("Country") { Text(profile.nordCountryName ?? "Fastest available") }
+                LabeledContent("Chosen area") {
+                    let parts = [profile.nordCityName, profile.nordCountryName].compactMap { $0 }
+                    Text(parts.isEmpty ? "Fastest available" : parts.joined(separator: ", "))
+                }
                 HStack {
                     Button(refreshing ? "Refreshing…" : "Pick a fresh recommended server") {
                         refreshing = true; refreshError = nil
@@ -179,6 +182,7 @@ struct NordSetupSheet: View {
     @State private var tcp = false
     @State private var countries: [NordVPN.Country] = []
     @State private var countryID: Int? = nil
+    @State private var cityID: Int? = nil
     @State private var working = false
     @State private var error: String?
 
@@ -201,6 +205,13 @@ struct NordSetupSheet: View {
                 Picker("Country", selection: $countryID) {
                     Text("Fastest available").tag(Int?.none)
                     ForEach(countries) { c in Text(c.name).tag(Int?.some(c.id)) }
+                }
+                .onChange(of: countryID) { _, _ in cityID = nil }
+                if let country = countries.first(where: { $0.id == countryID }), country.cities.count > 1 {
+                    Picker("City", selection: $cityID) {
+                        Text("Any city").tag(Int?.none)
+                        ForEach(country.cities.sorted { $0.name < $1.name }) { c in Text(c.name).tag(Int?.some(c.id)) }
+                    }
                 }
             }
             .formStyle(.columns)
@@ -229,10 +240,12 @@ struct NordSetupSheet: View {
 
     private func add() {
         working = true; error = nil
-        let name = countries.first { $0.id == countryID }?.name
+        let country = countries.first { $0.id == countryID }
+        let city = country?.cities.first { $0.id == cityID }
         Task {
             do {
-                try await session.addNordProfile(username: username, password: password, countryID: countryID, countryName: name, tcp: tcp)
+                try await session.addNordProfile(username: username, password: password, countryID: countryID, countryName: country?.name,
+                                                 cityID: cityID, cityName: city?.name, tcp: tcp)
                 dismiss()
             } catch {
                 self.error = error.localizedDescription

@@ -20,7 +20,7 @@ public enum HelperConstants {
     public static let machService = "dev.dpatel.passthrough.helper"
     public static let plistName = "dev.dpatel.passthrough.helper.plist"
     /// Bump together with the helper binary so the app can detect stale daemons.
-    public static let version = "1.2.6"
+    public static let version = "1.2.7"
 }
 
 /// Keys of the configuration dictionary handed to `startTunnel`.

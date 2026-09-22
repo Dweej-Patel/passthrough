@@ -542,8 +542,8 @@ final class SessionCoordinator: ObservableObject {
     }
 
     /// Creates (or refreshes) a NordVPN profile from Nord's recommended server.
-    func addNordProfile(username: String, password: String, countryID: Int?, countryName: String?, tcp: Bool) async throws {
-        let server = try await NordVPN.recommend(countryID: countryID, tcp: tcp)
+    func addNordProfile(username: String, password: String, countryID: Int?, countryName: String?, cityID: Int? = nil, cityName: String? = nil, tcp: Bool) async throws {
+        let server = try await NordVPN.recommend(countryID: countryID, cityID: cityID, tcp: tcp)
         let text = try await NordVPN.profileText(for: server, tcp: tcp)
         var profile = VPNProfile(name: "NordVPN · \(server.hostname.split(separator: ".").first ?? "server")", engine: .openvpn, source: .nordvpn)
         profile.server = server.hostname
@@ -551,6 +551,8 @@ final class SessionCoordinator: ObservableObject {
         profile.nordProtocol = tcp ? "tcp" : "udp"
         profile.nordCountryID = countryID
         profile.nordCountryName = countryName
+        profile.nordCityID = cityID
+        profile.nordCityName = cityName
         profile.needsCredentials = true
         addProfile(profile, config: text, username: username, password: password)
         vpnActiveProfileID = profile.id.uuidString
@@ -559,7 +561,7 @@ final class SessionCoordinator: ObservableObject {
 
     func refreshNordServer(_ profile: VPNProfile) async throws {
         let tcp = profile.nordProtocol == "tcp"
-        let server = try await NordVPN.recommend(countryID: profile.nordCountryID, tcp: tcp)
+        let server = try await NordVPN.recommend(countryID: profile.nordCountryID, cityID: profile.nordCityID, tcp: tcp)
         let text = try await NordVPN.profileText(for: server, tcp: tcp)
         var updated = profile
         updated.name = "NordVPN · \(server.hostname.split(separator: ".").first ?? "server")"
@@ -612,7 +614,9 @@ final class SessionCoordinator: ObservableObject {
         let busy = phase.isConnected || phase.isBusy || vpnWanted || panelVisible
         if !busy, healthTick % 10 != 0 { return }
         if healthTick % 10 == 1 || keepAwakeBlockedReason != nil { checkBattery() }
-        if phase.isConnected || vpnWanted, healthTick % 3 == 0, !statusPollInFlight {
+        // Poll every second while the VPN is the only thing carrying traffic (it feeds the meter).
+        let pollNow = (vpnWanted && !phase.isConnected) ? true : healthTick % 3 == 0
+        if phase.isConnected || vpnWanted, pollNow, !statusPollInFlight {
             let gen = generation
             let vpnGen = vpnGeneration
             let checkTunnel = phase.isConnected
@@ -622,6 +626,11 @@ final class SessionCoordinator: ObservableObject {
                 self.statusPollInFlight = false
                 if self.vpnWanted, vpnGen == self.vpnGeneration {
                     let parsed = VPNStatus(from: status[VPNStatusKey.vpn] as? [String: Any] ?? [:])
+                    if parsed.isConnected, !self.phase.isConnected, self.forwarder == nil {
+                        // VPN over Wi-Fi: the USB counters are idle, so meter the VPN itself.
+                        self.meter.record(ByteCounter.Snapshot(rx: parsed.rx, tx: parsed.tx, active: 0, totalConnections: 0))
+                        self.sessionRx = parsed.rx; self.sessionTx = parsed.tx
+                    }
                     if parsed.state == "failed" {
                         self.vpnWanted = false
                         self.vpnError = parsed.error ?? "The VPN layer stopped."
@@ -650,7 +659,7 @@ final class SessionCoordinator: ObservableObject {
             meter.record(snap)
             sessionRx = snap.rx
             sessionTx = snap.tx
-        } else if meter.downRate != 0 || meter.upRate != 0 {
+        } else if !(vpnWanted && vpn.isConnected), meter.downRate != 0 || meter.upRate != 0 {
             meter.record(.zero)
         }
         let availability = helper.availability
@@ -699,7 +708,7 @@ final class SessionCoordinator: ObservableObject {
     }
 
     /// Puts the coordinator into a synthetic state for previews and snapshots.
-    func debugApply(phase: Phase, device: Bool = false, status: DeviceStatus? = nil, traffic: Bool = false, vpn vpnState: String? = nil) {
+    func debugApply(phase: Phase, device: Bool = false, status: DeviceStatus? = nil, traffic: Bool = false, vpn vpnState: String? = nil, underlay: String = "iPhone") {
         ticker?.cancel()
         listenConnection?.cancel()
         panelVisible = true
@@ -707,7 +716,7 @@ final class SessionCoordinator: ObservableObject {
         if let vpnState {
             vpnWanted = true
             var v = VPNStatus(state: vpnState, name: "NordVPN · us9591", engine: "openvpn")
-            v.interface = "utun9"; v.underlay = "iPhone"; v.since = Date().addingTimeInterval(-612)
+            v.interface = "utun9"; v.underlay = underlay; v.since = Date().addingTimeInterval(-612)
             vpn = v
         }
         self.device = device ? USBMux.Device(id: 1, udid: "preview", connectionType: "USB", productID: 0) : nil

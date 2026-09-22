@@ -83,7 +83,7 @@ final class OpenVPNRunner: VPNRunner {
             "--ping-restart", "25",
             "--connect-retry", "2", "10",
             "--auth-user-pass", "/dev/stdin",
-            "--status", Self.statusPath, "5",
+            "--status", Self.statusPath, "1",
             "--verb", "3",
         ]
         let out = Pipe(), input = Pipe()

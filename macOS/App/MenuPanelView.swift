@@ -274,10 +274,15 @@ struct FlowCard: View {
                                    engine: v.engineLabel.isEmpty ? (session.activeVPNProfile?.engine.label ?? "VPN") : v.engineLabel,
                                    connected: v.isConnected, blocked: v.state == "blocked")
         }
+        // VPN with passthrough off: it rides the Mac's own network.
+        let viaWiFi = session.vpnWanted && !session.phase.isConnected && !session.phase.isBusy
+        let localName = session.vpn.underlay.map { $0 == "iPhone" ? "Wi-Fi" : $0 } ?? "Wi-Fi"
         return FlowMapState(perspective: .mac, macName: session.macName, phoneName: session.phoneStatus?.deviceName ?? "iPhone",
-                            linkUp: session.phase.isConnected, busy: session.phase.isBusy, radio: session.phoneStatus?.radio,
+                            linkUp: session.phase.isConnected || (viaWiFi && session.vpn.isConnected),
+                            busy: session.phase.isBusy || (viaWiFi && session.vpn.isBusy),
+                            radio: viaWiFi ? nil : session.phoneStatus?.radio,
                             vpn: vpn, keepAwake: session.keepAwake, downRate: session.meter.downRate, upRate: session.meter.upRate,
-                            activeConnections: session.phoneActiveConnections)
+                            activeConnections: session.phoneActiveConnections, viaWiFi: viaWiFi, localNetworkName: localName)
     }
 
     var body: some View {
