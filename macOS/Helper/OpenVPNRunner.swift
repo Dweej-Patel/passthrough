@@ -74,7 +74,7 @@ final class OpenVPNRunner: VPNRunner {
             "--pull-filter", "ignore", "block-outside-dns",
             "--script-security", "0",
             "--nobind", "--persist-tun", "--persist-key",
-            "--ping-restart", "60",
+            "--ping-restart", "30",
             "--connect-retry", "2", "10",
             "--auth-user-pass", "/dev/stdin",
             "--status", Self.statusPath, "5",

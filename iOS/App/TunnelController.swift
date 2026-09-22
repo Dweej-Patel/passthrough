@@ -44,6 +44,11 @@ final class TunnelController {
         manager.protocolConfiguration = proto
         manager.localizedDescription = "Passthrough"
         manager.isEnabled = true
+        // On-demand "always connect": iOS itself relaunches the extension if it
+        // is killed (memory pressure, crash) or after a reboot, so the proxy
+        // survives without the user reopening the app. Cleared on manual stop.
+        manager.isOnDemandEnabled = true
+        manager.onDemandRules = [NEOnDemandRuleConnect()]
         try await manager.saveToPreferences()
         try await manager.loadFromPreferences()
         self.manager = manager
@@ -55,8 +60,15 @@ final class TunnelController {
         try manager.connection.startVPNTunnel(options: nil)
     }
 
-    func stop() {
-        manager?.connection.stopVPNTunnel()
+    /// Manual stop: drop the on-demand rule first, otherwise iOS restarts the
+    /// tunnel the moment it goes down.
+    func stop() async {
+        guard let manager else { return }
+        if manager.isOnDemandEnabled {
+            manager.isOnDemandEnabled = false
+            try? await manager.saveToPreferences()
+        }
+        manager.connection.stopVPNTunnel()
     }
 
     func fetchStats() async -> ProviderStats? {

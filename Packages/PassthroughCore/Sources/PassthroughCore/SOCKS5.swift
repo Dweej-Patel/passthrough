@@ -114,7 +114,10 @@ public final class SOCKS5Server: @unchecked Sendable {
         public var allowUDP = true
         public var udpIdleTimeout: TimeInterval = 60
         public var maxUDPPeersPerSession = 512
-        public var connectTimeout: Int = 15
+        /// How long a new connection may sit "waiting" for a viable path (tower
+        /// handoff, radio waking) before it is failed. Generous on purpose: apps
+        /// have their own timeouts, and a stall that recovers beats a hard error.
+        public var connectTimeout: Int = 30
         /// A client that never finishes the SOCKS handshake is dropped after this.
         public var handshakeTimeout: TimeInterval = 20
         /// Hard cap on concurrent sessions (the extension has a tight memory budget).

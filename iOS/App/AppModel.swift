@@ -148,7 +148,7 @@ final class AppModel: ObservableObject {
             state = .stopped
             stats = ProviderStats(rx: stats.rx, tx: stats.tx, active: 0, totalConnections: stats.totalConnections, macs: [], startedAt: nil)
         } else {
-            tunnel.stop()
+            Task { await tunnel.stop() }
         }
     }
 
