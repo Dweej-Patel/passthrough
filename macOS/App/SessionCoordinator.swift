@@ -559,6 +559,31 @@ final class SessionCoordinator: ObservableObject {
         ptLog(.info, "Added NordVPN profile \(server.hostname) (\(server.locationText), load \(server.load)%)")
     }
 
+    /// Edit a NordVPN profile's area/protocol in place: fetches the matching
+    /// server and, if this profile is live, restarts the VPN on it.
+    func updateNordProfile(_ profile: VPNProfile, countryID: Int?, countryName: String?, cityID: Int?, cityName: String?, tcp: Bool, name: String?) async throws {
+        let server = try await NordVPN.recommend(countryID: countryID, cityID: cityID, tcp: tcp)
+        let text = try await NordVPN.profileText(for: server, tcp: tcp)
+        var updated = profile
+        updated.nordCountryID = countryID; updated.nordCountryName = countryName
+        updated.nordCityID = cityID; updated.nordCityName = cityName
+        updated.nordProtocol = tcp ? "tcp" : "udp"
+        updated.server = server.hostname
+        updated.location = server.locationText
+        let auto = "NordVPN · \(server.hostname.split(separator: ".").first ?? "server")"
+        updated.name = (name?.isEmpty == false && name != profile.name) ? name! : (profile.name.hasPrefix("NordVPN · ") ? auto : profile.name)
+        VPNProfileStore.setConfig(text, for: updated)
+        updateProfile(updated)
+        ptLog(.info, "NordVPN profile updated: \(server.hostname) (\(server.locationText), load \(server.load)%)")
+        if vpnWanted, activeVPNProfile?.id == profile.id { setVPN(false); setVPN(true) }
+    }
+
+    func renameProfile(_ profile: VPNProfile, to name: String) {
+        guard !name.trimmingCharacters(in: .whitespaces).isEmpty else { return }
+        var updated = profile; updated.name = name
+        updateProfile(updated)
+    }
+
     func refreshNordServer(_ profile: VPNProfile) async throws {
         let tcp = profile.nordProtocol == "tcp"
         let server = try await NordVPN.recommend(countryID: profile.nordCountryID, cityID: profile.nordCityID, tcp: tcp)

@@ -108,38 +108,69 @@ struct VPNSettings: View {
     }
 }
 
-/// Per-profile details: credentials for OpenVPN, server refresh for NordVPN.
+/// Per-profile details: editable name, area and protocol for NordVPN,
+/// credentials for OpenVPN.
 private struct ProfileDetail: View {
     @EnvironmentObject private var session: SessionCoordinator
     let profile: VPNProfile
     @Binding var refreshing: Bool
     @Binding var refreshError: String?
+    @State private var name = ""
     @State private var username = ""
     @State private var password = ""
     @State private var saved = false
+    @State private var countries: [NordVPN.Country] = []
+    @State private var countryID: Int? = nil
+    @State private var cityID: Int? = nil
+    @State private var tcp = false
+
+    private var nordEdited: Bool {
+        countryID != profile.nordCountryID || cityID != profile.nordCityID || tcp != (profile.nordProtocol == "tcp")
+    }
 
     var body: some View {
         Section {
+            TextField("Name", text: $name, onCommit: { session.renameProfile(profile, to: name) })
             LabeledContent("Engine") { Text(profile.engine.label) }
-            if let server = profile.server, !server.isEmpty { LabeledContent("Server") { Text(server).textSelection(.enabled) } }
-            if let location = profile.location, !location.isEmpty { LabeledContent("Server location") { Text(location) } }
             if profile.source == .nordvpn {
-                LabeledContent("Protocol") { Text(profile.nordProtocol == "tcp" ? "OpenVPN TCP (port 443)" : "OpenVPN UDP") }
-                LabeledContent("Chosen area") {
-                    let parts = [profile.nordCityName, profile.nordCountryName].compactMap { $0 }
-                    Text(parts.isEmpty ? "Fastest available" : parts.joined(separator: ", "))
+                Picker("Protocol", selection: $tcp) {
+                    Text("OpenVPN UDP (recommended)").tag(false)
+                    Text("OpenVPN TCP 443 (if UDP is blocked)").tag(true)
                 }
+                Picker("Country", selection: $countryID) {
+                    Text("Fastest available").tag(Int?.none)
+                    ForEach(countries) { c in Text(c.name).tag(Int?.some(c.id)) }
+                }
+                .onChange(of: countryID) { old, new in if old != new, new != profile.nordCountryID { cityID = nil } }
+                if let country = countries.first(where: { $0.id == countryID }), country.cities.count > 1 {
+                    Picker("City", selection: $cityID) {
+                        Text("Any city").tag(Int?.none)
+                        ForEach(country.cities.sorted { $0.name < $1.name }) { c in Text(c.name).tag(Int?.some(c.id)) }
+                    }
+                }
+                if let server = profile.server { LabeledContent("Current server") { Text("\(server)\(profile.location.map { " · \($0)" } ?? "")").textSelection(.enabled) } }
                 HStack {
-                    Button(refreshing ? "Refreshing…" : "Pick a fresh recommended server") {
+                    Button(refreshing ? "Working…" : (nordEdited ? "Apply and pick server" : "Pick a fresh server")) {
                         refreshing = true; refreshError = nil
+                        let country = countries.first { $0.id == countryID }
+                        let city = country?.cities.first { $0.id == cityID }
                         Task {
-                            do { try await session.refreshNordServer(profile) } catch { refreshError = error.localizedDescription }
+                            do {
+                                if nordEdited || name != profile.name {
+                                    try await session.updateNordProfile(profile, countryID: countryID, countryName: country?.name,
+                                                                        cityID: cityID, cityName: city?.name, tcp: tcp, name: name)
+                                } else {
+                                    try await session.refreshNordServer(profile)
+                                }
+                            } catch { refreshError = error.localizedDescription }
                             refreshing = false
                         }
                     }
                     .disabled(refreshing)
                     if let refreshError { Text(refreshError).font(.caption).foregroundStyle(PTTheme.danger) }
                 }
+            } else {
+                if let server = profile.server, !server.isEmpty { LabeledContent("Server") { Text(server).textSelection(.enabled) } }
             }
             if profile.needsCredentials {
                 TextField("Username", text: $username)
@@ -155,21 +186,28 @@ private struct ProfileDetail: View {
                 }
             }
         } header: {
-            Text(profile.name)
+            Text("Edit profile")
         } footer: {
             if profile.source == .nordvpn {
-                Text("These are NordVPN's *service credentials* (Nord account ▸ Manual setup), not your login. They are stored in your Keychain and handed to the engine over a pipe, never written to disk.")
+                Text("Change the area or protocol and apply: Nord's least-loaded matching server is fetched and, if this profile is running, the VPN reconnects to it. Service credentials come from your Nord account ▸ Manual setup; they are stored in the Keychain and handed to the engine over a pipe.")
             }
         }
         .onAppear(perform: load)
         .onChange(of: profile.id) { _, _ in load() }
+        .task(id: profile.id) {
+            if profile.source == .nordvpn, countries.isEmpty { countries = (try? await NordVPN.countries()) ?? [] }
+        }
     }
 
     private func load() {
+        name = profile.name
         let creds = VPNProfileStore.credentials(for: profile)
         username = creds.username
         password = creds.password
         saved = false
+        countryID = profile.nordCountryID
+        cityID = profile.nordCityID
+        tcp = profile.nordProtocol == "tcp"
     }
 }
 
