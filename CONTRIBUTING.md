@@ -41,6 +41,17 @@ swift test
 Please run the tests before opening a PR, and add tests for anything in
 `PassthroughCore` that you change.
 
+The Android app lives in `android/` and needs JDK 17 and the Android SDK
+(see [android/README.md](android/README.md)):
+
+```
+cd android
+./gradlew testDebugUnitTest lintDebug assembleDebug
+```
+
+The Swift and Kotlin sides speak the same wire protocol. If you change a
+message, a port or the pairing rules, change both and their tests.
+
 ## Things to keep in mind
 
 * **Security posture matters here.** The Mac helper runs as root and the phone
@@ -60,6 +71,7 @@ Please run the tests before opening a PR, and add tests for anything in
 
 * [ ] Branch is based on `dev`
 * [ ] `swift test` passes in `Packages/PassthroughCore`
+* [ ] `./gradlew testDebugUnitTest lintDebug` passes in `android/` (if you touched it)
 * [ ] Both apps build (`xcodegen generate`, then build the `Passthrough` and
       `PassthroughMac` schemes)
 * [ ] README updated if behaviour or setup changed

@@ -17,6 +17,8 @@ public struct FlowMapState: Equatable {
     public var perspective: Perspective
     public var macName: String
     public var phoneName: String
+    /// SF Symbol for the phone node ("iphone.gen3", or "smartphone" for Android).
+    public var phoneIcon: String
     /// The USB link carries traffic (passthrough connected / a Mac is served).
     public var linkUp: Bool
     /// Something is in progress (connecting, starting).
@@ -35,10 +37,10 @@ public struct FlowMapState: Equatable {
     /// Label for that local network ("Wi-Fi", "Ethernet").
     public var localNetworkName: String
 
-    public init(perspective: Perspective, macName: String = "Mac", phoneName: String = "iPhone", linkUp: Bool = false, busy: Bool = false,
+    public init(perspective: Perspective, macName: String = "Mac", phoneName: String = "iPhone", phoneIcon: String = "iphone.gen3", linkUp: Bool = false, busy: Bool = false,
                 radio: String? = nil, vpn: VPN? = nil, keepAwake: Bool = false, downRate: Double = 0, upRate: Double = 0, activeConnections: Int = 0,
                 viaWiFi: Bool = false, localNetworkName: String = "Wi-Fi") {
-        self.perspective = perspective; self.macName = macName; self.phoneName = phoneName; self.linkUp = linkUp; self.busy = busy
+        self.perspective = perspective; self.macName = macName; self.phoneName = phoneName; self.phoneIcon = phoneIcon; self.linkUp = linkUp; self.busy = busy
         self.radio = radio; self.vpn = vpn; self.keepAwake = keepAwake; self.downRate = downRate; self.upRate = upRate
         self.activeConnections = activeConnections; self.viaWiFi = viaWiFi; self.localNetworkName = localNetworkName
     }
@@ -314,7 +316,7 @@ private struct FlowNodes: View {
                          dim: !state.linkUp, radius: g.nodeR)
                     .position(x: g.phone, y: y + 8)
             } else {
-                NodeView(icon: "iphone.gen3", label: state.phoneName, tint: (state.linkUp || state.perspective == .iphone) ? active : .secondary,
+                NodeView(icon: state.phoneIcon, label: state.phoneName, tint: (state.linkUp || state.perspective == .iphone) ? active : .secondary,
                          dim: !state.linkUp && state.perspective == .mac, radius: g.nodeR)
                     .position(x: g.phone, y: y + 8)
             }

@@ -5,8 +5,9 @@ import Network
 import PassthroughCore
 import USBMux
 
-/// Drives the whole Mac side: watches USB for an iPhone, forwards a loopback
-/// port over usbmuxd, pairs, and asks the helper to route the Mac through it.
+/// Drives the whole Mac side: watches USB for a phone (usbmuxd for iPhones, adb
+/// for Android), forwards a loopback port to it, pairs, and asks the helper to
+/// route the Mac through it.
 @MainActor
 final class SessionCoordinator: ObservableObject {
     enum Phase: Equatable {
@@ -24,7 +25,11 @@ final class SessionCoordinator: ObservableObject {
 
     // Observable state
     @Published private(set) var phase: Phase = .noDevice
-    @Published private(set) var device: USBMux.Device?
+    @Published private(set) var device: PhoneDevice?
+    /// Android over adb: whether platform-tools were found and the server answers.
+    @Published private(set) var adbStatus: ADBStatus = .idle
+    /// Something the user must do on an attached Android phone (e.g. allow USB debugging).
+    @Published private(set) var androidHint: String?
     @Published private(set) var meter = TrafficMeter()
     @Published private(set) var phoneStatus: DeviceStatus?
     @Published private(set) var phoneActiveConnections = 0
@@ -44,6 +49,16 @@ final class SessionCoordinator: ObservableObject {
     @AppStorage("localPort") var localPort = Int(PassthroughProtocol.defaultLocalSOCKSPort)
     @AppStorage("mtu") var mtu = 8500
     @AppStorage("clientID") private var storedClientID = ""
+
+    /// Also watch for Android phones through adb. On by default; harmless without platform-tools.
+    @Published var androidEnabled: Bool = UserDefaults.standard.object(forKey: "androidEnabled") as? Bool ?? true {
+        didSet {
+            UserDefaults.standard.set(androidEnabled, forKey: "androidEnabled")
+            androidEnabled ? startADBWatch() : stopADBWatch()
+        }
+    }
+
+    enum ADBStatus: Equatable { case idle, notInstalled, starting, watching, unavailable }
 
     /// Keep the Mac from idle-sleeping while on, so long sessions survive. Off by default.
     @Published var keepAwake: Bool = UserDefaults.standard.bool(forKey: "keepAwake") {
@@ -81,7 +96,12 @@ final class SessionCoordinator: ObservableObject {
     private let power = PowerManager()
     private let queue = DispatchQueue(label: "dev.dpatel.passthrough.mac")
     private var listenConnection: NWConnection?
-    private var devices: [Int: USBMux.Device] = [:]
+    private var adbConnection: NWConnection?
+    private var adbRestartTask: Task<Void, Never>?
+    private var adbLastServerStart = Date.distantPast
+    /// Diagnostics only: accept emulators and adb-over-Wi-Fi devices.
+    private var adbAnyTransport = false
+    private var devices: [String: PhoneDevice] = [:]
     private var forwarder: LocalForwarder?
     private var control: ControlClient?
     private var ticker: AnyCancellable?
@@ -99,7 +119,16 @@ final class SessionCoordinator: ObservableObject {
         return storedClientID
     }
     var macName: String { Host.current().localizedName ?? "Mac" }
-    var hasToken: Bool { Keychain.read("token") != nil }
+    /// Keychain slot for the token the current phone issued. iPhones keep the
+    /// original "token" slot; each Android phone gets its own, keyed by serial.
+    private func tokenAccount(for device: PhoneDevice?) -> String {
+        guard let device, case .adb(let serial) = device.transport else { return "token" }
+        return "token.android." + serial.filter { $0.isLetter || $0.isNumber || $0 == "-" || $0 == "_" || $0 == "." }
+    }
+    var tokenAccount: String { tokenAccount(for: device) }
+    var hasToken: Bool { Keychain.read(tokenAccount) != nil }
+    /// "iPhone" or "Android phone" for the attached device; "phone" when none.
+    var phoneKindName: String { device?.kindName ?? "phone" }
     var dnsList: [String] { dnsServers.split(whereSeparator: { $0 == "," || $0 == " " }).map(String.init).filter { !$0.isEmpty } }
 
     /// Passthrough half of the menu-bar icon. Keep-awake adds a separate glyph.
@@ -128,7 +157,9 @@ final class SessionCoordinator: ObservableObject {
         let env: [String: String] = [:]
         #endif
         if env["PASSTHROUGH_NO_AUTOCONNECT"] != nil || env["PASSTHROUGH_VPN_TEST"] != nil { suppressAutoConnect = true }
+        adbAnyTransport = env["PASSTHROUGH_ADB_ANY_TRANSPORT"] == "1"
         startDeviceWatch()
+        startADBWatch()
         ticker = Timer.publish(every: 1, on: .main, in: .common).autoconnect().sink { [weak self] _ in self?.tick() }
         NotificationCenter.default.publisher(for: .passthroughWillTerminate)
             .sink { [weak self] _ in self?.shutdownForQuit() }
@@ -175,22 +206,9 @@ final class SessionCoordinator: ObservableObject {
             ptLog(.debug, "Watching usbmuxd for iPhones")
         case .attached(let d):
             guard d.isUSB else { return }
-            devices[d.id] = d
-            retryAttempts = 0
-            ptLog(.info, "iPhone attached over USB (\(d.udid.prefix(8))…)")
-            if device == nil {
-                device = d
-                phase = .deviceFound
-                if autoConnect, !suppressAutoConnect { connect() }
-            }
+            attach(PhoneDevice(transport: .usbmux(d.id), label: String(d.udid.prefix(8)) + "…"))
         case .detached(let id):
-            devices[id] = nil
-            if device?.id == id {
-                ptLog(.info, "iPhone detached")
-                teardown(to: devices.values.first.map { _ in .deviceFound } ?? .noDevice)
-                device = devices.values.first
-                if device != nil, autoConnect, !suppressAutoConnect { connect() }
-            }
+            detach(id: PhoneDevice(transport: .usbmux(id), label: "").id)
         case .failed(let error):
             // Coalesce: a connection can report waiting then failed; one restart only.
             guard watchRestartTask == nil else { return }
@@ -200,6 +218,101 @@ final class SessionCoordinator: ObservableObject {
                 guard let self else { return }
                 self.watchRestartTask = nil
                 self.startDeviceWatch()
+            }
+        }
+    }
+
+    private func attach(_ d: PhoneDevice) {
+        guard devices[d.id] == nil else { return }
+        devices[d.id] = d
+        retryAttempts = 0
+        ptLog(.info, "\(d.kindName) attached over USB (\(d.label))")
+        if device == nil {
+            device = d
+            phase = .deviceFound
+            if autoConnect, !suppressAutoConnect { connect() }
+        }
+    }
+
+    private func detach(id: String) {
+        guard let gone = devices.removeValue(forKey: id) else { return }
+        if device?.id == id {
+            ptLog(.info, "\(gone.kindName) detached")
+            teardown(to: devices.values.first.map { _ in .deviceFound } ?? .noDevice)
+            device = devices.values.first
+            if device != nil, autoConnect, !suppressAutoConnect { connect() }
+        }
+    }
+
+    // MARK: Android (adb)
+
+    private func startADBWatch() {
+        adbRestartTask?.cancel(); adbRestartTask = nil
+        adbConnection?.cancel()
+        guard androidEnabled else { return }
+        adbConnection = ADB.track(queue: queue) { [weak self] event in
+            Task { @MainActor in self?.handleADB(event) }
+        }
+    }
+
+    private func stopADBWatch() {
+        adbRestartTask?.cancel(); adbRestartTask = nil
+        adbConnection?.cancel(); adbConnection = nil
+        adbStatus = .idle
+        androidHint = nil
+        for d in devices.values where d.kind == .android { detach(id: d.id) }
+    }
+
+    private func handleADB(_ event: ADB.Event) {
+        switch event {
+        case .devices(let list):
+            if adbStatus != .watching { ptLog(.debug, "Watching adb for Android phones") }
+            adbStatus = .watching
+            let eligible = list.filter { $0.isUSB || adbAnyTransport }
+            let ready = eligible.filter(\.isReady)
+            let readyIDs = Set(ready.map { PhoneDevice(transport: .adb($0.serial), label: "").id })
+            for d in devices.values where d.kind == .android && !readyIDs.contains(d.id) { detach(id: d.id) }
+            for d in ready { attach(PhoneDevice(transport: .adb(d.serial), label: d.model ?? d.serial)) }
+            if eligible.contains(where: { $0.state == "unauthorized" }) {
+                androidHint = "Unlock the Android phone and allow USB debugging for this Mac."
+            } else if eligible.contains(where: { $0.state.contains("permission") }) {
+                androidHint = "adb can't access the Android phone. Replug the cable and choose File Transfer if asked."
+            } else if eligible.contains(where: { $0.state == "offline" }) {
+                androidHint = "The Android phone is offline to adb. Replug the cable."
+            } else {
+                androidHint = nil
+            }
+        case .failed(let error):
+            for d in devices.values where d.kind == .android { detach(id: d.id) }
+            androidHint = nil
+            guard androidEnabled, adbRestartTask == nil else { return }
+            let serverDown = (error as? ADB.ADBError) == .serverUnavailable
+            var delay: Duration = .seconds(5)
+            if serverDown {
+                if let binary = ADB.findBinary() {
+                    // Start the server ourselves, but not in a tight loop if it keeps dying.
+                    if Date().timeIntervalSince(adbLastServerStart) > 60 {
+                        adbLastServerStart = Date()
+                        adbStatus = .starting
+                        ptLog(.info, "Starting the adb server (\(binary))")
+                        Task.detached { ADB.startServer(binary: binary) }
+                        delay = .seconds(2)
+                    } else {
+                        adbStatus = .unavailable
+                    }
+                } else {
+                    if adbStatus != .notInstalled { ptLog(.debug, "adb not found; Android phones need Android platform-tools") }
+                    adbStatus = .notInstalled
+                    delay = .seconds(30)
+                }
+            } else {
+                ptLog(.debug, "adb watch ended: \(error.localizedDescription); retrying")
+            }
+            adbRestartTask = Task { [weak self] in
+                try? await Task.sleep(for: delay)
+                guard let self, !Task.isCancelled else { return }
+                self.adbRestartTask = nil
+                self.startADBWatch()
             }
         }
     }
@@ -217,7 +330,7 @@ final class SessionCoordinator: ObservableObject {
         Task { await runConnect(device: device, generation: gen) }
     }
 
-    private func runConnect(device: USBMux.Device, generation gen: Int) async {
+    private func runConnect(device: PhoneDevice, generation gen: Int) async {
         // 1. Helper
         helperAvailability = helper.availability
         if helperAvailability == .notRegistered { helperAvailability = helper.register() }
@@ -230,7 +343,7 @@ final class SessionCoordinator: ObservableObject {
 
         // 2. Loopback forwarder over usbmuxd
         phase = .connecting("Opening USB link")
-        let forwarder = LocalForwarder(deviceID: device.id, remotePort: PassthroughProtocol.defaultSOCKSPort, localPort: UInt16(localPort))
+        let forwarder = LocalForwarder(device: device, remotePort: PassthroughProtocol.defaultSOCKSPort, localPort: UInt16(localPort))
         do { try forwarder.start() } catch {
             fail("Could not listen on 127.0.0.1:\(localPort): \(error.localizedDescription)")
             return
@@ -239,9 +352,9 @@ final class SessionCoordinator: ObservableObject {
         forwarder.onFailure = { [weak self] error in Task { @MainActor in self?.fail(error.localizedDescription) } }
 
         // 3. Control channel
-        phase = .connecting("Talking to iPhone")
-        let identity = ControlClient.Identity(clientID: clientID, name: macName, token: Keychain.read("token"))
-        let control = ControlClient(deviceID: device.id, identity: identity) { [weak self] event in
+        phase = .connecting("Talking to the \(device.kindName)")
+        let identity = ControlClient.Identity(clientID: clientID, name: macName, token: Keychain.read(tokenAccount(for: device)))
+        let control = ControlClient(device: device, identity: identity) { [weak self] event in
             Task { @MainActor in self?.handleControl(event, generation: gen) }
         }
         self.control = control
@@ -265,29 +378,29 @@ final class SessionCoordinator: ObservableObject {
             // PairingRegistry.makeToken): anything else is not a token this phone issued.
             guard token.count == 43, token.allSatisfy({ $0.isASCII && ($0.isLetter || $0.isNumber || "-_".contains($0)) }) else {
                 pairingInFlight = false
-                fail("The iPhone sent a malformed pairing token")
+                fail("The \(phoneKindName) sent a malformed pairing token")
                 return
             }
-            Keychain.write(token, account: "token")
+            Keychain.write(token, account: tokenAccount)
             pairingInFlight = false
             pairingError = nil
-            ptLog(.info, "Paired with \(phoneStatus?.deviceName ?? "iPhone")")
+            ptLog(.info, "Paired with \(phoneStatus?.deviceName ?? phoneKindName)")
             Task { await bringTunnelUp(generation: gen) }
         case .pairingFailed(let failure):
             pairingInFlight = false
             switch failure {
-            case .badCode: pairingError = "That code didn't match. Check the digits on the iPhone."
-            case .expired: pairingError = "The code expired or wasn't generated yet. Tap Pair on the iPhone and try again."
+            case .badCode: pairingError = "That code didn't match. Check the digits on the \(phoneKindName)."
+            case .expired: pairingError = "The code expired or wasn't generated yet. Tap Pair on the \(phoneKindName) and try again."
             case .notAuthenticated: pairingError = "Not authenticated."
-            case .unsupportedVersion: pairingError = "The iPhone app is a different version. Update both apps."
+            case .unsupportedVersion: pairingError = "The \(phoneKindName) app is a different version. Update both apps."
             }
         case .status(let status, _, _, let active):
             phoneStatus = status
             phoneActiveConnections = active
         case .disconnected(let error):
-            let why = error?.localizedDescription ?? "The iPhone closed the connection"
+            let why = error?.localizedDescription ?? "The \(phoneKindName) closed the connection"
             if case .pairingRequired = phase {
-                fail("Lost the iPhone while pairing: \(why)")
+                fail("Lost the \(phoneKindName) while pairing: \(why)")
             } else if phase.isConnected || phase.isBusy {
                 ptLog(.warning, "Control channel dropped: \(why)")
                 fail(friendlyDrop(why))
@@ -296,13 +409,13 @@ final class SessionCoordinator: ObservableObject {
     }
 
     private func friendlyDrop(_ why: String) -> String {
-        if why.contains("refused") { return "Passthrough isn't running on the iPhone. Start it there, then connect." }
+        if why.contains("refused") { return "Passthrough isn't running on the \(phoneKindName). Start it there, then connect." }
         return why
     }
 
     private func bringTunnelUp(generation gen: Int) async {
-        guard let token = Keychain.read("token") else { phase = .pairingRequired; return }
-        phase = .connecting("Routing the Mac through the iPhone")
+        guard let token = Keychain.read(tokenAccount) else { phase = .pairingRequired; return }
+        phase = .connecting("Routing the Mac through the \(phoneKindName)")
         let config = HelperClient.TunnelConfig(socksPort: UInt16(localPort), username: clientID, password: token,
                                                ipv6: ipv6Enabled, dns: dnsList.isEmpty ? ["1.1.1.1", "1.0.0.1"] : dnsList, mtu: mtu)
         do {
@@ -313,7 +426,7 @@ final class SessionCoordinator: ObservableObject {
             meter.reset()
             sessionRx = 0; sessionTx = 0
             phase = .connected
-            ptLog(.info, "Connected: Mac traffic now flows over USB via \(iface)")
+            ptLog(.info, "Connected: Mac traffic now flows over USB through the \(phoneKindName) via \(iface)")
             if vpnAutoStart, !vpnWanted, activeVPNProfile != nil { setVPN(true) }
         } catch {
             fail(error.localizedDescription)
@@ -345,7 +458,7 @@ final class SessionCoordinator: ObservableObject {
     func openLoginItems() { HelperClient.openLoginItemsSettings() }
 
     func forgetPairing() {
-        Keychain.delete("token")
+        Keychain.delete(tokenAccount)
         if phase.isConnected { disconnect() }
         objectWillChange.send()
     }
@@ -427,6 +540,7 @@ final class SessionCoordinator: ObservableObject {
     private func shutdownForQuit() {
         if keepAwake { Task { _ = await helper.setDisableSleep(false) } }
         wantsConnection = false
+        adbConnection?.cancel()
         control?.close()
         forwarder?.stop()
         let vpnOn = vpnWanted
@@ -764,6 +878,7 @@ final class SessionCoordinator: ObservableObject {
     func debugApply(phase: Phase, device: Bool = false, status: DeviceStatus? = nil, traffic: Bool = false, vpn vpnState: String? = nil, underlay: String = "iPhone") {
         ticker?.cancel()
         listenConnection?.cancel()
+        adbConnection?.cancel()
         panelVisible = true
         self.phase = phase
         if let vpnState {
@@ -772,7 +887,7 @@ final class SessionCoordinator: ObservableObject {
             v.interface = "utun9"; v.underlay = underlay; v.since = Date().addingTimeInterval(-612)
             vpn = v
         }
-        self.device = device ? USBMux.Device(id: 1, udid: "preview", connectionType: "USB", productID: 0) : nil
+        self.device = device ? PhoneDevice(transport: .usbmux(1), label: "preview") : nil
         phoneStatus = status
         if traffic {
             connectedSince = Date().addingTimeInterval(-754)

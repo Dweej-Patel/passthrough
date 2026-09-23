@@ -32,6 +32,21 @@ Because the phone opens every connection with its own stack, the carrier sees th
 * Profiles, keys and credentials live in the data-protection keychain, this device only.
 * The helper tears the tunnel down automatically if the menu bar app quits or crashes.
 
+## Android
+
+The phone side also runs on Android (8.0 and later), with the same look, pairing, SOCKS5 server and control protocol as the iPhone app. The Mac app treats both the same way; only the USB transport differs.
+
+* **Transport.** usbmuxd is Apple-only, so the Mac reaches an Android phone through adb, Android's USB debugging bridge. The Mac app talks to the local adb server directly (the same way it talks to usbmuxd) and opens streams to the phone's loopback ports through it. Only phones on a USB cable are used; adb over Wi-Fi and emulators are ignored.
+* **Hosting.** The servers run in a foreground service with a notification, so they keep serving with the screen off. It routes none of the phone's own traffic.
+* **Cellular only** asks Android to keep mobile data up alongside Wi-Fi and binds every outbound socket to the cellular network. As on iOS it falls back to any network only after cellular has been unusable for 10 seconds.
+* **Pairing tokens** are stored per phone on the Mac, so an iPhone and an Android phone can both stay paired.
+
+What you need:
+
+1. On the Mac: `brew install android-platform-tools`. Passthrough starts the adb server itself when it isn't running.
+2. On the phone: enable Developer options (tap *Build number* seven times in *About phone*), turn on *USB debugging*, plug in, and allow this Mac when asked. The app warns you if USB debugging is off.
+3. Build and install the app: see [android/README.md](android/README.md).
+
 ## Flow map
 
 Both apps show a live map of the route traffic takes: Mac ⟶ USB ⟶ iPhone ⟶ radio ⟶ (VPN) ⟶ Internet. Particles ride the wires at a speed and density that follow the current throughput (teal toward the Mac, violet away from it), the VPN node slides in with a lock over the encrypted hop when the layer is on, the Mac gets a pulsing halo while keep-awake holds it up, and the USB hop shows the live rates. It is one `Canvas` driven by a `TimelineView` at up to 30 fps (15 fps when idle, fully paused when nothing is connected), with stateless particle math and no per-particle views, so it costs next to nothing (`PassthroughUI/FlowMap.swift`).
@@ -81,12 +96,13 @@ Diagnostics: `PASSTHROUGH_NO_AUTOCONNECT=1` launches the app without taking over
 
 ```
 Packages/PassthroughCore   Swift package: SOCKS5 server, control channel, pairing, stats,
-                           usbmuxd client, local forwarder, shared SwiftUI design layer, tests
+                           usbmuxd and adb clients, local forwarder, shared SwiftUI design layer, tests
 iOS/App                    SwiftUI iPhone app
 iOS/Tunnel                 Packet tunnel extension hosting the servers
 macOS/App                  SwiftUI menu bar app
 macOS/Helper               Root helper: utun + tun2socks + routes + DNS
 macOS/Shared               XPC protocol shared by app and helper
+android/                   Kotlin + Jetpack Compose Android app (same protocol, own tests)
 Vendor/HevSocks5Tunnel     Prebuilt tun2socks engine (arm64) + headers
 Vendor/hev-socks5-tunnel   Engine source (MIT), rebuilt with scripts/build-hev.sh
 Vendor/VPNEngines          Prebuilt wireguard-go + openvpn (arm64) for the VPN layer, plus licences
@@ -122,9 +138,15 @@ The SOCKS server can run on the Mac for protocol testing:
 
 ```
 cd Packages/PassthroughCore
-swift test                       # 12 tests: handshake, auth, CONNECT, UDP framing, pairing, control
+swift test                       # handshake, auth, CONNECT, UDP framing, pairing, control, adb parsing
 swift run passthrough-devserver  # then:
 curl --socks5-hostname 127.0.0.1:7890 --proxy-user dev:dev-token https://example.com
+```
+
+With an Android phone or emulator running Passthrough (proxy started, *Pair* sheet open), an opt-in test pairs over adb and fetches a page through the phone:
+
+```
+PASSTHROUGH_ADB_SERIAL=emulator-5554 PASSTHROUGH_ADB_CODE=123456 swift test --filter AndroidEndToEndTests
 ```
 
 Panel previews: `Passthrough.app/Contents/MacOS/Passthrough --snapshot /tmp/panels` renders the menu bar panel in every state, light and dark. On the simulator the iOS app honours `PASSTHROUGH_AUTOSTART=1`, `PASSTHROUGH_SHOW_PAIRING=1` and `PASSTHROUGH_SHOW_SETTINGS=1`.
