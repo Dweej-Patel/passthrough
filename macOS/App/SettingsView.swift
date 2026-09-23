@@ -32,10 +32,20 @@ struct GeneralSettings: View {
         return "When on battery power and keep awake is on, it switches off automatically at this level so a closed laptop can sleep instead of draining.\(now)"
     }
 
+    private var adbText: String {
+        switch session.adbStatus {
+        case .watching: return "Running"
+        case .starting: return "Starting…"
+        case .notInstalled: return "Not installed"
+        case .unavailable: return "Not responding"
+        case .idle: return "Off"
+        }
+    }
+
     var body: some View {
         Form {
             Section {
-                Toggle("Connect automatically when the iPhone is plugged in", isOn: $session.autoConnect)
+                Toggle("Connect automatically when a phone is plugged in", isOn: $session.autoConnect)
                 Toggle("Keep this Mac awake (even with the lid closed)", isOn: Binding(
                     get: { session.keepAwake },
                     set: { session.setKeepAwake($0) }))
@@ -67,6 +77,17 @@ struct GeneralSettings: View {
                 Text("Battery")
             } footer: {
                 Text(batteryFooter)
+            }
+            Section {
+                Toggle("Android phones (via adb)", isOn: $session.androidEnabled)
+                if session.androidEnabled { LabeledContent("adb") { Text(adbText) } }
+                if let hint = session.androidHint {
+                    Label(hint, systemImage: "exclamationmark.triangle.fill").font(.caption).foregroundStyle(PTTheme.warning)
+                }
+            } header: {
+                Text("Android")
+            } footer: {
+                Text("Android phones connect through adb, Android's USB debugging bridge. Install platform-tools (brew install android-platform-tools), turn on USB debugging on the phone, and allow this Mac when it asks.")
             }
             Section("Pairing") {
                 LabeledContent("This Mac") { Text(session.macName) }

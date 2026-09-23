@@ -1,18 +1,28 @@
 # Passthrough
 
-USB-only internet for your Mac, served by your iPhone's own network stack. No Personal Hotspot, no Wi-Fi, no Bluetooth: the only link between the two devices is the cable.
+USB-only internet for your Mac, served by your phone's own network stack. Works with an **iPhone** or an **Android phone**. No hotspot, no Wi-Fi, no Bluetooth: the only link between the two devices is the cable.
 
 ```
-┌──────────── Mac ─────────────┐   USB (usbmuxd)   ┌──────────── iPhone ────────────┐
-│ apps → utunN → tun2socks ────┼──────────────────▶│ SOCKS5 (loopback) → cellular   │
-│          (root helper)       │  127.0.0.1:17890  │ hosted in a VPN extension      │
-└──────────────────────────────┘                   └────────────────────────────────┘
+┌──────────── Mac ─────────────┐        USB         ┌──────────── Phone ─────────────┐
+│ apps → utunN → tun2socks ────┼───────────────────▶│ SOCKS5 (loopback) → cellular   │
+│          (root helper)       │ usbmuxd (iPhone)   │ iPhone: VPN extension          │
+│                              │ adb (Android)      │ Android: foreground service    │
+└──────────────────────────────┘                    └────────────────────────────────┘
 ```
+
+| | iPhone | Android |
+|---|---|---|
+| Phone app | SwiftUI, iOS 17+ | Kotlin + Jetpack Compose, Android 8.0+ |
+| Keeps serving with the screen off | Packet tunnel extension | Foreground service |
+| USB link from the Mac | usbmuxd (built into macOS) | adb (`brew install android-platform-tools`) |
+| Phone setup | Trust this Mac | Turn on USB debugging, allow this Mac |
+
+Both phone apps look the same and speak the same protocol, so the Mac app treats them the same way.
 
 ## How it works
 
-* **iPhone app + Network Extension.** A SOCKS5 server listens on loopback only. It is hosted inside a packet tunnel extension so it keeps running with the screen off (the "tunnel" carries a single unreachable /32, so none of the phone's own traffic is touched). Falls back to foreground hosting if the extension is unavailable.
-* **Mac menu bar app.** Watches usbmuxd (Apple's USB multiplexer, already on every Mac) for an attached iPhone, forwards a loopback port to the phone's SOCKS port over the cable, and pairs with the phone.
+* **Phone app.** A SOCKS5 server listens on the phone's loopback address only, next to a small control channel for pairing and live status. On an iPhone it is hosted inside a packet tunnel extension so it keeps running with the screen off (the "tunnel" carries a single unreachable /32, so none of the phone's own traffic is touched), with foreground hosting as a fallback. On Android it runs in a foreground service with a notification, which likewise routes none of the phone's own traffic.
+* **Mac menu bar app.** Watches for an attached phone: usbmuxd (Apple's USB multiplexer, already on every Mac) for iPhones, and the local adb server for Android phones. It forwards a loopback port to the phone's SOCKS port over the cable and pairs with the phone.
 * **Mac helper (root, launchd daemon).** Creates a `utun` interface, runs an embedded userspace TCP/IP stack (hev-socks5-tunnel + lwIP) that turns every packet into a SOCKS5 stream to the loopback port, installs the default routes, and registers the interface as the primary network service so macOS believes it is online and sends DNS through it.
 * **UDP** (DNS, QUIC, calls) rides inside the TCP stream using the "UDP in TCP" extension the engine speaks natively.
 
@@ -20,8 +30,8 @@ Because the phone opens every connection with its own stack, the carrier sees th
 
 ### Security model
 
-* The phone never listens on Wi-Fi or cellular. usbmuxd only forwards from a Mac the phone has trusted.
-* Each Mac pairs once with a six-digit code shown on the phone (single use, five minutes). The phone issues a 256-bit token; the Mac keeps it in its Keychain, the phone keeps only a SHA-256 hash.
+* The phone never listens on Wi-Fi or cellular. usbmuxd only forwards from a Mac the iPhone has trusted, and adb only from a Mac whose USB debugging key the Android phone has allowed. The Mac ignores adb over Wi-Fi and emulators.
+* Each Mac pairs once with a six-digit code shown on the phone (single use, five minutes). The phone issues a 256-bit token; the Mac keeps it in its Keychain (one per phone), the phone keeps only a SHA-256 hash. On Android that hash is excluded from cloud backup and device transfer.
 * Every SOCKS5 connection authenticates with that token, so no other process on the Mac can ride the proxy.
 * The root helper accepts XPC only from apps signed by your team (an unsigned helper refuses every client), and only ever talks to `127.0.0.1`.
 * Imported OpenVPN profiles are never handed to the root `openvpn` process as-is. They are tokenised with OpenVPN's own rules, checked against an allowlist of client directives with typed arguments, limited to inline certificate blocks, and re-emitted canonically; anything that could run code, touch files, open a control socket, weaken crypto or route around the endpoint pinning is refused with a specific message. The helper also forces AEAD/CBC ciphers only, TLS 1.2+, no compression and `remote-cert-tls server` on the command line.
@@ -32,9 +42,16 @@ Because the phone opens every connection with its own stack, the carrier sees th
 * Profiles, keys and credentials live in the data-protection keychain, this device only.
 * The helper tears the tunnel down automatically if the menu bar app quits or crashes.
 
+## Android specifics
+
+* **Cellular only** asks Android to keep mobile data up alongside Wi-Fi and binds every outbound socket to the cellular network. As on the iPhone, it falls back to any network only after cellular has been unusable for 10 seconds, and the radio pill reads "Wi-Fi (cell down)" while it does.
+* **The Mac starts adb itself.** It looks for platform-tools in the usual places (Homebrew, Android Studio's SDK, `ANDROID_HOME`) and runs `adb start-server` when nothing answers. Settings ▸ General ▸ Android shows whether adb was found and can turn Android support off.
+* **Radio label.** Android files the network type (5G, LTE) under its phone permission, which it describes as making and managing calls. It is therefore opt-in from Settings; without it the label reads "Cellular".
+* **A wake lock** keeps the CPU serving while the proxy runs. It is renewed every minute and released on stop.
+
 ## Flow map
 
-Both apps show a live map of the route traffic takes: Mac ⟶ USB ⟶ iPhone ⟶ radio ⟶ (VPN) ⟶ Internet. Particles ride the wires at a speed and density that follow the current throughput (teal toward the Mac, violet away from it), the VPN node slides in with a lock over the encrypted hop when the layer is on, the Mac gets a pulsing halo while keep-awake holds it up, and the USB hop shows the live rates. It is one `Canvas` driven by a `TimelineView` at up to 30 fps (15 fps when idle, fully paused when nothing is connected), with stateless particle math and no per-particle views, so it costs next to nothing (`PassthroughUI/FlowMap.swift`).
+All the apps show a live map of the route traffic takes: Mac ⟶ USB ⟶ phone ⟶ radio ⟶ (VPN) ⟶ Internet. Particles ride the wires at a speed and density that follow the current throughput (teal toward the Mac, violet away from it), the VPN node slides in with a lock over the encrypted hop when the layer is on, the Mac gets a pulsing halo while keep-awake holds it up, and the USB hop shows the live rates. It is one `Canvas` driven by a `TimelineView` at up to 30 fps (15 fps when idle, fully paused when nothing is connected), with stateless particle math and no per-particle views, so it costs next to nothing (`PassthroughUI/FlowMap.swift`).
 
 ## Keep Mac awake
 
@@ -53,7 +70,7 @@ Caution: a closed, running Mac in a bag can overheat and drain the battery — u
 
 ## VPN layer
 
-A third toggle, under the passthrough switch, wraps everything the Mac sends in one encrypted VPN flow on top of the passthrough. The iPhone and the carrier then see a single UDP (or TCP) stream to a VPN server instead of the Mac's individual connections, which removes the destination and fingerprint signals that could otherwise hint at tethering. It also works without passthrough, over Wi-Fi or Ethernet, like any VPN client.
+A third toggle, under the passthrough switch, wraps everything the Mac sends in one encrypted VPN flow on top of the passthrough. The phone and the carrier then see a single UDP (or TCP) stream to a VPN server instead of the Mac's individual connections, which removes the destination and fingerprint signals that could otherwise hint at tethering. It also works without passthrough, over Wi-Fi or Ethernet, like any VPN client.
 
 Two engines are bundled inside the app (`Contents/MacOS/`), so nothing else needs installing:
 
@@ -81,12 +98,13 @@ Diagnostics: `PASSTHROUGH_NO_AUTOCONNECT=1` launches the app without taking over
 
 ```
 Packages/PassthroughCore   Swift package: SOCKS5 server, control channel, pairing, stats,
-                           usbmuxd client, local forwarder, shared SwiftUI design layer, tests
+                           usbmuxd and adb clients, local forwarder, shared SwiftUI design layer, tests
 iOS/App                    SwiftUI iPhone app
 iOS/Tunnel                 Packet tunnel extension hosting the servers
 macOS/App                  SwiftUI menu bar app
 macOS/Helper               Root helper: utun + tun2socks + routes + DNS
 macOS/Shared               XPC protocol shared by app and helper
+android/                   Kotlin + Jetpack Compose Android app (same protocol, own tests)
 Vendor/HevSocks5Tunnel     Prebuilt tun2socks engine (arm64) + headers
 Vendor/hev-socks5-tunnel   Engine source (MIT), rebuilt with scripts/build-hev.sh
 Vendor/VPNEngines          Prebuilt wireguard-go + openvpn (arm64) for the VPN layer, plus licences
@@ -95,15 +113,29 @@ project.yml                XcodeGen spec that produces Passthrough.xcodeproj
 
 ## Setup
 
-1. `brew install xcodegen` (already done if you built once), then `xcodegen generate`.
-2. The Mac app uses the data-protection keychain, which needs a provisioning profile: build once with `xcodebuild … -allowProvisioningUpdates -allowProvisioningDeviceRegistration` (or run it from Xcode) so your Mac is registered and the profile is created. Copy `Config/Signing.xcconfig.example` to `Config/Signing.xcconfig` and set your Team ID (`DEVELOPMENT_TEAM = XXXXXXXXXX`), then regenerate. `Signing.xcconfig` is gitignored so your Team ID stays local. The `.xcodeproj` is generated (also gitignored); run `xcodegen generate` after cloning.
-3. In Xcode, the bundle IDs default to `dev.dpatel.passthrough.*`. Change `bundleIdPrefix` in `project.yml` if you want your own, and update the same string in `PassthroughProtocol.appGroup`, `TunnelController.providerBundleID`, `HelperConstants`, and the daemon plist.
-4. Xcode will create the App IDs, the App Group (`group.dev.dpatel.passthrough`) and the Network Extension (packet tunnel) capability automatically with automatic signing. If it complains, enable *Network Extensions* and *App Groups* for both iOS identifiers in the developer portal.
-5. **iPhone:** run the `Passthrough` scheme on a real device. Tap the power button. iOS asks once to add the VPN configuration.
-6. **Mac:** run `PassthroughMac`. On first connect macOS asks you to allow the helper under *System Settings ▸ General ▸ Login Items & Extensions ▸ Allow in the Background*.
-7. Plug the iPhone in, trust the Mac if prompted, and flip the switch in the menu bar. The first time it asks for the pairing code shown by the *Pair* button on the phone.
+### Mac (needed for either phone)
 
-The Mac app runs unsandboxed (it needs the usbmuxd socket) with hardened runtime, and installs no persistent network settings: everything lives in the dynamic store and vanishes when the tunnel stops.
+1. `brew install xcodegen`, then `xcodegen generate`. The `.xcodeproj` is generated and gitignored, so run this after cloning.
+2. Copy `Config/Signing.xcconfig.example` to `Config/Signing.xcconfig`, set your Team ID (`DEVELOPMENT_TEAM = XXXXXXXXXX`), and regenerate. `Signing.xcconfig` is gitignored so your Team ID stays local.
+3. The Mac app uses the data-protection keychain, which needs a provisioning profile: build once with `xcodebuild … -allowProvisioningUpdates -allowProvisioningDeviceRegistration` (or run it from Xcode) so your Mac is registered and the profile is created.
+4. Bundle IDs default to `dev.dpatel.passthrough.*`. To use your own, change `bundleIdPrefix` in `project.yml` and the same string in `PassthroughProtocol.appGroup`, `TunnelController.providerBundleID`, `HelperConstants` and the daemon plist.
+5. Run `PassthroughMac`. On first connect macOS asks you to allow the helper under *System Settings ▸ General ▸ Login Items & Extensions ▸ Allow in the Background*.
+
+The Mac app runs unsandboxed (it needs the usbmuxd and adb sockets) with hardened runtime, and installs no persistent network settings: everything lives in the dynamic store and vanishes when the tunnel stops.
+
+### iPhone
+
+1. Xcode creates the App IDs, the App Group (`group.dev.dpatel.passthrough`) and the Network Extension (packet tunnel) capability with automatic signing. If it complains, enable *Network Extensions* and *App Groups* for both iOS identifiers in the developer portal.
+2. Run the `Passthrough` scheme on a real device and tap the power button. iOS asks once to add the VPN configuration.
+3. Plug the iPhone into the Mac, trust the Mac if prompted, and flip the switch in the menu bar. The first time, it asks for the code shown by *Pair* on the phone.
+
+### Android
+
+1. On the Mac: `brew install android-platform-tools`.
+2. Build and install the app with `./gradlew installDebug` in `android/` (JDK 17 and the Android SDK; see [android/README.md](android/README.md)), or open `android/` in Android Studio.
+3. On the phone, enable Developer options (tap *Build number* seven times in *About phone*) and turn on *USB debugging*. The app warns you while it is off.
+4. Plug the phone into the Mac and allow this Mac's USB debugging key when asked.
+5. Tap the power button in Passthrough, then flip the switch in the Mac's menu bar and enter the code shown by *Pair your Mac*.
 
 ## Failure recovery
 
@@ -122,9 +154,15 @@ The SOCKS server can run on the Mac for protocol testing:
 
 ```
 cd Packages/PassthroughCore
-swift test                       # 12 tests: handshake, auth, CONNECT, UDP framing, pairing, control
+swift test                       # handshake, auth, CONNECT, UDP framing, pairing, control, adb parsing
 swift run passthrough-devserver  # then:
 curl --socks5-hostname 127.0.0.1:7890 --proxy-user dev:dev-token https://example.com
+```
+
+With an Android phone or emulator running Passthrough (proxy started, *Pair* sheet open), an opt-in test pairs over adb and fetches a page through the phone:
+
+```
+PASSTHROUGH_ADB_SERIAL=emulator-5554 PASSTHROUGH_ADB_CODE=123456 swift test --filter AndroidEndToEndTests
 ```
 
 Panel previews: `Passthrough.app/Contents/MacOS/Passthrough --snapshot /tmp/panels` renders the menu bar panel in every state, light and dark. On the simulator the iOS app honours `PASSTHROUGH_AUTOSTART=1`, `PASSTHROUGH_SHOW_PAIRING=1` and `PASSTHROUGH_SHOW_SETTINGS=1`.
@@ -136,7 +174,9 @@ Panel previews: `Passthrough.app/Contents/MacOS/Passthrough --snapshot /tmp/pane
 * **Tailscale over the tunnel (verified working, incl. wifi off):** Tailscale's transport rides the phone like everything else, and MagicDNS stays the resolver. One macOS quirk had to be worked around: Tailscale hard-ignores every interface named `utun` when deciding whether the machine has any network (`isInterestingInterface` in `net/netmon/netmon_darwin.go`). With only our `utun` tunnel present (laptop truly remote, wifi off) it would declare itself offline even though the tunnel works. The helper therefore brings up a tiny dummy `feth` ("fake ethernet") interface with a private address whenever the tunnel is active, purely so that check passes. No traffic is routed over it; real traffic still follows the default route into the tunnel. It is torn down when the tunnel stops. Behind carrier NAT, Tailscale connects via DERP relay (expected), which is fully functional.
 * **Reading logs**: if your shell aliases `log`, call `/usr/bin/log show --last 10m --info --predicate 'subsystem == "dev.dpatel.passthrough"'`. Crashes land in `~/Library/Logs/DiagnosticReports` (app) and `/Library/Logs/DiagnosticReports` (helper).
 
-* **"The iPhone refused the connection"**: the proxy is not running on the phone. Start it there.
+* **"The iPhone refused the connection"** / **"The phone refused the connection"**: the proxy is not running on the phone. Start it there.
+* **Android phone not detected**: check Settings ▸ General ▸ Android on the Mac. "Not installed" means adb is missing (`brew install android-platform-tools`). If the panel says to allow USB debugging, unlock the phone and accept the prompt; if it never appears, revoke USB debugging authorisations in Developer options and replug.
+* **Android stops serving after a while**: some manufacturers kill foreground services aggressively. Exempt Passthrough from battery optimisation in the phone's app settings.
 * **Stuck on "Helper needs approval"**: approve it in Login Items, then *Try again*. After rebuilding the helper, the app restarts the stale daemon automatically (version check over XPC).
 * **Mac shows online but DNS fails**: check the helper's log with `log stream --predicate 'process == "PassthroughHelper"'`; the DNS servers are configurable in Settings ▸ Network.
 * **iOS "VPN extension is not available"**: the tunnel provisioning profile is missing the Network Extension entitlement, or you are on the simulator. Foreground hosting still works (keep the app open).
@@ -145,7 +185,9 @@ Panel previews: `Passthrough.app/Contents/MacOS/Passthrough --snapshot /tmp/pane
 ## Known limits
 
 * Apple Silicon only for the prebuilt engine. Run `scripts/build-hev.sh` with `x86_64` flags to add Intel.
-* SOCKS5 `UDP ASSOCIATE` (the standard UDP mode) is not offered because usbmuxd carries TCP only; the UDP-in-TCP extension covers it.
+* SOCKS5 `UDP ASSOCIATE` (the standard UDP mode) is not offered because usbmuxd and adb carry TCP only; the UDP-in-TCP extension covers it.
+* Android needs USB debugging left on while you use Passthrough, which also lets any Mac the phone has authorised run adb commands on it.
+* The Android app has been tested on an Android 15 emulator, not yet across physical phones and manufacturers.
 * The phone's app deliberately does not expose the proxy on Wi-Fi. If you ever want that, it is one flag (`loopbackOnly`), but then do it behind TLS.
 
 ## Contributing

@@ -20,7 +20,7 @@ public final class ControlClient: @unchecked Sendable {
         case disconnected(Error?)
     }
 
-    private let deviceID: Int
+    private let device: PhoneDevice
     private let port: UInt16
     private let identity: Identity
     private let queue = DispatchQueue(label: "dev.dpatel.passthrough.control-client")
@@ -31,15 +31,15 @@ public final class ControlClient: @unchecked Sendable {
     private var closed = false
     private let handler: @Sendable (Event) -> Void
 
-    public init(deviceID: Int, port: UInt16 = PassthroughProtocol.defaultControlPort, identity: Identity, handler: @escaping @Sendable (Event) -> Void) {
-        self.deviceID = deviceID
+    public init(device: PhoneDevice, port: UInt16 = PassthroughProtocol.defaultControlPort, identity: Identity, handler: @escaping @Sendable (Event) -> Void) {
+        self.device = device
         self.port = port
         self.identity = identity
         self.handler = handler
     }
 
     public func connect() {
-        USBMux.connect(deviceID: deviceID, port: port, queue: queue) { [weak self] result in
+        device.connect(port: port, queue: queue) { [weak self] result in
             guard let self else { return }
             self.queue.async {
                 switch result {
@@ -89,7 +89,7 @@ public final class ControlClient: @unchecked Sendable {
         timer.setEventHandler { [weak self] in
             guard let self else { return }
             if Date().timeIntervalSince(self.lastPong) > 20 {
-                self.finish(NSError(domain: "Passthrough", code: 1, userInfo: [NSLocalizedDescriptionKey: "The iPhone stopped responding"]))
+                self.finish(NSError(domain: "Passthrough", code: 1, userInfo: [NSLocalizedDescriptionKey: "The phone stopped responding"]))
                 return
             }
             self.send(ControlEnvelope(t: ControlEnvelope.ping))

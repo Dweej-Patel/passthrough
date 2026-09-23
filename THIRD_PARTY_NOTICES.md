@@ -8,3 +8,5 @@ Third-party components distributed with this repository keep their own licences:
 * Vendor/VPNEngines/bin/openvpn — GPL-2.0 with the OpenSSL linking exception.
   See Vendor/VPNEngines/licenses/OPENVPN-COPYING. Source is fetched and rebuilt by
   scripts/build-vpn-engines.sh.
+* android/app/src/main/res/font/nunito.ttf — Nunito, SIL Open Font License 1.1.
+  See android/licenses/NUNITO-OFL.txt.

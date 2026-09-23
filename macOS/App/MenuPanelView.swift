@@ -49,10 +49,10 @@ struct MenuPanelView: View {
         HStack(spacing: 10) {
             ZStack {
                 RoundedRectangle(cornerRadius: 10, style: .continuous).fill(PTTheme.accent).frame(width: 36, height: 36)
-                Image(systemName: "iphone.gen3").font(.system(size: 18, weight: .semibold)).foregroundStyle(.white)
+                Image(systemName: session.device?.kind == .android ? "smartphone" : "iphone.gen3").font(.system(size: 18, weight: .semibold)).foregroundStyle(.white)
             }
             VStack(alignment: .leading, spacing: 2) {
-                Text(session.phoneStatus?.deviceName ?? (session.device == nil ? "No iPhone" : "iPhone"))
+                Text(session.phoneStatus?.deviceName ?? (session.device == nil ? "No phone" : session.phoneKindName))
                     .font(.headline)
                 Text(statusLine).font(.caption).foregroundStyle(.secondary).lineLimit(1)
                     .contentTransition(.opacity)
@@ -79,11 +79,11 @@ struct MenuPanelView: View {
 
     private var statusLine: String {
         switch session.phase {
-        case .noDevice: return "Plug an iPhone into a USB port"
+        case .noDevice: return "Plug an iPhone or Android phone into USB"
         case .deviceFound: return "Ready to connect over USB"
         case .helperRequired: return "Helper needs approval"
         case .connecting(let step): return step
-        case .pairingRequired: return "Enter the code from the iPhone"
+        case .pairingRequired: return "Enter the code from the \(session.phoneKindName)"
         case .connected:
             let n = session.phoneActiveConnections
             return "Online via USB · \(n) open connection\(n == 1 ? "" : "s")"
@@ -139,11 +139,11 @@ struct MenuPanelView: View {
             if let iface = session.tunnelInterface, let d = session.sessionDuration {
                 return "All traffic routes through \(iface) for \(ByteFormat.duration(d))."
             }
-            return "All traffic routes through the iPhone."
+            return "All traffic routes through the \(session.phoneKindName)."
         case .connecting: return "Setting up the USB link and routing. Open connections will switch over."
         case .error(let message): return message
-        case .noDevice: return "Connect the cable and unlock the iPhone. Trust this Mac if asked."
-        default: return session.hasToken ? "Flip the switch to route this Mac through the iPhone." : "First connection will ask for a pairing code."
+        case .noDevice: return session.androidHint ?? "Connect the cable and unlock the phone. Trust this Mac if asked; Android phones need USB debugging on."
+        default: return session.hasToken ? "Flip the switch to route this Mac through the \(session.phoneKindName)." : "First connection will ask for a pairing code."
         }
     }
 
@@ -158,7 +158,7 @@ struct MenuPanelView: View {
                 }
             }
             .buttonStyle(.plain)
-            .help("Connect as soon as the iPhone is plugged in")
+            .help("Connect as soon as a phone is plugged in")
             Spacer()
             Button { openSettings() } label: { Image(systemName: "gearshape").font(.system(size: 13, weight: .semibold)) }
                 .buttonStyle(.plain).foregroundStyle(.secondary)
@@ -277,7 +277,8 @@ struct FlowCard: View {
         // VPN with passthrough off: it rides the Mac's own network.
         let viaWiFi = session.vpnWanted && !session.phase.isConnected && !session.phase.isBusy
         let localName = session.vpn.underlay.map { $0 == "iPhone" ? "Wi-Fi" : $0 } ?? "Wi-Fi"
-        return FlowMapState(perspective: .mac, macName: session.macName, phoneName: session.phoneStatus?.deviceName ?? "iPhone",
+        return FlowMapState(perspective: .mac, macName: session.macName, phoneName: session.phoneStatus?.deviceName ?? session.phoneKindName,
+                            phoneIcon: session.device?.kind == .android ? "smartphone" : "iphone.gen3",
                             linkUp: session.phase.isConnected || (viaWiFi && session.vpn.isConnected),
                             busy: session.phase.isBusy || (viaWiFi && session.vpn.isBusy),
                             radio: viaWiFi ? nil : session.phoneStatus?.radio,
@@ -310,7 +311,7 @@ struct VPNRow: View {
         case "starting": return "Connecting to \(v.name)…"
         case "connected":
             var parts = [v.name]
-            if let u = v.underlay { parts.append("over \(u)") }
+            if let u = v.underlay { parts.append("over \(u == "iPhone" ? session.phoneKindName : u)") }
             if let d = v.duration { parts.append(ByteFormat.duration(d)) }
             return parts.joined(separator: " · ")
         case "reconnecting": return "Session dropped · reconnecting…"
@@ -414,8 +415,8 @@ struct PairingCard: View {
         PTCard(padding: 16) {
             VStack(spacing: 12) {
                 Image(systemName: "laptopcomputer.and.iphone").font(.system(size: 28, weight: .medium)).foregroundStyle(PTTheme.accent)
-                Text("Pair with \(session.phoneStatus?.deviceName ?? "iPhone")").font(.headline)
-                Text("On the iPhone, tap Pair in Passthrough and type the six digits here.")
+                Text("Pair with \(session.phoneStatus?.deviceName ?? session.phoneKindName)").font(.headline)
+                Text("On the \(session.phoneKindName), tap Pair in Passthrough and type the six digits here.")
                     .font(.caption).foregroundStyle(.secondary).multilineTextAlignment(.center)
                 ZStack {
                     PairingCodeTiles(code: code.padding(toLength: 6, withPad: " ", startingAt: 0), size: 36)

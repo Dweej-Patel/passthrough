@@ -2,13 +2,13 @@ import Foundation
 import Network
 import PassthroughCore
 
-/// Listens on 127.0.0.1 and forwards each accepted stream over usbmuxd to the
-/// iPhone's SOCKS port. The tunnel helper talks to this port; the phone does
+/// Listens on 127.0.0.1 and forwards each accepted stream over the USB cable
+/// (usbmuxd for an iPhone, adb for an Android phone) to the phone's SOCKS port. The tunnel helper talks to this port; the phone does
 /// the real proxying. Counts bytes so the Mac UI can show live throughput.
 public final class LocalForwarder: @unchecked Sendable {
     public let localPort: UInt16
     public let counter = ByteCounter()
-    private let deviceID: Int
+    private let device: PhoneDevice
     private let remotePort: UInt16
     private let queue = DispatchQueue(label: "dev.dpatel.passthrough.forwarder", qos: .userInitiated, attributes: .concurrent)
     private let stateQueue = DispatchQueue(label: "dev.dpatel.passthrough.forwarder.state")
@@ -16,8 +16,8 @@ public final class LocalForwarder: @unchecked Sendable {
     private var pipes: [ObjectIdentifier: Pipe] = [:]
     public var onFailure: (@Sendable (Error) -> Void)?
 
-    public init(deviceID: Int, remotePort: UInt16 = PassthroughProtocol.defaultSOCKSPort, localPort: UInt16 = PassthroughProtocol.defaultLocalSOCKSPort) {
-        self.deviceID = deviceID
+    public init(device: PhoneDevice, remotePort: UInt16 = PassthroughProtocol.defaultSOCKSPort, localPort: UInt16 = PassthroughProtocol.defaultLocalSOCKSPort) {
+        self.device = device
         self.remotePort = remotePort
         self.localPort = localPort
     }
@@ -44,7 +44,7 @@ public final class LocalForwarder: @unchecked Sendable {
         }
         listener.start(queue: queue)
         self.listener = listener
-        ptLog(.info, "Local SOCKS forwarder on 127.0.0.1:\(localPort) → device \(deviceID):\(remotePort)")
+        ptLog(.info, "Local SOCKS forwarder on 127.0.0.1:\(localPort) → \(device.kindName) \(device.label):\(remotePort)")
     }
 
     public func stop() {
@@ -59,7 +59,7 @@ public final class LocalForwarder: @unchecked Sendable {
         stateQueue.async {
             guard Date().timeIntervalSince(self.lastFailureLog) > 2 else { return }
             self.lastFailureLog = Date()
-            ptLog(.warning, "usbmuxd connect failed: \(error.localizedDescription)")
+            ptLog(.warning, "USB connect to the phone failed: \(error.localizedDescription)")
         }
     }
 
@@ -88,7 +88,7 @@ public final class LocalForwarder: @unchecked Sendable {
                 if case .cancelled = state { self?.close() }
             }
             client.start(queue: queue)
-            USBMux.connect(deviceID: forwarder.deviceID, port: forwarder.remotePort, queue: queue) { [weak self] result in
+            forwarder.device.connect(port: forwarder.remotePort, queue: queue) { [weak self] result in
                 guard let self else { return }
                 self.queue.async {
                     switch result {
