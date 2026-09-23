@@ -147,3 +147,11 @@ Panel previews: `Passthrough.app/Contents/MacOS/Passthrough --snapshot /tmp/pane
 * Apple Silicon only for the prebuilt engine. Run `scripts/build-hev.sh` with `x86_64` flags to add Intel.
 * SOCKS5 `UDP ASSOCIATE` (the standard UDP mode) is not offered because usbmuxd carries TCP only; the UDP-in-TCP extension covers it.
 * The phone's app deliberately does not expose the proxy on Wi-Fi. If you ever want that, it is one flag (`loopbackOnly`), but then do it behind TLS.
+
+## Contributing
+
+Pull requests are welcome against the `dev` branch. See [CONTRIBUTING.md](CONTRIBUTING.md) for setup and the checklist, and [SECURITY.md](SECURITY.md) for how to report a vulnerability privately.
+
+## Licence
+
+Passthrough is released under the [MIT License](LICENSE). The vendored engines (hev-socks5-tunnel, lwIP, wireguard-go, OpenVPN) keep their own licences; see `LICENSE` for the list.
