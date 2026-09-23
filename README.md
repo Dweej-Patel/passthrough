@@ -154,4 +154,4 @@ Pull requests are welcome against the `dev` branch. See [CONTRIBUTING.md](CONTRI
 
 ## Licence
 
-Passthrough is released under the [MIT License](LICENSE). The vendored engines (hev-socks5-tunnel, lwIP, wireguard-go, OpenVPN) keep their own licences; see `LICENSE` for the list.
+Passthrough is released under the [MIT License](LICENSE). The vendored engines (hev-socks5-tunnel, lwIP, wireguard-go, OpenVPN) keep their own licences; see [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).

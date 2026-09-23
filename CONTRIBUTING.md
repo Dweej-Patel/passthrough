@@ -5,8 +5,8 @@ process is deliberately light.
 
 ## Ground rules
 
-* `main` and `dev` are protected. Nobody pushes to them directly, including the
-  maintainer. All changes land through pull requests.
+* `main` and `dev` are protected. Contributors cannot push to them directly;
+  all changes land through pull requests reviewed by the maintainer.
 * Open pull requests against **`dev`**. `main` only receives merges from `dev`
   when a release is cut.
 * Keep pull requests focused. One fix or one feature per PR is much easier to
