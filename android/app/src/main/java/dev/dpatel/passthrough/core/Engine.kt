@@ -59,4 +59,22 @@ class PassthroughEngine(
     }
 
     val connectedMacs: List<ConnectedMac> get() = control?.connectedMacs ?: emptyList()
+
+    /** Current counters, connected Macs and start time, in the shape the app shows. */
+    fun stats(): ProviderStats {
+        val snap = counter.snapshot()
+        return ProviderStats(snap.rx, snap.tx, snap.active, snap.totalConnections, connectedMacs, startedAt)
+    }
 }
+
+/** What the service publishes once a second. Same shape as the Swift ProviderStats. */
+data class ProviderStats(
+    val rx: Long = 0,
+    val tx: Long = 0,
+    val active: Int = 0,
+    val totalConnections: Int = 0,
+    val macs: List<ConnectedMac> = emptyList(),
+    val startedAt: Long? = null,
+    /** When this snapshot was taken; makes every tick a distinct value so idle seconds still reach the meter. */
+    val sampledAt: Long = System.currentTimeMillis(),
+)

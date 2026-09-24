@@ -2,9 +2,9 @@ import Foundation
 import Network
 import PassthroughCore
 
-/// Listens on 127.0.0.1 and forwards each accepted stream over the USB cable
-/// (usbmuxd for an iPhone, adb for an Android phone) to the phone's SOCKS port. The tunnel helper talks to this port; the phone does
-/// the real proxying. Counts bytes so the Mac UI can show live throughput.
+/// Listens on 127.0.0.1 and forwards each accepted stream over the phone's
+/// link (see `PhoneLink`) to its SOCKS port. The tunnel helper talks to this
+/// port; the phone does the real proxying. Counts bytes so the Mac UI can show live throughput.
 public final class LocalForwarder: @unchecked Sendable {
     public let localPort: UInt16
     public let counter = ByteCounter()
@@ -90,22 +90,24 @@ public final class LocalForwarder: @unchecked Sendable {
             client.start(queue: queue)
             forwarder.device.connect(port: forwarder.remotePort, queue: queue) { [weak self] result in
                 guard let self else { return }
-                self.queue.async {
-                    switch result {
-                    case .failure(let error):
-                        self.forwarder.logFailure(error)
-                        self.close()
-                    case .success(let device):
-                        guard !self.closed else { device.cancel(); return }
-                        self.device = device
-                        device.stateUpdateHandler = { [weak self] state in
-                            if case .failed = state { self?.close() }
-                            if case .cancelled = state { self?.close() }
-                        }
-                        self.pump(from: self.client, to: device, download: false)
-                        self.pump(from: device, to: self.client, download: true)
-                    }
+                self.queue.async { self.opened(result) }
+            }
+        }
+
+        private func opened(_ result: Result<NWConnection, Error>) {
+            switch result {
+            case .failure(let error):
+                forwarder.logFailure(error)
+                close()
+            case .success(let device):
+                guard !closed else { device.cancel(); return }
+                self.device = device
+                device.stateUpdateHandler = { [weak self] state in
+                    if case .failed = state { self?.close() }
+                    if case .cancelled = state { self?.close() }
                 }
+                pump(from: client, to: device, download: false)
+                pump(from: device, to: client, download: true)
             }
         }
 

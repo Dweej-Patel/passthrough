@@ -6,28 +6,28 @@ import PassthroughUI
 
 /// Settings ▸ VPN: profiles for the VPN layer, NordVPN one-time setup, file import.
 struct VPNSettings: View {
-    @EnvironmentObject private var session: SessionCoordinator
+    @EnvironmentObject private var vpnLayer: VPNLayer
     @State private var showNordSheet = false
     @State private var importError: String?
     @State private var refreshing = false
     @State private var refreshError: String?
 
     private var selection: Binding<String> {
-        Binding(get: { session.activeVPNProfile?.id.uuidString ?? "" },
-                set: { session.vpnActiveProfileID = $0 })
+        Binding(get: { vpnLayer.activeProfile?.id.uuidString ?? "" },
+                set: { vpnLayer.activeProfileID = $0 })
     }
 
     var body: some View {
         Form {
             Section {
-                if session.vpnProfiles.isEmpty {
+                if vpnLayer.profiles.isEmpty {
                     Text("No profiles yet. Add NordVPN with your service credentials, or import a WireGuard .conf / OpenVPN .ovpn file.")
                         .font(.callout).foregroundStyle(.secondary)
                 } else {
                     Picker("Active profile", selection: selection) {
-                        ForEach(session.vpnProfiles) { p in Text(p.name).tag(p.id.uuidString) }
+                        ForEach(vpnLayer.profiles) { p in Text(p.name).tag(p.id.uuidString) }
                     }
-                    .disabled(session.vpnWanted)
+                    .disabled(vpnLayer.isWanted)
                 }
                 HStack {
                     Button("Add NordVPN…") { showNordSheet = true }
@@ -42,54 +42,54 @@ struct VPNSettings: View {
                 Text("The VPN runs on the Mac, on top of the passthrough when it is on: the iPhone and the carrier then see a single encrypted flow to the VPN server. WireGuard and OpenVPN engines are built in; nothing else needs installing.")
             }
 
-            if let profile = session.activeVPNProfile {
+            if let profile = vpnLayer.activeProfile {
                 ProfileDetail(profile: profile, refreshing: $refreshing, refreshError: $refreshError)
             }
 
             Section {
-                Toggle("Kill switch: block all traffic if the VPN drops", isOn: $session.vpnKillSwitch)
-                    .disabled(session.vpnWanted)
-                Toggle("Block IPv6 while the VPN is on", isOn: $session.vpnBlockIPv6)
-                    .disabled(session.vpnWanted)
-                Toggle("Turn the VPN layer on whenever passthrough connects", isOn: $session.vpnAutoStart)
+                Toggle("Kill switch: block all traffic if the VPN drops", isOn: $vpnLayer.killSwitch)
+                    .disabled(vpnLayer.isWanted)
+                Toggle("Block IPv6 while the VPN is on", isOn: $vpnLayer.blockIPv6)
+                    .disabled(vpnLayer.isWanted)
+                Toggle("Turn the VPN layer on whenever passthrough connects", isOn: $vpnLayer.autoStart)
             } header: {
                 Text("Behaviour")
             } footer: {
                 Text("Kill switch: nothing leaves the Mac while the VPN is reconnecting; off, traffic falls back to the passthrough or Wi-Fi meanwhile. Block IPv6: most VPN servers (NordVPN included) carry no IPv6, so without this IPv6 traffic would bypass the VPN and reach the carrier directly; apps fall back to IPv4 instantly. Turn it off only if you need IPv6 and accept that. Both apply on the next VPN start.")
             }
 
-            if !session.vpnProfiles.isEmpty {
+            if !vpnLayer.profiles.isEmpty {
                 Section("All profiles") {
-                    ForEach(session.vpnProfiles) { p in
+                    ForEach(vpnLayer.profiles) { p in
                         HStack {
                             VStack(alignment: .leading, spacing: 2) {
                                 Text(p.name).font(.body)
                                 Text(p.subtitle).font(.caption).foregroundStyle(.secondary)
                             }
                             Spacer()
-                            if p.id == session.activeVPNProfile?.id {
+                            if p.id == vpnLayer.activeProfile?.id {
                                 Image(systemName: "checkmark.circle.fill").foregroundStyle(PTTheme.accent)
                             }
-                            Button(role: .destructive) { session.deleteProfile(p) } label: { Image(systemName: "trash") }
+                            Button(role: .destructive) { vpnLayer.deleteProfile(p) } label: { Image(systemName: "trash") }
                                 .buttonStyle(.borderless)
-                                .disabled(session.vpnWanted && p.id == session.activeVPNProfile?.id)
+                                .disabled(vpnLayer.isWanted && p.id == vpnLayer.activeProfile?.id)
                         }
                     }
                 }
             }
         }
         .formStyle(.grouped)
-        .sheet(isPresented: $showNordSheet) { NordSetupSheet().environmentObject(session) }
+        .sheet(isPresented: $showNordSheet) { NordSetupSheet().environmentObject(vpnLayer) }
     }
 
     private var statusText: String {
-        guard session.vpnWanted else { return "Off" }
-        switch session.vpn.state {
-        case "connected": return "Connected via \(session.vpn.interface ?? "VPN")"
+        guard vpnLayer.isWanted else { return "Off" }
+        switch vpnLayer.status.state {
+        case "connected": return "Connected via \(vpnLayer.status.interface ?? "VPN")"
         case "starting": return "Connecting…"
         case "reconnecting": return "Reconnecting…"
         case "blocked": return "Blocked, reconnecting…"
-        default: return session.vpn.state.capitalized
+        default: return vpnLayer.status.state.capitalized
         }
     }
 
@@ -103,7 +103,7 @@ struct VPNSettings: View {
         panel.allowedContentTypes = types
         panel.message = "Choose a WireGuard .conf or OpenVPN .ovpn profile"
         guard panel.runModal() == .OK, let url = panel.url else { return }
-        do { try session.importProfile(from: url); importError = nil }
+        do { try vpnLayer.importProfile(from: url); importError = nil }
         catch { importError = error.localizedDescription }
     }
 }
@@ -111,7 +111,7 @@ struct VPNSettings: View {
 /// Per-profile details: editable name, area and protocol for NordVPN,
 /// credentials for OpenVPN.
 private struct ProfileDetail: View {
-    @EnvironmentObject private var session: SessionCoordinator
+    @EnvironmentObject private var vpnLayer: VPNLayer
     let profile: VPNProfile
     @Binding var refreshing: Bool
     @Binding var refreshError: String?
@@ -131,7 +131,7 @@ private struct ProfileDetail: View {
 
     var body: some View {
         Section {
-            TextField("Name", text: $name, onCommit: { session.renameProfile(profile, to: name) })
+            TextField("Name", text: $name, onCommit: { vpnLayer.renameProfile(profile, to: name) })
             LabeledContent("Engine") { Text(profile.engine.label) }
             if profile.source == .nordvpn {
                 Picker("Protocol", selection: $tcp) {
@@ -158,10 +158,10 @@ private struct ProfileDetail: View {
                         Task {
                             do {
                                 if nordEdited || name != profile.name {
-                                    try await session.updateNordProfile(profile, countryID: countryID, countryName: country?.name,
+                                    try await vpnLayer.updateNordProfile(profile, countryID: countryID, countryName: country?.name,
                                                                         cityID: cityID, cityName: city?.name, tcp: tcp, name: name)
                                 } else {
-                                    try await session.refreshNordServer(profile)
+                                    try await vpnLayer.refreshNordServer(profile)
                                 }
                             } catch { refreshError = error.localizedDescription }
                             refreshing = false
@@ -179,7 +179,7 @@ private struct ProfileDetail: View {
                 SecureField("Password", text: $password)
                 HStack {
                     Button("Save credentials") {
-                        saveFailed = !session.setCredentials(username: username, password: password, for: profile)
+                        saveFailed = !vpnLayer.setCredentials(username: username, password: password, for: profile)
                         saved = !saveFailed
                     }
                     .disabled(username.isEmpty || password.isEmpty)
@@ -215,7 +215,7 @@ private struct ProfileDetail: View {
 
 /// One-time NordVPN setup: service credentials + protocol + optional country.
 struct NordSetupSheet: View {
-    @EnvironmentObject private var session: SessionCoordinator
+    @EnvironmentObject private var vpnLayer: VPNLayer
     @Environment(\.dismiss) private var dismiss
     @State private var username = ""
     @State private var password = ""
@@ -271,7 +271,7 @@ struct NordSetupSheet: View {
         .frame(width: 440)
         .task {
             countries = (try? await NordVPN.countries()) ?? []
-            if let existing = session.vpnProfiles.first(where: { $0.source == .nordvpn }) {
+            if let existing = vpnLayer.profiles.first(where: { $0.source == .nordvpn }) {
                 let creds = VPNProfileStore.credentials(for: existing)
                 if username.isEmpty { username = creds.username; password = creds.password }
             }
@@ -284,7 +284,7 @@ struct NordSetupSheet: View {
         let city = country?.cities.first { $0.id == cityID }
         Task {
             do {
-                try await session.addNordProfile(username: username, password: password, countryID: countryID, countryName: country?.name,
+                try await vpnLayer.addNordProfile(username: username, password: password, countryID: countryID, countryName: country?.name,
                                                  cityID: cityID, cityName: city?.name, tcp: tcp)
                 dismiss()
             } catch {

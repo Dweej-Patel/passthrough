@@ -179,32 +179,29 @@ public final class ControlServer: @unchecked Sendable {
 
 private final class Peer: @unchecked Sendable {
     private let server: ControlServer
-    private let connection: NWConnection
-    private var buffer = Data()
+    private let channel: ControlConnection
     private var timer: DispatchSourceTimer?
     private var cancelled = false
     private(set) var mac: ConnectedMac?
 
     init(server: ControlServer, connection: NWConnection) {
         self.server = server
-        self.connection = connection
+        self.channel = ControlConnection(connection)
     }
 
     func start(on queue: DispatchQueue) {
-        connection.stateUpdateHandler = { [weak self] state in
-            switch state {
-            case .failed, .cancelled: self?.cancel()
-            default: break
-            }
+        channel.onMessage = { [weak self] message in
+            guard let self else { return }
+            self.channel.send(self.server.handle(message, from: self))
         }
-        connection.start(queue: queue)
-        receive()
+        channel.onClose = { [weak self] _ in self?.cancel() }
+        channel.start(queue: queue)
         // Status broadcast once authenticated.
         let timer = DispatchSource.makeTimerSource(queue: queue)
         timer.schedule(deadline: .now() + 1, repeating: 1)
         timer.setEventHandler { [weak self] in
             guard let self, self.mac != nil else { return }
-            self.send([self.server.statusMessage()])
+            self.channel.send(self.server.statusMessage())
         }
         timer.resume()
         self.timer = timer
@@ -218,40 +215,11 @@ private final class Peer: @unchecked Sendable {
         }
     }
 
-    private func receive() {
-        connection.receive(minimumIncompleteLength: 1, maximumLength: 64 * 1024) { [weak self] data, _, isComplete, error in
-            guard let self else { return }
-            if let data { self.buffer.append(data) }
-            if self.buffer.count > 256 * 1024 { self.cancel(); return }
-            while let newline = self.buffer.firstIndex(of: 0x0A) {
-                let line = self.buffer.subdata(in: self.buffer.startIndex..<newline)
-                self.buffer.removeSubrange(self.buffer.startIndex...newline)
-                guard !line.isEmpty else { continue }
-                if let message = try? ControlEnvelope.decode(line) {
-                    self.send(self.server.handle(message, from: self))
-                } else {
-                    ptLog(.warning, "control: undecodable message")
-                }
-            }
-            if isComplete || error != nil { self.cancel(); return }
-            self.receive()
-        }
-    }
-
-    private func send(_ messages: [ControlEnvelope]) {
-        guard !messages.isEmpty, !cancelled else { return }
-        var payload = Data()
-        for m in messages { if let d = try? m.encodedLine() { payload.append(d) } }
-        connection.send(content: payload, completion: .contentProcessed { [weak self] error in
-            if error != nil { self?.cancel() }
-        })
-    }
-
     func cancel() {
         guard !cancelled else { return }
         cancelled = true
         timer?.cancel()
-        connection.cancel()
+        channel.cancel()
         if let mac { ptLog(.info, "\(mac.name) disconnected") }
         server.remove(self)
     }

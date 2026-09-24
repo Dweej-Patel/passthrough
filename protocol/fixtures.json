@@ -1,0 +1,95 @@
+{
+  "_comment": "Shared by the Swift tests (Packages/PassthroughCore) and the Kotlin tests (android/). Change it and both suites must agree. See protocol/README.md.",
+  "protocolVersion": 1,
+  "ports": {
+    "socks": 7890,
+    "control": 7891
+  },
+  "pairingCodeLifetimeSeconds": 300,
+  "pairingFailures": [
+    "bad_code",
+    "expired",
+    "not_authenticated",
+    "unsupported_version"
+  ],
+  "tokens": [
+    {
+      "token": "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8",
+      "sha256": "ea866a757e4c38babfa8127cbe9a409d3e1f93a00ff1488ff735fcf917afffd0",
+      "wellFormed": true
+    },
+    {
+      "token": "hello",
+      "sha256": "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824",
+      "wellFormed": false
+    },
+    {
+      "token": "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh+",
+      "sha256": "fa54966dd28af6527387ff2f22f031720283cf1711fba141c84ee7624dd734de",
+      "wellFormed": false
+    }
+  ],
+  "messages": [
+    {
+      "line": "{\"t\":\"hello\",\"protocolVersion\":1,\"clientID\":\"8F0C2A51-4C8E-4D3B-9B1E-2F5C8A7D6E10\",\"name\":\"MacBook Pro\",\"token\":\"AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8\"}"
+    },
+    {
+      "line": "{\"t\":\"welcome\",\"protocolVersion\":1,\"paired\":false,\"socksPort\":7890,\"deviceName\":\"Pixel 8\",\"radio\":\"5G\",\"carrier\":\"T-Mobile\",\"battery\":0.82,\"hosting\":\"background\"}"
+    },
+    {
+      "line": "{\"t\":\"pair\",\"clientID\":\"8F0C2A51-4C8E-4D3B-9B1E-2F5C8A7D6E10\",\"name\":\"MacBook Pro\",\"code\":\"042917\"}"
+    },
+    {
+      "line": "{\"t\":\"paired\",\"token\":\"AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8\",\"socksPort\":7890,\"deviceName\":\"iPhone\"}"
+    },
+    {
+      "line": "{\"t\":\"error\",\"reason\":\"bad_code\"}"
+    },
+    {
+      "line": "{\"t\":\"ping\"}"
+    },
+    {
+      "line": "{\"t\":\"pong\"}"
+    },
+    {
+      "line": "{\"t\":\"status\",\"deviceName\":\"iPhone\",\"radio\":\"LTE\",\"battery\":0.5,\"hosting\":\"foreground\",\"activeConnections\":3,\"rxBytes\":5000000000,\"txBytes\":12,\"timestamp\":1758062400.5}"
+    }
+  ],
+  "rates": [
+    {
+      "bytesPerSecond": 0,
+      "value": "0",
+      "unit": "B/s"
+    },
+    {
+      "bytesPerSecond": 950,
+      "value": "950",
+      "unit": "B/s"
+    },
+    {
+      "bytesPerSecond": 1500,
+      "value": "1.50",
+      "unit": "KB/s"
+    },
+    {
+      "bytesPerSecond": 12400000,
+      "value": "12.4",
+      "unit": "MB/s"
+    },
+    {
+      "bytesPerSecond": 250000000,
+      "value": "250",
+      "unit": "MB/s"
+    }
+  ],
+  "durations": [
+    {
+      "seconds": 65,
+      "text": "01:05"
+    },
+    {
+      "seconds": 3665,
+      "text": "1:01:05"
+    }
+  ]
+}

@@ -11,16 +11,31 @@ struct PassthroughMacApp: App {
         MenuBarExtra {
             MenuPanelView()
                 .environmentObject(session)
+                .environmentObject(session.vpnLayer)
+                .environmentObject(session.keepAwake)
         } label: {
-            // Four states: phone shows passthrough on/off, cup shows keep-awake on/off.
-            Image(nsImage: MenuBarIcon.image(passthroughOn: session.phase.isConnected, vpnOn: session.vpn.isConnected, keepAwake: session.keepAwake))
+            MenuBarLabel(session: session, vpnLayer: session.vpnLayer, keepAwake: session.keepAwake)
         }
         .menuBarExtraStyle(.window)
 
         Settings {
             SettingsView()
                 .environmentObject(session)
+                .environmentObject(session.vpnLayer)
+                .environmentObject(session.keepAwake)
         }
+    }
+}
+
+/// The menu-bar icon: the phone shows passthrough on/off, with badges for the
+/// VPN layer and keep-awake. Observes all three so any of them redraws it.
+private struct MenuBarLabel: View {
+    @ObservedObject var session: SessionCoordinator
+    @ObservedObject var vpnLayer: VPNLayer
+    @ObservedObject var keepAwake: KeepAwakeController
+
+    var body: some View {
+        Image(nsImage: MenuBarIcon.image(passthroughOn: session.phase.isConnected, vpnOn: vpnLayer.status.isConnected, keepAwake: keepAwake.isOn))
     }
 }
 

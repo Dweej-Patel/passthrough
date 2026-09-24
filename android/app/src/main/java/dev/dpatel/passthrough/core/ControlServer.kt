@@ -2,7 +2,6 @@ package dev.dpatel.passthrough.core
 
 import java.io.ByteArrayOutputStream
 import java.io.IOException
-import java.io.InputStream
 import java.io.OutputStream
 import java.net.InetAddress
 import java.net.InetSocketAddress
@@ -147,9 +146,9 @@ class ControlServer(
             try {
                 socket.tcpNoDelay = true
                 out = socket.getOutputStream()
-                val input = socket.getInputStream()
+                val lines = LineReader(socket.getInputStream())
                 while (!cancelled.get()) {
-                    val line = readLine(input) ?: break
+                    val line = lines.next() ?: break
                     if (line.isBlank()) continue
                     val message = try { ControlEnvelope.decode(line) } catch (_: Exception) {
                         ptLog(PtLog.Level.WARNING, "control: undecodable message"); continue
@@ -159,18 +158,6 @@ class ControlServer(
             } catch (_: IOException) {
             } finally {
                 cancel()
-            }
-        }
-
-        /** Reads one newline-terminated line, capped so a peer can't balloon memory. */
-        private fun readLine(input: InputStream): String? {
-            val buf = ByteArrayOutputStream()
-            while (true) {
-                val b = input.read()
-                if (b < 0) return null
-                if (b == '\n'.code) return buf.toString(Charsets.UTF_8.name())
-                buf.write(b)
-                if (buf.size() > 256 * 1024) throw IOException("control line too long")
             }
         }
 

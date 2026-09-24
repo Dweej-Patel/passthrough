@@ -92,15 +92,30 @@ final class HelperClient {
         connection = nil
     }
 
-    func version() async -> String? {
+    /// One XPC round trip: `fallback` when the helper is unreachable or silent for `timeout` seconds.
+    private func call<T>(timeout: Double, fallback: T, _ body: (PassthroughHelperProtocol, @escaping (T) -> Void) -> Void) async -> T {
         await withCheckedContinuation { cont in
-            guard let proxy = proxy() else { cont.resume(returning: nil); return }
+            guard let proxy = proxy() else { cont.resume(returning: fallback); return }
             let done = Locked(false)
-            proxy.getVersion { v in if !done.exchange(true) { cont.resume(returning: v) } }
-            DispatchQueue.global().asyncAfter(deadline: .now() + 4) { if !done.exchange(true) { cont.resume(returning: nil) } }
+            let finish: (T) -> Void = { value in if !done.exchange(true) { cont.resume(returning: value) } }
+            body(proxy, finish)
+            DispatchQueue.global().asyncAfter(deadline: .now() + timeout) { finish(fallback) }
         }
     }
 
+    /// A round trip that reports success or the helper's reason for failing.
+    private func start(timeout: Double, _ body: (PassthroughHelperProtocol, @escaping (Bool, String) -> Void) -> Void) async throws -> String {
+        let result: Result<String, HelperError> = await call(timeout: timeout, fallback: .failure(.unreachable)) { proxy, finish in
+            body(proxy) { ok, detail in finish(ok ? .success(detail) : .failure(.startFailed(detail))) }
+        }
+        return try result.get()
+    }
+
+    func version() async -> String? {
+        await call(timeout: 4, fallback: nil) { proxy, finish in proxy.getVersion { finish($0) } }
+    }
+
+    /// Returns the tunnel's interface name.
     func startTunnel(_ config: TunnelConfig) async throws -> String {
         let dict: [String: Any] = [
             TunnelConfigKey.socksPort: Int(config.socksPort),
@@ -110,28 +125,11 @@ final class HelperClient {
             TunnelConfigKey.dns: config.dns,
             TunnelConfigKey.mtu: config.mtu,
         ]
-        return try await withCheckedThrowingContinuation { cont in
-            guard let proxy = proxy() else {
-                cont.resume(throwing: HelperError.unreachable); return
-            }
-            let done = Locked(false)
-            proxy.startTunnel(configuration: dict) { ok, detail in
-                guard !done.exchange(true) else { return }
-                ok ? cont.resume(returning: detail) : cont.resume(throwing: HelperError.startFailed(detail))
-            }
-            DispatchQueue.global().asyncAfter(deadline: .now() + 15) {
-                if !done.exchange(true) { cont.resume(throwing: HelperError.unreachable) }
-            }
-        }
+        return try await start(timeout: 15) { proxy, reply in proxy.startTunnel(configuration: dict, reply: reply) }
     }
 
     func stopTunnel() async {
-        await withCheckedContinuation { cont in
-            guard let proxy = proxy() else { cont.resume(); return }
-            let done = Locked(false)
-            proxy.stopTunnel { if !done.exchange(true) { cont.resume() } }
-            DispatchQueue.global().asyncAfter(deadline: .now() + 6) { if !done.exchange(true) { cont.resume() } }
-        }
+        await call(timeout: 6, fallback: ()) { proxy, finish in proxy.stopTunnel { finish(()) } }
     }
 
     struct VPNConfig {
@@ -154,44 +152,19 @@ final class HelperClient {
             VPNConfigKey.killSwitch: config.killSwitch,
             VPNConfigKey.blockIPv6: config.blockIPv6,
         ]
-        try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
-            guard let proxy = proxy() else { cont.resume(throwing: HelperError.unreachable); return }
-            let done = Locked(false)
-            proxy.startVPN(configuration: dict) { ok, detail in
-                guard !done.exchange(true) else { return }
-                ok ? cont.resume() : cont.resume(throwing: HelperError.startFailed(detail))
-            }
-            DispatchQueue.global().asyncAfter(deadline: .now() + 20) {
-                if !done.exchange(true) { cont.resume(throwing: HelperError.unreachable) }
-            }
-        }
+        _ = try await start(timeout: 20) { proxy, reply in proxy.startVPN(configuration: dict, reply: reply) }
     }
 
     func stopVPN() async {
-        await withCheckedContinuation { cont in
-            guard let proxy = proxy() else { cont.resume(); return }
-            let done = Locked(false)
-            proxy.stopVPN { if !done.exchange(true) { cont.resume() } }
-            DispatchQueue.global().asyncAfter(deadline: .now() + 8) { if !done.exchange(true) { cont.resume() } }
-        }
+        await call(timeout: 8, fallback: ()) { proxy, finish in proxy.stopVPN { finish(()) } }
     }
 
     func setDisableSleep(_ on: Bool) async -> Bool {
-        await withCheckedContinuation { cont in
-            guard let proxy = proxy() else { cont.resume(returning: false); return }
-            let done = Locked(false)
-            proxy.setDisableSleep(on) { ok in if !done.exchange(true) { cont.resume(returning: ok) } }
-            DispatchQueue.global().asyncAfter(deadline: .now() + 5) { if !done.exchange(true) { cont.resume(returning: false) } }
-        }
+        await call(timeout: 5, fallback: false) { proxy, finish in proxy.setDisableSleep(on) { finish($0) } }
     }
 
     func status() async -> [String: Any] {
-        await withCheckedContinuation { cont in
-            guard let proxy = proxy() else { cont.resume(returning: [:]); return }
-            let done = Locked(false)
-            proxy.getStatus { s in if !done.exchange(true) { cont.resume(returning: s) } }
-            DispatchQueue.global().asyncAfter(deadline: .now() + 4) { if !done.exchange(true) { cont.resume(returning: [:]) } }
-        }
+        await call(timeout: 4, fallback: [:]) { proxy, finish in proxy.getStatus { finish($0) } }
     }
 
     func quitHelper() {
@@ -201,6 +174,39 @@ final class HelperClient {
         // invalidation handler clears our reference), so the next call respawns
         // the updated binary via launchd.
         proxy()?.quit()
+    }
+
+    /// Registers the helper if it never was; true once launchd runs it.
+    func ensureRegistered() -> Bool {
+        if availability == .notRegistered { _ = register() }
+        return availability == .ready
+    }
+
+    /// Restarts a helper older than this app so it runs the bundled binary.
+    /// With `mayReregister`, also moves a registration made by another copy of
+    /// the app (only safe while nothing routes through the helper).
+    func ensureCurrent(mayReregister: Bool) async {
+        guard availability == .ready, let v = await version() else { return }
+        var restart = false
+        if v != HelperConstants.version {
+            ptLog(.warning, "Helper version \(v) ≠ \(HelperConstants.version); restarting helper")
+            restart = true
+        }
+        if mayReregister, Bundle.main.bundleURL.path.hasPrefix("/Applications/"),
+           let path = await status()[TunnelStatusKey.helperPath] as? String, await reregisterIfStale(helperPath: path) {
+            restart = true
+        }
+        guard restart else { return }
+        quitHelper()
+        // Wait for launchd to respawn the new binary before we drive it.
+        for _ in 0..<10 {
+            try? await Task.sleep(for: .milliseconds(400))
+            if let nv = await version(), nv == HelperConstants.version {
+                ptLog(.info, "Helper upgraded to \(nv)")
+                return
+            }
+        }
+        ptLog(.warning, "Helper did not report the expected version after restart")
     }
 
     enum HelperError: LocalizedError {
@@ -213,11 +219,4 @@ final class HelperClient {
             }
         }
     }
-}
-
-final class Locked<T>: @unchecked Sendable {
-    private var value: T
-    private let lock = NSLock()
-    init(_ value: T) { self.value = value }
-    func exchange(_ new: T) -> T { lock.lock(); defer { lock.unlock() }; let old = value; value = new; return old }
 }

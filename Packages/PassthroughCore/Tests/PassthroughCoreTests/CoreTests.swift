@@ -1,7 +1,7 @@
 import XCTest
 import Network
 @testable import PassthroughCore
-@testable import USBMux
+@testable import PhoneTransport
 
 /// Minimal blocking TCP client for exercising the servers from tests.
 final class TestClient {

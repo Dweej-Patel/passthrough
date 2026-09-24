@@ -16,21 +16,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         let defaults = UserDefaults(suiteName: PassthroughProtocol.appGroup) ?? .standard
         ptLog(.info, "Extension starting")
         let config = (protocolConfiguration as? NETunnelProviderProtocol)?.providerConfiguration ?? [:]
-        var serviceOptions = PassthroughService.Options()
-        serviceOptions.cellularOnly = config["cellularOnly"] as? Bool ?? false
-        serviceOptions.allowUDP = config["allowUDP"] as? Bool ?? true
-        serviceOptions.socksPort = UInt16(config["socksPort"] as? Int ?? Int(PassthroughProtocol.defaultSOCKSPort))
-        serviceOptions.controlPort = UInt16(config["controlPort"] as? Int ?? Int(PassthroughProtocol.defaultControlPort))
-
-        let service = PassthroughService(registry: PairingRegistry(defaults: defaults), options: serviceOptions) {
-            DeviceStatus(deviceName: defaults.string(forKey: SharedKeys.deviceName) ?? "iPhone",
-                         radio: defaults.string(forKey: SharedKeys.radio),
-                         battery: defaults.object(forKey: SharedKeys.battery) as? Double,
-                         hosting: "background")
-        }
-
-        service.onCellularUsableChange = { usable in defaults.set(!usable, forKey: SharedKeys.cellularFallback) }
-        defaults.set(false, forKey: SharedKeys.cellularFallback)
+        let service = PassthroughService.sharing(defaults, options: .init(providerConfiguration: config), hosting: "background")
         let settings = NEPacketTunnelNetworkSettings(tunnelRemoteAddress: "10.255.255.1")
         let ipv4 = NEIPv4Settings(addresses: ["10.255.255.2"], subnetMasks: ["255.255.255.255"])
         ipv4.includedRoutes = [NEIPv4Route(destinationAddress: "10.255.255.1", subnetMask: "255.255.255.255")]
@@ -70,10 +56,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
 
     override func handleAppMessage(_ messageData: Data, completionHandler: ((Data?) -> Void)?) {
         guard let service else { completionHandler?(nil); return }
-        let snap = service.counter.snapshot()
-        let stats = ProviderStats(rx: snap.rx, tx: snap.tx, active: snap.active, totalConnections: snap.totalConnections,
-                                  macs: service.connectedMacs, startedAt: service.startedAt)
-        completionHandler?(try? JSONEncoder().encode(stats))
+        completionHandler?(try? JSONEncoder().encode(service.stats()))
     }
 
     override func sleep(completionHandler: @escaping () -> Void) { completionHandler() }

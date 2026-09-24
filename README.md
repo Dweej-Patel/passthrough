@@ -97,11 +97,14 @@ Diagnostics: `PASSTHROUGH_NO_AUTOCONNECT=1` launches the app without taking over
 ## Layout
 
 ```
-Packages/PassthroughCore   Swift package: SOCKS5 server, control channel, pairing, stats,
-                           usbmuxd and adb clients, local forwarder, shared SwiftUI design layer, tests
+protocol/                  Wire protocol spec and fixtures.json, read by both the Swift and Kotlin tests
+Packages/PassthroughCore   Swift package:
+  PassthroughCore            SOCKS5 server, control channel, pairing, stats (the phone side)
+  PhoneTransport             phone links (usbmuxd, adb), device watchers, local forwarder, control client (the Mac side)
+  PassthroughUI              shared SwiftUI design layer
 iOS/App                    SwiftUI iPhone app
 iOS/Tunnel                 Packet tunnel extension hosting the servers
-macOS/App                  SwiftUI menu bar app
+macOS/App                  SwiftUI menu bar app: Session/, VPN/, Power/, Views/
 macOS/Helper               Root helper: utun + tun2socks + routes + DNS
 macOS/Shared               XPC protocol shared by app and helper
 android/                   Kotlin + Jetpack Compose Android app (same protocol, own tests)
@@ -110,6 +113,20 @@ Vendor/hev-socks5-tunnel   Engine source (MIT), rebuilt with scripts/build-hev.s
 Vendor/VPNEngines          Prebuilt wireguard-go + openvpn (arm64) for the VPN layer, plus licences
 project.yml                XcodeGen spec that produces Passthrough.xcodeproj
 ```
+
+### Seams
+
+The code is built around a few small interfaces, so a new phone, link or host plugs in without touching the rest:
+
+| Interface | Implementations | What it hides |
+|-----------|-----------------|---------------|
+| `PhoneLink` (Swift) | `USBMuxLink`, `ADBLink` | How the Mac opens a stream to a port on the phone |
+| `DeviceWatcher` (Swift) | `USBMuxWatcher`, `ADBWatcher` | How phones are found; `DeviceDirectory` merges them |
+| `ControlConnection` / `LineBuffer` (Swift), `LineReader` (Kotlin) | shared by both ends | Control-channel framing |
+| `ProxyHost` (iOS) | `ExtensionHost`, `InProcessHost` | Whether the proxy runs in the VPN extension or the app |
+| `Egress` / `EgressProvider` (Kotlin) | `DefaultEgress`, `CellularEgressProvider` | Which network outbound connections leave on |
+
+On the Mac, `SessionCoordinator` runs the passthrough link and owns two independent parts, `VPNLayer` and `KeepAwakeController`, which the views observe directly.
 
 ## Setup
 
@@ -154,7 +171,7 @@ The SOCKS server can run on the Mac for protocol testing:
 
 ```
 cd Packages/PassthroughCore
-swift test                       # handshake, auth, CONNECT, UDP framing, pairing, control, adb parsing
+swift test                       # handshake, auth, CONNECT, UDP framing, pairing, control, adb parsing, protocol fixtures
 swift run passthrough-devserver  # then:
 curl --socks5-hostname 127.0.0.1:7890 --proxy-user dev:dev-token https://example.com
 ```

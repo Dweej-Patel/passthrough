@@ -1,6 +1,31 @@
 import Foundation
 import CryptoKit
 
+/// The secret a phone issues each Mac it pairs with: 32 random bytes as
+/// unpadded URL-safe base64. The phone keeps only its SHA-256.
+public enum PairingToken {
+    public static let length = 43
+
+    public static func generate() -> String {
+        var bytes = [UInt8](repeating: 0, count: 32)
+        _ = SecRandomCopyBytes(kSecRandomDefault, bytes.count, &bytes)
+        return Data(bytes).base64EncodedString()
+            .replacingOccurrences(of: "+", with: "-")
+            .replacingOccurrences(of: "/", with: "_")
+            .replacingOccurrences(of: "=", with: "")
+    }
+
+    /// Lowercase hex SHA-256, the form the phone stores.
+    public static func hash(_ token: String) -> String {
+        SHA256.hash(data: Data(token.utf8)).map { String(format: "%02x", $0) }.joined()
+    }
+
+    /// Whether `token` has the shape `generate()` produces; anything else was not issued by a phone.
+    public static func isWellFormed(_ token: String) -> Bool {
+        token.count == length && token.allSatisfy { $0.isASCII && ($0.isLetter || $0.isNumber || $0 == "-" || $0 == "_") }
+    }
+}
+
 /// A Mac that has been granted access to this iPhone's proxy.
 public struct PairedClient: Codable, Identifiable, Equatable, Sendable {
     public var id: String
@@ -27,19 +52,6 @@ public final class PairingRegistry: @unchecked Sendable {
 
     public init(defaults: UserDefaults) {
         self.defaults = defaults
-    }
-
-    public static func hash(token: String) -> String {
-        SHA256.hash(data: Data(token.utf8)).map { String(format: "%02x", $0) }.joined()
-    }
-
-    public static func makeToken() -> String {
-        var bytes = [UInt8](repeating: 0, count: 32)
-        _ = SecRandomCopyBytes(kSecRandomDefault, bytes.count, &bytes)
-        return Data(bytes).base64EncodedString()
-            .replacingOccurrences(of: "+", with: "-")
-            .replacingOccurrences(of: "/", with: "_")
-            .replacingOccurrences(of: "=", with: "")
     }
 
     public var clients: [PairedClient] {
@@ -115,10 +127,10 @@ public final class PairingRegistry: @unchecked Sendable {
         }
         guard clientID.count <= 64, name.count <= 64 else { return .failure(.badCode) }
 
-        let token = Self.makeToken()
+        let token = PairingToken.generate()
         lock.lock()
         var list = loadClients().filter { $0.id != clientID }
-        list.append(PairedClient(id: clientID, name: name, tokenHash: Self.hash(token: token), pairedAt: Date(), lastSeen: Date()))
+        list.append(PairedClient(id: clientID, name: name, tokenHash: PairingToken.hash(token), pairedAt: Date(), lastSeen: Date()))
         save(list)
         defaults.removeObject(forKey: Self.codeKey)
         defaults.removeObject(forKey: Self.codeExpiryKey)
@@ -131,7 +143,7 @@ public final class PairingRegistry: @unchecked Sendable {
     public func verify(clientID: String, token: String) -> Bool {
         lock.lock(); defer { lock.unlock() }
         guard let client = loadClients().first(where: { $0.id == clientID }) else { return false }
-        return constantTimeEquals(client.tokenHash, Self.hash(token: token))
+        return constantTimeEquals(client.tokenHash, PairingToken.hash(token))
     }
 
     public func touch(clientID: String) {

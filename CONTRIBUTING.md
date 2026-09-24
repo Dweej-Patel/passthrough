@@ -49,8 +49,10 @@ cd android
 ./gradlew testDebugUnitTest lintDebug assembleDebug
 ```
 
-The Swift and Kotlin sides speak the same wire protocol. If you change a
-message, a port or the pairing rules, change both and their tests.
+The Swift and Kotlin sides speak the same wire protocol, described in
+[protocol/README.md](protocol/README.md). Both test suites check themselves
+against `protocol/fixtures.json`: if you change a message, a port or the
+pairing rules, update the fixtures first, then make both suites pass.
 
 ## Things to keep in mind
 

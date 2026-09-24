@@ -217,37 +217,37 @@ struct ConnectToggle: View {
 
 /// A quick toggle to keep the Mac awake for long sessions.
 struct KeepAwakeRow: View {
-    @EnvironmentObject private var session: SessionCoordinator
+    @EnvironmentObject private var keepAwake: KeepAwakeController
     private var keepAwakeSubtitle: String {
-        guard session.keepAwake else { return "Sleeps normally" }
-        if !session.lidCloseHeld { return "Idle sleep held (approve helper for lid-close)" }
-        if session.batteryAutoOff, session.battery.hasBattery, !session.battery.isOnAC {
-            return "Awake with lid closed · off at \(session.batteryAutoOffThreshold)%"
+        guard keepAwake.isOn else { return "Sleeps normally" }
+        if !keepAwake.lidCloseHeld { return "Idle sleep held (approve helper for lid-close)" }
+        if keepAwake.batteryAutoOff, keepAwake.battery.hasBattery, !keepAwake.battery.isOnAC {
+            return "Awake with lid closed · off at \(keepAwake.batteryAutoOffThreshold)%"
         }
         return "Stays awake even with the lid closed"
     }
     var body: some View {
         VStack(spacing: 0) {
-        Button { session.setKeepAwake(!session.keepAwake) } label: {
+        Button { keepAwake.set(!keepAwake.isOn) } label: {
             HStack(spacing: 10) {
-                Image(systemName: session.keepAwake ? "cup.and.saucer.fill" : "cup.and.saucer")
+                Image(systemName: keepAwake.isOn ? "cup.and.saucer.fill" : "cup.and.saucer")
                     .font(.system(size: 14, weight: .semibold))
-                    .foregroundStyle(session.keepAwake ? AnyShapeStyle(PTTheme.accent) : AnyShapeStyle(Color.secondary))
+                    .foregroundStyle(keepAwake.isOn ? AnyShapeStyle(PTTheme.accent) : AnyShapeStyle(Color.secondary))
                     .frame(width: 20)
                 VStack(alignment: .leading, spacing: 1) {
                     Text("Keep Mac awake").font(.subheadline.weight(.medium))
                     Text(keepAwakeSubtitle)
-                        .font(.caption2).foregroundStyle(session.keepAwake && !session.lidCloseHeld ? PTTheme.warning : .secondary)
+                        .font(.caption2).foregroundStyle(keepAwake.isOn && !keepAwake.lidCloseHeld ? PTTheme.warning : .secondary)
                 }
                 Spacer()
-                MiniSwitch(isOn: session.keepAwake)
+                MiniSwitch(isOn: keepAwake.isOn)
             }
             .padding(.horizontal, 12).padding(.vertical, 9)
             .background(Color.primary.opacity(0.04), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
         }
         .buttonStyle(.plain)
         .help("Keeps the Mac awake for long sessions, including with the lid closed. Warning: a closed, running Mac in a bag can overheat and drain the battery.")
-        if let reason = session.keepAwakeBlockedReason {
+        if let reason = keepAwake.blockedReason {
             HStack(alignment: .top, spacing: 6) {
                 Image(systemName: "exclamationmark.triangle.fill").font(.caption2)
                 Text(reason).font(.caption2)
@@ -258,31 +258,33 @@ struct KeepAwakeRow: View {
             .transition(.opacity)
         }
         }
-        .animation(.easeInOut(duration: 0.2), value: session.keepAwakeBlockedReason)
+        .animation(.easeInOut(duration: 0.2), value: keepAwake.blockedReason)
     }
 }
 
 /// Live picture of the route traffic takes right now.
 struct FlowCard: View {
     @EnvironmentObject private var session: SessionCoordinator
+    @EnvironmentObject private var vpnLayer: VPNLayer
+    @EnvironmentObject private var keepAwake: KeepAwakeController
 
     private var flowState: FlowMapState {
         var vpn: FlowMapState.VPN?
-        if session.vpnWanted {
-            let v = session.vpn
-            vpn = FlowMapState.VPN(name: v.name.isEmpty ? (session.activeVPNProfile?.name ?? "VPN") : v.name,
-                                   engine: v.engineLabel.isEmpty ? (session.activeVPNProfile?.engine.label ?? "VPN") : v.engineLabel,
+        if vpnLayer.isWanted {
+            let v = vpnLayer.status
+            vpn = FlowMapState.VPN(name: v.name.isEmpty ? (vpnLayer.activeProfile?.name ?? "VPN") : v.name,
+                                   engine: v.engineLabel.isEmpty ? (vpnLayer.activeProfile?.engine.label ?? "VPN") : v.engineLabel,
                                    connected: v.isConnected, blocked: v.state == "blocked")
         }
         // VPN with passthrough off: it rides the Mac's own network.
-        let viaWiFi = session.vpnWanted && !session.phase.isConnected && !session.phase.isBusy
-        let localName = session.vpn.underlay.map { $0 == "iPhone" ? "Wi-Fi" : $0 } ?? "Wi-Fi"
+        let viaWiFi = vpnLayer.isWanted && !session.phase.isConnected && !session.phase.isBusy
+        let localName = vpnLayer.status.underlay.map { $0 == "iPhone" ? "Wi-Fi" : $0 } ?? "Wi-Fi"
         return FlowMapState(perspective: .mac, macName: session.macName, phoneName: session.phoneStatus?.deviceName ?? session.phoneKindName,
                             phoneIcon: session.device?.kind == .android ? "smartphone" : "iphone.gen3",
-                            linkUp: session.phase.isConnected || (viaWiFi && session.vpn.isConnected),
-                            busy: session.phase.isBusy || (viaWiFi && session.vpn.isBusy),
+                            linkUp: session.phase.isConnected || (viaWiFi && vpnLayer.status.isConnected),
+                            busy: session.phase.isBusy || (viaWiFi && vpnLayer.status.isBusy),
                             radio: viaWiFi ? nil : session.phoneStatus?.radio,
-                            vpn: vpn, keepAwake: session.keepAwake, downRate: session.meter.downRate, upRate: session.meter.upRate,
+                            vpn: vpn, keepAwake: keepAwake.isOn, downRate: session.meter.downRate, upRate: session.meter.upRate,
                             activeConnections: session.phoneActiveConnections, viaWiFi: viaWiFi, localNetworkName: localName)
     }
 
@@ -296,15 +298,16 @@ struct FlowCard: View {
 /// The VPN layer toggle: one encrypted flow on top of the passthrough.
 struct VPNRow: View {
     @EnvironmentObject private var session: SessionCoordinator
+    @EnvironmentObject private var vpnLayer: VPNLayer
     @Environment(\.openSettings) private var openSettings
 
-    private var hasProfile: Bool { session.activeVPNProfile != nil }
-    private var isOn: Bool { session.vpnWanted }
+    private var hasProfile: Bool { vpnLayer.activeProfile != nil }
+    private var isOn: Bool { vpnLayer.isWanted }
 
     private var subtitle: String {
-        let v = session.vpn
+        let v = vpnLayer.status
         guard isOn else {
-            if let p = session.activeVPNProfile { return "Off · \(p.name)" }
+            if let p = vpnLayer.activeProfile { return "Off · \(p.name)" }
             return "No profile yet · set one up in Settings"
         }
         switch v.state {
@@ -316,14 +319,14 @@ struct VPNRow: View {
             return parts.joined(separator: " · ")
         case "reconnecting": return "Session dropped · reconnecting…"
         case "blocked": return "Down · traffic blocked · reconnecting…"
-        case "failed": return session.vpnKillSwitch ? "Failed · traffic blocked · turn off to release" : "Failed"
+        case "failed": return vpnLayer.killSwitch ? "Failed · traffic blocked · turn off to release" : "Failed"
         default: return v.name
         }
     }
 
     private var tint: Color {
         guard isOn else { return .secondary }
-        switch session.vpn.state {
+        switch vpnLayer.status.state {
         case "connected": return PTTheme.success
         case "blocked", "reconnecting": return PTTheme.warning
         case "failed": return PTTheme.danger
@@ -334,25 +337,25 @@ struct VPNRow: View {
     var body: some View {
         VStack(spacing: 0) {
             Button {
-                if hasProfile { session.setVPN(!isOn) } else { SettingsWindow.show(openSettings) }
+                if hasProfile { vpnLayer.set(!isOn) } else { SettingsWindow.show(openSettings) }
             } label: {
                 HStack(spacing: 10) {
                     Group {
-                        if session.vpn.isBusy {
+                        if vpnLayer.status.isBusy {
                             ProgressView().controlSize(.small)
                         } else {
-                            Image(systemName: session.vpn.isConnected ? "lock.shield.fill" : "lock.shield")
+                            Image(systemName: vpnLayer.status.isConnected ? "lock.shield.fill" : "lock.shield")
                                 .font(.system(size: 15, weight: .semibold))
-                                .foregroundStyle(session.vpn.isConnected ? AnyShapeStyle(PTTheme.accent) : AnyShapeStyle(Color.secondary))
+                                .foregroundStyle(vpnLayer.status.isConnected ? AnyShapeStyle(PTTheme.accent) : AnyShapeStyle(Color.secondary))
                         }
                     }
                     .frame(width: 20)
                     VStack(alignment: .leading, spacing: 1) {
                         HStack(spacing: 6) {
                             Text("VPN layer").font(.subheadline.weight(.medium))
-                            if session.vpn.isConnected {
-                                PTPill(session.vpn.engineLabel, tint: PTTheme.success)
-                            } else if session.vpnKillSwitch, isOn {
+                            if vpnLayer.status.isConnected {
+                                PTPill(vpnLayer.status.engineLabel, tint: PTTheme.success)
+                            } else if vpnLayer.killSwitch, isOn {
                                 PTPill("Kill switch", tint: .secondary)
                             }
                         }
@@ -366,7 +369,7 @@ struct VPNRow: View {
             }
             .buttonStyle(.plain)
             .help("Wraps everything the Mac sends in one encrypted VPN flow (WireGuard or OpenVPN) on top of the passthrough, so the carrier only ever sees a VPN.")
-            if let error = session.vpnError {
+            if let error = vpnLayer.error {
                 HStack(alignment: .top, spacing: 6) {
                     Image(systemName: "exclamationmark.triangle.fill").font(.caption2)
                     Text(error).font(.caption2)
@@ -377,8 +380,8 @@ struct VPNRow: View {
                 .transition(.opacity)
             }
         }
-        .animation(.easeInOut(duration: 0.2), value: session.vpnError)
-        .animation(.easeInOut(duration: 0.2), value: session.vpn.state)
+        .animation(.easeInOut(duration: 0.2), value: vpnLayer.error)
+        .animation(.easeInOut(duration: 0.2), value: vpnLayer.status.state)
     }
 }
 
