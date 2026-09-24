@@ -44,7 +44,7 @@ Because the phone opens every connection with its own stack, the carrier sees th
 
 ## Android specifics
 
-* **Cellular only** asks Android to keep mobile data up alongside Wi-Fi and binds every outbound socket to the cellular network. As on the iPhone, it falls back to any network only after cellular has been unusable for 10 seconds, and the radio pill reads "Wi-Fi (cell down)" while it does.
+* **Cellular only** asks Android to keep mobile data up alongside Wi-Fi and binds every outbound socket to the cellular network, so unlike the iPhone it keeps using cellular while the phone is on Wi-Fi. It falls back to any network only after cellular has been unusable for 10 seconds, and the radio pill reads "Wi-Fi (cell down)" while it does.
 * **The Mac starts adb itself.** It looks for platform-tools in the usual places (Homebrew, Android Studio's SDK, `ANDROID_HOME`) and runs `adb start-server` when nothing answers. Settings ▸ General ▸ Android shows whether adb was found and can turn Android support off.
 * **Radio label.** Android files the network type (5G, LTE) under its phone permission, which it describes as making and managing calls. It is therefore opt-in from Settings; without it the label reads "Cellular".
 * **A wake lock** keeps the CPU serving while the proxy runs. It is renewed every minute and released on stop.
@@ -187,7 +187,7 @@ Panel previews: `Passthrough.app/Contents/MacOS/Passthrough --snapshot /tmp/pane
 ## Troubleshooting
 
 * **Connecting cuts every open connection on the Mac** (SSH sessions, terminals talking to an API, video calls). That is the default route switching to the tunnel, the same as any VPN. Connect before you start long-lived work, not in the middle of it.
-* **Same public IP as before**: the phone was on Wi-Fi and *Cellular only* was off. It is on by default now; check the pill next to the power button on the phone, it reads "Wi-Fi" when the Mac would ride the phone's Wi-Fi.
+* **Same public IP as before**: the phone is on Wi-Fi, so the Mac rides its Wi-Fi. On the iPhone this happens even with *Cellular only* on: while Wi-Fi is up iOS lets cellular data sleep, and forced-cellular UDP (DNS, QUIC, VPNs) then never gets a route, so everything but plain web pages would fail. The phone and the Mac menu both say when this is happening; turn off Wi-Fi on the phone to use cellular.
 * **Tailscale over the tunnel (verified working, incl. wifi off):** Tailscale's transport rides the phone like everything else, and MagicDNS stays the resolver. One macOS quirk had to be worked around: Tailscale hard-ignores every interface named `utun` when deciding whether the machine has any network (`isInterestingInterface` in `net/netmon/netmon_darwin.go`). With only our `utun` tunnel present (laptop truly remote, wifi off) it would declare itself offline even though the tunnel works. The helper therefore brings up a tiny dummy `feth` ("fake ethernet") interface with a private address whenever the tunnel is active, purely so that check passes. No traffic is routed over it; real traffic still follows the default route into the tunnel. It is torn down when the tunnel stops. Behind carrier NAT, Tailscale connects via DERP relay (expected), which is fully functional.
 * **Reading logs**: if your shell aliases `log`, call `/usr/bin/log show --last 10m --info --predicate 'subsystem == "dev.dpatel.passthrough"'`. Crashes land in `~/Library/Logs/DiagnosticReports` (app) and `/Library/Logs/DiagnosticReports` (helper).
 

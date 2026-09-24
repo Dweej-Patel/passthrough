@@ -136,6 +136,9 @@ struct MenuPanelView: View {
     private var heroDetail: String {
         switch session.phase {
         case .connected:
+            if session.phoneStatus?.radio == "Wi-Fi" {
+                return "The \(session.phoneKindName) is on Wi-Fi, so this Mac uses its Wi-Fi, not cellular. Turn off Wi-Fi on the phone to use cellular."
+            }
             if let iface = session.tunnelInterface, let d = session.sessionDuration {
                 return "All traffic routes through \(iface) for \(ByteFormat.duration(d))."
             }

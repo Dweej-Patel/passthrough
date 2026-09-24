@@ -115,6 +115,18 @@ public enum SOCKS5 {
     }
 }
 
+/// The network new outbound connections leave on under "cellular only".
+public enum Egress: String, Sendable {
+    /// Cellular, required.
+    case cellular
+    /// The phone is on Wi-Fi, so use it. iOS lets cellular data sleep while
+    /// Wi-Fi is up, and UDP (DNS, QUIC, calls, VPNs) can't wake it: forcing
+    /// cellular then breaks everything but plain web pages.
+    case wifi
+    /// Cellular has been unusable for longer than the grace period: any network.
+    case fallback
+}
+
 /// A SOCKS5 server that turns Mac-originated streams and datagrams into
 /// connections opened by the iPhone's own network stack.
 public final class SOCKS5Server: @unchecked Sendable {
@@ -122,7 +134,7 @@ public final class SOCKS5Server: @unchecked Sendable {
         public var port: UInt16 = PassthroughProtocol.defaultSOCKSPort
         /// Bind to loopback only; the Mac reaches us through usbmuxd, never the radio.
         public var loopbackOnly = true
-        /// Force cellular even when Wi-Fi is available.
+        /// Use cellular, unless the phone is on Wi-Fi (see `Egress.wifi`).
         public var cellularOnly = false
         public var allowUDP = true
         public var udpIdleTimeout: TimeInterval = 60
@@ -151,19 +163,23 @@ public final class SOCKS5Server: @unchecked Sendable {
     private var listeners: [NWListener] = []
     private var sessions: [ObjectIdentifier: Session] = [:]
     public private(set) var isRunning = false
-    /// Tracks whether cellular is actually usable right now. With "cellular
-    /// only", a moment where the radio's data path is down would otherwise
-    /// fail every connection with "network is down"; instead we fall back to
-    /// whatever path the phone has until cellular is viable again.
-    private var cellularMonitor: NWPathMonitor?
-    private let cellularLock = NSLock()
+    /// With "cellular only", tracks whether cellular is actually usable and
+    /// whether the phone is on Wi-Fi. A moment where the radio's data path is
+    /// down would otherwise fail every connection with "network is down";
+    /// instead we fall back to whatever path the phone has until cellular is
+    /// viable again.
+    private var monitors: [NWPathMonitor] = []
+    private let egressLock = NSLock()
     private var cellularUsable = true
+    private var onWiFi = false
     private var cellularGraceTimer: DispatchSourceTimer?
     /// How long cellular must be unusable before we fall back to another network.
     public var cellularFallbackGrace: TimeInterval = 10
-    /// Called (on an internal queue) when the effective fallback state changes.
-    public var onCellularUsableChange: (@Sendable (Bool) -> Void)?
-    public var isCellularUsable: Bool { cellularLock.lock(); defer { cellularLock.unlock() }; return cellularUsable }
+    /// Called (on an internal queue) when the network for new connections changes.
+    public var onEgressChange: (@Sendable (Egress) -> Void)?
+    public var egress: Egress { egressLock.lock(); defer { egressLock.unlock() }; return currentEgress }
+    /// Call with `egressLock` held.
+    private var currentEgress: Egress { onWiFi ? .wifi : (cellularUsable ? .cellular : .fallback) }
 
     public init(configuration: Configuration = Configuration(), authenticator: Authenticator?) {
         self.configuration = configuration
@@ -188,7 +204,7 @@ public final class SOCKS5Server: @unchecked Sendable {
             if listeners.isEmpty, let lastError { throw lastError }
             isRunning = true
             ptLog(.info, "SOCKS5 listening on port \(configuration.port) (\(listeners.count) listener(s))")
-            if configuration.cellularOnly { startCellularMonitor() }
+            if configuration.cellularOnly { startEgressMonitors() }
         }
     }
 
@@ -224,37 +240,44 @@ public final class SOCKS5Server: @unchecked Sendable {
         return listener
     }
 
-    private func startCellularMonitor() {
-        let monitor = NWPathMonitor(requiredInterfaceType: .cellular)
-        monitor.pathUpdateHandler = { [weak self] path in
+    private func startEgressMonitors() {
+        let cellular = NWPathMonitor(requiredInterfaceType: .cellular)
+        cellular.pathUpdateHandler = { [weak self] path in
             guard let self else { return }
-            let satisfied = path.status == .satisfied
             self.cellularGraceTimer?.cancel(); self.cellularGraceTimer = nil
-            if satisfied {
-                self.setCellularUsable(true)
+            if path.status == .satisfied {
+                self.updateEgress { $0.cellularUsable = true }
             } else {
                 // Brief blips (handoffs) must not push traffic onto another network;
                 // only a sustained outage does, and it is announced.
                 let timer = DispatchSource.makeTimerSource(queue: self.stateQueue)
                 timer.schedule(deadline: .now() + self.cellularFallbackGrace)
-                timer.setEventHandler { [weak self] in self?.setCellularUsable(false) }
+                timer.setEventHandler { [weak self] in self?.updateEgress { $0.cellularUsable = false } }
                 timer.resume()
                 self.cellularGraceTimer = timer
             }
         }
-        monitor.start(queue: stateQueue)
-        cellularMonitor = monitor
+        let wifi = NWPathMonitor(requiredInterfaceType: .wifi)
+        wifi.pathUpdateHandler = { [weak self] path in
+            self?.updateEgress { $0.onWiFi = path.status == .satisfied }
+        }
+        for monitor in [cellular, wifi] { monitor.start(queue: stateQueue) }
+        monitors = [cellular, wifi]
     }
 
-    private func setCellularUsable(_ usable: Bool) {
-        cellularLock.lock()
-        let changed = usable != cellularUsable
-        cellularUsable = usable
-        cellularLock.unlock()
-        guard changed else { return }
-        ptLog(usable ? .info : .warning, usable ? "Cellular data is usable again; new connections use cellular"
-                                               : "Cellular data has been unusable for \(Int(cellularFallbackGrace))s; new connections use any available network until it is back")
-        onCellularUsableChange?(usable)
+    private func updateEgress(_ change: (SOCKS5Server) -> Void) {
+        egressLock.lock()
+        let before = currentEgress
+        change(self)
+        let after = currentEgress
+        egressLock.unlock()
+        guard after != before else { return }
+        switch after {
+        case .cellular: ptLog(.info, "New connections use cellular")
+        case .wifi: ptLog(.info, "This phone is on Wi-Fi; new connections use Wi-Fi until it leaves")
+        case .fallback: ptLog(.warning, "Cellular data has been unusable for \(Int(cellularFallbackGrace))s; new connections use any available network until it is back")
+        }
+        onEgressChange?(after)
     }
 
     public func stop() {
@@ -262,7 +285,7 @@ public final class SOCKS5Server: @unchecked Sendable {
             guard isRunning else { return }
             isRunning = false
             cellularGraceTimer?.cancel(); cellularGraceTimer = nil
-            cellularMonitor?.cancel(); cellularMonitor = nil
+            monitors.forEach { $0.cancel() }; monitors = []
             listeners.forEach { $0.cancel() }
             listeners = []
             let open = Array(sessions.values)
@@ -317,7 +340,7 @@ public final class SOCKS5Server: @unchecked Sendable {
         } else {
             params = NWParameters.udp
         }
-        if configuration.cellularOnly, isCellularUsable {
+        if configuration.cellularOnly, egress == .cellular {
             params.requiredInterfaceType = .cellular
         }
         params.preferNoProxies = true

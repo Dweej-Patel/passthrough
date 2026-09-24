@@ -30,6 +30,8 @@ final class AppModel: ObservableObject {
     @Published private(set) var pairingCode: (code: String, expiry: Date)?
     @Published private(set) var radio: String?
     @Published private(set) var batteryLevel: Double?
+    /// "Cellular only" is on but the phone is on Wi-Fi, so Macs get its Wi-Fi.
+    @Published private(set) var sharingWiFiInsteadOfCellular = false
     @Published private(set) var extensionAvailable = true
     @Published private(set) var logEntries: [PassthroughLog.Entry] = []
     @Published var usage = UsageLedger(defaults: AppModel.groupDefaults)
@@ -190,8 +192,9 @@ final class AppModel: ObservableObject {
     /// Publishes the radio and battery, and hands them to whichever process hosts the service.
     private func refreshDeviceFacts() {
         let defaults = Self.groupDefaults
-        radio = facts.radio(cellularOnly: cellularOnly, running: state == .running,
-                            fallback: defaults.bool(forKey: SharedKeys.cellularFallback))
+        let egress = defaults.string(forKey: SharedKeys.egress).flatMap(Egress.init(rawValue:)) ?? .cellular
+        radio = facts.radio(cellularOnly: cellularOnly, running: state == .running, egress: egress)
+        sharingWiFiInsteadOfCellular = cellularOnly && facts.onWiFi
         batteryLevel = facts.battery
         // Cross-process defaults writes are not free; only when something changed.
         if defaults.string(forKey: SharedKeys.radio) != radio { defaults.set(radio, forKey: SharedKeys.radio) }

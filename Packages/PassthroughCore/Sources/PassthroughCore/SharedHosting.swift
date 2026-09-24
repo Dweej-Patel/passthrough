@@ -28,7 +28,7 @@ extension PassthroughService.Options {
 
 extension PassthroughService {
     /// A service that reports the device facts the app keeps in `defaults`, and
-    /// records there whether "cellular only" had to fall back to another network.
+    /// records there which network "cellular only" is using (see `Egress`).
     /// Pass the app's own `registry` when hosting in the app process.
     public static func sharing(_ store: UserDefaults, registry: PairingRegistry? = nil, options: Options, hosting: String) -> PassthroughService {
         nonisolated(unsafe) let defaults = store  // UserDefaults is thread-safe
@@ -38,8 +38,8 @@ extension PassthroughService {
                          battery: defaults.object(forKey: SharedKeys.battery) as? Double,
                          hosting: hosting)
         }
-        service.onCellularUsableChange = { usable in defaults.set(!usable, forKey: SharedKeys.cellularFallback) }
-        defaults.set(false, forKey: SharedKeys.cellularFallback)
+        service.onEgressChange = { egress in defaults.set(egress.rawValue, forKey: SharedKeys.egress) }
+        defaults.set(Egress.cellular.rawValue, forKey: SharedKeys.egress)
         return service
     }
 

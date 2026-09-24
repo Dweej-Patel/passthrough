@@ -2,6 +2,7 @@ import Foundation
 import UIKit
 import Network
 import CoreTelephony
+import PassthroughCore
 
 /// What the phone knows about itself for the Mac to show: which radio the
 /// Mac's traffic rides on and the battery. The iOS counterpart of the Android
@@ -25,10 +26,11 @@ final class DeviceFacts {
         pathMonitor.start(queue: DispatchQueue(label: "dev.dpatel.passthrough.path"))
     }
 
-    /// The network the Mac's traffic actually leaves on.
-    func radio(cellularOnly: Bool, running: Bool, fallback: Bool) -> String? {
-        if cellularOnly && running && fallback { return "Wi-Fi (cell down)" }
-        if onWiFi && !cellularOnly { return "Wi-Fi" }
+    /// The network the Mac's traffic actually leaves on. On Wi-Fi that is
+    /// Wi-Fi, "cellular only" or not (see `Egress.wifi`).
+    func radio(cellularOnly: Bool, running: Bool, egress: Egress) -> String? {
+        if onWiFi { return "Wi-Fi" }
+        if cellularOnly && running && egress == .fallback { return "Cellular down" }
         return Self.radioLabel(telephony.serviceCurrentRadioAccessTechnology?.values.first)
     }
 

@@ -16,8 +16,8 @@ public final class PassthroughService: @unchecked Sendable {
 
     public let registry: PairingRegistry
     public let options: Options
-    /// Fires when "cellular only" has to fall back to another network (false) or recovers (true).
-    public var onCellularUsableChange: (@Sendable (Bool) -> Void)?
+    /// Fires when "cellular only" moves new connections to another network, or back.
+    public var onEgressChange: (@Sendable (Egress) -> Void)?
     public private(set) var socks: SOCKS5Server?
     public private(set) var control: ControlServer?
     public var counter: ByteCounter { socks?.counter ?? fallbackCounter }
@@ -47,7 +47,7 @@ public final class PassthroughService: @unchecked Sendable {
             authenticator = { user, password in registry.verify(clientID: user, token: password) }
         }
         let socks = SOCKS5Server(configuration: config, authenticator: authenticator)
-        socks.onCellularUsableChange = { [weak self] usable in self?.onCellularUsableChange?(usable) }
+        socks.onEgressChange = { [weak self] egress in self?.onEgressChange?(egress) }
         let control = ControlServer(port: options.controlPort, socksPort: options.socksPort, registry: registry,
                                     counter: socks.counter, statusProvider: statusProvider)
         control.onClientsChanged = { [weak self] macs in self?.onClientsChanged?(macs) }

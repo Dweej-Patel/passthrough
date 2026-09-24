@@ -143,6 +143,10 @@ struct HeroCard: View {
                     if case .failed(let message) = model.state {
                         Text(message).font(.caption).foregroundStyle(PTTheme.danger).multilineTextAlignment(.center)
                     }
+                    if model.sharingWiFiInsteadOfCellular {
+                        Label("This iPhone is on Wi-Fi, so your Mac uses its Wi-Fi, not cellular. Turn off Wi-Fi to share cellular.", systemImage: "wifi")
+                            .font(.caption).foregroundStyle(PTTheme.warning).multilineTextAlignment(.center)
+                    }
                     HStack(spacing: 8) {
                         if let radio = model.radio { PTPill(radio, icon: "antenna.radiowaves.left.and.right", tint: PTTheme.down) }
                         PTPill("USB", icon: "cable.connector", tint: .secondary)
