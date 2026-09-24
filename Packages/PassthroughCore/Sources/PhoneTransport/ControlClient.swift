@@ -101,7 +101,7 @@ public final class ControlClient: @unchecked Sendable {
 
     private func handle(_ m: ControlEnvelope) {
         lastPong = Date()
-        let status = DeviceStatus(deviceName: m.deviceName ?? device.kindName, radio: m.radio, carrier: m.carrier, battery: m.battery, hosting: m.hosting ?? "")
+        let status = DeviceStatus(deviceName: m.deviceName ?? device.kindName, radio: m.radio, carrier: m.carrier, battery: m.battery, hosting: m.hosting ?? "", ipv6: m.ipv6)
         switch m.t {
         case ControlEnvelope.welcome:
             handler(.welcomed(paired: m.paired ?? false, status: status, socksPort: UInt16(m.socksPort ?? Int(PassthroughProtocol.defaultSOCKSPort))))

@@ -40,7 +40,11 @@ class PassthroughEngine(
             Socks5Server.Config(port = options.socksPort, allowUDP = options.allowUDP, refuseLocalDestinations = options.refuseLocalDestinations),
             auth, egress,
         )
-        val control = ControlServer(options.controlPort, options.socksPort, registry, socks.counter, statusProvider = statusProvider)
+        // The Mac blocks IPv6 in its tunnel when the phone's network has none,
+        // so apps fall back to IPv4 at once instead of hanging.
+        val control = ControlServer(options.controlPort, options.socksPort, registry, socks.counter) {
+            statusProvider().copy(ipv6 = egress.acquire(0)?.hasIPv6())
+        }
         control.onClientsChanged = { onClientsChanged?.invoke(it) }
         socks.start()
         try { control.start() } catch (e: Exception) { socks.stop(); throw e }

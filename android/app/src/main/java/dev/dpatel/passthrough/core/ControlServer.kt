@@ -122,7 +122,7 @@ class ControlServer(
         val s = statusProvider()
         return ControlEnvelope(
             ControlEnvelope.WELCOME, protocolVersion = PassthroughProtocol.VERSION, deviceName = s.deviceName, socksPort = socksPort,
-            radio = s.radio, carrier = s.carrier, battery = s.battery, hosting = s.hosting,
+            radio = s.radio, carrier = s.carrier, battery = s.battery, hosting = s.hosting, ipv6 = s.ipv6,
         )
     }
 
@@ -131,7 +131,7 @@ class ControlServer(
         val snap = counter.snapshot()
         return ControlEnvelope(
             ControlEnvelope.STATUS, deviceName = s.deviceName, radio = s.radio, carrier = s.carrier, battery = s.battery,
-            hosting = s.hosting, activeConnections = snap.active, rxBytes = snap.rx, txBytes = snap.tx,
+            hosting = s.hosting, ipv6 = s.ipv6, activeConnections = snap.active, rxBytes = snap.rx, txBytes = snap.tx,
             timestamp = System.currentTimeMillis() / 1000.0,
         )
     }

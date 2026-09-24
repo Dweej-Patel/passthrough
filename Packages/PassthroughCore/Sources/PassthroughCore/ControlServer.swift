@@ -8,8 +8,10 @@ public struct DeviceStatus: Sendable, Equatable {
     public var carrier: String?
     public var battery: Double?
     public var hosting: String
-    public init(deviceName: String, radio: String? = nil, carrier: String? = nil, battery: Double? = nil, hosting: String) {
-        self.deviceName = deviceName; self.radio = radio; self.carrier = carrier; self.battery = battery; self.hosting = hosting
+    /// Whether the network the phone sends Mac traffic out on routes IPv6; nil when unknown.
+    public var ipv6: Bool?
+    public init(deviceName: String, radio: String? = nil, carrier: String? = nil, battery: Double? = nil, hosting: String, ipv6: Bool? = nil) {
+        self.deviceName = deviceName; self.radio = radio; self.carrier = carrier; self.battery = battery; self.hosting = hosting; self.ipv6 = ipv6
     }
 }
 
@@ -157,6 +159,7 @@ public final class ControlServer: @unchecked Sendable {
         reply.carrier = status.carrier
         reply.battery = status.battery
         reply.hosting = status.hosting
+        reply.ipv6 = status.ipv6
         return reply
     }
 
@@ -169,6 +172,7 @@ public final class ControlServer: @unchecked Sendable {
         m.carrier = status.carrier
         m.battery = status.battery
         m.hosting = status.hosting
+        m.ipv6 = status.ipv6
         m.activeConnections = snap.active
         m.rxBytes = snap.rx
         m.txBytes = snap.tx

@@ -52,6 +52,9 @@ final class TunnelEngine {
     /// Set when the engine ignored a stop request. It still owns its utun and
     /// that utun's fixed addresses, so no new tunnel can start in this process.
     private(set) var isStuck = false
+    /// IPv6 is rejected at the tunnel's routes because the phone's network has none.
+    private(set) var ipv6Blocked = false
+    static let ipv6Halves = ["::/1", "8000::/1"]
     var ipv4Gateway: String? { config?.ipv4Gateway }
     /// DNS servers the VPN layer wants used instead of the configured ones.
     private var dnsOverride: [String]?
@@ -128,10 +131,28 @@ final class TunnelEngine {
             try run("/sbin/route", ["-q", "-n", "add", "-inet6", "::/1", "-interface", name])
             try run("/sbin/route", ["-q", "-n", "add", "-inet6", "8000::/1", "-interface", name])
         }
+        ipv6Blocked = false
         publishNetworkService(name: name, config: config)
         createKeepaliveInterface()
         startedAt = Date()
         HelperLog.info("tunnel up on \(name) → 127.0.0.1:\(config.socksPort)")
+    }
+
+    /// Follows the phone's network: without IPv6 there, the tunnel's IPv6
+    /// routes become reject routes, so apps fall back to IPv4 at once instead of
+    /// hanging on connections tun2socks accepts but the phone can never make.
+    /// Each flip is one atomic `route change` per half.
+    func setIPv6Available(_ available: Bool) {
+        guard isRunning, let name = interfaceName, config?.ipv6 == true, available == ipv6Blocked else { return }
+        for half in Self.ipv6Halves {
+            let target = available ? ["-interface", name] : ["::1", "-reject"]
+            if (try? run("/sbin/route", ["-q", "-n", "change", "-inet6", half] + target)) == nil {
+                HelperLog.warn("route change \(half) failed")
+            }
+        }
+        ipv6Blocked = !available
+        HelperLog.info(available ? "phone's network routes IPv6 again; IPv6 goes through \(name)"
+                                 : "phone's network has no IPv6; rejecting IPv6 so apps use IPv4 at once")
     }
 
     func stop() {
@@ -142,8 +163,14 @@ final class TunnelEngine {
         if let name = interfaceName {
             _ = try? run("/sbin/route", ["-q", "-n", "delete", "-inet", "0.0.0.0/1", "-interface", name])
             _ = try? run("/sbin/route", ["-q", "-n", "delete", "-inet", "128.0.0.0/1", "-interface", name])
-            _ = try? run("/sbin/route", ["-q", "-n", "delete", "-inet6", "::/1", "-interface", name])
-            _ = try? run("/sbin/route", ["-q", "-n", "delete", "-inet6", "8000::/1", "-interface", name])
+            if ipv6Blocked {
+                // Reject routes aren't tied to the utun, so they'd outlive it.
+                for half in Self.ipv6Halves { RouteTable.deleteIfPresent(half, v6: true) }
+                ipv6Blocked = false
+            } else {
+                _ = try? run("/sbin/route", ["-q", "-n", "delete", "-inet6", "::/1", "-interface", name])
+                _ = try? run("/sbin/route", ["-q", "-n", "delete", "-inet6", "8000::/1", "-interface", name])
+            }
         }
         var engineGone = true
         if thread != nil {

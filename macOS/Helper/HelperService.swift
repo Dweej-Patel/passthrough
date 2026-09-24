@@ -117,6 +117,13 @@ final class HelperService: NSObject, PassthroughHelperProtocol {
         queue.asyncAfter(deadline: .now() + 0.5) { exit(0) }
     }
 
+    func setTunnelIPv6(_ available: Bool, reply: @escaping () -> Void) {
+        queue.async {
+            self.engine.setIPv6Available(available)
+            reply()
+        }
+    }
+
     func getStatus(reply: @escaping ([String: Any]) -> Void) {
         queue.async {
             var status = self.engine.status()

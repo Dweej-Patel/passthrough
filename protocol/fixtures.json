@@ -53,6 +53,12 @@
     },
     {
       "line": "{\"t\":\"status\",\"deviceName\":\"iPhone\",\"radio\":\"LTE\",\"battery\":0.5,\"hosting\":\"foreground\",\"activeConnections\":3,\"rxBytes\":5000000000,\"txBytes\":12,\"timestamp\":1758062400.5}"
+    },
+    {
+      "line": "{\"t\":\"status\",\"deviceName\":\"iPhone\",\"radio\":\"Wi-Fi\",\"hosting\":\"background\",\"ipv6\":false,\"activeConnections\":1,\"rxBytes\":10,\"txBytes\":20,\"timestamp\":1758062400.5}"
+    },
+    {
+      "line": "{\"t\":\"welcome\",\"protocolVersion\":1,\"paired\":true,\"socksPort\":7890,\"deviceName\":\"Pixel 8\",\"hosting\":\"background\",\"ipv6\":true}"
     }
   ],
   "rates": [

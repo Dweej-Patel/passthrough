@@ -6,6 +6,8 @@ import Foundation
     func getVersion(reply: @escaping (String) -> Void)
     func startTunnel(configuration: [String: Any], reply: @escaping (Bool, String) -> Void)
     func stopTunnel(reply: @escaping () -> Void)
+    /// Whether the phone's network routes IPv6; without it IPv6 is rejected at the tunnel.
+    func setTunnelIPv6(_ available: Bool, reply: @escaping () -> Void)
     func getStatus(reply: @escaping ([String: Any]) -> Void)
     /// Disables/enables ALL system sleep (incl. lid-close) via pmset. Root only.
     func setDisableSleep(_ on: Bool, reply: @escaping (Bool) -> Void)
@@ -20,7 +22,7 @@ public enum HelperConstants {
     public static let machService = "dev.dpatel.passthrough.helper"
     public static let plistName = "dev.dpatel.passthrough.helper.plist"
     /// Bump together with the helper binary so the app can detect stale daemons.
-    public static let version = "1.2.10"
+    public static let version = "1.2.11"
 }
 
 /// Keys of the configuration dictionary handed to `startTunnel`.

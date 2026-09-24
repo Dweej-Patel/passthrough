@@ -75,6 +75,8 @@ final class SessionCoordinator: ObservableObject {
     private var generation = 0
     private var wantsConnection = false
     private var suppressAutoConnect = false
+    /// What the helper was last told about IPv6 in the tunnel (it starts open).
+    private var tunnelIPv6: Bool?
 
     var adbStatus: WatchStatus.State { androidWatch.state }
     var androidHint: String? { androidWatch.hint }
@@ -212,6 +214,7 @@ final class SessionCoordinator: ObservableObject {
         switch event {
         case .welcomed(let paired, let status, _):
             phoneStatus = status
+            syncTunnelIPv6()
             retryAttempts = 0
             if paired {
                 Task { await bringTunnelUp(generation: gen) }
@@ -240,6 +243,7 @@ final class SessionCoordinator: ObservableObject {
         case .status(let status, _, _, let active):
             phoneStatus = status
             phoneActiveConnections = active
+            syncTunnelIPv6()
         case .disconnected(let error):
             let why = error?.localizedDescription ?? "The \(phoneKindName) closed the connection"
             if case .pairingRequired = phase {
@@ -262,11 +266,24 @@ final class SessionCoordinator: ObservableObject {
             meter.reset()
             sessionRx = 0; sessionTx = 0
             phase = .connected
+            tunnelIPv6 = true
             ptLog(.info, "Connected: Mac traffic now flows over USB through the \(phoneKindName) via \(iface)")
+            syncTunnelIPv6()
             vpnLayer.passthroughConnected()
         } catch {
             fail(error.localizedDescription)
         }
+    }
+
+    /// Mirrors the phone's IPv6 into the tunnel: without it there, the helper
+    /// rejects IPv6 so apps use IPv4 at once instead of hanging. Phones too old
+    /// to say leave the tunnel as it is.
+    private func syncTunnelIPv6() {
+        guard phase.isConnected, ipv6Enabled, let available = phoneStatus?.ipv6, available != tunnelIPv6 else { return }
+        tunnelIPv6 = available
+        ptLog(.info, available ? "The \(phoneKindName)'s network routes IPv6; IPv6 goes through the tunnel"
+                               : "The \(phoneKindName)'s network has no IPv6; IPv6 is blocked so apps use IPv4")
+        Task { await helper.setTunnelIPv6(available) }
     }
 
     private func tunnelConfig(socksPort: UInt16, username: String, password: String, ipv6: Bool) -> HelperClient.TunnelConfig {
@@ -332,6 +349,7 @@ final class SessionCoordinator: ObservableObject {
         let forwarder = self.forwarder
         self.forwarder = nil
         tunnelInterface = nil
+        tunnelIPv6 = nil
         connectedSince = nil
         phoneActiveConnections = 0
         pairingInFlight = false

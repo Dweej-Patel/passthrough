@@ -128,6 +128,10 @@ final class HelperClient {
         return try await start(timeout: 15) { proxy, reply in proxy.startTunnel(configuration: dict, reply: reply) }
     }
 
+    func setTunnelIPv6(_ available: Bool) async {
+        await call(timeout: 4, fallback: ()) { proxy, finish in proxy.setTunnelIPv6(available) { finish(()) } }
+    }
+
     func stopTunnel() async {
         await call(timeout: 6, fallback: ()) { proxy, finish in proxy.stopTunnel { finish(()) } }
     }

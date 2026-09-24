@@ -32,6 +32,8 @@ public struct ControlEnvelope: Codable, Equatable, Sendable {
     public var carrier: String?
     public var battery: Double?
     public var hosting: String?
+    /// Whether the phone's current network routes IPv6. Absent from older phones.
+    public var ipv6: Bool?
     public var activeConnections: Int?
     public var rxBytes: Int64?
     public var txBytes: Int64?

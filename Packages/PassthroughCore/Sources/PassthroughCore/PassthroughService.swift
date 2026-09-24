@@ -48,8 +48,13 @@ public final class PassthroughService: @unchecked Sendable {
         }
         let socks = SOCKS5Server(configuration: config, authenticator: authenticator)
         socks.onEgressChange = { [weak self] egress in self?.onEgressChange?(egress) }
+        let provider = statusProvider
         let control = ControlServer(port: options.controlPort, socksPort: options.socksPort, registry: registry,
-                                    counter: socks.counter, statusProvider: statusProvider)
+                                    counter: socks.counter) { [weak socks] in
+            var status = provider()
+            status.ipv6 = socks?.egressSupportsIPv6
+            return status
+        }
         control.onClientsChanged = { [weak self] macs in self?.onClientsChanged?(macs) }
         try socks.start()
         do { try control.start() } catch { socks.stop(); throw error }

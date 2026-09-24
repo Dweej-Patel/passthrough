@@ -172,6 +172,8 @@ public final class SOCKS5Server: @unchecked Sendable {
     private let egressLock = NSLock()
     private var cellularUsable = true
     private var onWiFi = false
+    private var cellularIPv6 = false
+    private var defaultIPv6 = false
     private var cellularGraceTimer: DispatchSourceTimer?
     /// How long cellular must be unusable before we fall back to another network.
     public var cellularFallbackGrace: TimeInterval = 10
@@ -179,6 +181,13 @@ public final class SOCKS5Server: @unchecked Sendable {
     public var onEgressChange: (@Sendable (Egress) -> Void)?
     public var egress: Egress { egressLock.lock(); defer { egressLock.unlock() }; return currentEgress }
     private var lastDNSServer: String?
+    /// Whether the network new connections leave on can route IPv6. The Mac
+    /// blocks IPv6 in its tunnel when it can't, so apps fall back to IPv4 at
+    /// once instead of hanging on connections this phone can never make.
+    public var egressSupportsIPv6: Bool {
+        egressLock.lock(); defer { egressLock.unlock() }
+        return configuration.cellularOnly && currentEgress == .cellular ? cellularIPv6 : defaultIPv6
+    }
     /// Call with `egressLock` held.
     private var currentEgress: Egress { onWiFi ? .wifi : (cellularUsable ? .cellular : .fallback) }
 
@@ -205,7 +214,7 @@ public final class SOCKS5Server: @unchecked Sendable {
             if listeners.isEmpty, let lastError { throw lastError }
             isRunning = true
             ptLog(.info, "SOCKS5 listening on port \(configuration.port) (\(listeners.count) listener(s))")
-            if configuration.cellularOnly { startEgressMonitors() }
+            startEgressMonitors()
         }
     }
 
@@ -246,6 +255,7 @@ public final class SOCKS5Server: @unchecked Sendable {
         cellular.pathUpdateHandler = { [weak self] path in
             guard let self else { return }
             self.cellularGraceTimer?.cancel(); self.cellularGraceTimer = nil
+            self.updateEgress { $0.cellularIPv6 = path.status == .satisfied && path.supportsIPv6 }
             if path.status == .satisfied {
                 self.updateEgress { $0.cellularUsable = true }
             } else {
@@ -262,8 +272,12 @@ public final class SOCKS5Server: @unchecked Sendable {
         wifi.pathUpdateHandler = { [weak self] path in
             self?.updateEgress { $0.onWiFi = path.status == .satisfied }
         }
-        for monitor in [cellular, wifi] { monitor.start(queue: stateQueue) }
-        monitors = [cellular, wifi]
+        let any = NWPathMonitor()
+        any.pathUpdateHandler = { [weak self] path in
+            self?.updateEgress { $0.defaultIPv6 = path.status == .satisfied && path.supportsIPv6 }
+        }
+        for monitor in [cellular, wifi, any] { monitor.start(queue: stateQueue) }
+        monitors = [cellular, wifi, any]
     }
 
     private func updateEgress(_ change: (SOCKS5Server) -> Void) {
@@ -272,7 +286,8 @@ public final class SOCKS5Server: @unchecked Sendable {
         change(self)
         let after = currentEgress
         egressLock.unlock()
-        guard after != before else { return }
+        // Without "cellular only" the phone's default network is always used.
+        guard configuration.cellularOnly, after != before else { return }
         switch after {
         case .cellular: ptLog(.info, "New connections use cellular")
         case .wifi: ptLog(.info, "This phone is on Wi-Fi; new connections use Wi-Fi until it leaves")

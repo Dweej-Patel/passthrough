@@ -37,8 +37,11 @@ absent (never `null`). Unknown fields are ignored.
 | `ping` / `pong` | Mac / phone | none | Heartbeat every 5 s; the Mac gives up after 20 s of silence. |
 | `status` | phone | device facts, `activeConnections`, `rxBytes`, `txBytes`, `timestamp` | Once a second to authenticated Macs. |
 
-Device facts are `deviceName`, `radio`, `carrier`, `battery` (0 to 1) and
-`hosting` (`background` or `foreground`).
+Device facts are `deviceName`, `radio`, `carrier`, `battery` (0 to 1),
+`hosting` (`background` or `foreground`) and `ipv6`: whether the network the
+phone sends traffic out on routes IPv6. When it is `false` the Mac rejects
+IPv6 in its tunnel, so apps fall back to IPv4 at once instead of hanging on
+connections the phone can't make; older phones omit it and nothing changes.
 
 ## Pairing
 

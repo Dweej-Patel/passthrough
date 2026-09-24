@@ -78,6 +78,16 @@ enum RouteTable {
         })
     }
 
+    /// The gateway column of `prefix`'s route, if it is in the table.
+    static func gateway(of prefix: String, v6: Bool) -> String? {
+        let name = names[prefix] ?? prefix
+        for line in Shell.capture("/usr/sbin/netstat", ["-rn", "-f", v6 ? "inet6" : "inet"]).split(separator: "\n") {
+            let fields = line.split(separator: " ", omittingEmptySubsequences: true)
+            if fields.count >= 2, fields[0] == name { return String(fields[1]) }
+        }
+        return nil
+    }
+
     static func exists(_ prefix: String, v6: Bool, in table: Set<String>) -> Bool {
         table.contains(names[prefix] ?? prefix)
     }
@@ -103,6 +113,11 @@ enum RecoverySweep {
             cleaned.append(q)
         }
         for q in ["::/2", "4000::/2", "8000::/2", "c000::/2"] where RouteTable.deleteIfPresent(q, v6: true, table: v6) {
+            cleaned.append(q)
+        }
+        // The tunnel's IPv6 halves, only when they are our reject routes (an
+        // interface route vanished with its utun; someone else's is not ours).
+        for q in TunnelEngine.ipv6Halves where RouteTable.gateway(of: q, v6: true) == "::1" && RouteTable.deleteIfPresent(q, v6: true, table: v6) {
             cleaned.append(q)
         }
         for name in Shell.capture("/sbin/ifconfig", ["-l"]).split(separator: " ").map(String.init) where name.hasPrefix("feth") {
