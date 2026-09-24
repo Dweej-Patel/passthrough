@@ -45,6 +45,9 @@ public final class PairingRegistry: @unchecked Sendable {
     public static let clientsKey = "pairing.clients"
     public static let codeKey = "pairing.code"
     public static let codeExpiryKey = "pairing.codeExpiry"
+    /// Wrong guesses against the current code. Kept with the code in the shared
+    /// defaults, since the iOS app issues codes and the extension checks them.
+    public static let failedAttemptsKey = "pairing.failedAttempts"
 
     private let defaults: UserDefaults
     private let lock = NSLock()
@@ -71,13 +74,11 @@ public final class PairingRegistry: @unchecked Sendable {
 
     // MARK: Pairing code
 
-    /// Generates a fresh six digit code, valid for `PassthroughProtocol.pairingCodeLifetime`.
-    private var failedAttempts = 0
     private static let maxAttempts = 5
 
+    /// Generates a fresh six digit code, valid for `PassthroughProtocol.pairingCodeLifetime`.
     @discardableResult
     public func issueCode() -> (code: String, expiry: Date) {
-        lock.lock(); failedAttempts = 0; lock.unlock()
         var value: UInt32 = 0
         _ = withUnsafeMutableBytes(of: &value) { SecRandomCopyBytes(kSecRandomDefault, 4, $0.baseAddress!) }
         let code = String(format: "%06d", value % 1_000_000)
@@ -85,6 +86,7 @@ public final class PairingRegistry: @unchecked Sendable {
         lock.lock()
         defaults.set(code, forKey: Self.codeKey)
         defaults.set(expiry.timeIntervalSince1970, forKey: Self.codeExpiryKey)
+        defaults.set(0, forKey: Self.failedAttemptsKey)
         lock.unlock()
         onChange?()
         return (code, expiry)
@@ -117,7 +119,10 @@ public final class PairingRegistry: @unchecked Sendable {
         guard constantTimeEquals(stored, code.trimmingCharacters(in: .whitespaces)) else {
             // A six-digit code must not be brute-forceable over the cable: a
             // handful of wrong guesses burns the code; the user shows a new one.
-            lock.lock(); failedAttempts += 1; let n = failedAttempts; lock.unlock()
+            lock.lock()
+            let n = defaults.integer(forKey: Self.failedAttemptsKey) + 1
+            defaults.set(n, forKey: Self.failedAttemptsKey)
+            lock.unlock()
             if n >= Self.maxAttempts {
                 ptLog(.warning, "Pairing code withdrawn after \(n) wrong attempts")
                 clearCode()

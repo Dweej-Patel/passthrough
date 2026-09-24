@@ -250,6 +250,23 @@ final class PairingTests: XCTestCase {
         defaults.set(Date().timeIntervalSince1970 - 1, forKey: PairingRegistry.codeExpiryKey)
         XCTAssertEqual(registry.pair(code: defaults.string(forKey: PairingRegistry.codeKey) ?? "", clientID: "m", name: "Mac"), .failure(.expired))
     }
+
+    /// The iOS app issues codes and the tunnel extension checks them: two
+    /// registries on one set of defaults. Wrong guesses count per code.
+    func testWrongGuessesCountPerCodeAcrossProcesses() {
+        let app = registry!
+        let tunnel = PairingRegistry(defaults: defaults)
+        func wrong(_ code: String) -> String { code == "000000" ? "111111" : "000000" }
+
+        var code = app.issueCode().code
+        for _ in 0..<4 { XCTAssertEqual(tunnel.pair(code: wrong(code), clientID: "m", name: "Mac"), .failure(.badCode)) }
+        XCTAssertEqual(tunnel.pair(code: wrong(code), clientID: "m", name: "Mac"), .failure(.expired), "the fifth wrong guess withdraws it")
+        XCTAssertNil(app.activeCode)
+
+        code = app.issueCode().code
+        XCTAssertEqual(tunnel.pair(code: wrong(code), clientID: "m", name: "Mac"), .failure(.badCode), "a new code starts a new count")
+        guard case .success = tunnel.pair(code: code, clientID: "m", name: "Mac") else { return XCTFail() }
+    }
 }
 
 final class ControlServerTests: XCTestCase {
