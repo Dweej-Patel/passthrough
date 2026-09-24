@@ -160,7 +160,7 @@ struct MenuPanelView: View {
             .buttonStyle(.plain)
             .help("Connect as soon as a phone is plugged in")
             Spacer()
-            Button { openSettings() } label: { Image(systemName: "gearshape").font(.system(size: 13, weight: .semibold)) }
+            Button { SettingsWindow.show(openSettings) } label: { Image(systemName: "gearshape").font(.system(size: 13, weight: .semibold)) }
                 .buttonStyle(.plain).foregroundStyle(.secondary)
                 .help("Settings")
             Button { NSApp.terminate(nil) } label: { Image(systemName: "power").font(.system(size: 13, weight: .semibold)) }
@@ -334,7 +334,7 @@ struct VPNRow: View {
     var body: some View {
         VStack(spacing: 0) {
             Button {
-                if hasProfile { session.setVPN(!isOn) } else { openSettings() }
+                if hasProfile { session.setVPN(!isOn) } else { SettingsWindow.show(openSettings) }
             } label: {
                 HStack(spacing: 10) {
                     Group {
