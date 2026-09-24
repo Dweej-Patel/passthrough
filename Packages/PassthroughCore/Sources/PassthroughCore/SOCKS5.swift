@@ -178,6 +178,7 @@ public final class SOCKS5Server: @unchecked Sendable {
     /// Called (on an internal queue) when the network for new connections changes.
     public var onEgressChange: (@Sendable (Egress) -> Void)?
     public var egress: Egress { egressLock.lock(); defer { egressLock.unlock() }; return currentEgress }
+    private var lastDNSServer: String?
     /// Call with `egressLock` held.
     private var currentEgress: Egress { onWiFi ? .wifi : (cellularUsable ? .cellular : .fallback) }
 
@@ -327,6 +328,17 @@ public final class SOCKS5Server: @unchecked Sendable {
         return map
     }()
     private static func resolveInterface(_ name: String) -> NWInterface? { resolvedInterfaces[name] }
+
+    /// Where a redirected DNS query goes (see `DNSRedirect`); logs when that changes.
+    fileprivate func dnsRedirectTarget(for address: SOCKS5.Address) -> NWEndpoint {
+        let server = DNSRedirect.server(from: DNSRedirect.systemServers())
+        egressLock.lock()
+        let changed = server != lastDNSServer
+        lastDNSServer = server
+        egressLock.unlock()
+        if changed { ptLog(.info, "DNS sent to \(address.host) goes to this phone's DNS server \(server) instead") }
+        return .hostPort(host: NWEndpoint.Host(server), port: NWEndpoint.Port(rawValue: DNSRedirect.port)!)
+    }
 
     fileprivate func remoteParameters(tcp: Bool) -> NWParameters {
         let params: NWParameters
@@ -488,6 +500,10 @@ private final class Session: @unchecked Sendable {
         switch command {
         case SOCKS5.Command.connect:
             if server.configuration.refuseLocalDestinations, address.isLocalOnly {
+                if DNSRedirect.applies(to: address) {
+                    connect(to: address, via: server.dnsRedirectTarget(for: address))
+                    return
+                }
                 ptLog(.debug, "refused \(address): private/local address, not reachable via the phone")
                 write(SOCKS5.reply(SOCKS5.Reply.networkUnreachable)) { self.close(reason: "local-only destination") }
                 return
@@ -502,9 +518,10 @@ private final class Session: @unchecked Sendable {
 
     // MARK: CONNECT
 
-    private func connect(to address: SOCKS5.Address) {
+    /// Opens the stream to `address`, or to `endpoint` when the destination was redirected.
+    private func connect(to address: SOCKS5.Address, via endpoint: NWEndpoint? = nil) {
         remoteLabel = "\(address)"
-        let remote = NWConnection(host: address.host, port: address.port, using: server.remoteParameters(tcp: true))
+        let remote = NWConnection(to: endpoint ?? .hostPort(host: address.host, port: address.port), using: server.remoteParameters(tcp: true))
         self.remote = remote
         var replied = false
         let fail: (NWError) -> Void = { [weak self] error in
@@ -614,7 +631,7 @@ private final class Session: @unchecked Sendable {
             read(headerLength - 3) { [self] addrBytes in
                 guard let address = SOCKS5.Address(raw: addrBytes) else { close(reason: "bad udp address"); return }
                 read(payloadLength) { [self] payload in
-                    if server.configuration.refuseLocalDestinations, address.isLocalOnly {
+                    if server.configuration.refuseLocalDestinations, address.isLocalOnly, !DNSRedirect.applies(to: address) {
                         // Silently drop LAN/multicast probes; nothing on cellular can answer.
                         readDatagramFrame(); return
                     }
@@ -661,7 +678,9 @@ private final class Session: @unchecked Sendable {
             udpPeers[oldest.key] = nil
         }
         remoteLabel = "\(address)"
-        let peer = UDPPeer(address: address, parameters: server.remoteParameters(tcp: false), queue: queue,
+        let redirected = server.configuration.refuseLocalDestinations && DNSRedirect.applies(to: address)
+        let peer = UDPPeer(address: address, target: redirected ? server.dnsRedirectTarget(for: address) : nil,
+                           parameters: server.remoteParameters(tcp: false), queue: queue,
                            waitTimeout: TimeInterval(server.configuration.connectTimeout)) { [weak self] datagram in
             guard let self, !self.closed else { return }
             self.server.counter.addRx(datagram.count)
@@ -717,12 +736,13 @@ private final class UDPPeer: @unchecked Sendable {
     private let onDatagram: (Data) -> Void
     private let label: String
 
-    init(address: SOCKS5.Address, parameters: NWParameters, queue: DispatchQueue, waitTimeout: TimeInterval, onDatagram: @escaping (Data) -> Void) {
+    /// Datagrams go to `target` when given (a redirected DNS query), else to `address`.
+    init(address: SOCKS5.Address, target: NWEndpoint?, parameters: NWParameters, queue: DispatchQueue, waitTimeout: TimeInterval, onDatagram: @escaping (Data) -> Void) {
         self.onDatagram = onDatagram
         self.label = "\(address)"
         self.queue = queue
         self.waitTimeout = waitTimeout
-        connection = NWConnection(host: address.host, port: address.port, using: parameters)
+        connection = NWConnection(to: target ?? .hostPort(host: address.host, port: address.port), using: parameters)
         connection.stateUpdateHandler = { [weak self] state in
             guard let self else { return }
             switch state {

@@ -75,6 +75,21 @@ class ProtocolFixtureTests {
         assertEquals(true, runCatching { long.next() }.isFailure)
     }
 
+    @Test fun dnsRedirectRules() {
+        val f = fixtures["dnsRedirect"]!!.jsonObject
+        assertEquals(f["port"]!!.jsonPrimitive.int, DnsRedirect.PORT)
+        assertEquals(f["fallback"]!!.jsonPrimitive.content, DnsRedirect.FALLBACK)
+        for (d in f["destinations"]!!.jsonArray.map { it.jsonObject }) {
+            val ip = java.net.InetAddress.getByName(d["address"]!!.jsonPrimitive.content)
+            val address = Socks5.Address.parse(Socks5.rawAddress(ip, d["port"]!!.jsonPrimitive.int))!!
+            assertEquals(address.toString(), d["redirect"]!!.jsonPrimitive.boolean, DnsRedirect.applies(address))
+        }
+        for (c in f["serverChoice"]!!.jsonArray.map { it.jsonObject }) {
+            val system = c["system"]!!.jsonArray.map { java.net.InetAddress.getByName(it.jsonPrimitive.content) }
+            assertEquals(java.net.InetAddress.getByName(c["chosen"]!!.jsonPrimitive.content), DnsRedirect.server(system))
+        }
+    }
+
     /** Numbers compare by value (1.0 == 1, 1.7580624E9 == 1758062400.0); strings and booleans by content. */
     private fun normalize(e: JsonElement): Any? = when (e) {
         is JsonObject -> e.mapValues { normalize(it.value) }

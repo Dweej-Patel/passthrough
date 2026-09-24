@@ -91,5 +91,62 @@
       "seconds": 3665,
       "text": "1:01:05"
     }
-  ]
+  ],
+  "dnsRedirect": {
+    "_comment": "DNS the Mac sends to a private IP goes to the phone's own DNS server (first non-loopback one), else the fallback. Anything else keeps today's rules.",
+    "port": 53,
+    "fallback": "1.1.1.1",
+    "destinations": [
+      {
+        "address": "192.168.1.1",
+        "port": 53,
+        "redirect": true
+      },
+      {
+        "address": "10.0.0.1",
+        "port": 53,
+        "redirect": true
+      },
+      {
+        "address": "fd7a:115c:a1e0::53",
+        "port": 53,
+        "redirect": true
+      },
+      {
+        "address": "192.168.1.1",
+        "port": 80,
+        "redirect": false
+      },
+      {
+        "address": "1.1.1.1",
+        "port": 53,
+        "redirect": false
+      },
+      {
+        "address": "2606:4700:4700::1111",
+        "port": 53,
+        "redirect": false
+      }
+    ],
+    "serverChoice": [
+      {
+        "system": [
+          "172.20.10.1",
+          "8.8.8.8"
+        ],
+        "chosen": "172.20.10.1"
+      },
+      {
+        "system": [
+          "127.0.0.1",
+          "fd00:976a::9"
+        ],
+        "chosen": "fd00:976a::9"
+      },
+      {
+        "system": [],
+        "chosen": "1.1.1.1"
+      }
+    ]
+  }
 }

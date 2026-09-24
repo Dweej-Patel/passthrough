@@ -17,11 +17,19 @@ import java.net.InetAddress
 import java.net.Socket
 
 /** Sockets and DNS pinned to one Android network. */
-class NetworkEgress(private val network: Network) : Egress {
+class NetworkEgress(private val network: Network, private val cm: ConnectivityManager) : Egress {
     override fun resolve(host: String): List<InetAddress> = network.getAllByName(host).toList()
     override fun bind(socket: Socket) = network.bindSocket(socket)
     override fun bind(socket: DatagramSocket) = network.bindSocket(socket)
     override val label = "cellular"
+    override fun dnsServers(): List<InetAddress> = cm.getLinkProperties(network)?.dnsServers.orEmpty()
+}
+
+/** Whatever network Android picks (Wi-Fi when it is up), with that network's DNS servers. */
+class SystemEgress(context: Context) : Egress by DefaultEgress, EgressProvider {
+    private val cm = context.getSystemService(ConnectivityManager::class.java)
+    override fun dnsServers(): List<InetAddress> = cm.activeNetwork?.let { cm.getLinkProperties(it)?.dnsServers }.orEmpty()
+    override fun acquire(timeoutMs: Long): Egress = this
 }
 
 /**
@@ -32,7 +40,7 @@ class NetworkEgress(private val network: Network) : Egress {
  * returns; brief handoff blips never push traffic onto Wi-Fi.
  */
 class CellularEgressProvider(
-    context: Context,
+    private val context: Context,
     private val graceMs: Long = 10_000,
     private val onUsableChange: (Boolean) -> Unit,
 ) : EgressProvider {
@@ -95,8 +103,8 @@ class CellularEgressProvider(
         val deadline = System.currentTimeMillis() + timeoutMs
         synchronized(lock) {
             while (true) {
-                network?.let { return NetworkEgress(it) }
-                if (fallback) return DefaultEgress
+                network?.let { return NetworkEgress(it, cm) }
+                if (fallback) return SystemEgress(context)
                 val left = deadline - System.currentTimeMillis()
                 if (left <= 0) return null
                 lock.wait(left)

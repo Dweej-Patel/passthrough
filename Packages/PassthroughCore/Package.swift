@@ -11,7 +11,8 @@ let package = Package(
         .executable(name: "passthrough-devserver", targets: ["passthrough-devserver"]),
     ],
     targets: [
-        .target(name: "PassthroughCore"),
+        .target(name: "CResolv", linkerSettings: [.linkedLibrary("resolv")]),
+        .target(name: "PassthroughCore", dependencies: ["CResolv"]),
         .target(name: "PhoneTransport", dependencies: ["PassthroughCore"]),
         .target(name: "PassthroughUI", dependencies: ["PassthroughCore"]),
         .executableTarget(name: "passthrough-devserver", dependencies: ["PassthroughCore"]),

@@ -1,4 +1,5 @@
 import XCTest
+import Network
 @testable import PassthroughCore
 
 /// Checks this package against protocol/fixtures.json, the same file the
@@ -60,5 +61,26 @@ final class ProtocolFixtureTests: XCTestCase {
         for d in try XCTUnwrap(f["durations"] as? [[String: Any]]) {
             XCTAssertEqual(ByteFormat.duration(try XCTUnwrap(d["seconds"] as? Double)), d["text"] as? String)
         }
+    }
+
+    func testDNSRedirectRules() throws {
+        let f = try XCTUnwrap(fixtures()["dnsRedirect"] as? [String: Any])
+        XCTAssertEqual(f["port"] as? Int, Int(DNSRedirect.port))
+        XCTAssertEqual(f["fallback"] as? String, DNSRedirect.fallback)
+        for d in try XCTUnwrap(f["destinations"] as? [[String: Any]]) {
+            let text = try XCTUnwrap(d["address"] as? String)
+            let port = UInt16(try XCTUnwrap(d["port"] as? Int))
+            let portBytes = [UInt8(port >> 8), UInt8(port & 0xFF)]
+            let raw: Data
+            if let v4 = IPv4Address(text) { raw = Data([SOCKS5.AddressType.ipv4]) + v4.rawValue + portBytes }
+            else { raw = Data([SOCKS5.AddressType.ipv6]) + (try XCTUnwrap(IPv6Address(text))).rawValue + portBytes }
+            let address = try XCTUnwrap(SOCKS5.Address(raw: raw))
+            XCTAssertEqual(DNSRedirect.applies(to: address), d["redirect"] as? Bool, "\(text):\(port)")
+        }
+        for c in try XCTUnwrap(f["serverChoice"] as? [[String: Any]]) {
+            XCTAssertEqual(DNSRedirect.server(from: try XCTUnwrap(c["system"] as? [String])), c["chosen"] as? String)
+        }
+        // Reads the real resolver configuration without crashing; the list depends on the machine.
+        _ = DNSRedirect.systemServers()
     }
 }

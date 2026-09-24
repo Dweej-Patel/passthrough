@@ -102,6 +102,18 @@ class Socks5Server(
 
     val activeSessions: Int get() = sessions.size
 
+    @Volatile private var lastDnsServer: InetAddress? = null
+
+    /** Where a redirected DNS query goes on [egress]; logs when that changes. */
+    private fun dnsServer(egress: Egress, address: Socks5.Address): InetAddress {
+        val server = DnsRedirect.server(egress.dnsServers())
+        if (server != lastDnsServer) {
+            lastDnsServer = server
+            ptLog(PtLog.Level.INFO, "DNS sent to ${address.host} goes to this phone's DNS server ${server.hostAddress} instead")
+        }
+        return server
+    }
+
     private fun authenticate(user: String, password: String): Boolean {
         val auth = authenticator ?: return true
         val ok = auth(user, password)
@@ -183,6 +195,7 @@ class Socks5Server(
             when {
                 cmd == Socks5.Command.CONNECT -> {
                     if (config.refuseLocalDestinations && address.isLocalOnly) {
+                        if (DnsRedirect.applies(address)) { connect(address, redirected = true); return }
                         ptLog(PtLog.Level.DEBUG, "refused $address: private/local address, not reachable via the phone")
                         output.write(Socks5.reply(Socks5.Reply.NETWORK_UNREACHABLE)); return
                     }
@@ -195,7 +208,8 @@ class Socks5Server(
 
         // CONNECT
 
-        private fun connect(address: Socks5.Address) {
+        /** Opens the stream to [address], or to the phone's DNS server when [redirected] (see [DnsRedirect]). */
+        private fun connect(address: Socks5.Address, redirected: Boolean = false) {
             label = address.toString()
             val deadline = System.currentTimeMillis() + config.connectTimeoutMs
             val eg = egress.acquire(config.connectTimeoutMs.toLong())
@@ -204,7 +218,7 @@ class Socks5Server(
                 output.write(Socks5.reply(Socks5.Reply.NETWORK_UNREACHABLE)); return
             }
             val candidates = try {
-                address.ip?.let { listOf(it) } ?: eg.resolve(address.host)
+                if (redirected) listOf(dnsServer(eg, address)) else address.ip?.let { listOf(it) } ?: eg.resolve(address.host)
             } catch (e: UnknownHostException) {
                 ptLog(PtLog.Level.DEBUG, "connect to $address failed: DNS error")
                 output.write(Socks5.reply(Socks5.Reply.HOST_UNREACHABLE)); return
@@ -301,7 +315,7 @@ class Socks5Server(
                     val payload = ByteArray(payloadLength).also { input.readFully(it) }
                     val address = Socks5.Address.parse(addrRaw) ?: run { close("bad udp address"); return }
                     // Silently drop LAN/multicast probes; nothing on cellular can answer.
-                    if (config.refuseLocalDestinations && address.isLocalOnly) continue
+                    if (config.refuseLocalDestinations && address.isLocalOnly && !DnsRedirect.applies(address)) continue
                     counter.addTx(payload.size)
                     send(address, payload)
                 }
@@ -309,7 +323,10 @@ class Socks5Server(
 
             private fun send(address: Socks5.Address, payload: ByteArray) {
                 val target = try {
-                    InetSocketAddress(address.ip ?: resolve(address.host), address.port)
+                    if (config.refuseLocalDestinations && DnsRedirect.applies(address)) {
+                        val eg = egress.acquire(config.connectTimeoutMs.toLong()) ?: throw UnknownHostException(address.host)
+                        InetSocketAddress(dnsServer(eg, address), DnsRedirect.PORT)
+                    } else InetSocketAddress(address.ip ?: resolve(address.host), address.port)
                 } catch (e: Exception) {
                     ptLog(PtLog.Level.DEBUG, "UDP to $address dropped: ${describe(e)}"); return
                 }

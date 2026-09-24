@@ -59,4 +59,8 @@ RFC 1928 with username/password auth (RFC 1929) only. Commands:
   datagram travels as `[length:2][header length:1][address][payload]` on the
   same TCP stream.
 
-Private, link-local and multicast destinations are refused.
+Private, link-local and multicast destinations are refused, with one
+exception: DNS (port 53) sent to a private IP address, usually the router
+the Mac last had, is forwarded unchanged to the phone's own network's DNS
+server, or to 1.1.1.1 when the phone knows none. Replies come back under the
+address the Mac asked (`DNSRedirect`, `DnsRedirect`).

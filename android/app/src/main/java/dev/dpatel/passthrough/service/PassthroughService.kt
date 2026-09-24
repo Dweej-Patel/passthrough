@@ -11,7 +11,6 @@ import android.os.Looper
 import android.os.PowerManager
 import androidx.core.app.ServiceCompat
 import androidx.core.content.ContextCompat
-import dev.dpatel.passthrough.core.DefaultEgress
 import dev.dpatel.passthrough.core.DeviceStatus
 import dev.dpatel.passthrough.core.PassthroughEngine
 import dev.dpatel.passthrough.core.PtLog
@@ -72,7 +71,7 @@ class PassthroughService : Service() {
         Runtime.setCellularFallback(false)
         val egress = if (cellularOnly) {
             CellularEgressProvider(this, onUsableChange = { usable -> Runtime.setCellularFallback(!usable) }).also { it.start(); cellular = it }
-        } else DefaultEgress
+        } else SystemEgress(this)
         refreshFacts()
         val options = PassthroughEngine.Options(
             socksPort = settings.socksPort.value,
