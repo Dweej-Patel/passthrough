@@ -29,6 +29,7 @@ final class HelperService: NSObject, PassthroughHelperProtocol {
                 self.engine.stop()
                 self.owner = nil
                 self.vpn.underlayChanged()
+                self.restartIfEngineStuck()
             }
             if self.clients.isEmpty && self.sleepDisabled {
                 HelperLog.info("last client gone; re-enabling system sleep")
@@ -89,6 +90,7 @@ final class HelperService: NSObject, PassthroughHelperProtocol {
                 HelperLog.error("start failed: \(error.localizedDescription)")
                 self.engine.stop()
                 reply(false, error.localizedDescription)
+                self.restartIfEngineStuck()
             }
         }
     }
@@ -100,7 +102,19 @@ final class HelperService: NSObject, PassthroughHelperProtocol {
             self.owner = nil
             reply()
             if wasRunning { self.vpn.underlayChanged() }
+            self.restartIfEngineStuck()
         }
+    }
+
+    /// A stuck tun2socks engine keeps its utun alive with the tunnel's fixed
+    /// addresses, so every later start fails ("ifconfig … failed"). Exit once
+    /// the reply is out; launchd starts a clean helper on the next call and its
+    /// recovery sweep removes whatever the old one left behind.
+    private func restartIfEngineStuck() {
+        guard engine.isStuck else { return }
+        HelperLog.error("tunnel engine is stuck; restarting the helper to release it")
+        vpn.stop()
+        queue.asyncAfter(deadline: .now() + 0.5) { exit(0) }
     }
 
     func getStatus(reply: @escaping ([String: Any]) -> Void) {

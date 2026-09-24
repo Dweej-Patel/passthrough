@@ -49,6 +49,9 @@ final class TunnelEngine {
     private var engineAlive = false
 
     var isRunning: Bool { thread != nil && isEngineAlive }
+    /// Set when the engine ignored a stop request. It still owns its utun and
+    /// that utun's fixed addresses, so no new tunnel can start in this process.
+    private(set) var isStuck = false
     var ipv4Gateway: String? { config?.ipv4Gateway }
     /// DNS servers the VPN layer wants used instead of the configured ones.
     private var dnsOverride: [String]?
@@ -149,6 +152,7 @@ final class TunnelEngine {
                 if exited.wait(timeout: .now() + 8) != .success {
                     HelperLog.error("engine did not stop in time; leaving its descriptor open")
                     engineGone = false
+                    isStuck = true
                 }
             }
             thread = nil
