@@ -194,6 +194,10 @@ Panel previews: `Passthrough.app/Contents/MacOS/Passthrough --snapshot /tmp/pane
 
 Pull requests are welcome against the `dev` branch. See [CONTRIBUTING.md](CONTRIBUTING.md) for setup and the checklist, and [SECURITY.md](SECURITY.md) for how to report a vulnerability privately.
 
+## Support
+
+Passthrough is free and open source. If it saved your day (or your data plan), you can [buy me a coffee](https://buymeacoffee.com/dwepat). ☕
+
 ## Licence
 
 Passthrough is released under the [MIT License](LICENSE). The vendored engines (hev-socks5-tunnel, lwIP, wireguard-go, OpenVPN) keep their own licences; see [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
