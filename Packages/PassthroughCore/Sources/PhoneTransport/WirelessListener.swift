@@ -129,7 +129,11 @@ public final class WirelessListener: @unchecked Sendable {
 public struct MuxLink: PhoneLink {
     public let mux: Mux
     public init(mux: Mux) { self.mux = mux }
+    /// While the link is waiting to resume, new streams fail at once: apps
+    /// retry later instead of piling up thousands of connections that all
+    /// have to be opened on the phone the moment the link returns.
     public func connect(port: UInt16, queue: DispatchQueue, completion: @escaping @Sendable (Result<ByteStream, Error>) -> Void) {
+        guard !mux.isSuspended, !mux.isClosed else { completion(.failure(MuxError.linkClosed)); return }
         completion(.success(mux.open(port: port)))
     }
 }

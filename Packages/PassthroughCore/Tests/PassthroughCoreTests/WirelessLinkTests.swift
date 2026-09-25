@@ -166,6 +166,13 @@ final class WirelessLinkTests: XCTestCase {
         DispatchQueue.global().asyncAfter(deadline: .now() + 1) { settled.fulfill() }
         wait(for: [settled], timeout: 3)
         mux.interruptForTesting()
+        // While it waits to resume, new streams are refused at once.
+        for _ in 0..<50 where !mux.isSuspended { Thread.sleep(forTimeInterval: 0.01) }
+        let refused = expectation(description: "refused while suspended")
+        link.connect(port: echoPort, queue: .global()) { result in
+            if case .failure = result { refused.fulfill() }
+        }
+        wait(for: [refused], timeout: 1)
         func roundTrip(_ stream: ByteStream, _ text: String) -> XCTestExpectation {
             let done = expectation(description: text)
             stream.send(Data(text.utf8), isComplete: false) { _ in }
@@ -175,13 +182,14 @@ final class WirelessLinkTests: XCTestCase {
             return done
         }
         let old = roundTrip(streams[150], "still here")
+        wait(for: [old], timeout: 15)
         var fresh: ByteStream?
         let newOne = expectation(description: "new stream")
         link.connect(port: echoPort, queue: .global()) { result in
             if case .success(let s) = result { fresh = s }
             newOne.fulfill()
         }
-        wait(for: [old, newOne], timeout: 15)
+        wait(for: [newOne], timeout: 5)
         wait(for: [roundTrip(fresh!, "and new")], timeout: 10)
     }
 

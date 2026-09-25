@@ -115,8 +115,12 @@ public final class Mux: @unchecked Sendable {
     private var expiry: DispatchWorkItem?
     private let closedLock = NSLock()
     private var _isClosed = false
+    private var _isSuspended = false
     /// True once the mux ended for good (safe from any thread).
     public var isClosed: Bool { closedLock.lock(); defer { closedLock.unlock() }; return _isClosed }
+    /// True while waiting for a resume (safe from any thread).
+    public var isSuspended: Bool { closedLock.lock(); defer { closedLock.unlock() }; return _isSuspended }
+    private func setSuspended(_ value: Bool) { closedLock.lock(); _isSuspended = value; closedLock.unlock() }
 
     /// `isOpener` is true on the Mac, false on the phone. `initialBytes` are
     /// frame bytes already read off the transport during the handshake.
@@ -198,6 +202,7 @@ public final class Mux: @unchecked Sendable {
     // MARK: Internals (on queue)
 
     private func attach(_ transport: ByteStream, initialBytes: Data) {
+        setSuspended(false)
         epoch += 1
         let current = epoch
         transport.onTerminated = { [weak self] error in self?.queue.async { self?.lost(error ?? MuxError.linkClosed, epoch: current) } }
@@ -227,6 +232,7 @@ public final class Mux: @unchecked Sendable {
         guard !closed, lostEpoch == epoch else { return }
         guard resumable else { close(error); return }
         detachTransport()
+        setSuspended(true)
         guard expiry == nil else { return }
         ptLog(.info, "wireless: link interrupted (\(error.localizedDescription)); holding \(streams.count) stream(s)")
         let expiry = DispatchWorkItem { [weak self] in self?.close(MuxError.timeout) }
