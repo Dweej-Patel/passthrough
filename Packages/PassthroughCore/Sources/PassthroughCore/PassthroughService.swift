@@ -25,6 +25,7 @@ public final class PassthroughService: @unchecked Sendable {
     public private(set) var socks: SOCKS5Server?
     public private(set) var control: ControlServer?
     private var dialer: WirelessDialer?
+    private var memoryTimer: DispatchSourceTimer?
     public var counter: ByteCounter { socks?.counter ?? fallbackCounter }
     private let fallbackCounter = ByteCounter()
     private let statusProvider: @Sendable () -> DeviceStatus
@@ -73,9 +74,36 @@ public final class PassthroughService: @unchecked Sendable {
             self.dialer = dialer
         }
         startedAt = Date()
+        watchMemory()
+    }
+
+    /// The iOS extension is killed at 50 MB. Log the footprint while it is
+    /// high, so growth shows up in the log before iOS steps in.
+    private func watchMemory() {
+        let timer = DispatchSource.makeTimerSource(queue: DispatchQueue.global(qos: .utility))
+        var lastLogged = 0
+        timer.schedule(deadline: .now() + 30, repeating: 30)
+        timer.setEventHandler {
+            guard let mb = Self.footprintMB(), mb >= 25, abs(mb - lastLogged) >= 3 else { return }
+            lastLogged = mb
+            ptLog(mb >= 40 ? .warning : .info, "Memory in use: \(mb) MB")
+        }
+        timer.resume()
+        memoryTimer = timer
+    }
+
+    static func footprintMB() -> Int? {
+        var info = task_vm_info_data_t()
+        var count = mach_msg_type_number_t(MemoryLayout<task_vm_info_data_t>.size / MemoryLayout<natural_t>.size)
+        let result = withUnsafeMutablePointer(to: &info) {
+            $0.withMemoryRebound(to: integer_t.self, capacity: Int(count)) { task_info(mach_task_self_, task_flavor_t(TASK_VM_INFO), $0, &count) }
+        }
+        return result == KERN_SUCCESS ? Int(info.phys_footprint / 1_048_576) : nil
     }
 
     public func stop() {
+        memoryTimer?.cancel()
+        memoryTimer = nil
         dialer?.stop()
         dialer = nil
         control?.stop()

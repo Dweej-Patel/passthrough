@@ -387,6 +387,12 @@ private final class Session: @unchecked Sendable {
     private let queue: DispatchQueue
     private var remote: NWConnection?
     private var udpPeers: [SOCKS5.Address: UDPPeer] = [:]
+    /// Datagram bytes handed to the Mac-bound stream but not yet sent. UDP
+    /// arriving faster than the Mac drains it (a slow wireless link) must be
+    /// dropped, as a router would, not queued: the extension has 50 MB.
+    private var udpBacklog = 0
+    private var udpDropped = 0
+    static let udpBacklogLimit = 1 << 20
     private var udpTimer: DispatchSourceTimer?
     private var handshakeTimer: DispatchSourceTimer?
     private var waitTimer: DispatchSourceTimer?
@@ -699,7 +705,16 @@ private final class Session: @unchecked Sendable {
                            waitTimeout: TimeInterval(server.configuration.connectTimeout)) { [weak self] datagram in
             guard let self, !self.closed else { return }
             self.server.counter.addRx(datagram.count)
-            self.write(SOCKS5.frameDatagram(address: address.raw, payload: datagram))
+            let frame = SOCKS5.frameDatagram(address: address.raw, payload: datagram)
+            guard self.udpBacklog + frame.count <= Self.udpBacklogLimit else {
+                self.udpDropped += 1
+                if self.udpDropped == 1 || self.udpDropped % 1000 == 0 {
+                    ptLog(.debug, "UDP to the Mac is backed up; dropped \(self.udpDropped) datagram(s) so far")
+                }
+                return
+            }
+            self.udpBacklog += frame.count
+            self.write(frame) { [weak self] in self?.udpBacklog -= frame.count }
         }
         peer.onDead = { [weak self, weak peer] in
             guard let self, let peer, self.udpPeers[address] === peer else { return }

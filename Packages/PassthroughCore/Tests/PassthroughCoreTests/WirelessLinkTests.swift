@@ -44,7 +44,8 @@ final class WirelessLinkTests: XCTestCase {
 
     override func setUpWithError() throws {
         label = "passthrough-test-\(UUID().uuidString)"
-        identity = try makeTestIdentity()
+        // The openssl/PKCS#12 step very rarely fails on a busy machine; retry.
+        identity = try (try? makeTestIdentity()) ?? (try? makeTestIdentity()) ?? makeTestIdentity()
         echo = try NWListener(using: .tcp, on: .any)
         let ready = expectation(description: "echo ready")
         echo.stateUpdateHandler = { if case .ready = $0 { ready.fulfill() } }

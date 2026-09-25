@@ -84,7 +84,9 @@ public struct MuxStreamState: Codable, Equatable, Sendable {
 /// but the peer hasn't consumed (at most one window), and after resuming
 /// sends exactly the part the peer never received. All state lives on `queue`.
 public final class Mux: @unchecked Sendable {
-    public static let initialWindow = 256 * 1024
+    /// Per-stream credit, and the most a stream keeps unconfirmed for resending.
+    /// Bounded tightly: the iOS extension that hosts the phone's end has 50 MB.
+    public static let initialWindow = 128 * 1024
     static let windowUpdate = 64 * 1024
     public static var pingInterval: TimeInterval = 10
     public static var deadAfter: TimeInterval = 30
