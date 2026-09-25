@@ -73,3 +73,91 @@ public final class PeerProbeServer: @unchecked Sendable {
         }
     }
 }
+
+/// The other direction: the phone finds the Mac's probe service over
+/// peer-to-peer Wi-Fi and dials out to it, pinging every 5 s and reconnecting
+/// when the link drops. Tests whether the background extension can hold an
+/// outgoing link while the phone is locked.
+public final class PeerProbeDialer: @unchecked Sendable {
+    public static let macServiceType = "_ptmac._tcp"
+    private let queue = DispatchQueue(label: "dev.dpatel.passthrough.peer-dialer")
+    private var browser: NWBrowser?
+    private var connection: NWConnection?
+    private var endpoint: NWEndpoint?
+    private var timer: DispatchSourceTimer?
+    private var seq = 0
+    private var stopped = false
+
+    public init() {}
+
+    private static func parameters() -> NWParameters {
+        let p = NWParameters.tcp
+        p.includePeerToPeer = true
+        return p
+    }
+
+    public func start() {
+        queue.async { [self] in
+            let browser = NWBrowser(for: .bonjour(type: Self.macServiceType, domain: nil), using: Self.parameters())
+            browser.stateUpdateHandler = { ptLog(.info, "peer dialer browse: \($0)") }
+            browser.browseResultsChangedHandler = { [weak self] results, _ in
+                guard let self else { return }
+                ptLog(.info, "peer dialer sees \(results.map { "\($0.endpoint) \($0.interfaces.map(\.name))" })")
+                if let first = results.first, self.endpoint == nil {
+                    self.endpoint = first.endpoint
+                    self.dial()
+                }
+            }
+            browser.start(queue: queue)
+            self.browser = browser
+            let timer = DispatchSource.makeTimerSource(queue: queue)
+            timer.schedule(deadline: .now() + 5, repeating: 5)
+            timer.setEventHandler { [weak self] in self?.ping() }
+            timer.resume()
+            self.timer = timer
+        }
+    }
+
+    public func stop() {
+        queue.async { [self] in
+            stopped = true
+            timer?.cancel(); timer = nil
+            browser?.cancel(); browser = nil
+            connection?.cancel(); connection = nil
+        }
+    }
+
+    private func dial() {
+        guard let endpoint, !stopped else { return }
+        connection?.cancel()
+        let c = NWConnection(to: endpoint, using: Self.parameters())
+        c.stateUpdateHandler = { [weak self] state in
+            switch state {
+            case .ready:
+                ptLog(.info, "peer dialer connected via \(c.currentPath?.availableInterfaces.map(\.name) ?? [])")
+            case .waiting(let e):
+                ptLog(.info, "peer dialer waiting: \(e)")
+            case .failed(let e):
+                ptLog(.warning, "peer dialer failed: \(e); redialing in 5 s")
+                self?.queue.asyncAfter(deadline: .now() + 5) { self?.dial() }
+            default: break
+            }
+        }
+        c.start(queue: queue)
+        connection = c
+        receive(c)
+    }
+
+    private func receive(_ c: NWConnection) {
+        c.receive(minimumIncompleteLength: 1, maximumLength: 4096) { [weak self] _, _, done, error in
+            if done || error != nil { return }
+            self?.receive(c)
+        }
+    }
+
+    private func ping() {
+        guard let c = connection, c.state == .ready else { return }
+        seq += 1
+        c.send(content: Data("ping \(seq) \(Date().timeIntervalSince1970)\n".utf8), completion: .contentProcessed { _ in })
+    }
+}

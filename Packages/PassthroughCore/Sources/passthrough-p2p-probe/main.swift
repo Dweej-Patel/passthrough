@@ -7,7 +7,10 @@ import PassthroughCore
 // connection every 30 s, logging the interface each one uses.
 //   swift run passthrough-p2p-probe [minutes]
 
-let minutes = Double(CommandLine.arguments.dropFirst().first ?? "20") ?? 20
+// `passthrough-p2p-probe listen [minutes]`: the Mac advertises and the phone
+// dials in (the phone's extension can't accept incoming connections).
+let listenMode = CommandLine.arguments.dropFirst().first == "listen"
+let minutes = Double(CommandLine.arguments.dropFirst(listenMode ? 2 : 1).first ?? "20") ?? 20
 let queue = DispatchQueue(label: "probe")
 let t0 = Date()
 func log(_ s: String) {
@@ -97,6 +100,41 @@ func freshConnectionTest() {
     }
     c.start(queue: queue)
     queue.asyncAfter(deadline: .now() + 10) { if !done { done = true; log("fresh: TIMEOUT after 10s"); c.cancel() } }
+}
+
+if listenMode {
+    var lastPing = Date()
+    let params = NWParameters.tcp
+    params.includePeerToPeer = true
+    let listener = try! NWListener(using: params)
+    listener.service = NWListener.Service(type: PeerProbeDialer.macServiceType)
+    listener.stateUpdateHandler = { log("listener: \($0)") }
+    listener.serviceRegistrationUpdateHandler = { log("service: \($0)") }
+    listener.newConnectionHandler = { c in
+        c.stateUpdateHandler = { state in
+            switch state {
+            case .ready: log("phone connected \(describe(c)) from \(c.endpoint)"); lastPing = Date()
+            case .failed(let e): log("phone connection FAILED \(e)")
+            case .cancelled: log("phone connection closed")
+            default: break
+            }
+        }
+        readLines(c) { line in
+            let gap = Date().timeIntervalSince(lastPing)
+            lastPing = Date()
+            let parts = line.split(separator: " ")
+            let n = Int(parts.dropFirst().first ?? "") ?? 0
+            if gap > 12 || n % 12 == 0 { log("ping \(n) gap=\(Int(gap))s\(gap > 12 ? "  <-- GAP" : "")") }
+        }
+        c.start(queue: queue)
+    }
+    listener.start(queue: queue)
+    let watchdog = DispatchSource.makeTimerSource(queue: queue)
+    watchdog.schedule(deadline: .now() + 30, repeating: 30)
+    watchdog.setEventHandler { if Date().timeIntervalSince(lastPing) > 30 { log("no ping for \(Int(Date().timeIntervalSince(lastPing)))s") } }
+    watchdog.resume()
+    queue.asyncAfter(deadline: .now() + minutes * 60) { log("done"); exit(0) }
+    dispatchMain()
 }
 
 let browser = NWBrowser(for: .bonjour(type: PeerProbeServer.serviceType, domain: nil), using: p2pParameters())

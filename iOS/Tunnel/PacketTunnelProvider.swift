@@ -7,6 +7,7 @@ import PassthroughCore
 final class PacketTunnelProvider: NEPacketTunnelProvider {
     private var service: PassthroughService?
     private var probe: PeerProbeServer?
+    private var dialer: PeerProbeDialer?
 
     override init() {
         super.init()
@@ -38,6 +39,9 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
                     let probe = PeerProbeServer()
                     probe.start()
                     self?.probe = probe
+                    let dialer = PeerProbeDialer()
+                    dialer.start()
+                    self?.dialer = dialer
                     ptLog(.info, "Peer-to-peer probe running")
                 }
                 ptLog(.info, "Background host started")
@@ -60,6 +64,8 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         service = nil
         probe?.stop()
         probe = nil
+        dialer?.stop()
+        dialer = nil
         completionHandler()
     }
 
