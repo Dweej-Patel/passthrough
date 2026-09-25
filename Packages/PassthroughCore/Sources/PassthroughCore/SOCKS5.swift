@@ -850,6 +850,7 @@ private final class UDPPeer: @unchecked Sendable {
     func report(interval: TimeInterval, queuedToMac: Int) {
         defer { sentSinceCheck = 0; receivedSinceCheck = 0; relayedSinceCheck = 0; droppedSinceCheck = 0 }
         guard Date().timeIntervalSince(born) >= interval else { return }   // skip one-shot DNS
+        guard sentSinceCheck + receivedSinceCheck + relayedSinceCheck + droppedSinceCheck > 0 || queuedToMac > 0 else { return }
         ptLog(.info, "UDP \(label), last \(Int(interval)) s: \(sentSinceCheck) from Mac, \(receivedSinceCheck) from server, "
               + "\(relayedSinceCheck) to Mac, \(droppedSinceCheck) dropped, \(queuedToMac) B queued")
     }

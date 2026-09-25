@@ -180,6 +180,7 @@ final class TunnelEngine {
                 hev_socks5_tunnel_quit()
                 if exited.wait(timeout: .now() + 8) != .success {
                     HelperLog.error("engine did not stop in time; leaving its descriptor open")
+                    Self.recordStuckEngine()
                     engineGone = false
                     isStuck = true
                 }
@@ -240,6 +241,26 @@ final class TunnelEngine {
             let why = String(cString: strerror(errno)); close(fd); throw EngineError.utunOpen("ifname: \(why)")
         }
         return (fd, String(cString: nameBuffer))
+    }
+
+    /// Where a stuck engine's thread stacks are saved (readable without root).
+    static let stuckEnginePath = "/var/tmp/passthrough-engine-stuck.txt"
+
+    /// Samples this process while the engine thread is stuck, so the next
+    /// report shows exactly what it is waiting on instead of just "stuck".
+    private static func recordStuckEngine() {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/sample")
+        process.arguments = ["\(getpid())", "1", "-mayDie", "-file", stuckEnginePath]
+        process.standardOutput = FileHandle.nullDevice
+        process.standardError = FileHandle.nullDevice
+        do {
+            try process.run()
+            process.waitUntilExit()
+            HelperLog.error("engine stacks saved to \(stuckEnginePath)")
+        } catch {
+            HelperLog.warn("could not sample the stuck engine: \(error.localizedDescription)")
+        }
     }
 
     // MARK: Engine config
