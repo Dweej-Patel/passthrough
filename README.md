@@ -3,10 +3,11 @@
 Internet for your Mac over a USB cable, served by your phone's own network stack. Works with an **iPhone** or an **Android phone**. By default the cable is the only link between the two devices; an optional [wireless link](#wireless-link) (iPhone for now) carries the same traffic when it is unplugged.
 
 ```
-┌──────────── Mac ─────────────┐        USB         ┌──────────── Phone ─────────────┐
+┌──────────── Mac ─────────────┐  USB or wireless   ┌──────────── Phone ─────────────┐
 │ apps → utunN → tun2socks ────┼───────────────────▶│ SOCKS5 (loopback) → cellular   │
 │          (root helper)       │ usbmuxd (iPhone)   │ iPhone: VPN extension          │
 │                              │ adb (Android)      │ Android: foreground service    │
+│                              │ TLS (wireless)     │                                │
 └──────────────────────────────┘                    └────────────────────────────────┘
 ```
 
@@ -22,7 +23,7 @@ Both phone apps look the same and speak the same protocol, so the Mac app treats
 ## How it works
 
 * **Phone app.** A SOCKS5 server listens on the phone's loopback address only, next to a small control channel for pairing and live status. On an iPhone it is hosted inside a packet tunnel extension so it keeps running with the screen off (the "tunnel" carries a single unreachable /32, so none of the phone's own traffic is touched), with foreground hosting as a fallback. On Android it runs in a foreground service with a notification, which likewise routes none of the phone's own traffic.
-* **Mac menu bar app.** Watches for an attached phone: usbmuxd (Apple's USB multiplexer, already on every Mac) for iPhones, and the local adb server for Android phones. It forwards a loopback port to the phone's SOCKS port over the cable and pairs with the phone.
+* **Mac menu bar app.** Watches for an attached phone: usbmuxd (Apple's USB multiplexer, already on every Mac) for iPhones, and the local adb server for Android phones; with the [wireless link](#wireless-link) on, also for linked phones dialing in. It forwards a loopback port to the phone's SOCKS port over whichever link is in use, and pairs with the phone (pairing and linking always happen over the cable).
 * **Mac helper (root, launchd daemon).** Creates a `utun` interface, runs a userspace TCP/IP stack (hev-socks5-tunnel + lwIP, in a child process) that turns every packet into a SOCKS5 stream to the loopback port, installs the default routes, and registers the interface as the primary network service so macOS believes it is online and sends DNS through it.
 * **UDP** (DNS, QUIC, calls) rides inside the TCP stream using the "UDP in TCP" extension the engine speaks natively.
 
@@ -52,7 +53,7 @@ Because the phone opens every connection with its own stack, the carrier sees th
 
 ## Flow map
 
-All the apps show a live map of the route traffic takes: Mac ⟶ USB ⟶ phone ⟶ radio ⟶ (VPN) ⟶ Internet. Particles ride the wires at a speed and density that follow the current throughput (teal toward the Mac, violet away from it), the VPN node slides in with a lock over the encrypted hop when the layer is on, the Mac gets a pulsing halo while keep-awake holds it up, and the USB hop shows the live rates. It is one `Canvas` driven by a `TimelineView` at up to 30 fps (15 fps when idle, fully paused when nothing is connected), with stateless particle math and no per-particle views, so it costs next to nothing (`PassthroughUI/FlowMap.swift`).
+All the apps show a live map of the route traffic takes: Mac ⟶ USB or wireless ⟶ phone ⟶ radio ⟶ (VPN) ⟶ Internet. Particles ride the wires at a speed and density that follow the current throughput (teal toward the Mac, violet away from it), the VPN node slides in with a lock over the encrypted hop when the layer is on, the Mac gets a pulsing halo while keep-awake holds it up, and the Mac–phone hop shows the live rates and names what carries it. It is one `Canvas` driven by a `TimelineView` at up to 30 fps (15 fps when idle, fully paused when nothing is connected), with stateless particle math and no per-particle views, so it costs next to nothing (`PassthroughUI/FlowMap.swift`).
 
 ## Wireless link
 
@@ -109,8 +110,8 @@ Diagnostics: `PASSTHROUGH_NO_AUTOCONNECT=1` launches the app without taking over
 ```
 protocol/                  Wire protocol spec and fixtures.json, read by both the Swift and Kotlin tests
 Packages/PassthroughCore   Swift package:
-  PassthroughCore            SOCKS5 server, control channel, pairing, stats (the phone side)
-  PhoneTransport             phone links (usbmuxd, adb), device watchers, local forwarder, control client (the Mac side)
+  PassthroughCore            SOCKS5 server, control channel, pairing, stats, wireless dialer and multiplexer (the phone side)
+  PhoneTransport             phone links (usbmuxd, adb, wireless), device watchers, local forwarder, control client (the Mac side)
   PassthroughUI              shared SwiftUI design layer
 iOS/App                    SwiftUI iPhone app
 iOS/Tunnel                 Packet tunnel extension hosting the servers
@@ -130,8 +131,8 @@ The code is built around a few small interfaces, so a new phone, link or host pl
 
 | Interface | Implementations | What it hides |
 |-----------|-----------------|---------------|
-| `PhoneLink` (Swift) | `USBMuxLink`, `ADBLink` | How the Mac opens a stream to a port on the phone |
-| `DeviceWatcher` (Swift) | `USBMuxWatcher`, `ADBWatcher` | How phones are found; `DeviceDirectory` merges them |
+| `PhoneLink` (Swift) | `USBMuxLink`, `ADBLink`, `MuxLink` (wireless) | How the Mac opens a stream to a port on the phone |
+| `DeviceWatcher` (Swift) | `USBMuxWatcher`, `ADBWatcher`, `WirelessWatcher` | How phones are found; `DeviceDirectory` merges them |
 | `ControlConnection` / `LineBuffer` (Swift), `LineReader` (Kotlin) | shared by both ends | Control-channel framing |
 | `ProxyHost` (iOS) | `ExtensionHost`, `InProcessHost` | Whether the proxy runs in the VPN extension or the app |
 | `Egress` / `EgressProvider` (Kotlin) | `DefaultEgress`, `CellularEgressProvider` | Which network outbound connections leave on |
@@ -215,7 +216,7 @@ Panel previews: `Passthrough.app/Contents/MacOS/Passthrough --snapshot /tmp/pane
 ## Known limits
 
 * Apple Silicon only for the prebuilt engine. Run `scripts/build-hev.sh` with `x86_64` flags to add Intel.
-* SOCKS5 `UDP ASSOCIATE` (the standard UDP mode) is not offered because usbmuxd and adb carry TCP only; the UDP-in-TCP extension covers it.
+* SOCKS5 `UDP ASSOCIATE` (the standard UDP mode) is not offered because usbmuxd, adb and the wireless link carry TCP only; the UDP-in-TCP extension covers it.
 * Android needs USB debugging left on while you use Passthrough, which also lets any Mac the phone has authorised run adb commands on it.
 * The Android app has been tested on an Android 15 emulator, not yet across physical phones and manufacturers.
 * The phone's app deliberately does not expose the proxy on Wi-Fi. If you ever want that, it is one flag (`loopbackOnly`), but then do it behind TLS.
