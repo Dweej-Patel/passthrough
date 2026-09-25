@@ -144,7 +144,7 @@ final class SessionCoordinator: ObservableObject {
     /// "over USB" or "over Wi-Fi", for status copy.
     var linkedPhoneCount: Int { links.phones.count }
     var linkName: String { device?.medium == .wireless ? "over \(wirelessCarrier ?? "Wi-Fi")" : "over USB" }
-    /// What carries the wireless link right now: "Hotspot", "Peer-to-peer" or "Wi-Fi network".
+    /// What carries the wireless link right now: "Hotspot", "Peer-to-peer", "USB" or "Wi-Fi network".
     @Published private(set) var wirelessCarrier: String?
     private func refreshWirelessCarrier() {
         guard let device, device.medium == .wireless, device.id.hasPrefix("wifi:") else { wirelessCarrier = nil; return }

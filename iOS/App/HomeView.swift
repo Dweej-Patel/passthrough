@@ -151,7 +151,7 @@ struct HeroCard: View {
                     HStack(spacing: 8) {
                         if let radio = model.radio { PTPill(radio, icon: "antenna.radiowaves.left.and.right", tint: PTTheme.down) }
                         PTPill(model.servingWirelessly ? (model.stats.wirelessCarrier ?? "Wireless") : "USB",
-                               icon: model.servingWirelessly ? (model.stats.wirelessCarrier == "Hotspot" ? "personalhotspot" : "wifi") : "cable.connector", tint: .secondary)
+                               icon: model.servingWirelessly ? Self.carrierIcon(model.stats.wirelessCarrier) : "cable.connector", tint: .secondary)
                         PTPill(model.hosting == .background ? "Background" : "Foreground", icon: model.hosting == .background ? "moon.zzz.fill" : "sun.max.fill", tint: .secondary)
                         if model.state == .running {
                             PTPill("\(model.stats.active) open", icon: "arrow.left.arrow.right", tint: PTTheme.up)
@@ -182,6 +182,14 @@ struct HeroCard: View {
         case .running:
             if let mac = model.stats.macs.first { return "\(mac.name) is online through this iPhone" }
             return "Ready. Plug in your Mac and connect from the menu bar."
+        }
+    }
+
+    static func carrierIcon(_ carrier: String?) -> String {
+        switch carrier {
+        case "Hotspot": return "personalhotspot"
+        case "USB": return "cable.connector"
+        default: return "wifi"
         }
     }
 }

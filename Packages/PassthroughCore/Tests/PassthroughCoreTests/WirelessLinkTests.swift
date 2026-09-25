@@ -86,6 +86,7 @@ final class WirelessLinkTests: XCTestCase {
         XCTAssertEqual(WirelessLink.carrier(interface: "bridge100"), "Hotspot")
         XCTAssertEqual(WirelessLink.carrier(interface: "en0", onPhoneHotspot: true), "Hotspot")
         XCTAssertEqual(WirelessLink.carrier(interface: "en0"), "Wi-Fi network")
+        XCTAssertEqual(WirelessLink.carrier(interface: "anpi0"), "USB")
     }
 
     func testCertificateIsWellFormedAndKeychainIdentityIsStable() throws {

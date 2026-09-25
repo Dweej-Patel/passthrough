@@ -54,6 +54,8 @@ public enum WirelessLink {
     public static func carrier(interface: String?, onPhoneHotspot: Bool = false) -> String {
         guard let name = interface else { return "Wireless" }
         if name.hasPrefix("awdl") || name.hasPrefix("llw") { return "Peer-to-peer" }
+        // The network a USB-C cable brings up between the phone and the Mac.
+        if name.hasPrefix("anpi") { return "USB" }
         if name.hasPrefix("bridge") || name.hasPrefix("ap") || onPhoneHotspot { return "Hotspot" }
         return "Wi-Fi network"
     }

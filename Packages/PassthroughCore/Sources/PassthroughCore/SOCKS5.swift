@@ -393,6 +393,7 @@ private final class Session: @unchecked Sendable {
     private var udpBacklog = 0
     private var udpDropped = 0
     static let udpBacklogLimit = 1 << 20
+    static let udpCheckInterval: TimeInterval = 15
     private var udpTimer: DispatchSourceTimer?
     private var handshakeTimer: DispatchSourceTimer?
     private var waitTimer: DispatchSourceTimer?
@@ -636,7 +637,7 @@ private final class Session: @unchecked Sendable {
         countedOpen = true
         server.counter.connectionOpened()
         let timer = DispatchSource.makeTimerSource(queue: queue)
-        timer.schedule(deadline: .now() + 15, repeating: 15)
+        timer.schedule(deadline: .now() + Self.udpCheckInterval, repeating: Self.udpCheckInterval)
         timer.setEventHandler { [weak self] in self?.pruneIdlePeers() }
         timer.resume()
         udpTimer = timer
@@ -725,6 +726,7 @@ private final class Session: @unchecked Sendable {
     }
 
     private func pruneIdlePeers() {
+        udpPeers.values.forEach { $0.checkSilence(interval: Self.udpCheckInterval) }
         let cutoff = Date().addingTimeInterval(-server.configuration.udpIdleTimeout)
         for (key, peer) in udpPeers where peer.lastActivity < cutoff {
             peer.cancel()
@@ -764,6 +766,11 @@ private final class UDPPeer: @unchecked Sendable {
     var lastActivity = Date()
     var onDead: (() -> Void)?
     private let onDatagram: (Data) -> Void
+    // Datagrams each way since the last `checkSilence`, and whether the flow
+    // was last reported as unanswered.
+    private var sentSinceCheck = 0
+    private var receivedSinceCheck = 0
+    private var silent = false
     private let label: String
 
     /// Datagrams go to `target` when given (a redirected DNS query), else to `address`.
@@ -826,7 +833,21 @@ private final class UDPPeer: @unchecked Sendable {
             if pending.count < 64 { pending.append(datagram) }
             return
         }
+        sentSinceCheck += 1
         connection.send(content: datagram, completion: .idempotent)
+    }
+
+    /// Logs a flow that keeps sending but hears nothing back for a whole
+    /// interval, and when it hears again: tells where a stalled flow (a VPN
+    /// session, say) stops, at the far end or before it reaches this phone.
+    func checkSilence(interval: TimeInterval) {
+        defer { sentSinceCheck = 0; receivedSinceCheck = 0 }
+        if receivedSinceCheck > 0 {
+            if silent { silent = false; ptLog(.info, "UDP to \(label) answering again (\(receivedSinceCheck) back, \(sentSinceCheck) out)") }
+        } else if sentSinceCheck >= 2, !silent {
+            silent = true
+            ptLog(.info, "UDP to \(label): \(sentSinceCheck) datagram(s) out, nothing back in \(Int(interval)) s")
+        }
     }
 
     private func receiveLoop() {
@@ -838,6 +859,7 @@ private final class UDPPeer: @unchecked Sendable {
             }
             if let data, !data.isEmpty {
                 self.lastActivity = Date()
+                self.receivedSinceCheck += 1
                 self.onDatagram(data)
             }
             self.receiveLoop()

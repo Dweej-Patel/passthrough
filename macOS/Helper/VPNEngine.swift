@@ -98,6 +98,7 @@ final class VPNEngine {
         l.onDead = { [weak self] in self?.restart(after: 0.5) }
         return l
     }()
+    private lazy var underlayWatch = UnderlayWatch(queue: queue)
     private var retryTimer: DispatchSourceTimer?
     private var deadlineTimer: DispatchSourceTimer?
     private var retryAttempt = 0
@@ -131,6 +132,7 @@ final class VPNEngine {
         HelperLog.info("vpn: stopping")
         generation += 1
         liveness.stop()
+        underlayWatch.stop()
         retryTimer?.cancel(); retryTimer = nil
         deadlineTimer?.cancel(); deadlineTimer = nil
         runner?.onEvent = nil
@@ -204,6 +206,12 @@ final class VPNEngine {
 
         guard let underlay = detectUnderlay() else { throw VPNError.noUnderlay }
         self.underlay = underlay
+        // The passthrough tunnel reports its own comings and goings
+        // (underlayChanged); a Wi-Fi or Ethernet underlay is watched here.
+        if !underlay.isPassthrough {
+            let interface = underlay.interface
+            underlayWatch.start(interface: interface) { [weak self] in self?.underlayMoved(interface) }
+        }
         // Kill switch first whenever no name resolution is needed (IP-literal
         // endpoints, or cached answers), so there is no unprotected moment.
         let needsDNS = runner.endpoints.contains { ep in
@@ -286,8 +294,18 @@ final class VPNEngine {
         }
     }
 
+    /// The interface under the VPN joined another network: the endpoint route
+    /// still points at the old gateway, so start over on the new one. The
+    /// short wait lets the new default route settle before it is read.
+    private func underlayMoved(_ interface: String) {
+        guard let config, state != .off else { return }
+        HelperLog.info("vpn: \(interface) joined another network; restarting \(config.engine.rawValue)")
+        restart(after: 2)
+    }
+
     private func restart(after delay: TimeInterval) {
         liveness.stop()
+        underlayWatch.stop()
         retryTimer?.cancel()
         deadlineTimer?.cancel(); deadlineTimer = nil
         runner?.onEvent = nil

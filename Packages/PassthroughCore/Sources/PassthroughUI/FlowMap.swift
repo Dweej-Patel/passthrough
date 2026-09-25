@@ -38,7 +38,7 @@ public struct FlowMapState: Equatable {
     public var localNetworkName: String
     /// The Mac and phone talk over the wireless link instead of the cable.
     public var wireless: Bool
-    /// What carries that link ("Hotspot", "Peer-to-peer", "Wi-Fi network").
+    /// What carries that link ("Hotspot", "Peer-to-peer", "USB", "Wi-Fi network").
     public var wirelessCarrier: String?
 
     public init(perspective: Perspective, macName: String = "Mac", phoneName: String = "iPhone", phoneIcon: String = "iphone.gen3", linkUp: Bool = false, busy: Bool = false,
