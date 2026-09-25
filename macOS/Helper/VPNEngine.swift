@@ -389,7 +389,6 @@ final class VPNEngine {
         for q in Self.v4Quarters where !setQuarter(q, v6: false, target: ["-interface", iface], table: v4) {
             HelperLog.warn("vpn: route \(q) → \(iface) failed")
         }
-        rejectRoutesInstalled = false
         // IPv6: most VPN servers (NordVPN included) hand out no IPv6, and the
         // kernel refuses a v6 route through an interface with no v6 address. In
         // that case reject v6 outright so it can never fall back to the underlay;
