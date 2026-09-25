@@ -46,10 +46,12 @@ struct SettingsView: View {
                 }
                 .disabled(model.state.isActive)
                 Section {
-                    Toggle("Wireless link test", isOn: $model.peerProbe)
-                        .onChange(of: model.peerProbe) { _, on in if on { LocalNetworkPermission.request() } }
+                    Toggle("Wireless link", isOn: $model.wireless)
+                        .onChange(of: model.wireless) { _, on in if on { LocalNetworkPermission.request() } }
+                } header: {
+                    Text("Wireless")
                 } footer: {
-                    Text("Answers pings from the Mac over a direct Wi-Fi link, to test whether a wireless connection holds while this iPhone is locked. Carries no traffic. Takes effect the next time the proxy starts.")
+                    Text("Also reach linked Macs over a direct Wi-Fi link, no cable or router needed. A Mac links the first time it connects over USB. The link is encrypted and only a Mac this iPhone paired with can use it. Takes effect the next time the proxy starts.")
                 }
                 Section("Diagnostics") {
                     DisclosureGroup("Log", isExpanded: $showLog) {

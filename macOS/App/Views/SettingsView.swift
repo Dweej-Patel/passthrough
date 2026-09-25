@@ -31,6 +31,14 @@ struct GeneralSettings: View {
         return "When on battery power and keep awake is on, it switches off automatically at this level so a closed laptop can sleep instead of draining.\(now)"
     }
 
+    private var wirelessText: String {
+        switch session.wirelessWatch.state {
+        case .watching: return session.device?.medium == .wireless ? "Linked" : "Waiting for a phone"
+        case .unavailable: return session.wirelessWatch.hint ?? "Not available"
+        default: return "Off"
+        }
+    }
+
     private var adbText: String {
         switch session.adbStatus {
         case .watching: return "Running"
@@ -76,6 +84,19 @@ struct GeneralSettings: View {
                 Text("Battery")
             } footer: {
                 Text(batteryFooter)
+            }
+            Section {
+                Picker("Connect over", selection: $session.connectionMode) {
+                    ForEach(SessionCoordinator.ConnectionMode.allCases) { Text($0.title).tag($0) }
+                }
+                if session.connectionMode != .cable {
+                    LabeledContent("Wireless") { Text(wirelessText) }
+                    LabeledContent("Linked phones") { Text("\(session.linkedPhoneCount)") }
+                }
+            } header: {
+                Text("Connection")
+            } footer: {
+                Text("Wireless reaches a phone over a direct Wi-Fi link: Apple's peer-to-peer Wi-Fi for an iPhone, a Wi-Fi Direct network the phone hosts for Android. Turn on Wireless link in Passthrough on the phone too. A phone links the first time it connects over USB, and the link is encrypted with a key only the two of them share. Automatic prefers the cable when both are available.")
             }
             Section {
                 Toggle("Android phones (via adb)", isOn: $session.androidEnabled)

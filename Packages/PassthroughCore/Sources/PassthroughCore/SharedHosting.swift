@@ -9,6 +9,7 @@ extension PassthroughService.Options {
         static let allowUDP = "allowUDP"
         static let socksPort = "socksPort"
         static let controlPort = "controlPort"
+        static let wireless = "wireless"
     }
 
     /// Reads the options the app stored in the tunnel's provider configuration.
@@ -18,11 +19,12 @@ extension PassthroughService.Options {
         allowUDP = config[Key.allowUDP] as? Bool ?? true
         socksPort = UInt16(config[Key.socksPort] as? Int ?? Int(PassthroughProtocol.defaultSOCKSPort))
         controlPort = UInt16(config[Key.controlPort] as? Int ?? Int(PassthroughProtocol.defaultControlPort))
+        wireless = config[Key.wireless] as? Bool ?? false
     }
 
     public var providerConfiguration: [String: Any] {
         [Key.cellularOnly: cellularOnly, Key.allowUDP: allowUDP,
-         Key.socksPort: Int(socksPort), Key.controlPort: Int(controlPort)]
+         Key.socksPort: Int(socksPort), Key.controlPort: Int(controlPort), Key.wireless: wireless]
     }
 }
 

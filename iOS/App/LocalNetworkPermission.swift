@@ -12,7 +12,7 @@ enum LocalNetworkPermission {
         browser?.cancel()
         let params = NWParameters.tcp
         params.includePeerToPeer = true
-        let browser = NWBrowser(for: .bonjour(type: PeerProbeServer.serviceType, domain: nil), using: params)
+        let browser = NWBrowser(for: .bonjour(type: WirelessLink.serviceType, domain: nil), using: params)
         browser.stateUpdateHandler = { state in ptLog(.info, "local network permission check: \(state)") }
         browser.start(queue: .main)
         self.browser = browser

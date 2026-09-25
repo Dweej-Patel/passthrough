@@ -11,6 +11,8 @@ public final class PassthroughService: @unchecked Sendable {
         public var disableAuth = false
         /// Dev servers on a Mac legitimately talk to loopback/LAN targets.
         public var refuseLocalDestinations = true
+        /// Also dial linked Macs over the wireless link.
+        public var wireless = false
         public init() {}
     }
 
@@ -20,6 +22,7 @@ public final class PassthroughService: @unchecked Sendable {
     public var onEgressChange: (@Sendable (Egress) -> Void)?
     public private(set) var socks: SOCKS5Server?
     public private(set) var control: ControlServer?
+    private var dialer: WirelessDialer?
     public var counter: ByteCounter { socks?.counter ?? fallbackCounter }
     private let fallbackCounter = ByteCounter()
     private let statusProvider: @Sendable () -> DeviceStatus
@@ -61,10 +64,18 @@ public final class PassthroughService: @unchecked Sendable {
         do { try control.start() } catch { socks.stop(); throw error }
         self.socks = socks
         self.control = control
+        if options.wireless {
+            let registry = self.registry
+            let dialer = WirelessDialer(allowedPorts: [options.socksPort, options.controlPort]) { registry.linkCredentials() }
+            dialer.start()
+            self.dialer = dialer
+        }
         startedAt = Date()
     }
 
     public func stop() {
+        dialer?.stop()
+        dialer = nil
         control?.stop()
         socks?.stop()
         control = nil

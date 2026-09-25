@@ -6,8 +6,7 @@ import PassthroughCore
 /// the VPN session valid while the phone's real traffic flows untouched.
 final class PacketTunnelProvider: NEPacketTunnelProvider {
     private var service: PassthroughService?
-    private var probe: PeerProbeServer?
-    private var dialer: PeerProbeDialer?
+
 
     override init() {
         super.init()
@@ -35,15 +34,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
                 try service.start()
                 self?.service = service
                 self?.drainPackets()
-                if defaults.bool(forKey: SharedKeys.peerProbe) {
-                    let probe = PeerProbeServer()
-                    probe.start()
-                    self?.probe = probe
-                    let dialer = PeerProbeDialer()
-                    dialer.start()
-                    self?.dialer = dialer
-                    ptLog(.info, "Peer-to-peer probe running")
-                }
+
                 ptLog(.info, "Background host started")
                 completionHandler(nil)
             } catch {
@@ -62,10 +53,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         ptLog(.info, "Background host stopping (\(reason.rawValue))")
         service?.stop()
         service = nil
-        probe?.stop()
-        probe = nil
-        dialer?.stop()
-        dialer = nil
+
         completionHandler()
     }
 

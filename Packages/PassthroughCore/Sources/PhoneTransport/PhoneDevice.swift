@@ -46,9 +46,13 @@ public struct PhoneDevice: Identifiable, Hashable, Sendable {
         public var defaultPairingSlot: String { "token" }
     }
 
-    /// Unique among attached phones, e.g. "usbmux:3" or "adb:R58M…".
+    /// How the Mac reaches the phone.
+    public enum Medium: Sendable { case usb, wireless }
+
+    /// Unique among attached phones, e.g. "usbmux:3", "adb:R58M…" or "wifi:<phoneID>".
     public let id: String
     public let kind: Kind
+    public let medium: Medium
     /// Short hardware label for logs ("00008110…", "Pixel 8").
     public let label: String
     /// Names the stored pairing token for this phone. Every iPhone shares the
@@ -56,8 +60,13 @@ public struct PhoneDevice: Identifiable, Hashable, Sendable {
     public let pairingSlot: String
     public let link: any PhoneLink
 
-    public init(id: String, kind: Kind, label: String, pairingSlot: String, link: any PhoneLink) {
-        self.id = id; self.kind = kind; self.label = label; self.pairingSlot = pairingSlot; self.link = link
+    public init(id: String, kind: Kind, medium: Medium = .usb, label: String, pairingSlot: String, link: any PhoneLink) {
+        self.id = id; self.kind = kind; self.medium = medium; self.label = label; self.pairingSlot = pairingSlot; self.link = link
+    }
+
+    /// A phone that dialed in over the wireless link.
+    public static func wireless(phoneID: String, kind: Kind, label: String, pairingSlot: String, link: any PhoneLink) -> PhoneDevice {
+        PhoneDevice(id: "wifi:\(phoneID)", kind: kind, medium: .wireless, label: label, pairingSlot: pairingSlot, link: link)
     }
 
     public static func iPhone(deviceID: Int, udid: String) -> PhoneDevice {

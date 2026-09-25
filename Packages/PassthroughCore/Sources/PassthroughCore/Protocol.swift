@@ -112,8 +112,8 @@ public enum SharedKeys {
     public static let controlPort = "settings.controlPort"
     /// `Egress` raw value: which network "cellular only" is using right now.
     public static let egress = "state.egress"
-    /// Diagnostics: run the peer-to-peer probe (`PeerProbeServer`) alongside the proxy.
-    public static let peerProbe = "diagnostics.peerProbe"
+    /// Dial linked Macs over the wireless link too.
+    public static let wireless = "settings.wireless"
     public static let usageMonthRx = "usage.month.rx"
     public static let usageMonthTx = "usage.month.tx"
     public static let usageMonthStart = "usage.month.start"

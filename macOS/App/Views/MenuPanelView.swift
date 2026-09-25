@@ -79,14 +79,14 @@ struct MenuPanelView: View {
 
     private var statusLine: String {
         switch session.phase {
-        case .noDevice: return "Plug an iPhone or Android phone into USB"
-        case .deviceFound: return "Ready to connect over USB"
+        case .noDevice: return session.connectionMode == .wireless ? "Looking for a linked phone nearby" : "Plug an iPhone or Android phone into USB"
+        case .deviceFound: return "Ready to connect \(session.linkName)"
         case .helperRequired: return "Helper needs approval"
         case .connecting(let step): return step
         case .pairingRequired: return "Enter the code from the \(session.phoneKindName)"
         case .connected:
             let n = session.phoneActiveConnections
-            return "Online via USB · \(n) open connection\(n == 1 ? "" : "s")"
+            return "Online \(session.linkName) · \(n) open connection\(n == 1 ? "" : "s")"
         case .error(let message): return message
         }
     }
@@ -128,7 +128,7 @@ struct MenuPanelView: View {
         case .connected: return "Passthrough is on"
         case .connecting: return "Connecting…"
         case .error: return "Not connected"
-        case .noDevice: return "Waiting for USB"
+        case .noDevice: return session.connectionMode == .wireless ? "Waiting for the phone" : "Waiting for USB"
         default: return "Passthrough is off"
         }
     }
@@ -143,9 +143,13 @@ struct MenuPanelView: View {
                 return "All traffic routes through \(iface) for \(ByteFormat.duration(d))."
             }
             return "All traffic routes through the \(session.phoneKindName)."
-        case .connecting: return "Setting up the USB link and routing. Open connections will switch over."
+        case .connecting: return "Setting up the link and routing. Open connections will switch over."
         case .error(let message): return message
-        case .noDevice: return session.androidHint ?? "Connect the cable and unlock the phone. Trust this Mac if asked; Android phones need USB debugging on."
+        case .noDevice:
+            if session.connectionMode == .wireless {
+                return "Turn on Wireless link in Passthrough on the phone and keep it nearby. A phone links the first time it connects over USB."
+            }
+            return session.androidHint ?? "Connect the cable and unlock the phone. Trust this Mac if asked; Android phones need USB debugging on."
         default: return session.hasToken ? "Flip the switch to route this Mac through the \(session.phoneKindName)." : "First connection will ask for a pairing code."
         }
     }

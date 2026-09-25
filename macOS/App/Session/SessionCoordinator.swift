@@ -50,6 +50,34 @@ final class SessionCoordinator: ObservableObject {
     @AppStorage("mtu") var mtu = 8500
     @AppStorage("clientID") private var storedClientID = ""
 
+    /// Which links may carry the passthrough. Cable only unless changed.
+    enum ConnectionMode: String, CaseIterable, Identifiable {
+        case cable, wireless, automatic
+        var id: String { rawValue }
+        var title: String {
+            switch self {
+            case .cable: return "Cable only"
+            case .wireless: return "Wireless only"
+            case .automatic: return "Automatic"
+            }
+        }
+        func allows(_ device: PhoneDevice) -> Bool {
+            switch self {
+            case .cable: return device.medium == .usb
+            case .wireless: return device.medium == .wireless
+            case .automatic: return true
+            }
+        }
+    }
+    @Published var connectionMode: ConnectionMode = ConnectionMode(rawValue: UserDefaults.standard.string(forKey: "connectionMode") ?? "") ?? .cable {
+        didSet {
+            UserDefaults.standard.set(connectionMode.rawValue, forKey: "connectionMode")
+            connectionMode == .cable ? wirelessWatcher.stop() : wirelessWatcher.start()
+            reconsiderDevice()
+        }
+    }
+    @Published private(set) var wirelessWatch = WatchStatus()
+
     /// Also watch for Android phones through adb. On by default; harmless without platform-tools.
     @Published var androidEnabled: Bool = UserDefaults.standard.object(forKey: "androidEnabled") as? Bool ?? true {
         didSet {
@@ -64,6 +92,8 @@ final class SessionCoordinator: ObservableObject {
     private let helper = HelperClient()
     private let directory: DeviceDirectory
     private let androidWatcher: ADBWatcher
+    private let wirelessWatcher: WirelessWatcher
+    private let links = LinkStore()
     private var forwarder: LocalForwarder?
     private var control: ControlClient?
     private var ticker: AnyCancellable?
@@ -90,6 +120,9 @@ final class SessionCoordinator: ObservableObject {
     /// Keychain slot of the attached phone's pairing token (the iPhone slot when none is attached).
     private var pairingSlot: String { device?.pairingSlot ?? PhoneDevice.Kind.iPhone.defaultPairingSlot }
     var hasToken: Bool { Keychain.read(pairingSlot) != nil }
+    /// "over USB" or "over Wi-Fi", for status copy.
+    var linkedPhoneCount: Int { links.phones.count }
+    var linkName: String { device?.medium == .wireless ? "over Wi-Fi" : "over USB" }
     /// "iPhone" or "Android phone" for the attached device; "phone" when none.
     var phoneKindName: String { device?.kindName ?? "phone" }
     var dnsList: [String] { dnsServers.split(whereSeparator: { $0 == "," || $0 == " " }).map(String.init).filter { !$0.isEmpty } }
@@ -108,7 +141,13 @@ final class SessionCoordinator: ObservableObject {
         let env: [String: String] = [:]
         #endif
         androidWatcher = ADBWatcher(includeNonUSB: env["PASSTHROUGH_ADB_ANY_TRANSPORT"] == "1")
-        directory = DeviceDirectory(watchers: [USBMuxWatcher(), androidWatcher])
+        let links = self.links
+        let clientIDDefault = UserDefaults.standard
+        wirelessWatcher = WirelessWatcher(
+            macTag: { WirelessLink.macTag(clientID: clientIDDefault.string(forKey: "clientID") ?? "") },
+            identity: { try MacIdentity.loadOrCreate(label: SessionCoordinator.identityLabel) },
+            phones: { links.phones })
+        directory = DeviceDirectory(watchers: [USBMuxWatcher(), androidWatcher, wirelessWatcher])
         suppressAutoConnect = env["PASSTHROUGH_NO_AUTOCONNECT"] != nil || env["PASSTHROUGH_VPN_TEST"] != nil
 
         logEntries = PassthroughLog.shared.snapshot()
@@ -125,7 +164,15 @@ final class SessionCoordinator: ObservableObject {
         }
         directory.onChange = { [weak self] change in self?.devicesChanged(change) }
         androidWatcher.onStatusChange = { [weak self] status in self?.androidWatch = status }
-        for watcher in directory.watchers where watcher.kind != .android || androidEnabled { watcher.start() }
+        wirelessWatcher.onStatusChange = { [weak self] status in self?.wirelessWatch = status }
+        _ = clientID   // the wireless listener advertises a tag derived from it
+        for watcher in directory.watchers {
+            switch watcher.transport {
+            case .usbmux: watcher.start()
+            case .adb: if androidEnabled { watcher.start() }
+            case .wireless: if connectionMode != .cable { watcher.start() }
+            }
+        }
 
         ticker = Timer.publish(every: 1, on: .main, in: .common).autoconnect().sink { [weak self] _ in self?.tick() }
         NotificationCenter.default.publisher(for: .passthroughWillTerminate)
@@ -148,24 +195,56 @@ final class SessionCoordinator: ObservableObject {
 
     // MARK: Devices
 
+    static let identityLabel = "dev.dpatel.passthrough.wireless-identity"
+
     private func devicesChanged(_ change: DeviceDirectory.Change) {
         switch change {
         case .attached(let d):
             retryAttempts = 0
-            ptLog(.info, "\(d.kindName) attached over USB (\(d.label))")
-            guard device == nil else { return }
-            device = d
-            phase = .deviceFound
-            if autoConnect, !suppressAutoConnect { connect() }
+            ptLog(.info, "\(d.kindName) \(d.medium == .usb ? "attached over USB" : "reachable wirelessly") (\(d.label))")
+            reconsiderDevice()
         case .detached(let gone):
-            guard device?.id == gone.id else { return }
-            ptLog(.info, "\(gone.kindName) detached")
-            let next = directory.devices.first
-            teardown(to: next == nil ? .noDevice : .deviceFound)
-            device = next
-            if next != nil, autoConnect, !suppressAutoConnect { connect() }
+            ptLog(.info, "\(gone.kindName) \(gone.medium == .usb ? "detached" : "out of wireless reach")")
+            reconsiderDevice()
         }
     }
+
+    /// The phone to use: the current one while it stays attached and allowed,
+    /// else the first allowed one, the cable first when both are possible.
+    private func preferredDevice() -> PhoneDevice? {
+        let allowed = directory.devices.filter { connectionMode.allows($0) }
+        return allowed.first { $0.medium == .usb } ?? allowed.first
+    }
+
+    private func reconsiderDevice() {
+        let best = preferredDevice()
+        let currentStillFine = device.map { d in directory.devices.contains { $0.id == d.id } && connectionMode.allows(d) } ?? false
+        // Keep a working link unless the cable just became available in Automatic.
+        if currentStillFine, !(device?.medium == .wireless && best?.medium == .usb) { return }
+        guard best?.id != device?.id else { return }
+        if device != nil { teardown(to: best == nil ? .noDevice : .deviceFound) }
+        device = best
+        if best != nil {
+            if phase == .noDevice { phase = .deviceFound }
+            if autoConnect, !suppressAutoConnect { connect() }
+        } else {
+            phase = .noDevice
+        }
+    }
+
+    /// Over the cable, after pairing: hand the phone what it needs to reach
+    /// this Mac wirelessly later (certificate pin and link key).
+    private func sendLink() {
+        guard let device, device.medium == .usb, let control else { return }
+        do {
+            let identity = try MacIdentity.loadOrCreate(label: Self.identityLabel)
+            pendingLink = (links.key(forSlot: device.pairingSlot), device)
+            control.link(linkKey: pendingLink!.key, certificateSHA256: identity.fingerprint)
+        } catch {
+            ptLog(.warning, "wireless: could not prepare the link: \(error.localizedDescription)")
+        }
+    }
+    private var pendingLink: (key: Data, device: PhoneDevice)?
 
     // MARK: Connect flow
 
@@ -192,7 +271,7 @@ final class SessionCoordinator: ObservableObject {
         guard generation == gen else { return }
 
         // 2. Loopback forwarder over the phone's link
-        phase = .connecting("Opening USB link")
+        phase = .connecting(device.medium == .usb ? "Opening USB link" : "Opening wireless link")
         let forwarder = LocalForwarder(device: device, remotePort: PassthroughProtocol.defaultSOCKSPort, localPort: UInt16(localPort))
         do { try forwarder.start() } catch {
             fail("Could not listen on 127.0.0.1:\(localPort): \(error.localizedDescription)")
@@ -219,6 +298,7 @@ final class SessionCoordinator: ObservableObject {
             syncTunnelIPv6()
             retryAttempts = 0
             if paired {
+                sendLink()
                 Task { await bringTunnelUp(generation: gen) }
             } else {
                 phase = .pairingRequired
@@ -233,7 +313,15 @@ final class SessionCoordinator: ObservableObject {
             Keychain.write(token, account: device.pairingSlot)
             pairingError = nil
             ptLog(.info, "Paired with \(phoneStatus?.deviceName ?? phoneKindName)")
+            sendLink()
             Task { await bringTunnelUp(generation: gen) }
+        case .linked(let phoneID, let network, let passphrase):
+            guard let pending = pendingLink else { return }
+            pendingLink = nil
+            links.record(WirelessPhone(phoneID: phoneID, linkKey: pending.key, isAndroid: pending.device.kind == .android,
+                                       label: phoneStatus?.deviceName ?? pending.device.kindName,
+                                       pairingSlot: pending.device.pairingSlot, network: network, passphrase: passphrase))
+            ptLog(.info, "Linked \(phoneStatus?.deviceName ?? phoneKindName) for the wireless link")
         case .pairingFailed(let failure):
             pairingInFlight = false
             switch failure {
@@ -270,7 +358,7 @@ final class SessionCoordinator: ObservableObject {
             sessionRx = 0; sessionTx = 0
             phase = .connected
             tunnelIPv6 = true
-            ptLog(.info, "Connected: Mac traffic now flows over USB through the \(phoneKindName) via \(iface)")
+            ptLog(.info, "Connected: Mac traffic now flows \(linkName) through the \(phoneKindName) via \(iface)")
             syncTunnelIPv6()
             vpnLayer.passthroughConnected()
         } catch {
@@ -331,6 +419,7 @@ final class SessionCoordinator: ObservableObject {
 
     func forgetPairing() {
         Keychain.delete(pairingSlot)
+        links.forget(slot: pairingSlot)
         if phase.isConnected { disconnect() }
         objectWillChange.send()
     }
