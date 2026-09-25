@@ -73,6 +73,11 @@ final class VPNEngine {
     private static let serviceID = "dev.dpatel.passthrough.vpn"
     private static let v4Quarters = ["0.0.0.0/2", "64.0.0.0/2", "128.0.0.0/2", "192.0.0.0/2"]
     private static let v6Quarters = ["::/2", "4000::/2", "8000::/2", "c000::/2"]
+    /// The kill switch rejects at /3, one step more specific than the /2 VPN
+    /// routes, so engaging and lifting it are plain adds and deletes: never a
+    /// moment without a route (XNU ignores -reject on `route change`).
+    static let v4Eighths = ["0.0.0.0/3", "32.0.0.0/3", "64.0.0.0/3", "96.0.0.0/3", "128.0.0.0/3", "160.0.0.0/3", "192.0.0.0/3", "224.0.0.0/3"]
+    static let v6Eighths = ["::/3", "2000::/3", "4000::/3", "6000::/3", "8000::/3", "a000::/3", "c000::/3", "e000::/3"]
 
     private let queue: DispatchQueue
     private unowned let tunnel: TunnelEngine
@@ -229,8 +234,8 @@ final class VPNEngine {
             if startedAt == nil { startedAt = Date() }
             retryAttempt = 0
             lastError = nil
-            removeRejectRoutes()
             installQuarterRoutes(on: iface)
+            removeRejectRoutes()
             applyDNS(dns.isEmpty ? config.fallbackDNS : dns, interface: iface, address: address, gateway: gateway)
             state = .connected
             HelperLog.info("vpn: connected on \(iface) (dns \(activeDNS.joined(separator: ", ")))")
@@ -241,19 +246,18 @@ final class VPNEngine {
             deadlineTimer?.cancel(); deadlineTimer = nil
             runner?.onEvent = nil
             runner = nil
+            if config.killSwitch { installRejectRoutes() }
             removeQuarterRoutes()
             if let fatal {
                 // Nothing a retry can fix. With the kill switch on, traffic stays
                 // blocked until the user turns the layer off (stopVPN lifts it):
                 // a peer must never be able to "fail" us into the clear.
-                if config.killSwitch { installRejectRoutes() }
                 lastError = fatal
                 state = .failed
                 HelperLog.error("vpn: \(fatal)")
                 removeEndpointRoutes()
                 return
             }
-            if config.killSwitch { installRejectRoutes() }
             retryAttempt += 1
             let delay = min(30.0, pow(2.0, Double(min(retryAttempt, 5))))
             lastError = "The VPN engine stopped; reconnecting in \(Int(delay))s"
@@ -269,8 +273,9 @@ final class VPNEngine {
         runner?.onEvent = nil
         runner?.stop()
         runner = nil
-        // Flip to reject first (atomic per prefix), then tear down the rest.
-        if config?.killSwitch == true { installRejectRoutes() } else { removeQuarterRoutes() }
+        // Block first, then tear down the rest.
+        if config?.killSwitch == true { installRejectRoutes() }
+        removeQuarterRoutes()
         removeEndpointRoutes()
         retractOwnService()
         let timer = DispatchSource.makeTimerSource(queue: queue)
@@ -366,10 +371,15 @@ final class VPNEngine {
     /// Points a quarter prefix at `target` atomically: `route change` when the
     /// prefix exists (e.g. as a reject route), `route add` otherwise. Traffic for
     /// that prefix is never unrouted in between.
+    /// A reject target, or an existing reject route, is re-added instead:
+    /// XNU neither sets nor clears the reject flag on a change.
     private func setQuarter(_ q: String, v6: Bool, target: [String], table: Set<String>) -> Bool {
         let family = v6 ? "-inet6" : "-inet"
-        if RouteTable.exists(q, v6: v6, in: table),
-           (try? Shell.run("/sbin/route", ["-q", "-n", "change", family, q] + target, quiet: true)) != nil { return true }
+        if RouteTable.exists(q, v6: v6, in: table) {
+            if !target.contains("-reject"), !RouteTable.isReject(q, v6: v6),
+               (try? Shell.run("/sbin/route", ["-q", "-n", "change", family, q] + target, quiet: true)) != nil { return true }
+            RouteTable.deleteIfPresent(q, v6: v6, table: table)
+        }
         return (try? Shell.run("/sbin/route", ["-q", "-n", "add", family, q] + target, quiet: true)) != nil
     }
 
@@ -415,9 +425,12 @@ final class VPNEngine {
     private func installRejectRoutes() {
         guard !rejectRoutesInstalled else { return }
         let v4 = RouteTable.present(v6: false), v6 = RouteTable.present(v6: true)
-        for q in Self.v4Quarters { _ = setQuarter(q, v6: false, target: ["127.0.0.1", "-reject"], table: v4) }
-        for q in Self.v6Quarters { _ = setQuarter(q, v6: true, target: ["::1", "-reject"], table: v6) }
-        quarterRoutesOn = nil
+        for q in Self.v4Eighths where !RouteTable.exists(q, v6: false, in: v4) {
+            if (try? Shell.run("/sbin/route", ["-q", "-n", "add", "-inet", q, "127.0.0.1", "-reject"], quiet: true)) == nil { HelperLog.warn("vpn: reject \(q) failed") }
+        }
+        for q in Self.v6Eighths where !RouteTable.exists(q, v6: true, in: v6) {
+            if (try? Shell.run("/sbin/route", ["-q", "-n", "add", "-inet6", q, "::1", "-reject"], quiet: true)) == nil { HelperLog.warn("vpn: reject \(q) failed") }
+        }
         rejectRoutesInstalled = true
         HelperLog.info("vpn: kill switch engaged (traffic blocked until the VPN is back)")
     }
@@ -425,8 +438,8 @@ final class VPNEngine {
     private func removeRejectRoutes() {
         guard rejectRoutesInstalled else { return }
         let v4 = RouteTable.present(v6: false), v6 = RouteTable.present(v6: true)
-        for q in Self.v4Quarters { RouteTable.deleteIfPresent(q, v6: false, table: v4) }
-        for q in Self.v6Quarters { RouteTable.deleteIfPresent(q, v6: true, table: v6) }
+        for q in Self.v4Eighths { RouteTable.deleteIfPresent(q, v6: false, table: v4) }
+        for q in Self.v6Eighths { RouteTable.deleteIfPresent(q, v6: true, table: v6) }
         rejectRoutesInstalled = false
     }
 
