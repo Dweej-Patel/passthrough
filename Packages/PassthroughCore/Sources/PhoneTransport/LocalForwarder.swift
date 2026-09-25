@@ -59,7 +59,7 @@ public final class LocalForwarder: @unchecked Sendable {
         stateQueue.async {
             guard Date().timeIntervalSince(self.lastFailureLog) > 2 else { return }
             self.lastFailureLog = Date()
-            ptLog(.warning, "USB connect to the phone failed: \(error.localizedDescription)")
+            ptLog(.warning, "\(self.device.medium == .usb ? "USB" : "Wireless") connect to the phone failed: \(error.localizedDescription)")
         }
     }
 
@@ -67,81 +67,54 @@ public final class LocalForwarder: @unchecked Sendable {
         stateQueue.async { self.pipes[ObjectIdentifier(pipe)] = nil }
     }
 
+    /// One forwarded connection: the tunnel helper's stream on one side, a
+    /// stream to the phone's SOCKS port on the other.
     fileprivate final class Pipe: @unchecked Sendable {
         private let forwarder: LocalForwarder
-        private let client: NWConnection
-        private var device: NWConnection?
+        private let client: ByteStream
         private let queue: DispatchQueue
+        private var splice: Splice?
         private var closed = false
-        private var halfClosures = 0
 
         init(forwarder: LocalForwarder, client: NWConnection) {
             self.forwarder = forwarder
-            self.client = client
             self.queue = DispatchQueue(label: "dev.dpatel.passthrough.pipe", target: forwarder.queue)
+            self.client = ConnectionStream(client, queue: queue)
         }
 
         func start() {
             forwarder.counter.connectionOpened()
-            client.stateUpdateHandler = { [weak self] state in
-                if case .failed = state { self?.close() }
-                if case .cancelled = state { self?.close() }
-            }
-            client.start(queue: queue)
+            client.onTerminated = { [weak self] _ in self?.close() }
             forwarder.device.connect(port: forwarder.remotePort, queue: queue) { [weak self] result in
                 guard let self else { return }
                 self.queue.async { self.opened(result) }
             }
         }
 
-        private func opened(_ result: Result<NWConnection, Error>) {
+        private func opened(_ result: Result<ByteStream, Error>) {
             switch result {
             case .failure(let error):
                 forwarder.logFailure(error)
                 close()
             case .success(let device):
                 guard !closed else { device.cancel(); return }
-                self.device = device
-                device.stateUpdateHandler = { [weak self] state in
-                    if case .failed = state { self?.close() }
-                    if case .cancelled = state { self?.close() }
-                }
-                pump(from: client, to: device, download: false)
-                pump(from: device, to: client, download: true)
+                client.onTerminated = nil   // the splice judges failure from reads and writes
+                let counter = forwarder.counter
+                let splice = Splice(client, device, queue: queue,
+                                    onBytes: { upload, n in upload ? counter.addTx(n) : counter.addRx(n) },
+                                    onClose: { [weak self] in self?.close() })
+                self.splice = splice
+                splice.start()
             }
-        }
-
-        private func pump(from source: NWConnection, to sink: NWConnection, download: Bool) {
-            source.receive(minimumIncompleteLength: 1, maximumLength: 256 * 1024) { [weak self] data, _, isComplete, error in
-                guard let self, !self.closed else { return }
-                if error != nil { self.close(); return }
-                if let data, !data.isEmpty {
-                    if download { self.forwarder.counter.addRx(data.count) } else { self.forwarder.counter.addTx(data.count) }
-                    sink.send(content: data, completion: .contentProcessed { [weak self] sendError in
-                        guard let self else { return }
-                        if sendError != nil { self.close(); return }
-                        if isComplete { self.halfClose(sink) } else { self.pump(from: source, to: sink, download: download) }
-                    })
-                } else if isComplete {
-                    self.halfClose(sink)
-                } else {
-                    self.pump(from: source, to: sink, download: download)
-                }
-            }
-        }
-
-        private func halfClose(_ sink: NWConnection) {
-            sink.send(content: nil, contentContext: .finalMessage, isComplete: true, completion: .idempotent)
-            halfClosures += 1
-            if halfClosures >= 2 { close() }
         }
 
         func close() {
             queue.async { [self] in
                 guard !closed else { return }
                 closed = true
+                client.onTerminated = nil
                 client.cancel()
-                device?.cancel()
+                splice?.close()
                 forwarder.counter.connectionClosed()
                 forwarder.remove(self)
             }

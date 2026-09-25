@@ -20,7 +20,7 @@ final class AppModel: ObservableObject {
     }
 
     static let groupDefaults = UserDefaults(suiteName: PassthroughProtocol.appGroup) ?? .standard
-    let registry = PairingRegistry(defaults: AppModel.groupDefaults)
+    let registry = PairingRegistry(defaults: AppModel.groupDefaults, secrets: KeychainSecrets(accessGroup: PassthroughProtocol.appGroup))
     let log = PassthroughLog.shared
 
     @Published private(set) var state: ServiceState = .stopped
@@ -42,6 +42,8 @@ final class AppModel: ObservableObject {
     @AppStorage(SharedKeys.allowUDP, store: AppModel.groupDefaults) var allowUDP = true
     @AppStorage(SharedKeys.socksPort, store: AppModel.groupDefaults) var socksPort = Int(PassthroughProtocol.defaultSOCKSPort)
     @AppStorage(SharedKeys.controlPort, store: AppModel.groupDefaults) var controlPort = Int(PassthroughProtocol.defaultControlPort)
+    @AppStorage(SharedKeys.wireless, store: AppModel.groupDefaults) var wireless = false
+    @AppStorage(SharedKeys.peerToPeer, store: AppModel.groupDefaults) var peerToPeer = false
     @AppStorage("hosting", store: AppModel.groupDefaults) var hostingRaw = Hosting.background.rawValue
     var hosting: Hosting {
         get { Hosting(rawValue: hostingRaw) ?? .background }
@@ -53,6 +55,8 @@ final class AppModel: ObservableObject {
     /// The host serving now. The extension can be running from an earlier launch.
     private var activeHost: any ProxyHost { inProcessIsActive ? inProcessHost : extensionHost }
     private var inProcessIsActive = false
+    /// Start again once the current run has stopped (a setting that needs a restart changed).
+    private var restartWhenStopped = false
     private let facts = DeviceFacts()
     private var ticker: AnyCancellable?
     private var lastUsageSnapshot: (rx: Int64, tx: Int64)?
@@ -123,6 +127,8 @@ final class AppModel: ObservableObject {
         options.controlPort = UInt16(controlPort)
         options.cellularOnly = cellularOnly
         options.allowUDP = allowUDP
+        options.wireless = wireless
+        options.peerToPeer = peerToPeer
         let host = activeHost
         Task {
             do {
@@ -141,16 +147,27 @@ final class AppModel: ObservableObject {
         Task { await host.stop() }
     }
 
+    /// Applies a setting that only takes effect at start: restarts a running proxy.
+    func restartIfRunning() {
+        guard state.isActive else { return }
+        restartWhenStopped = true
+        stop()
+    }
+
     private func hostStateChanged(_ host: HostState) {
         switch host {
         case .running: state = .running
         case .starting: state = .starting
         case .stopping: state = .stopping
         case .stopped:
-            if case .failed = state { return }
+            if case .failed = state { restartWhenStopped = false; return }
             state = .stopped
             inProcessIsActive = false
             stats = ProviderStats(rx: stats.rx, tx: stats.tx, active: 0, totalConnections: stats.totalConnections, macs: [], startedAt: nil)
+            if restartWhenStopped {
+                restartWhenStopped = false
+                start()
+            }
         }
     }
 
@@ -218,6 +235,8 @@ final class AppModel: ObservableObject {
     }
 
     var connectedMacIDs: Set<String> { Set(stats.macs.map(\.id)) }
+    /// Every Mac this iPhone serves right now is on the wireless link.
+    var servingWirelessly: Bool { !stats.macs.isEmpty && stats.macs.allSatisfy { stats.isWireless($0) } }
 
     var sessionDuration: TimeInterval? {
         guard let start = stats.startedAt, state == .running else { return nil }

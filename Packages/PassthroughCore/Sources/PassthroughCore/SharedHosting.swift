@@ -9,6 +9,8 @@ extension PassthroughService.Options {
         static let allowUDP = "allowUDP"
         static let socksPort = "socksPort"
         static let controlPort = "controlPort"
+        static let wireless = "wireless"
+        static let peerToPeer = "peerToPeer"
     }
 
     /// Reads the options the app stored in the tunnel's provider configuration.
@@ -18,11 +20,13 @@ extension PassthroughService.Options {
         allowUDP = config[Key.allowUDP] as? Bool ?? true
         socksPort = UInt16(config[Key.socksPort] as? Int ?? Int(PassthroughProtocol.defaultSOCKSPort))
         controlPort = UInt16(config[Key.controlPort] as? Int ?? Int(PassthroughProtocol.defaultControlPort))
+        wireless = config[Key.wireless] as? Bool ?? false
+        peerToPeer = config[Key.peerToPeer] as? Bool ?? false
     }
 
     public var providerConfiguration: [String: Any] {
         [Key.cellularOnly: cellularOnly, Key.allowUDP: allowUDP,
-         Key.socksPort: Int(socksPort), Key.controlPort: Int(controlPort)]
+         Key.socksPort: Int(socksPort), Key.controlPort: Int(controlPort), Key.wireless: wireless, Key.peerToPeer: peerToPeer]
     }
 }
 
@@ -32,7 +36,8 @@ extension PassthroughService {
     /// Pass the app's own `registry` when hosting in the app process.
     public static func sharing(_ store: UserDefaults, registry: PairingRegistry? = nil, options: Options, hosting: String) -> PassthroughService {
         nonisolated(unsafe) let defaults = store  // UserDefaults is thread-safe
-        let service = PassthroughService(registry: registry ?? PairingRegistry(defaults: defaults), options: options) {
+        let registry = registry ?? PairingRegistry(defaults: defaults, secrets: KeychainSecrets(accessGroup: PassthroughProtocol.appGroup))
+        let service = PassthroughService(registry: registry, options: options) {
             DeviceStatus(deviceName: defaults.string(forKey: SharedKeys.deviceName) ?? "iPhone",
                          radio: defaults.string(forKey: SharedKeys.radio),
                          battery: defaults.object(forKey: SharedKeys.battery) as? Double,
@@ -47,6 +52,7 @@ extension PassthroughService {
     public func stats() -> ProviderStats {
         let snap = counter.snapshot()
         return ProviderStats(rx: snap.rx, tx: snap.tx, active: snap.active, totalConnections: snap.totalConnections,
-                             macs: connectedMacs, startedAt: startedAt)
+                             macs: connectedMacs, startedAt: startedAt,
+                             wirelessMacTags: wirelessMacTags, wirelessCarrier: wirelessCarrier)
     }
 }

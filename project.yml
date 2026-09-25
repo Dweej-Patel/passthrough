@@ -47,7 +47,8 @@ targets:
         ITSAppUsesNonExemptEncryption: false
         UIApplicationSceneManifest:
           UIApplicationSupportsMultipleScenes: false
-        NSLocalNetworkUsageDescription: Passthrough only listens on the USB link to your Mac.
+        NSLocalNetworkUsageDescription: Passthrough finds your linked Mac on this iPhone's Personal Hotspot, or over peer-to-peer Wi-Fi, when the wireless link is on.
+        NSBonjourServices: [_passthrough._tcp]
     entitlements:
       path: iOS/App/Passthrough.entitlements
       properties:
@@ -75,6 +76,8 @@ targets:
       path: iOS/Tunnel/Info.plist
       properties:
         CFBundleDisplayName: Passthrough Tunnel
+        NSLocalNetworkUsageDescription: Passthrough finds your linked Mac on this iPhone's Personal Hotspot, or over peer-to-peer Wi-Fi, when the wireless link is on.
+        NSBonjourServices: [_passthrough._tcp]
         NSExtension:
           NSExtensionPointIdentifier: com.apple.networkextension.packet-tunnel
           NSExtensionPrincipalClass: $(PRODUCT_MODULE_NAME).PacketTunnelProvider
@@ -134,6 +137,8 @@ targets:
         LSMinimumSystemVersion: "14.0"
         NSHumanReadableCopyright: ""
         ITSAppUsesNonExemptEncryption: false
+        NSLocalNetworkUsageDescription: Passthrough listens for your linked phone on the local network, such as the phone's Personal Hotspot, when it connects wirelessly.
+        NSBonjourServices: [_passthrough._tcp]
     entitlements:
       path: macOS/App/PassthroughMac.entitlements
       properties:

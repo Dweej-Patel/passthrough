@@ -1,4 +1,5 @@
 import Foundation
+import notify
 
 /// Bundles the SOCKS5 server and the control channel behind one switch.
 /// Hosted either inside the packet tunnel extension or the foreground app.
@@ -11,6 +12,10 @@ public final class PassthroughService: @unchecked Sendable {
         public var disableAuth = false
         /// Dev servers on a Mac legitimately talk to loopback/LAN targets.
         public var refuseLocalDestinations = true
+        /// Also dial linked Macs over the wireless link.
+        public var wireless = false
+        /// Let that link use Apple peer-to-peer Wi-Fi, not only a shared network.
+        public var peerToPeer = false
         public init() {}
     }
 
@@ -20,6 +25,9 @@ public final class PassthroughService: @unchecked Sendable {
     public var onEgressChange: (@Sendable (Egress) -> Void)?
     public private(set) var socks: SOCKS5Server?
     public private(set) var control: ControlServer?
+    private var dialer: WirelessDialer?
+    private var pairingsToken: Int32?
+    private var memoryTimer: DispatchSourceTimer?
     public var counter: ByteCounter { socks?.counter ?? fallbackCounter }
     private let fallbackCounter = ByteCounter()
     private let statusProvider: @Sendable () -> DeviceStatus
@@ -61,10 +69,53 @@ public final class PassthroughService: @unchecked Sendable {
         do { try control.start() } catch { socks.stop(); throw error }
         self.socks = socks
         self.control = control
+        if options.wireless {
+            let registry = self.registry
+            let dialer = WirelessDialer(allowedPorts: [options.socksPort, options.controlPort], peerToPeer: options.peerToPeer) { registry.linkCredentials() }
+            dialer.start()
+            // A Mac linked over the cable, or forgotten in the app (another
+            // process): dial it now, or end its link now.
+            var token: Int32 = 0
+            if notify_register_dispatch(PairingRegistry.changedNotification, &token, .global(qos: .utility), { [weak dialer] _ in dialer?.refresh() }) == NOTIFY_STATUS_OK {
+                pairingsToken = token
+            }
+            self.dialer = dialer
+        }
         startedAt = Date()
+        watchMemory()
+    }
+
+    /// The iOS extension is killed at 50 MB. Log the footprint while it is
+    /// high, so growth shows up in the log before iOS steps in.
+    private func watchMemory() {
+        let timer = DispatchSource.makeTimerSource(queue: DispatchQueue.global(qos: .utility))
+        var lastLogged = 0
+        timer.schedule(deadline: .now() + 30, repeating: 30)
+        timer.setEventHandler {
+            guard let mb = Self.footprintMB(), mb >= 25, abs(mb - lastLogged) >= 3 else { return }
+            lastLogged = mb
+            ptLog(mb >= 40 ? .warning : .info, "Memory in use: \(mb) MB")
+        }
+        timer.resume()
+        memoryTimer = timer
+    }
+
+    static func footprintMB() -> Int? {
+        var info = task_vm_info_data_t()
+        var count = mach_msg_type_number_t(MemoryLayout<task_vm_info_data_t>.size / MemoryLayout<natural_t>.size)
+        let result = withUnsafeMutablePointer(to: &info) {
+            $0.withMemoryRebound(to: integer_t.self, capacity: Int(count)) { task_info(mach_task_self_, task_flavor_t(TASK_VM_INFO), $0, &count) }
+        }
+        return result == KERN_SUCCESS ? Int(info.phys_footprint / 1_048_576) : nil
     }
 
     public func stop() {
+        memoryTimer?.cancel()
+        memoryTimer = nil
+        if let pairingsToken { notify_cancel(pairingsToken) }
+        pairingsToken = nil
+        dialer?.stop()
+        dialer = nil
         control?.stop()
         socks?.stop()
         control = nil
@@ -73,6 +124,10 @@ public final class PassthroughService: @unchecked Sendable {
     }
 
     public var connectedMacs: [ConnectedMac] { control?.connectedMacs ?? [] }
+    /// Macs linked over the air right now.
+    public var wirelessMacTags: [String] { dialer?.connectedMacTags ?? [] }
+    /// What carries the wireless link(s): "Hotspot", "Peer-to-peer", "USB" or "Wi-Fi network".
+    public var wirelessCarrier: String? { dialer?.carriers.values.sorted().first }
 
     /// Every proxied connection costs two descriptors (the stream from the Mac
     /// and the one to the internet). iOS starts processes at 256, which a

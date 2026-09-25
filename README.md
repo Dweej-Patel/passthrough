@@ -1,6 +1,6 @@
 # Passthrough
 
-USB-only internet for your Mac, served by your phone's own network stack. Works with an **iPhone** or an **Android phone**. No hotspot, no Wi-Fi, no Bluetooth: the only link between the two devices is the cable.
+Internet for your Mac over a USB cable, served by your phone's own network stack. Works with an **iPhone** or an **Android phone**. By default the cable is the only link between the two devices; an optional [wireless link](#wireless-link) (iPhone for now) carries the same traffic when it is unplugged.
 
 ```
 ┌──────────── Mac ─────────────┐        USB         ┌──────────── Phone ─────────────┐
@@ -23,7 +23,7 @@ Both phone apps look the same and speak the same protocol, so the Mac app treats
 
 * **Phone app.** A SOCKS5 server listens on the phone's loopback address only, next to a small control channel for pairing and live status. On an iPhone it is hosted inside a packet tunnel extension so it keeps running with the screen off (the "tunnel" carries a single unreachable /32, so none of the phone's own traffic is touched), with foreground hosting as a fallback. On Android it runs in a foreground service with a notification, which likewise routes none of the phone's own traffic.
 * **Mac menu bar app.** Watches for an attached phone: usbmuxd (Apple's USB multiplexer, already on every Mac) for iPhones, and the local adb server for Android phones. It forwards a loopback port to the phone's SOCKS port over the cable and pairs with the phone.
-* **Mac helper (root, launchd daemon).** Creates a `utun` interface, runs an embedded userspace TCP/IP stack (hev-socks5-tunnel + lwIP) that turns every packet into a SOCKS5 stream to the loopback port, installs the default routes, and registers the interface as the primary network service so macOS believes it is online and sends DNS through it.
+* **Mac helper (root, launchd daemon).** Creates a `utun` interface, runs a userspace TCP/IP stack (hev-socks5-tunnel + lwIP, in a child process) that turns every packet into a SOCKS5 stream to the loopback port, installs the default routes, and registers the interface as the primary network service so macOS believes it is online and sends DNS through it.
 * **UDP** (DNS, QUIC, calls) rides inside the TCP stream using the "UDP in TCP" extension the engine speaks natively.
 
 Because the phone opens every connection with its own stack, the carrier sees the phone's TTL, TCP fingerprint and APN, not a tethered device. There is no guarantee of undetectability: unusual volume or application-layer fingerprints can still be visible, and this likely violates your carrier's terms.
@@ -38,6 +38,7 @@ Because the phone opens every connection with its own stack, the carrier sees th
 * Engine binaries are copied into the root-only state directory and that copy is verified (strict validation, Team ID and identifier) before it is executed, so nothing can be swapped between check and exec.
 * NordVPN profiles are accepted only if their certificate authority is Nord's (pinned by hash) and they pin the exact server that was requested.
 * Pairing codes are withdrawn after five wrong guesses; tokens are validated for format before use; the control channel is capped at eight peers.
+* The wireless link is set up over the cable: the Mac hands the phone its certificate fingerprint and a per-phone link key. The phone dials out (it still never listens), accepts only TLS 1.3 with that certificate, and proves the key by answering a fresh challenge (HMAC-SHA256); the Mac accepts only phones linked this way. The key sits in the Keychain on both sides (this device only). Anyone on the same network can reach the Mac's listener, so before proving the key a connection gets at most two handshake slots per address and a 128 KB first message. Forgetting a Mac on the phone ends its wireless link at once.
 * A fatal VPN failure (rejected credentials, bad profile) keeps the kill switch engaged until you turn the layer off, so no peer can "fail" you into the clear. Kill-switch reject routes sit one step more specific than the VPN's routes, so engaging or lifting them never leaves a gap.
 * Profiles, keys and credentials live in the data-protection keychain, this device only.
 * The helper tears the tunnel down automatically if the menu bar app quits or crashes.
@@ -52,6 +53,15 @@ Because the phone opens every connection with its own stack, the carrier sees th
 ## Flow map
 
 All the apps show a live map of the route traffic takes: Mac ⟶ USB ⟶ phone ⟶ radio ⟶ (VPN) ⟶ Internet. Particles ride the wires at a speed and density that follow the current throughput (teal toward the Mac, violet away from it), the VPN node slides in with a lock over the encrypted hop when the layer is on, the Mac gets a pulsing halo while keep-awake holds it up, and the USB hop shows the live rates. It is one `Canvas` driven by a `TimelineView` at up to 30 fps (15 fps when idle, fully paused when nothing is connected), with stateless particle math and no per-particle views, so it costs next to nothing (`PassthroughUI/FlowMap.swift`).
+
+## Wireless link
+
+Off by default. Set **Connect over** to **Wireless only** or **Automatic** in the Mac's settings and turn on **Wireless link** in the iPhone's settings. The phone links the next time it is connected over USB, and from then on it can serve the Mac without the cable (Automatic prefers the cable when one is plugged in).
+
+* The Mac joins the iPhone's **Personal Hotspot**; the phone finds the Mac there and dials it. While passthrough is down, the Mac's **hotspot guard** (on by default) rejects everything but the link to the phone, so the hotspot's own data allowance is not spent.
+* **Use peer-to-peer Wi-Fi** (Apple's AWDL, no hotspot needed) is an option on the iPhone. It drops for a minute or more while the phone is locked, so the hotspot is the default.
+* A dropped link resumes: both sides keep the session's connections for up to two minutes while the phone redials, so apps see a pause rather than errors. Traffic is the same SOCKS5 and control streams as over the cable, multiplexed over one TLS connection (see [protocol/README.md](protocol/README.md)).
+* Android's wireless link (a Wi-Fi Direct group the phone hosts) is not built yet.
 
 ## Keep Mac awake
 
@@ -165,7 +175,7 @@ The Mac app runs unsandboxed (it needs the usbmuxd and adb sockets) with hardene
 * The phone's tunnel is registered with an on-demand "always connect" rule, so iOS relaunches the extension by itself if it is killed or after a reboot; stopping it from the app clears the rule. New connections tolerate up to 30 s without a viable path (tower handoff, radio waking) before failing, and existing ones simply resume if the path returns in time.
 * On the phone, "Cellular only" now degrades gracefully: a path monitor tracks whether cellular data is actually usable, and while it isn't (radio asleep after a handoff, brief carrier outage) new connections use whatever network the phone has instead of failing with "network is down"; it switches back the moment cellular is viable, logging both transitions. Private, link-local and multicast destinations (home-LAN probes) are refused immediately rather than waiting on the radio. DNS aimed at a private address is the exception: Tailscale, for one, keeps sending lookups to the last Wi-Fi router the Mac saw, even with the Mac's Wi-Fi off, so the phone forwards those queries to its own network's DNS server (the carrier's, or its Wi-Fi's; 1.1.1.1 if it knows none) instead of letting every lookup fail.
 * On the phone, a UDP peer whose socket fails or never becomes viable is replaced on the next packet; a client that never completes the SOCKS handshake is dropped after 20 s; sessions are capped.
-* The phone reports whether its current network routes IPv6. When it doesn't (plenty of home Wi-Fi, some carriers), the helper turns the tunnel's IPv6 routes into reject routes, so apps fall back to IPv4 immediately instead of hanging on IPv6 connections tun2socks accepts but the phone can never make; they flip back when IPv6 returns. A tunnel engine that won't stop makes the helper restart itself, since its utun would otherwise block every new tunnel.
+* The phone reports whether its current network routes IPv6. When it doesn't (plenty of home Wi-Fi, some carriers), the helper turns the tunnel's IPv6 routes into reject routes, so apps fall back to IPv4 immediately instead of hanging on IPv6 connections tun2socks accepts but the phone can never make; they flip back when IPv6 returns. The engine runs in its own process (a verified root-only copy of the helper), ended outright on disconnect: its own shutdown can wait forever for a packet that no longer comes. The kernel frees its sockets and utun; the helper tidies routes and settings. If it somehow outlives that by 2 seconds it is killed, with its stack logged.
 * If launchd is still running the helper from an old bundle location, the app re-registers it from its current location the next time nothing is connected.
 
 ## Verifying without a phone

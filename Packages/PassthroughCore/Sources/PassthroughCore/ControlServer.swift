@@ -20,7 +20,11 @@ public struct ConnectedMac: Identifiable, Sendable, Equatable, Codable {
     public let id: String
     public let name: String
     public let since: Date
-    public init(id: String, name: String, since: Date) { self.id = id; self.name = name; self.since = since }
+    /// Over the wireless link rather than the cable; nil when the Mac didn't say.
+    public let wireless: Bool?
+    public init(id: String, name: String, since: Date, wireless: Bool? = nil) {
+        self.id = id; self.name = name; self.since = since; self.wireless = wireless
+    }
 }
 
 /// Newline-delimited JSON control channel: pairing, heartbeat, live status.
@@ -30,7 +34,7 @@ public final class ControlServer: @unchecked Sendable {
     private let counter: ByteCounter
     private let statusProvider: @Sendable () -> DeviceStatus
     private let socksPort: UInt16
-    private let queue = DispatchQueue(label: "dev.dpatel.passthrough.control")
+    fileprivate let queue = DispatchQueue(label: "dev.dpatel.passthrough.control")
     private var listeners: [NWListener] = []
     private var peers: [ObjectIdentifier: Peer] = [:]
     public private(set) var isRunning = false
@@ -116,6 +120,7 @@ public final class ControlServer: @unchecked Sendable {
                 var e = ControlEnvelope(t: ControlEnvelope.error); e.reason = PairingFailure.unsupportedVersion.rawValue
                 return [e]
             }
+            peer.via = message.via
             var paired = false
             if let id = message.clientID, let token = message.token, registry.verify(clientID: id, token: token) {
                 paired = true
@@ -142,6 +147,20 @@ public final class ControlServer: @unchecked Sendable {
                 var e = ControlEnvelope(t: ControlEnvelope.error); e.reason = failure.rawValue
                 return [e]
             }
+        case ControlEnvelope.link:
+            // Only a Mac that already proved its pairing token may link.
+            guard let mac = peer.mac, let cert = message.certSHA256, cert.count == 64,
+                  let key = message.linkKey.flatMap({ Data(base64Encoded: $0) }), key.count == 32 else { return [] }
+            // No reply if the key could not be stored: the Mac stays unlinked
+            // and offers the link again next time.
+            guard registry.link(clientID: mac.id, certificateSHA256: cert, linkKey: key) else {
+                ptLog(.error, "Could not link \(mac.name) for the wireless link")
+                return []
+            }
+            var reply = ControlEnvelope(t: ControlEnvelope.linked)
+            reply.phoneID = registry.phoneID
+            ptLog(.info, "Linked \(mac.name) for the wireless link")
+            return [reply]
         case ControlEnvelope.ping:
             return [ControlEnvelope(t: ControlEnvelope.pong)]
         default:
@@ -187,10 +206,12 @@ private final class Peer: @unchecked Sendable {
     private var timer: DispatchSourceTimer?
     private var cancelled = false
     private(set) var mac: ConnectedMac?
+    /// What the Mac's hello said carries this connection ("usb" or "wireless").
+    var via: String?
 
     init(server: ControlServer, connection: NWConnection) {
         self.server = server
-        self.channel = ControlConnection(connection)
+        self.channel = ControlConnection(connection, queue: server.queue)
     }
 
     func start(on queue: DispatchQueue) {
@@ -213,8 +234,8 @@ private final class Peer: @unchecked Sendable {
 
     func authenticate(id: String, name: String) {
         if mac == nil {
-            mac = ConnectedMac(id: id, name: name, since: Date())
-            ptLog(.info, "\(name) connected over USB")
+            mac = ConnectedMac(id: id, name: name, since: Date(), wireless: via.map { $0 == "wireless" })
+            ptLog(.info, "\(name) connected")
             server.clientsChanged()
         }
     }

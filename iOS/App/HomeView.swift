@@ -63,7 +63,8 @@ struct HomeView: View {
         switch model.state {
         case .running:
             let n = model.stats.macs.count
-            return n == 0 ? "Waiting for a Mac on USB" : "Serving \(n == 1 ? "1 Mac" : "\(n) Macs") over USB"
+            let how = model.servingWirelessly ? "over \(model.stats.wirelessCarrier ?? "Wi-Fi")" : "over USB"
+            return n == 0 ? (model.wireless ? "Waiting for a Mac" : "Waiting for a Mac on USB") : "Serving \(n == 1 ? "1 Mac" : "\(n) Macs") \(how)"
         case .starting: return "Starting…"
         case .stopping: return "Stopping…"
         case .failed: return "Something went wrong"
@@ -96,7 +97,7 @@ struct FlowCard: View {
                             linkUp: model.state == .running && !macs.isEmpty,
                             busy: model.state == .starting || (model.state == .running && macs.isEmpty),
                             radio: model.radio, downRate: model.meter.downRate, upRate: model.meter.upRate,
-                            activeConnections: model.stats.active)
+                            activeConnections: model.stats.active, wireless: model.servingWirelessly, wirelessCarrier: model.stats.wirelessCarrier)
     }
 
     var body: some View {
@@ -149,7 +150,8 @@ struct HeroCard: View {
                     }
                     HStack(spacing: 8) {
                         if let radio = model.radio { PTPill(radio, icon: "antenna.radiowaves.left.and.right", tint: PTTheme.down) }
-                        PTPill("USB", icon: "cable.connector", tint: .secondary)
+                        PTPill(model.servingWirelessly ? (model.stats.wirelessCarrier ?? "Wireless") : "USB",
+                               icon: model.servingWirelessly ? Self.carrierIcon(model.stats.wirelessCarrier) : "cable.connector", tint: .secondary)
                         PTPill(model.hosting == .background ? "Background" : "Foreground", icon: model.hosting == .background ? "moon.zzz.fill" : "sun.max.fill", tint: .secondary)
                         if model.state == .running {
                             PTPill("\(model.stats.active) open", icon: "arrow.left.arrow.right", tint: PTTheme.up)
@@ -180,6 +182,14 @@ struct HeroCard: View {
         case .running:
             if let mac = model.stats.macs.first { return "\(mac.name) is online through this iPhone" }
             return "Ready. Plug in your Mac and connect from the menu bar."
+        }
+    }
+
+    static func carrierIcon(_ carrier: String?) -> String {
+        switch carrier {
+        case "Hotspot": return "personalhotspot"
+        case "USB": return "cable.connector"
+        default: return "wifi"
         }
     }
 }

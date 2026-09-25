@@ -22,11 +22,11 @@ final class LineBufferTests: XCTestCase {
 /// A watcher driven by hand, standing in for usbmuxd or adb.
 @MainActor
 private final class FakeWatcher: DeviceWatcher {
-    let kind: PhoneDevice.Kind
+    let transport: WatchTransport
     var status = WatchStatus()
     var onDevicesChange: (([PhoneDevice]) -> Void)?
     var onStatusChange: ((WatchStatus) -> Void)?
-    init(kind: PhoneDevice.Kind) { self.kind = kind }
+    init(transport: WatchTransport) { self.transport = transport }
     func start() {}
     func stop() { onDevicesChange?([]) }
 }
@@ -34,9 +34,10 @@ private final class FakeWatcher: DeviceWatcher {
 @MainActor
 final class DeviceDirectoryTests: XCTestCase {
     func testMergesWatchersAndReportsChanges() {
-        let phones = FakeWatcher(kind: .iPhone)
-        let androids = FakeWatcher(kind: .android)
-        let directory = DeviceDirectory(watchers: [phones, androids])
+        let phones = FakeWatcher(transport: .usbmux)
+        let androids = FakeWatcher(transport: .adb)
+        let wireless = FakeWatcher(transport: .wireless)
+        let directory = DeviceDirectory(watchers: [phones, androids, wireless])
         var changes: [String] = []
         directory.onChange = { change in
             switch change {
@@ -57,6 +58,13 @@ final class DeviceDirectoryTests: XCTestCase {
 
         androids.stop()
         XCTAssertEqual(directory.devices.map(\.id), ["usbmux:1"], "stopping one watcher leaves the others' phones")
-        XCTAssertTrue(directory.watcher(for: .android) === androids)
+        XCTAssertTrue(directory.watcher(for: .adb) === androids)
+
+        // The same iPhone over the air is a second device; its watcher's lists don't touch the cable one.
+        let overAir = PhoneDevice.wireless(phoneID: "P1", kind: .iPhone, label: "iPhone", pairingSlot: "token", link: LoopbackLink())
+        wireless.onDevicesChange?([overAir])
+        wireless.onDevicesChange?([])
+        XCTAssertEqual(directory.devices.map(\.id), ["usbmux:1"])
+        XCTAssertEqual(changes.suffix(2), ["+wifi:P1", "-wifi:P1"])
     }
 }

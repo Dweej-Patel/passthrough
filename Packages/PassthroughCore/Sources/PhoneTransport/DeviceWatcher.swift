@@ -11,11 +11,11 @@ public struct WatchStatus: Equatable, Sendable {
     public init(state: State = .idle, hint: String? = nil) { self.state = state; self.hint = hint }
 }
 
-/// Finds phones of one kind and reports the ones ready to use. Restarts itself
-/// after failures until stopped.
+/// Finds phones over one transport and reports the ones ready to use.
+/// Restarts itself after failures until stopped.
 @MainActor
 public protocol DeviceWatcher: AnyObject {
-    var kind: PhoneDevice.Kind { get }
+    var transport: WatchTransport { get }
     var status: WatchStatus { get }
     /// Every usable phone this watcher sees, oldest first.
     var onDevicesChange: (([PhoneDevice]) -> Void)? { get set }
@@ -25,6 +25,8 @@ public protocol DeviceWatcher: AnyObject {
     func stop()
 }
 
+public enum WatchTransport: Sendable { case usbmux, adb, wireless }
+
 /// Tracks every watcher's phones in attach order and reports each change.
 @MainActor
 public final class DeviceDirectory {
@@ -33,28 +35,32 @@ public final class DeviceDirectory {
     public private(set) var devices: [PhoneDevice] = []
     public var onChange: ((Change) -> Void)?
     public let watchers: [any DeviceWatcher]
+    /// Which watcher reported each device.
+    private var source: [String: WatchTransport] = [:]
 
     public init(watchers: [any DeviceWatcher]) {
         self.watchers = watchers
         for watcher in watchers {
-            let kind = watcher.kind
-            watcher.onDevicesChange = { [weak self] list in self?.update(kind: kind, list) }
+            let transport = watcher.transport
+            watcher.onDevicesChange = { [weak self] list in self?.update(transport, list) }
         }
     }
 
-    public func watcher(for kind: PhoneDevice.Kind) -> (any DeviceWatcher)? {
-        watchers.first { $0.kind == kind }
+    public func watcher(for transport: WatchTransport) -> (any DeviceWatcher)? {
+        watchers.first { $0.transport == transport }
     }
 
     /// Detaches first, then attaches, so a replugged phone reads as a fresh arrival.
-    private func update(kind: PhoneDevice.Kind, _ list: [PhoneDevice]) {
+    private func update(_ transport: WatchTransport, _ list: [PhoneDevice]) {
         let listed = Set(list.map(\.id))
-        for gone in devices where gone.kind == kind && !listed.contains(gone.id) {
+        for gone in devices where source[gone.id] == transport && !listed.contains(gone.id) {
             devices.removeAll { $0.id == gone.id }
+            source[gone.id] = nil
             onChange?(.detached(gone))
         }
         for new in list where !devices.contains(where: { $0.id == new.id }) {
             devices.append(new)
+            source[new.id] = transport
             onChange?(.attached(new))
         }
     }
@@ -65,7 +71,7 @@ public final class DeviceDirectory {
 /// Watches usbmuxd for iPhones on the cable.
 @MainActor
 public final class USBMuxWatcher: DeviceWatcher {
-    public let kind = PhoneDevice.Kind.iPhone
+    public let transport = WatchTransport.usbmux
     public private(set) var status = WatchStatus() { didSet { if status != oldValue { onStatusChange?(status) } } }
     public var onDevicesChange: (([PhoneDevice]) -> Void)?
     public var onStatusChange: ((WatchStatus) -> Void)?
@@ -129,7 +135,7 @@ public final class USBMuxWatcher: DeviceWatcher {
 /// when platform-tools are installed but it isn't running.
 @MainActor
 public final class ADBWatcher: DeviceWatcher {
-    public let kind = PhoneDevice.Kind.android
+    public let transport = WatchTransport.adb
     public private(set) var status = WatchStatus() { didSet { if status != oldValue { onStatusChange?(status) } } }
     public var onDevicesChange: (([PhoneDevice]) -> Void)?
     public var onStatusChange: ((WatchStatus) -> Void)?

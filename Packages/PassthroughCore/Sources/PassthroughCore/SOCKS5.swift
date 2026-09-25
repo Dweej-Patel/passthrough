@@ -156,6 +156,24 @@ public final class SOCKS5Server: @unchecked Sendable {
 
     public let configuration: Configuration
     public let counter = ByteCounter()
+
+    /// Datagram bytes all sessions have handed to the Mac but not yet sent.
+    /// Each UDP flow is its own session with its own limit; this bounds them
+    /// together (the extension has 50 MB).
+    private let udpBacklogLock = NSLock()
+    private var udpBacklog = 0
+    static let udpBacklogLimit = 4 << 20
+
+    fileprivate func reserveUDPBacklog(_ bytes: Int) -> Bool {
+        udpBacklogLock.lock(); defer { udpBacklogLock.unlock() }
+        guard udpBacklog + bytes <= Self.udpBacklogLimit else { return false }
+        udpBacklog += bytes
+        return true
+    }
+
+    fileprivate func releaseUDPBacklog(_ bytes: Int) {
+        udpBacklogLock.lock(); udpBacklog -= bytes; udpBacklogLock.unlock()
+    }
     public var onAuthenticated: (@Sendable (String) -> Void)?
     private let authenticator: Authenticator?
     let queue = DispatchQueue(label: "dev.dpatel.passthrough.socks", qos: .userInitiated, attributes: .concurrent)
@@ -387,6 +405,13 @@ private final class Session: @unchecked Sendable {
     private let queue: DispatchQueue
     private var remote: NWConnection?
     private var udpPeers: [SOCKS5.Address: UDPPeer] = [:]
+    /// Datagram bytes handed to the Mac-bound stream but not yet sent. UDP
+    /// arriving faster than the Mac drains it (a slow wireless link) must be
+    /// dropped, as a router would, not queued: the extension has 50 MB.
+    private var udpBacklog = 0
+    private var udpDropped = 0
+    static let udpBacklogLimit = 1 << 20
+    static let udpCheckInterval: TimeInterval = 15
     private var udpTimer: DispatchSourceTimer?
     private var handshakeTimer: DispatchSourceTimer?
     private var waitTimer: DispatchSourceTimer?
@@ -630,7 +655,7 @@ private final class Session: @unchecked Sendable {
         countedOpen = true
         server.counter.connectionOpened()
         let timer = DispatchSource.makeTimerSource(queue: queue)
-        timer.schedule(deadline: .now() + 15, repeating: 15)
+        timer.schedule(deadline: .now() + Self.udpCheckInterval, repeating: Self.udpCheckInterval)
         timer.setEventHandler { [weak self] in self?.pruneIdlePeers() }
         timer.resume()
         udpTimer = timer
@@ -699,7 +724,26 @@ private final class Session: @unchecked Sendable {
                            waitTimeout: TimeInterval(server.configuration.connectTimeout)) { [weak self] datagram in
             guard let self, !self.closed else { return }
             self.server.counter.addRx(datagram.count)
-            self.write(SOCKS5.frameDatagram(address: address.raw, payload: datagram))
+            let frame = SOCKS5.frameDatagram(address: address.raw, payload: datagram)
+            let server = self.server
+            guard self.udpBacklog + frame.count <= Self.udpBacklogLimit, server.reserveUDPBacklog(frame.count) else {
+                self.udpDropped += 1
+                self.udpPeers[address]?.droppedSinceCheck += 1
+                if self.udpDropped == 1 || self.udpDropped % 1000 == 0 {
+                    ptLog(.debug, "UDP to the Mac is backed up; dropped \(self.udpDropped) datagram(s) so far")
+                }
+                return
+            }
+            self.udpBacklog += frame.count
+            // Released whatever happens: a session that fails must not keep
+            // its share of the relay-wide budget.
+            self.client.send(content: frame, completion: .contentProcessed { [weak self] error in
+                server.releaseUDPBacklog(frame.count)
+                guard let self else { return }
+                self.udpBacklog -= frame.count
+                if let error { self.close(reason: "write failed: \(error)"); return }
+                self.udpPeers[address]?.relayedSinceCheck += 1
+            })
         }
         peer.onDead = { [weak self, weak peer] in
             guard let self, let peer, self.udpPeers[address] === peer else { return }
@@ -710,6 +754,7 @@ private final class Session: @unchecked Sendable {
     }
 
     private func pruneIdlePeers() {
+        udpPeers.values.forEach { $0.report(interval: Self.udpCheckInterval, queuedToMac: udpBacklog) }
         let cutoff = Date().addingTimeInterval(-server.configuration.udpIdleTimeout)
         for (key, peer) in udpPeers where peer.lastActivity < cutoff {
             peer.cancel()
@@ -749,6 +794,14 @@ private final class UDPPeer: @unchecked Sendable {
     var lastActivity = Date()
     var onDead: (() -> Void)?
     private let onDatagram: (Data) -> Void
+    // Datagrams since the last `report`: from the Mac (sent on), from the
+    // server, and handed back to the Mac or dropped on the way.
+    private var sentSinceCheck = 0
+    private var receivedSinceCheck = 0
+    var relayedSinceCheck = 0
+    var droppedSinceCheck = 0
+    private var fromMacLastCheck = 0
+    private let born = Date()
     private let label: String
 
     /// Datagrams go to `target` when given (a redirected DNS query), else to `address`.
@@ -811,7 +864,27 @@ private final class UDPPeer: @unchecked Sendable {
             if pending.count < 64 { pending.append(datagram) }
             return
         }
+        sentSinceCheck += 1
         connection.send(content: datagram, completion: .idempotent)
+    }
+
+    /// Logs a long-lived flow whose last interval looks wrong, with its
+    /// datagrams per hop, so a stalled flow (a VPN session, say) shows which
+    /// hop stopped: the Mac's side of the link, the far end, or the way back.
+    func report(interval: TimeInterval, queuedToMac: Int) {
+        defer {
+            fromMacLastCheck = sentSinceCheck
+            sentSinceCheck = 0; receivedSinceCheck = 0; relayedSinceCheck = 0; droppedSinceCheck = 0
+        }
+        guard Date().timeIntervalSince(born) >= interval else { return }   // skip one-shot DNS
+        let problem: String
+        if droppedSinceCheck > 0 { problem = "backed up toward the Mac" }
+        else if sentSinceCheck >= 2, receivedSinceCheck == 0 { problem = "unanswered" }
+        else if receivedSinceCheck > 0, relayedSinceCheck == 0 { problem = "not reaching the Mac" }
+        else if fromMacLastCheck >= 50, sentSinceCheck == 0, receivedSinceCheck == 0 { problem = "went quiet" }
+        else { return }
+        ptLog(.info, "UDP \(label) \(problem), last \(Int(interval)) s: \(sentSinceCheck) from Mac, \(receivedSinceCheck) from server, "
+              + "\(relayedSinceCheck) to Mac, \(droppedSinceCheck) dropped, \(queuedToMac) B queued")
     }
 
     private func receiveLoop() {
@@ -823,6 +896,7 @@ private final class UDPPeer: @unchecked Sendable {
             }
             if let data, !data.isEmpty {
                 self.lastActivity = Date()
+                self.receivedSinceCheck += 1
                 self.onDatagram(data)
             }
             self.receiveLoop()

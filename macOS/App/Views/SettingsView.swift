@@ -31,6 +31,14 @@ struct GeneralSettings: View {
         return "When on battery power and keep awake is on, it switches off automatically at this level so a closed laptop can sleep instead of draining.\(now)"
     }
 
+    private var wirelessText: String {
+        switch session.wirelessWatch.state {
+        case .watching: return session.device?.medium == .wireless ? "Linked" : "Waiting for a phone"
+        case .unavailable: return session.wirelessWatch.hint ?? "Not available"
+        default: return "Off"
+        }
+    }
+
     private var adbText: String {
         switch session.adbStatus {
         case .watching: return "Running"
@@ -76,6 +84,21 @@ struct GeneralSettings: View {
                 Text("Battery")
             } footer: {
                 Text(batteryFooter)
+            }
+            Section {
+                Picker("Connect over", selection: $session.connectionMode) {
+                    ForEach(SessionCoordinator.ConnectionMode.allCases) { Text($0.title).tag($0) }
+                }
+                if session.connectionMode != .cable {
+                    LabeledContent("Wireless") { Text(wirelessText) }
+                    LabeledContent("Linked phones") { Text("\(session.linkedPhoneCount)") }
+                    Toggle("Don't use the hotspot's own data", isOn: $session.hotspotGuard)
+                    Toggle("Use peer-to-peer Wi-Fi", isOn: $session.peerToPeer)
+                }
+            } header: {
+                Text("Connection")
+            } footer: {
+                Text("Wireless: join the iPhone's Personal Hotspot from the Wi-Fi menu (it stays up while the iPhone is locked) and turn on Wireless link in Passthrough on the phone. Traffic still goes through Passthrough; with \"Don't use the hotspot's own data\" the Mac reaches nothing but the phone while passthrough is down, so the hotspot allowance isn't touched. Peer-to-peer Wi-Fi needs no hotspot but drops for minutes while an iPhone is locked. A phone links the first time it connects over USB. Automatic prefers the cable.")
             }
             Section {
                 Toggle("Android phones (via adb)", isOn: $session.androidEnabled)

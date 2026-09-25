@@ -22,8 +22,12 @@
 	<string>1</string>
 	<key>ITSAppUsesNonExemptEncryption</key>
 	<false/>
+	<key>NSBonjourServices</key>
+	<array>
+		<string>_passthrough._tcp</string>
+	</array>
 	<key>NSLocalNetworkUsageDescription</key>
-	<string>Passthrough only listens on the USB link to your Mac.</string>
+	<string>Passthrough finds your linked Mac on this iPhone's Personal Hotspot, or over peer-to-peer Wi-Fi, when the wireless link is on.</string>
 	<key>UIApplicationSceneManifest</key>
 	<dict>
 		<key>UIApplicationSupportsMultipleScenes</key>

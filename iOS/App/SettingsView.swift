@@ -45,6 +45,20 @@ struct SettingsView: View {
                     Button("Forget all paired Macs", role: .destructive) { model.registry.revokeAll() }
                 }
                 .disabled(model.state.isActive)
+                Section {
+                    Toggle("Wireless link", isOn: $model.wireless)
+                        .onChange(of: model.wireless) { _, on in
+                            if on { LocalNetworkPermission.request() }
+                            model.restartIfRunning()
+                        }
+                    Toggle("Use peer-to-peer Wi-Fi", isOn: $model.peerToPeer)
+                        .disabled(!model.wireless)
+                        .onChange(of: model.peerToPeer) { _, _ in model.restartIfRunning() }
+                } header: {
+                    Text("Wireless")
+                } footer: {
+                    Text("Reach linked Macs without the cable. Join this iPhone's Personal Hotspot from the Mac's Wi-Fi menu: it stays up while the iPhone is locked, and the Mac's traffic still goes through Passthrough, not the hotspot's own internet. Peer-to-peer Wi-Fi needs no hotspot, but iOS switches it off for minutes at a time while the iPhone is locked. A Mac links the first time it connects over USB; the link is encrypted and only a paired Mac can use it.")
+                }
                 Section("Diagnostics") {
                     DisclosureGroup("Log", isExpanded: $showLog) {
                         if model.logEntries.isEmpty {

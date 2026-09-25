@@ -38,6 +38,16 @@ public struct ControlEnvelope: Codable, Equatable, Sendable {
     public var rxBytes: Int64?
     public var txBytes: Int64?
     public var timestamp: Double?
+    // Linking the wireless link (see protocol/README.md).
+    public var linkKey: String?
+    public var certSHA256: String?
+    public var phoneID: String?
+    public var network: String?
+    public var passphrase: String?
+    /// hello: how the Mac reaches the phone on this connection, "usb" or
+    /// "wireless". A phone can have a wireless link up while the Mac uses the
+    /// cable, so only the Mac knows which carries its traffic.
+    public var via: String?
 
     public init(t: String) { self.t = t }
 
@@ -49,6 +59,8 @@ public struct ControlEnvelope: Codable, Equatable, Sendable {
     public static let ping = "ping"
     public static let pong = "pong"
     public static let status = "status"
+    public static let link = "link"
+    public static let linked = "linked"
 
     public func encodedLine() throws -> Data {
         var data = try JSONEncoder().encode(self)
@@ -77,8 +89,20 @@ public struct ProviderStats: Codable, Sendable, Equatable {
     public var totalConnections: Int
     public var macs: [ConnectedMac]
     public var startedAt: Date?
-    public init(rx: Int64, tx: Int64, active: Int, totalConnections: Int, macs: [ConnectedMac], startedAt: Date?) {
+    /// `WirelessLink.macTag` of the Macs whose link is up over the air.
+    public var wirelessMacTags: [String]?
+    /// What carries the wireless link: "Hotspot", "Peer-to-peer", "USB" or "Wi-Fi network".
+    public var wirelessCarrier: String?
+    public init(rx: Int64, tx: Int64, active: Int, totalConnections: Int, macs: [ConnectedMac], startedAt: Date?,
+                wirelessMacTags: [String]? = nil, wirelessCarrier: String? = nil) {
         self.rx = rx; self.tx = tx; self.active = active; self.totalConnections = totalConnections; self.macs = macs; self.startedAt = startedAt
+        self.wirelessMacTags = wirelessMacTags; self.wirelessCarrier = wirelessCarrier
+    }
+
+    /// Whether `mac` is connected over the wireless link rather than the cable:
+    /// as the Mac said, or for a Mac too old to say, whether a link to it is up.
+    public func isWireless(_ mac: ConnectedMac) -> Bool {
+        mac.wireless ?? wirelessMacTags?.contains(WirelessLink.macTag(clientID: mac.id)) ?? false
     }
 }
 
@@ -104,6 +128,10 @@ public enum SharedKeys {
     public static let controlPort = "settings.controlPort"
     /// `Egress` raw value: which network "cellular only" is using right now.
     public static let egress = "state.egress"
+    /// Dial linked Macs over the wireless link too.
+    public static let wireless = "settings.wireless"
+    /// Let the wireless link use Apple peer-to-peer Wi-Fi as well.
+    public static let peerToPeer = "settings.peerToPeer"
     public static let usageMonthRx = "usage.month.rx"
     public static let usageMonthTx = "usage.month.tx"
     public static let usageMonthStart = "usage.month.start"

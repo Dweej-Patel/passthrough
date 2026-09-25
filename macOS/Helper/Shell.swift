@@ -86,23 +86,30 @@ enum RouteTable {
         })
     }
 
-    /// The gateway column of `prefix`'s route, if it is in the table.
-    static func gateway(of prefix: String, v6: Bool) -> String? {
-        let name = netstatName(prefix)
+    /// Destination → gateway for every route in one family's table, from one netstat run.
+    static func gateways(v6: Bool) -> [String: String] {
+        var result: [String: String] = [:]
         for line in Shell.capture("/usr/sbin/netstat", ["-rn", "-f", v6 ? "inet6" : "inet"]).split(separator: "\n") {
             let fields = line.split(separator: " ", omittingEmptySubsequences: true)
-            if fields.count >= 2, fields[0] == name { return String(fields[1]) }
+            if fields.count >= 2, result[String(fields[0])] == nil { result[String(fields[0])] = String(fields[1]) }
         }
-        return nil
+        return result
+    }
+
+    /// The gateway column of `prefix`'s route, if it is in the table.
+    static func gateway(of prefix: String, v6: Bool) -> String? {
+        gateways(v6: v6)[netstatName(prefix)]
     }
 
     static func exists(_ prefix: String, v6: Bool, in table: Set<String>) -> Bool {
         table.contains(netstatName(prefix))
     }
 
-    /// Whether `prefix` is one of our reject routes (gateway 127.0.0.1 or ::1).
-    static func isReject(_ prefix: String, v6: Bool) -> Bool {
-        gateway(of: prefix, v6: v6) == (v6 ? "::1" : "127.0.0.1")
+    /// Whether `prefix` is one of our reject routes (gateway 127.0.0.1 or ::1),
+    /// in `gateways` when given (one snapshot for many prefixes).
+    static func isReject(_ prefix: String, v6: Bool, in gateways: [String: String]? = nil) -> Bool {
+        let gateway = gateways.map { $0[netstatName(prefix)] } ?? gateway(of: prefix, v6: v6)
+        return gateway == (v6 ? "::1" : "127.0.0.1")
     }
 
     /// Deletes `prefix` only if it is really in the table. Returns true if removed.
@@ -121,6 +128,12 @@ enum RouteTable {
 enum RecoverySweep {
     static func run() {
         var cleaned: [String] = []
+        // An engine left by a helper that died: it quits by itself once it
+        // notices, but its quit is what can spin forever.
+        let staleEngine = BundledEngines.stateDirectory + "/bin/"
+        if (try? Shell.run("/usr/bin/pkill", ["-9", "-f", "^" + staleEngine + ".* " + EngineProcess.flag + "$"], quiet: true)) != nil {
+            cleaned.append("engine process")
+        }
         let v4 = RouteTable.present(v6: false), v6 = RouteTable.present(v6: true)
         for q in ["0.0.0.0/2", "64.0.0.0/2", "128.0.0.0/2", "192.0.0.0/2"] where RouteTable.deleteIfPresent(q, v6: false, table: v4) {
             cleaned.append(q)
@@ -137,6 +150,7 @@ enum RecoverySweep {
         for q in VPNEngine.v4Eighths where RouteTable.isReject(q, v6: false) && RouteTable.deleteIfPresent(q, v6: false, table: v4) {
             cleaned.append(q)
         }
+        cleaned += HotspotGuard.removeAll()
         for name in Shell.capture("/sbin/ifconfig", ["-l"]).split(separator: " ").map(String.init) where name.hasPrefix("feth") {
             if Shell.capture("/sbin/ifconfig", [name]).contains("10.83.0.1"), (try? Shell.run("/sbin/ifconfig", [name, "destroy"], quiet: true)) != nil {
                 cleaned.append(name)
@@ -183,7 +197,7 @@ enum BundledEngines {
     /// the root-only state directory, the *copy* is verified (strictly, and by
     /// identifier as well as Team ID) and the copy is what gets executed, so
     /// nothing can be swapped between check and exec.
-    static func stagedEngine(_ url: URL) throws -> URL {
+    static func stagedEngine(_ url: URL, identifier: String? = nil) throws -> URL {
         guard FileManager.default.isExecutableFile(atPath: url.path) else { throw EngineFileError.missing(url.lastPathComponent) }
         try prepareStateDirectory()
         let binDir = URL(fileURLWithPath: stateDirectory).appendingPathComponent("bin", isDirectory: true)
@@ -192,18 +206,19 @@ enum BundledEngines {
         try? FileManager.default.removeItem(at: staged)
         try FileManager.default.copyItem(at: url, to: staged)
         try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: staged.path)
-        try verifySignature(of: staged)
+        try verifySignature(of: staged, identifier: identifier ?? url.lastPathComponent)
         return staged
     }
 
-    static func verifySignature(of url: URL) throws {
+    /// `identifier`: the signing identifier the file must carry.
+    static func verifySignature(of url: URL, identifier: String) throws {
         guard let team = CodeSigning.ownTeamIdentifier() else { throw EngineFileError.unsigned(url.lastPathComponent) }
         var staticCode: SecStaticCode?
         guard SecStaticCodeCreateWithPath(url as CFURL, [], &staticCode) == errSecSuccess, let staticCode else {
             throw EngineFileError.unsigned(url.lastPathComponent)
         }
         var requirement: SecRequirement?
-        let text = "anchor apple generic and certificate leaf[subject.OU] = \"\(team)\" and identifier \"\(url.lastPathComponent)\"" as CFString
+        let text = "anchor apple generic and certificate leaf[subject.OU] = \"\(team)\" and identifier \"\(identifier)\"" as CFString
         guard SecRequirementCreateWithString(text, [], &requirement) == errSecSuccess, let requirement else {
             throw EngineFileError.unsigned(url.lastPathComponent)
         }
