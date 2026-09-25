@@ -569,7 +569,9 @@ final class SessionCoordinator: ObservableObject {
         let vpnWanted = vpnLayer.isWanted
         let busy = phase.isConnected || phase.isBusy || vpnWanted || panelVisible
         if !busy, healthTick % 10 != 0 { return }
-        if healthTick % 10 == 1 || keepAwake.blockedReason != nil { keepAwake.checkBattery(); keepAwake.checkThermal() }
+        // Every 10 s, busy or not: these ticks are the ones that get here when
+        // idle, which is exactly when a closed, kept-awake Mac needs the check.
+        if healthTick % 10 == 0 || keepAwake.blockedReason != nil { keepAwake.checkBattery(); keepAwake.checkThermal() }
         // Poll every second while the VPN is the only thing carrying traffic (it feeds the meter).
         let pollNow = (vpnWanted && !phase.isConnected) ? true : healthTick % 3 == 0
         if phase.isConnected || vpnWanted, pollNow, !statusPollInFlight { pollHelper() }

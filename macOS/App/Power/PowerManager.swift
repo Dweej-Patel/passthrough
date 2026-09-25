@@ -8,6 +8,9 @@ import IOKit.pwr_mgt
 /// display, which is normal macOS behavior we deliberately don't override.
 final class PowerManager {
     private var assertionID: IOPMAssertionID = 0
+    /// Keeps App Nap off while held: with the lid closed and no window open it
+    /// would otherwise stretch the timer that runs the battery and heat checks.
+    private var activity: NSObjectProtocol?
     private(set) var isActive = false
 
     func apply(_ keepAwake: Bool) {
@@ -23,9 +26,14 @@ final class PowerManager {
             reason,
             &assertionID)
         isActive = (result == kIOReturnSuccess)
+        if activity == nil {
+            activity = ProcessInfo.processInfo.beginActivity(options: .userInitiatedAllowingIdleSystemSleep,
+                                                             reason: "Keep awake checks battery and heat")
+        }
     }
 
     private func disable() {
+        if let activity { ProcessInfo.processInfo.endActivity(activity); self.activity = nil }
         guard isActive else { return }
         IOPMAssertionRelease(assertionID)
         assertionID = 0
