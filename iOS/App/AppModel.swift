@@ -20,7 +20,7 @@ final class AppModel: ObservableObject {
     }
 
     static let groupDefaults = UserDefaults(suiteName: PassthroughProtocol.appGroup) ?? .standard
-    let registry = PairingRegistry(defaults: AppModel.groupDefaults)
+    let registry = PairingRegistry(defaults: AppModel.groupDefaults, secrets: KeychainSecrets(accessGroup: PassthroughProtocol.appGroup))
     let log = PassthroughLog.shared
 
     @Published private(set) var state: ServiceState = .stopped

@@ -38,6 +38,12 @@ public struct ControlEnvelope: Codable, Equatable, Sendable {
     public var rxBytes: Int64?
     public var txBytes: Int64?
     public var timestamp: Double?
+    // Linking the wireless link (see protocol/README.md).
+    public var linkKey: String?
+    public var certSHA256: String?
+    public var phoneID: String?
+    public var network: String?
+    public var passphrase: String?
 
     public init(t: String) { self.t = t }
 
@@ -49,6 +55,8 @@ public struct ControlEnvelope: Codable, Equatable, Sendable {
     public static let ping = "ping"
     public static let pong = "pong"
     public static let status = "status"
+    public static let link = "link"
+    public static let linked = "linked"
 
     public func encodedLine() throws -> Data {
         var data = try JSONEncoder().encode(self)

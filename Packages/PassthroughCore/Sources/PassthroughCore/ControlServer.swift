@@ -142,6 +142,15 @@ public final class ControlServer: @unchecked Sendable {
                 var e = ControlEnvelope(t: ControlEnvelope.error); e.reason = failure.rawValue
                 return [e]
             }
+        case ControlEnvelope.link:
+            // Only a Mac that already proved its pairing token may link.
+            guard let mac = peer.mac, let cert = message.certSHA256, cert.count == 64,
+                  let key = message.linkKey.flatMap({ Data(base64Encoded: $0) }), key.count == 32 else { return [] }
+            registry.link(clientID: mac.id, certificateSHA256: cert, linkKey: key)
+            var reply = ControlEnvelope(t: ControlEnvelope.linked)
+            reply.phoneID = registry.phoneID
+            ptLog(.info, "Linked \(mac.name) for the wireless link")
+            return [reply]
         case ControlEnvelope.ping:
             return [ControlEnvelope(t: ControlEnvelope.pong)]
         default:

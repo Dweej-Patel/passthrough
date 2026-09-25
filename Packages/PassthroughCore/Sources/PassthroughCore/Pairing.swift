@@ -33,6 +33,8 @@ public struct PairedClient: Codable, Identifiable, Equatable, Sendable {
     public var tokenHash: String
     public var pairedAt: Date
     public var lastSeen: Date?
+    /// SHA-256 of the Mac's wireless-link certificate, once linked over the cable.
+    public var linkCertificate: String?
 
     public init(id: String, name: String, tokenHash: String, pairedAt: Date, lastSeen: Date? = nil) {
         self.id = id; self.name = name; self.tokenHash = tokenHash; self.pairedAt = pairedAt; self.lastSeen = lastSeen
@@ -49,12 +51,48 @@ public final class PairingRegistry: @unchecked Sendable {
     /// defaults, since the iOS app issues codes and the extension checks them.
     public static let failedAttemptsKey = "pairing.failedAttempts"
 
+    public static let phoneIDKey = "pairing.phoneID"
+
     private let defaults: UserDefaults
+    private let secrets: SecretStore
     private let lock = NSLock()
     public var onChange: (@Sendable () -> Void)?
 
-    public init(defaults: UserDefaults) {
+    /// `secrets` holds the wireless link keys: the apps pass `KeychainSecrets`.
+    public init(defaults: UserDefaults, secrets: SecretStore = InMemorySecrets()) {
         self.defaults = defaults
+        self.secrets = secrets
+    }
+
+    // MARK: Wireless link
+
+    /// This phone's identity towards linked Macs: random, created once.
+    public var phoneID: String {
+        lock.lock(); defer { lock.unlock() }
+        if let id = defaults.string(forKey: Self.phoneIDKey) { return id }
+        let id = UUID().uuidString
+        defaults.set(id, forKey: Self.phoneIDKey)
+        return id
+    }
+
+    /// Records what a paired Mac sent over the cable to link wirelessly.
+    public func link(clientID: String, certificateSHA256: String, linkKey: Data) {
+        lock.lock()
+        var list = loadClients()
+        guard let i = list.firstIndex(where: { $0.id == clientID }) else { lock.unlock(); return }
+        secrets.write(linkKey, account: "link." + clientID)
+        list[i].linkCertificate = certificateSHA256
+        save(list)
+        lock.unlock()
+    }
+
+    /// Everything the wireless dialer needs, for every linked Mac.
+    public func linkCredentials() -> [LinkCredential] {
+        let id = phoneID
+        return clients.compactMap { client in
+            guard let cert = client.linkCertificate, let key = secrets.read("link." + client.id) else { return nil }
+            return LinkCredential(macTag: WirelessLink.macTag(clientID: client.id), certSHA256: cert, linkKey: key, phoneID: id)
+        }
     }
 
     public var clients: [PairedClient] {
@@ -161,11 +199,13 @@ public final class PairingRegistry: @unchecked Sendable {
 
     public func revoke(clientID: String) {
         lock.lock(); defer { lock.unlock() }
+        secrets.delete("link." + clientID)
         save(loadClients().filter { $0.id != clientID })
     }
 
     public func revokeAll() {
         lock.lock(); defer { lock.unlock() }
+        loadClients().forEach { secrets.delete("link." + $0.id) }
         save([])
     }
 

@@ -32,7 +32,8 @@ extension PassthroughService {
     /// Pass the app's own `registry` when hosting in the app process.
     public static func sharing(_ store: UserDefaults, registry: PairingRegistry? = nil, options: Options, hosting: String) -> PassthroughService {
         nonisolated(unsafe) let defaults = store  // UserDefaults is thread-safe
-        let service = PassthroughService(registry: registry ?? PairingRegistry(defaults: defaults), options: options) {
+        let registry = registry ?? PairingRegistry(defaults: defaults, secrets: KeychainSecrets(accessGroup: PassthroughProtocol.appGroup))
+        let service = PassthroughService(registry: registry, options: options) {
             DeviceStatus(deviceName: defaults.string(forKey: SharedKeys.deviceName) ?? "iPhone",
                          radio: defaults.string(forKey: SharedKeys.radio),
                          battery: defaults.object(forKey: SharedKeys.battery) as? Double,
