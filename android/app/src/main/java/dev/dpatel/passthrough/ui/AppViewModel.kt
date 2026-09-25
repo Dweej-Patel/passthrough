@@ -69,7 +69,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     fun start() {
         if (state.value.isActive) return
         _meter.value = TrafficMeter()
-        Runtime.state.value = ServiceState.Starting
+        Runtime.setState(ServiceState.Starting)
         PassthroughService.start(getApplication())
     }
 

@@ -10,6 +10,10 @@ interface Egress {
     fun bind(socket: Socket)
     fun bind(socket: DatagramSocket)
     val label: String
+    /** The network's own DNS servers, for [DnsRedirect]; empty when unknown. */
+    fun dnsServers(): List<InetAddress> = emptyList()
+    /** Whether this network routes IPv6; null when unknown. */
+    fun hasIPv6(): Boolean? = null
 }
 
 /** Hands out the egress to use for a new connection, possibly waiting for one. */

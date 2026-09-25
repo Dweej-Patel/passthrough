@@ -1,7 +1,7 @@
 import XCTest
 import Network
 @testable import PassthroughCore
-@testable import USBMux
+@testable import PhoneTransport
 
 final class AndroidTransportTests: XCTestCase {
     func testADBRequestFraming() {
@@ -37,12 +37,24 @@ final class AndroidTransportTests: XCTestCase {
     }
 
     func testPhoneDeviceIdentity() {
-        let a = PhoneDevice(transport: .adb("R58M"), label: "Pixel")
-        let i = PhoneDevice(transport: .usbmux(3), label: "0000…")
-        XCTAssertEqual(a.id, "adb:R58M")
+        let a = PhoneDevice.android(serial: "R58M/1", model: "Pixel")
+        let i = PhoneDevice.iPhone(deviceID: 3, udid: "00008110ABCDEF")
+        XCTAssertEqual(a.id, "adb:R58M/1")
         XCTAssertEqual(i.id, "usbmux:3")
         XCTAssertEqual(a.kind, .android)
+        XCTAssertEqual(a.label, "Pixel")
+        XCTAssertEqual(i.label, "00008110…")
         XCTAssertEqual(i.kindName, "iPhone")
+        XCTAssertEqual(i.pairingSlot, "token", "iPhones keep the original keychain slot")
+        XCTAssertEqual(a.pairingSlot, "token.android.R58M1")
+    }
+
+    func testADBHints() {
+        func d(_ state: String) -> ADB.Device { ADB.Device(serial: "S", state: state, model: nil, isUSB: true) }
+        XCTAssertNil(ADBWatcher.hint(for: [d("device")]))
+        XCTAssertTrue(ADBWatcher.hint(for: [d("unauthorized")])?.contains("allow USB debugging") == true)
+        XCTAssertTrue(ADBWatcher.hint(for: [d("no permissions (plugdev)")])?.contains("File Transfer") == true)
+        XCTAssertTrue(ADBWatcher.hint(for: [d("offline")])?.contains("offline") == true)
     }
 
     /// What the Android app's kotlinx.serialization encoder emits (nulls omitted).
@@ -67,7 +79,7 @@ final class AndroidEndToEndTests: XCTestCase {
 
     func testControlPairingAndSOCKSOverADB() throws {
         guard let serial = env["PASSTHROUGH_ADB_SERIAL"] else { throw XCTSkip("set PASSTHROUGH_ADB_SERIAL to run") }
-        let device = PhoneDevice(transport: .adb(serial), label: serial)
+        let device = PhoneDevice.android(serial: serial, model: nil)
         let queue = DispatchQueue(label: "e2e")
 
         // 1. The device shows up in adb's device list.

@@ -60,15 +60,18 @@ final class OpenVPNRunner: VPNRunner {
             "--tls-version-min", "1.2",
             "--allow-compression", "asym",
             "--remote-cert-tls", "server",
-            // Servers push their own keepalive timers (NordVPN: ping 60 /
-            // ping-restart 180), which would leave a dead session unnoticed for
-            // three minutes after a cellular drop. Ignore them and use ours.
+            // Keepalives. We ping every 10 s whatever the server pushes (NordVPN:
+            // ping 60), so carrier NAT never forgets the flow. The restart
+            // timeout must outlast the *server's* ping interval, since OpenVPN
+            // pings are one-way: an idle link hears from the server only that
+            // often. A 25 s timeout against NordVPN's 60 s pings restarted every
+            // idle half minute. So honour the server's ping-restart (NordVPN:
+            // 180); network changes restart the session anyway (underlayChanged).
             "--pull-filter", "ignore", "ping",
-            "--pull-filter", "ignore", "ping-restart",
             "--script-security", "0",
             "--nobind", "--persist-tun", "--persist-key",
             "--ping", "10",
-            "--ping-restart", "25",
+            "--ping-restart", "120",
             "--connect-retry", "2", "10",
             "--auth-user-pass", "/dev/stdin",
             "--status", Self.statusPath, "1",

@@ -32,6 +32,8 @@ public struct ControlEnvelope: Codable, Equatable, Sendable {
     public var carrier: String?
     public var battery: Double?
     public var hosting: String?
+    /// Whether the phone's current network routes IPv6. Absent from older phones.
+    public var ipv6: Bool?
     public var activeConnections: Int?
     public var rxBytes: Int64?
     public var txBytes: Int64?
@@ -100,8 +102,8 @@ public enum SharedKeys {
     public static let allowUDP = "settings.allowUDP"
     public static let socksPort = "settings.socksPort"
     public static let controlPort = "settings.controlPort"
-    /// True while "cellular only" is temporarily using another network.
-    public static let cellularFallback = "state.cellularFallback"
+    /// `Egress` raw value: which network "cellular only" is using right now.
+    public static let egress = "state.egress"
     public static let usageMonthRx = "usage.month.rx"
     public static let usageMonthTx = "usage.month.tx"
     public static let usageMonthStart = "usage.month.start"

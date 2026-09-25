@@ -33,7 +33,7 @@ struct SettingsView: View {
                 } header: {
                     Text("Network")
                 } footer: {
-                    Text("On: the Mac always uses cellular data, even when this phone is on Wi-Fi. Off: the Mac rides whatever this phone is using.")
+                    Text("On: the Mac uses cellular data. While this phone is on Wi-Fi it uses the Wi-Fi instead, because iOS lets cellular sleep then. Off: the Mac rides whatever this phone is using.")
                 }
                 Section("Advanced") {
                     LabeledContent("SOCKS port") {

@@ -1,9 +1,11 @@
 package dev.dpatel.passthrough.service
 
-import dev.dpatel.passthrough.core.ConnectedMac
 import dev.dpatel.passthrough.core.PairedClient
 import dev.dpatel.passthrough.core.PairingRegistry
+import dev.dpatel.passthrough.core.ProviderStats
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.update
 
 sealed interface ServiceState {
     data object Stopped : ServiceState
@@ -15,22 +17,10 @@ sealed interface ServiceState {
     val isActive: Boolean get() = this == Starting || this == Running
 }
 
-/** Snapshot the service publishes once a second. Same shape as iOS ProviderStats. */
-data class ProviderStats(
-    val rx: Long = 0,
-    val tx: Long = 0,
-    val active: Int = 0,
-    val totalConnections: Int = 0,
-    val macs: List<ConnectedMac> = emptyList(),
-    val startedAt: Long? = null,
-    /** When the service took this snapshot; makes every tick a distinct value so idle seconds still reach the meter. */
-    val sampledAt: Long = System.currentTimeMillis(),
-)
-
 /**
  * Process-wide state shared by the foreground service and the UI (same
- * process, so plain singletons and flows are enough). Initialised in
- * [dev.dpatel.passthrough.PassthroughApp].
+ * process, so plain singletons and flows are enough). The service publishes,
+ * the UI observes. Initialised in [dev.dpatel.passthrough.PassthroughApp].
  */
 object Runtime {
     lateinit var settings: AppSettings
@@ -39,15 +29,25 @@ object Runtime {
     @android.annotation.SuppressLint("StaticFieldLeak") // holds the application context only
     lateinit var facts: DeviceFacts
 
-    val state = MutableStateFlow<ServiceState>(ServiceState.Stopped)
-    val stats = MutableStateFlow(ProviderStats())
-    val pairedClients = MutableStateFlow<List<PairedClient>>(emptyList())
-    val pairingCode = MutableStateFlow<PairingRegistry.Code?>(null)
+    private val _state = MutableStateFlow<ServiceState>(ServiceState.Stopped)
+    val state: StateFlow<ServiceState> = _state
+    private val _stats = MutableStateFlow(ProviderStats())
+    val stats: StateFlow<ProviderStats> = _stats
+    private val _pairedClients = MutableStateFlow<List<PairedClient>>(emptyList())
+    val pairedClients: StateFlow<List<PairedClient>> = _pairedClients
+    private val _pairingCode = MutableStateFlow<PairingRegistry.Code?>(null)
+    val pairingCode: StateFlow<PairingRegistry.Code?> = _pairingCode
+    private val _cellularFallback = MutableStateFlow(false)
     /** True while "cellular only" is temporarily using another network. */
-    val cellularFallback = MutableStateFlow(false)
+    val cellularFallback: StateFlow<Boolean> = _cellularFallback
 
+    fun setState(state: ServiceState) { _state.value = state }
+    fun updateStats(transform: (ProviderStats) -> ProviderStats) = _stats.update(transform)
+    fun setCellularFallback(active: Boolean) { _cellularFallback.value = active }
+
+    /** Re-reads paired Macs and the code on screen (gone once used or expired). */
     fun refreshPairing() {
-        pairedClients.value = registry.clients
-        pairingCode.value = registry.activeCode
+        _pairedClients.value = registry.clients
+        _pairingCode.value = registry.activeCode
     }
 }

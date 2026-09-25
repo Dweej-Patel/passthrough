@@ -4,8 +4,6 @@ import PassthroughCore
 import PassthroughUI
 
 struct SettingsView: View {
-    @EnvironmentObject private var session: SessionCoordinator
-
     var body: some View {
         TabView {
             GeneralSettings().tabItem { Label("General", systemImage: "gearshape") }
@@ -19,13 +17,14 @@ struct SettingsView: View {
 
 struct GeneralSettings: View {
     @EnvironmentObject private var session: SessionCoordinator
+    @EnvironmentObject private var keepAwake: KeepAwakeController
     @State private var launchAtLogin = SMAppService.mainApp.status == .enabled
     @State private var loginError: String?
 
     private var batteryFooter: String {
         let now: String
-        if session.battery.hasBattery, session.battery.percent >= 0 {
-            now = " Currently \(session.battery.percent)%\(session.battery.isOnAC ? " (on power)" : " (on battery)")."
+        if keepAwake.battery.hasBattery, keepAwake.battery.percent >= 0 {
+            now = " Currently \(keepAwake.battery.percent)%\(keepAwake.battery.isOnAC ? " (on power)" : " (on battery)")."
         } else {
             now = ""
         }
@@ -47,9 +46,9 @@ struct GeneralSettings: View {
             Section {
                 Toggle("Connect automatically when a phone is plugged in", isOn: $session.autoConnect)
                 Toggle("Keep this Mac awake (even with the lid closed)", isOn: Binding(
-                    get: { session.keepAwake },
-                    set: { session.setKeepAwake($0) }))
-                if let reason = session.keepAwakeBlockedReason {
+                    get: { keepAwake.isOn },
+                    set: { keepAwake.set($0) }))
+                if let reason = keepAwake.blockedReason {
                     Label(reason, systemImage: "exclamationmark.triangle.fill")
                         .font(.caption).foregroundStyle(PTTheme.warning)
                 }
@@ -63,13 +62,13 @@ struct GeneralSettings: View {
                 Text("Keep awake stops the Mac from sleeping so long sessions survive when you step away, including with the lid closed (via the root helper). It reverts automatically when you turn it off or quit Passthrough. Caution: a closed, running Mac in a bag can overheat and drain the battery, so only use lid-closed on power or in open air.")
             }
             Section {
-                Toggle("Turn off keep awake at low battery", isOn: $session.batteryAutoOff)
-                if session.batteryAutoOff {
-                    Stepper(value: $session.batteryAutoOffThreshold, in: 5...80, step: 5) {
+                Toggle("Turn off keep awake at low battery", isOn: $keepAwake.batteryAutoOff)
+                if keepAwake.batteryAutoOff {
+                    Stepper(value: $keepAwake.batteryAutoOffThreshold, in: 5...80, step: 5) {
                         HStack {
                             Text("Threshold")
                             Spacer()
-                            Text("\(session.batteryAutoOffThreshold)%").foregroundStyle(.secondary).monospacedDigit()
+                            Text("\(keepAwake.batteryAutoOffThreshold)%").foregroundStyle(.secondary).monospacedDigit()
                         }
                     }
                 }

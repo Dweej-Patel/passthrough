@@ -35,6 +35,8 @@ data class ControlEnvelope(
     var carrier: String? = null,
     var battery: Double? = null,
     var hosting: String? = null,
+    /** Whether the phone's current network routes IPv6. Absent from older phones. */
+    var ipv6: Boolean? = null,
     var activeConnections: Int? = null,
     var rxBytes: Long? = null,
     var txBytes: Long? = null,
@@ -77,6 +79,8 @@ data class DeviceStatus(
     val carrier: String? = null,
     val battery: Double? = null,
     val hosting: String,
+    /** Whether the network the phone sends Mac traffic out on routes IPv6; null when unknown. */
+    val ipv6: Boolean? = null,
 )
 
 /** A connected Mac as seen by the phone. */

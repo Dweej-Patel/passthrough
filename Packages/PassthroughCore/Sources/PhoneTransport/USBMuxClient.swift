@@ -196,12 +196,3 @@ public enum USBMux {
         connection.start(queue: queue)
     }
 }
-
-final class Locked<T>: @unchecked Sendable {
-    private var value: T
-    private let lock = NSLock()
-    init(_ value: T) { self.value = value }
-    func exchange(_ new: T) -> T { lock.lock(); defer { lock.unlock() }; let old = value; value = new; return old }
-    func get() -> T { lock.lock(); defer { lock.unlock() }; return value }
-    func set(_ new: T) { lock.lock(); value = new; lock.unlock() }
-}

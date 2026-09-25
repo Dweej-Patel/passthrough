@@ -1,6 +1,31 @@
 import Foundation
 import CryptoKit
 
+/// The secret a phone issues each Mac it pairs with: 32 random bytes as
+/// unpadded URL-safe base64. The phone keeps only its SHA-256.
+public enum PairingToken {
+    public static let length = 43
+
+    public static func generate() -> String {
+        var bytes = [UInt8](repeating: 0, count: 32)
+        _ = SecRandomCopyBytes(kSecRandomDefault, bytes.count, &bytes)
+        return Data(bytes).base64EncodedString()
+            .replacingOccurrences(of: "+", with: "-")
+            .replacingOccurrences(of: "/", with: "_")
+            .replacingOccurrences(of: "=", with: "")
+    }
+
+    /// Lowercase hex SHA-256, the form the phone stores.
+    public static func hash(_ token: String) -> String {
+        SHA256.hash(data: Data(token.utf8)).map { String(format: "%02x", $0) }.joined()
+    }
+
+    /// Whether `token` has the shape `generate()` produces; anything else was not issued by a phone.
+    public static func isWellFormed(_ token: String) -> Bool {
+        token.count == length && token.allSatisfy { $0.isASCII && ($0.isLetter || $0.isNumber || $0 == "-" || $0 == "_") }
+    }
+}
+
 /// A Mac that has been granted access to this iPhone's proxy.
 public struct PairedClient: Codable, Identifiable, Equatable, Sendable {
     public var id: String
@@ -20,6 +45,9 @@ public final class PairingRegistry: @unchecked Sendable {
     public static let clientsKey = "pairing.clients"
     public static let codeKey = "pairing.code"
     public static let codeExpiryKey = "pairing.codeExpiry"
+    /// Wrong guesses against the current code. Kept with the code in the shared
+    /// defaults, since the iOS app issues codes and the extension checks them.
+    public static let failedAttemptsKey = "pairing.failedAttempts"
 
     private let defaults: UserDefaults
     private let lock = NSLock()
@@ -27,19 +55,6 @@ public final class PairingRegistry: @unchecked Sendable {
 
     public init(defaults: UserDefaults) {
         self.defaults = defaults
-    }
-
-    public static func hash(token: String) -> String {
-        SHA256.hash(data: Data(token.utf8)).map { String(format: "%02x", $0) }.joined()
-    }
-
-    public static func makeToken() -> String {
-        var bytes = [UInt8](repeating: 0, count: 32)
-        _ = SecRandomCopyBytes(kSecRandomDefault, bytes.count, &bytes)
-        return Data(bytes).base64EncodedString()
-            .replacingOccurrences(of: "+", with: "-")
-            .replacingOccurrences(of: "/", with: "_")
-            .replacingOccurrences(of: "=", with: "")
     }
 
     public var clients: [PairedClient] {
@@ -59,13 +74,11 @@ public final class PairingRegistry: @unchecked Sendable {
 
     // MARK: Pairing code
 
-    /// Generates a fresh six digit code, valid for `PassthroughProtocol.pairingCodeLifetime`.
-    private var failedAttempts = 0
     private static let maxAttempts = 5
 
+    /// Generates a fresh six digit code, valid for `PassthroughProtocol.pairingCodeLifetime`.
     @discardableResult
     public func issueCode() -> (code: String, expiry: Date) {
-        lock.lock(); failedAttempts = 0; lock.unlock()
         var value: UInt32 = 0
         _ = withUnsafeMutableBytes(of: &value) { SecRandomCopyBytes(kSecRandomDefault, 4, $0.baseAddress!) }
         let code = String(format: "%06d", value % 1_000_000)
@@ -73,6 +86,7 @@ public final class PairingRegistry: @unchecked Sendable {
         lock.lock()
         defaults.set(code, forKey: Self.codeKey)
         defaults.set(expiry.timeIntervalSince1970, forKey: Self.codeExpiryKey)
+        defaults.set(0, forKey: Self.failedAttemptsKey)
         lock.unlock()
         onChange?()
         return (code, expiry)
@@ -105,7 +119,10 @@ public final class PairingRegistry: @unchecked Sendable {
         guard constantTimeEquals(stored, code.trimmingCharacters(in: .whitespaces)) else {
             // A six-digit code must not be brute-forceable over the cable: a
             // handful of wrong guesses burns the code; the user shows a new one.
-            lock.lock(); failedAttempts += 1; let n = failedAttempts; lock.unlock()
+            lock.lock()
+            let n = defaults.integer(forKey: Self.failedAttemptsKey) + 1
+            defaults.set(n, forKey: Self.failedAttemptsKey)
+            lock.unlock()
             if n >= Self.maxAttempts {
                 ptLog(.warning, "Pairing code withdrawn after \(n) wrong attempts")
                 clearCode()
@@ -115,10 +132,10 @@ public final class PairingRegistry: @unchecked Sendable {
         }
         guard clientID.count <= 64, name.count <= 64 else { return .failure(.badCode) }
 
-        let token = Self.makeToken()
+        let token = PairingToken.generate()
         lock.lock()
         var list = loadClients().filter { $0.id != clientID }
-        list.append(PairedClient(id: clientID, name: name, tokenHash: Self.hash(token: token), pairedAt: Date(), lastSeen: Date()))
+        list.append(PairedClient(id: clientID, name: name, tokenHash: PairingToken.hash(token), pairedAt: Date(), lastSeen: Date()))
         save(list)
         defaults.removeObject(forKey: Self.codeKey)
         defaults.removeObject(forKey: Self.codeExpiryKey)
@@ -131,7 +148,7 @@ public final class PairingRegistry: @unchecked Sendable {
     public func verify(clientID: String, token: String) -> Bool {
         lock.lock(); defer { lock.unlock() }
         guard let client = loadClients().first(where: { $0.id == clientID }) else { return false }
-        return constantTimeEquals(client.tokenHash, Self.hash(token: token))
+        return constantTimeEquals(client.tokenHash, PairingToken.hash(token))
     }
 
     public func touch(clientID: String) {

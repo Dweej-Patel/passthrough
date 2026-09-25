@@ -22,7 +22,7 @@ enum PanelSnapshots {
             let session = SessionCoordinator()
             configure(session)
             for scheme in [ColorScheme.dark, .light] {
-                let view = MenuPanelView().environmentObject(session).environment(\.colorScheme, scheme)
+                let view = MenuPanelView().environmentObject(session).environmentObject(session.vpnLayer).environmentObject(session.keepAwake).environment(\.colorScheme, scheme)
                     .frame(width: 356)
                 let renderer = ImageRenderer(content: view)
                 renderer.scale = 2

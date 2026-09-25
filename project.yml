@@ -119,7 +119,7 @@ targets:
       - package: PassthroughCore
         product: PassthroughUI
       - package: PassthroughCore
-        product: USBMux
+        product: PhoneTransport
       - target: PassthroughHelper
         embed: true
         link: false

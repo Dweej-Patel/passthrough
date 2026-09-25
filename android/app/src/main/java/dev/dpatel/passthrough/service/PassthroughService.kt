@@ -1,9 +1,5 @@
 package dev.dpatel.passthrough.service
 
-import android.app.Notification
-import android.app.NotificationChannel
-import android.app.NotificationManager
-import android.app.PendingIntent
 import android.app.Service
 import android.content.Context
 import android.content.Intent
@@ -13,13 +9,8 @@ import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
 import android.os.PowerManager
-import androidx.core.app.NotificationCompat
 import androidx.core.app.ServiceCompat
 import androidx.core.content.ContextCompat
-import dev.dpatel.passthrough.MainActivity
-import dev.dpatel.passthrough.R
-import dev.dpatel.passthrough.core.ByteFormat
-import dev.dpatel.passthrough.core.DefaultEgress
 import dev.dpatel.passthrough.core.DeviceStatus
 import dev.dpatel.passthrough.core.PassthroughEngine
 import dev.dpatel.passthrough.core.PtLog
@@ -36,6 +27,7 @@ class PassthroughService : Service() {
     private var cellular: CellularEgressProvider? = null
     private var wakeLock: PowerManager.WakeLock? = null
     private val handler = Handler(Looper.getMainLooper())
+    private val notification by lazy { ServingNotification(this) }
     private var lastUsage: Pair<Long, Long>? = null
     private var ticks = 0
     @Volatile private var radio: String? = null
@@ -69,17 +61,17 @@ class PassthroughService : Service() {
 
     private fun goForeground() {
         val type = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE else 0
-        ServiceCompat.startForeground(this, NOTIFICATION_ID, buildNotification(), type)
+        ServiceCompat.startForeground(this, ServingNotification.ID, notification.build(engine != null, Runtime.stats.value, radio), type)
     }
 
     private fun startEngine() {
-        Runtime.state.value = ServiceState.Starting
+        Runtime.setState(ServiceState.Starting)
         val settings = Runtime.settings
         val cellularOnly = settings.cellularOnly.value
-        Runtime.cellularFallback.value = false
+        Runtime.setCellularFallback(false)
         val egress = if (cellularOnly) {
-            CellularEgressProvider(this, onUsableChange = { usable -> Runtime.cellularFallback.value = !usable }).also { it.start(); cellular = it }
-        } else DefaultEgress
+            CellularEgressProvider(this, onUsableChange = { usable -> Runtime.setCellularFallback(!usable) }).also { it.start(); cellular = it }
+        } else SystemEgress(this)
         refreshFacts()
         val options = PassthroughEngine.Options(
             socksPort = settings.socksPort.value,
@@ -90,9 +82,9 @@ class PassthroughService : Service() {
             DeviceStatus(Runtime.settings.deviceName.value, radio, carrier, batteryLevel, hosting = "background")
         }
         engine.onClientsChanged = { macs ->
-            Runtime.stats.value = Runtime.stats.value.copy(macs = macs)
+            Runtime.updateStats { it.copy(macs = macs) }
             // A Mac just paired: the code on screen has done its job.
-            if (macs.isNotEmpty()) Runtime.pairingCode.value = Runtime.registry.activeCode
+            if (macs.isNotEmpty()) Runtime.refreshPairing()
             handler.post { updateNotification() }
         }
         try {
@@ -101,7 +93,7 @@ class PassthroughService : Service() {
             val message = if (e is BindException) "Port ${options.socksPort} or ${options.controlPort} is already in use on this phone." else (e.message ?: e.toString())
             ptLog(PtLog.Level.ERROR, "Could not start: $message")
             cellular?.stop(); cellular = null
-            Runtime.state.value = ServiceState.Failed(message)
+            Runtime.setState(ServiceState.Failed(message))
             ServiceCompat.stopForeground(this, ServiceCompat.STOP_FOREGROUND_REMOVE)
             stopSelf()
             return
@@ -111,8 +103,8 @@ class PassthroughService : Service() {
         wakeLock = getSystemService(PowerManager::class.java)
             .newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "Passthrough::serving").apply { setReferenceCounted(false); acquire(WAKE_LOCK_MS) }
         lastUsage = null
-        Runtime.stats.value = ProviderStats(startedAt = engine.startedAt)
-        Runtime.state.value = ServiceState.Running
+        Runtime.updateStats { engine.stats() }
+        Runtime.setState(ServiceState.Running)
         ptLog(PtLog.Level.INFO, "Serving in the background. Plug in your Mac and connect from its menu bar.")
         handler.removeCallbacks(ticker)
         handler.post(ticker)
@@ -130,26 +122,30 @@ class PassthroughService : Service() {
         val engine = engine ?: return
         ticks++
         refreshFacts()
-        val snap = engine.counter.snapshot()
-        Runtime.stats.value = ProviderStats(snap.rx, snap.tx, snap.active, snap.totalConnections, engine.connectedMacs, engine.startedAt)
-        lastUsage?.let { (rx, tx) -> Runtime.usage.add(maxOf(0, snap.rx - rx), maxOf(0, snap.tx - tx)) }
-        lastUsage = snap.rx to snap.tx
-        if (Runtime.pairingCode.value != null && Runtime.registry.activeCode == null) Runtime.pairingCode.value = null
+        val stats = engine.stats()
+        Runtime.updateStats { stats }
+        lastUsage?.let { (rx, tx) -> Runtime.usage.add(maxOf(0, stats.rx - rx), maxOf(0, stats.tx - tx)) }
+        lastUsage = stats.rx to stats.tx
+        if (Runtime.pairingCode.value != null && Runtime.registry.activeCode == null) Runtime.refreshPairing()
         if (ticks % 2 == 0) updateNotification()
         if (ticks % 60 == 0) wakeLock?.acquire(WAKE_LOCK_MS)
     }
 
     private fun shutdown() {
         handler.removeCallbacks(ticker)
-        if (engine != null || Runtime.state.value.isActive) Runtime.state.value = ServiceState.Stopping
+        if (engine != null || Runtime.state.value.isActive) Runtime.setState(ServiceState.Stopping)
         engine?.stop()
         engine = null
         cellular?.stop(); cellular = null
         wakeLock?.let { if (it.isHeld) it.release() }
         wakeLock = null
-        Runtime.stats.value = Runtime.stats.value.copy(active = 0, macs = emptyList(), startedAt = null)
-        if (Runtime.state.value !is ServiceState.Failed) Runtime.state.value = ServiceState.Stopped
+        Runtime.updateStats { it.copy(active = 0, macs = emptyList(), startedAt = null) }
+        if (Runtime.state.value !is ServiceState.Failed) Runtime.setState(ServiceState.Stopped)
         ServiceCompat.stopForeground(this, ServiceCompat.STOP_FOREGROUND_REMOVE)
+    }
+
+    private fun updateNotification() {
+        if (engine != null) notification.update(Runtime.stats.value, radio)
     }
 
     override fun onDestroy() {
@@ -157,54 +153,7 @@ class PassthroughService : Service() {
         super.onDestroy()
     }
 
-    // Notification
-
-    private fun buildNotification(): Notification {
-        val nm = getSystemService(NotificationManager::class.java)
-        if (nm.getNotificationChannel(CHANNEL_ID) == null) {
-            nm.createNotificationChannel(NotificationChannel(CHANNEL_ID, "Passthrough", NotificationManager.IMPORTANCE_LOW).apply {
-                description = "Shown while this phone is sharing its connection over USB"
-                setShowBadge(false)
-            })
-        }
-        val open = PendingIntent.getActivity(this, 0, Intent(this, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP),
-            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
-        val stop = PendingIntent.getService(this, 1, Intent(this, PassthroughService::class.java).setAction(ACTION_STOP),
-            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
-        val stats = Runtime.stats.value
-        val macs = stats.macs
-        val title = when {
-            engine == null -> "Starting Passthrough"
-            macs.isEmpty() -> "Waiting for a Mac on USB"
-            macs.size == 1 -> "${macs.first().name} is online through this phone"
-            else -> "Serving ${macs.size} Macs over USB"
-        }
-        val text = if (macs.isEmpty()) "Connect from Passthrough in the Mac's menu bar." else {
-            val u = Runtime.usage.usage.value
-            "${radio ?: "Cellular"} · ${stats.active} open · ${ByteFormat.bytes(stats.rx + stats.tx)} this session · ${ByteFormat.bytes(u.monthTotal)} this month"
-        }
-        return NotificationCompat.Builder(this, CHANNEL_ID)
-            .setSmallIcon(R.drawable.ic_stat_passthrough)
-            .setContentTitle(title)
-            .setContentText(text)
-            .setOngoing(true)
-            .setOnlyAlertOnce(true)
-            .setShowWhen(false)
-            .setCategory(NotificationCompat.CATEGORY_SERVICE)
-            .setForegroundServiceBehavior(NotificationCompat.FOREGROUND_SERVICE_IMMEDIATE)
-            .setContentIntent(open)
-            .addAction(0, "Stop", stop)
-            .build()
-    }
-
-    private fun updateNotification() {
-        if (engine == null) return
-        runCatching { getSystemService(NotificationManager::class.java).notify(NOTIFICATION_ID, buildNotification()) }
-    }
-
     companion object {
-        private const val CHANNEL_ID = "passthrough"
-        private const val NOTIFICATION_ID = 1
         /** Renewed every minute while serving, so a crash can never leave the CPU held for long. */
         private const val WAKE_LOCK_MS = 10 * 60 * 1000L
         const val ACTION_START = "dev.dpatel.passthrough.START"

@@ -19,6 +19,30 @@ class MemoryStore : KeyValueStore {
     @Synchronized override fun putString(key: String, value: String?) { if (value == null) map.remove(key) else map[key] = value }
 }
 
+/**
+ * The secret a phone issues each Mac it pairs with: 32 random bytes as
+ * unpadded URL-safe base64. The phone keeps only its SHA-256. Mirrors
+ * PairingToken in PassthroughCore/Pairing.swift.
+ */
+object PairingToken {
+    const val LENGTH = 43
+    private val random = SecureRandom()
+
+    fun generate(): String {
+        val bytes = ByteArray(32)
+        random.nextBytes(bytes)
+        return Base64.getUrlEncoder().withoutPadding().encodeToString(bytes)
+    }
+
+    /** Lowercase hex SHA-256, the form the phone stores. */
+    fun hash(token: String): String =
+        MessageDigest.getInstance("SHA-256").digest(token.toByteArray(Charsets.UTF_8)).joinToString("") { "%02x".format(it) }
+
+    /** Whether [token] has the shape [generate] produces. */
+    fun isWellFormed(token: String): Boolean =
+        token.length == LENGTH && token.all { it in 'a'..'z' || it in 'A'..'Z' || it in '0'..'9' || it == '-' || it == '_' }
+}
+
 /** A Mac that has been granted access to this phone's proxy. Times are epoch millis. */
 @Serializable
 data class PairedClient(
@@ -99,9 +123,9 @@ class PairingRegistry(
                 return@synchronized PairResult.Failure(PairingFailure.BAD_CODE)
             }
             if (clientID.length > 64 || name.length > 64 || clientID.isEmpty()) return@synchronized PairResult.Failure(PairingFailure.BAD_CODE)
-            val token = makeToken()
+            val token = PairingToken.generate()
             val now = clock()
-            save(loadClients().filter { it.id != clientID } + PairedClient(clientID, name, hash(token), now, now))
+            save(loadClients().filter { it.id != clientID } + PairedClient(clientID, name, PairingToken.hash(token), now, now))
             this.code = null
             PairResult.Success(token)
         }
@@ -112,7 +136,7 @@ class PairingRegistry(
 
     fun verify(clientID: String, token: String): Boolean = synchronized(lock) {
         val client = loadClients().firstOrNull { it.id == clientID } ?: return false
-        constantTimeEquals(client.tokenHash, hash(token))
+        constantTimeEquals(client.tokenHash, PairingToken.hash(token))
     }
 
     fun touch(clientID: String) {
@@ -137,18 +161,6 @@ class PairingRegistry(
     companion object {
         const val CLIENTS_KEY = "pairing.clients"
         private const val MAX_ATTEMPTS = 5
-        private val tokenRandom = SecureRandom()
-
-        fun hash(token: String): String =
-            MessageDigest.getInstance("SHA-256").digest(token.toByteArray(Charsets.UTF_8)).joinToString("") { "%02x".format(it) }
-
-        /** 32 random bytes as unpadded URL-safe base64: 43 characters, what the Mac expects. */
-        fun makeToken(): String {
-            val bytes = ByteArray(32)
-            tokenRandom.nextBytes(bytes)
-            return Base64.getUrlEncoder().withoutPadding().encodeToString(bytes)
-        }
-
         private fun constantTimeEquals(a: String, b: String): Boolean =
             MessageDigest.isEqual(a.toByteArray(Charsets.UTF_8), b.toByteArray(Charsets.UTF_8))
     }

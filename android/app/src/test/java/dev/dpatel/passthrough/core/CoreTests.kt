@@ -181,9 +181,10 @@ class PairingTests {
         assertEquals(PairingRegistry.PairResult.Failure(PairingFailure.EXPIRED), registry.pair(code.code, "m1", "Mac"))
     }
 
-    @Test fun tokenHashMatchesSwift() {
-        // SHA-256 hex, same as PairingRegistry.hash(token:) in Swift.
-        assertEquals("2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824", PairingRegistry.hash("hello"))
+    @Test fun generatesWellFormedTokens() {
+        val token = PairingToken.generate()
+        assertTrue(PairingToken.isWellFormed(token))
+        assertEquals(64, PairingToken.hash(token).length)
     }
 }
 

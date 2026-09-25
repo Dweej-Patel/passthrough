@@ -65,10 +65,18 @@ enum Shell {
 /// touches a route we didn't add (`route delete` on a missing prefix is not
 /// something to rely on) and cleanup reports only what was really there.
 enum RouteTable {
-    /// netstat prints classful abbreviations for our IPv4 quarter prefixes.
-    private static let names: [String: String] = [
-        "0.0.0.0/2": "0/2", "64.0.0.0/2": "64/2", "128.0.0.0/2": "128.0/2", "192.0.0.0/2": "192.0.0/2",
-    ]
+    /// netstat prints IPv4 prefixes classfully abbreviated: trailing zero
+    /// octets dropped beyond the class's network part ("0.0.0.0/2" is "0/2",
+    /// "128.0.0.0/3" is "128.0/3", "192.0.0.0/3" is "192.0.0/3").
+    static func netstatName(_ prefix: String) -> String {
+        let parts = prefix.split(separator: "/", maxSplits: 1)
+        let octets = parts[0].split(separator: ".")
+        guard parts.count == 2, octets.count == 4, let first = Int(octets[0]) else { return prefix }
+        let keep = first < 128 ? 1 : first < 192 ? 2 : 3
+        var shown = Array(octets)
+        while shown.count > keep, shown.last == "0" { shown.removeLast() }
+        return shown.joined(separator: ".") + "/" + parts[1]
+    }
 
     static func present(v6: Bool) -> Set<String> {
         let table = Shell.capture("/usr/sbin/netstat", ["-rn", "-f", v6 ? "inet6" : "inet"])
@@ -78,8 +86,23 @@ enum RouteTable {
         })
     }
 
+    /// The gateway column of `prefix`'s route, if it is in the table.
+    static func gateway(of prefix: String, v6: Bool) -> String? {
+        let name = netstatName(prefix)
+        for line in Shell.capture("/usr/sbin/netstat", ["-rn", "-f", v6 ? "inet6" : "inet"]).split(separator: "\n") {
+            let fields = line.split(separator: " ", omittingEmptySubsequences: true)
+            if fields.count >= 2, fields[0] == name { return String(fields[1]) }
+        }
+        return nil
+    }
+
     static func exists(_ prefix: String, v6: Bool, in table: Set<String>) -> Bool {
-        table.contains(names[prefix] ?? prefix)
+        table.contains(netstatName(prefix))
+    }
+
+    /// Whether `prefix` is one of our reject routes (gateway 127.0.0.1 or ::1).
+    static func isReject(_ prefix: String, v6: Bool) -> Bool {
+        gateway(of: prefix, v6: v6) == (v6 ? "::1" : "127.0.0.1")
     }
 
     /// Deletes `prefix` only if it is really in the table. Returns true if removed.
@@ -103,6 +126,15 @@ enum RecoverySweep {
             cleaned.append(q)
         }
         for q in ["::/2", "4000::/2", "8000::/2", "c000::/2"] where RouteTable.deleteIfPresent(q, v6: true, table: v6) {
+            cleaned.append(q)
+        }
+        // The tunnel's IPv6 halves and the kill switch's eighths, only when they
+        // are our reject routes (interface routes vanished with their utun;
+        // anyone else's are not ours).
+        for q in TunnelEngine.ipv6Halves + VPNEngine.v6Eighths where RouteTable.isReject(q, v6: true) && RouteTable.deleteIfPresent(q, v6: true, table: v6) {
+            cleaned.append(q)
+        }
+        for q in VPNEngine.v4Eighths where RouteTable.isReject(q, v6: false) && RouteTable.deleteIfPresent(q, v6: false, table: v4) {
             cleaned.append(q)
         }
         for name in Shell.capture("/sbin/ifconfig", ["-l"]).split(separator: " ").map(String.init) where name.hasPrefix("feth") {

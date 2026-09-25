@@ -14,7 +14,7 @@ let registry = PairingRegistry(defaults: defaults)
 // Optional args 3 & 4 override the default dev/dev-token, to match a real Mac's creds.
 let seedID = CommandLine.arguments.dropFirst(3).first ?? "dev"
 let seedToken = CommandLine.arguments.dropFirst(4).first ?? "dev-token"
-defaults.set(try? JSONEncoder().encode([PairedClient(id: seedID, name: "Dev client", tokenHash: PairingRegistry.hash(token: seedToken), pairedAt: Date())]), forKey: PairingRegistry.clientsKey)
+defaults.set(try? JSONEncoder().encode([PairedClient(id: seedID, name: "Dev client", tokenHash: PairingToken.hash(seedToken), pairedAt: Date())]), forKey: PairingRegistry.clientsKey)
 
 var options = PassthroughService.Options()
 options.refuseLocalDestinations = false

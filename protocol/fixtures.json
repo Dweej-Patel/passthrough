@@ -1,0 +1,158 @@
+{
+  "_comment": "Shared by the Swift tests (Packages/PassthroughCore) and the Kotlin tests (android/). Change it and both suites must agree. See protocol/README.md.",
+  "protocolVersion": 1,
+  "ports": {
+    "socks": 7890,
+    "control": 7891
+  },
+  "pairingCodeLifetimeSeconds": 300,
+  "pairingFailures": [
+    "bad_code",
+    "expired",
+    "not_authenticated",
+    "unsupported_version"
+  ],
+  "tokens": [
+    {
+      "token": "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8",
+      "sha256": "ea866a757e4c38babfa8127cbe9a409d3e1f93a00ff1488ff735fcf917afffd0",
+      "wellFormed": true
+    },
+    {
+      "token": "hello",
+      "sha256": "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824",
+      "wellFormed": false
+    },
+    {
+      "token": "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh+",
+      "sha256": "fa54966dd28af6527387ff2f22f031720283cf1711fba141c84ee7624dd734de",
+      "wellFormed": false
+    }
+  ],
+  "messages": [
+    {
+      "line": "{\"t\":\"hello\",\"protocolVersion\":1,\"clientID\":\"8F0C2A51-4C8E-4D3B-9B1E-2F5C8A7D6E10\",\"name\":\"MacBook Pro\",\"token\":\"AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8\"}"
+    },
+    {
+      "line": "{\"t\":\"welcome\",\"protocolVersion\":1,\"paired\":false,\"socksPort\":7890,\"deviceName\":\"Pixel 8\",\"radio\":\"5G\",\"carrier\":\"T-Mobile\",\"battery\":0.82,\"hosting\":\"background\"}"
+    },
+    {
+      "line": "{\"t\":\"pair\",\"clientID\":\"8F0C2A51-4C8E-4D3B-9B1E-2F5C8A7D6E10\",\"name\":\"MacBook Pro\",\"code\":\"042917\"}"
+    },
+    {
+      "line": "{\"t\":\"paired\",\"token\":\"AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8\",\"socksPort\":7890,\"deviceName\":\"iPhone\"}"
+    },
+    {
+      "line": "{\"t\":\"error\",\"reason\":\"bad_code\"}"
+    },
+    {
+      "line": "{\"t\":\"ping\"}"
+    },
+    {
+      "line": "{\"t\":\"pong\"}"
+    },
+    {
+      "line": "{\"t\":\"status\",\"deviceName\":\"iPhone\",\"radio\":\"LTE\",\"battery\":0.5,\"hosting\":\"foreground\",\"activeConnections\":3,\"rxBytes\":5000000000,\"txBytes\":12,\"timestamp\":1758062400.5}"
+    },
+    {
+      "line": "{\"t\":\"status\",\"deviceName\":\"iPhone\",\"radio\":\"Wi-Fi\",\"hosting\":\"background\",\"ipv6\":false,\"activeConnections\":1,\"rxBytes\":10,\"txBytes\":20,\"timestamp\":1758062400.5}"
+    },
+    {
+      "line": "{\"t\":\"welcome\",\"protocolVersion\":1,\"paired\":true,\"socksPort\":7890,\"deviceName\":\"Pixel 8\",\"hosting\":\"background\",\"ipv6\":true}"
+    }
+  ],
+  "rates": [
+    {
+      "bytesPerSecond": 0,
+      "value": "0",
+      "unit": "B/s"
+    },
+    {
+      "bytesPerSecond": 950,
+      "value": "950",
+      "unit": "B/s"
+    },
+    {
+      "bytesPerSecond": 1500,
+      "value": "1.50",
+      "unit": "KB/s"
+    },
+    {
+      "bytesPerSecond": 12400000,
+      "value": "12.4",
+      "unit": "MB/s"
+    },
+    {
+      "bytesPerSecond": 250000000,
+      "value": "250",
+      "unit": "MB/s"
+    }
+  ],
+  "durations": [
+    {
+      "seconds": 65,
+      "text": "01:05"
+    },
+    {
+      "seconds": 3665,
+      "text": "1:01:05"
+    }
+  ],
+  "dnsRedirect": {
+    "_comment": "DNS the Mac sends to a private IP goes to the phone's own DNS server (first non-loopback one), else the fallback. Anything else keeps today's rules.",
+    "port": 53,
+    "fallback": "1.1.1.1",
+    "destinations": [
+      {
+        "address": "192.168.1.1",
+        "port": 53,
+        "redirect": true
+      },
+      {
+        "address": "10.0.0.1",
+        "port": 53,
+        "redirect": true
+      },
+      {
+        "address": "fd7a:115c:a1e0::53",
+        "port": 53,
+        "redirect": true
+      },
+      {
+        "address": "192.168.1.1",
+        "port": 80,
+        "redirect": false
+      },
+      {
+        "address": "1.1.1.1",
+        "port": 53,
+        "redirect": false
+      },
+      {
+        "address": "2606:4700:4700::1111",
+        "port": 53,
+        "redirect": false
+      }
+    ],
+    "serverChoice": [
+      {
+        "system": [
+          "172.20.10.1",
+          "8.8.8.8"
+        ],
+        "chosen": "172.20.10.1"
+      },
+      {
+        "system": [
+          "127.0.0.1",
+          "fd00:976a::9"
+        ],
+        "chosen": "fd00:976a::9"
+      },
+      {
+        "system": [],
+        "chosen": "1.1.1.1"
+      }
+    ]
+  }
+}

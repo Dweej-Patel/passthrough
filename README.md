@@ -38,13 +38,13 @@ Because the phone opens every connection with its own stack, the carrier sees th
 * Engine binaries are copied into the root-only state directory and that copy is verified (strict validation, Team ID and identifier) before it is executed, so nothing can be swapped between check and exec.
 * NordVPN profiles are accepted only if their certificate authority is Nord's (pinned by hash) and they pin the exact server that was requested.
 * Pairing codes are withdrawn after five wrong guesses; tokens are validated for format before use; the control channel is capped at eight peers.
-* A fatal VPN failure (rejected credentials, bad profile) keeps the kill switch engaged until you turn the layer off, so no peer can "fail" you into the clear. Kill-switch routes flip atomically between reject and the VPN interface.
+* A fatal VPN failure (rejected credentials, bad profile) keeps the kill switch engaged until you turn the layer off, so no peer can "fail" you into the clear. Kill-switch reject routes sit one step more specific than the VPN's routes, so engaging or lifting them never leaves a gap.
 * Profiles, keys and credentials live in the data-protection keychain, this device only.
 * The helper tears the tunnel down automatically if the menu bar app quits or crashes.
 
 ## Android specifics
 
-* **Cellular only** asks Android to keep mobile data up alongside Wi-Fi and binds every outbound socket to the cellular network. As on the iPhone, it falls back to any network only after cellular has been unusable for 10 seconds, and the radio pill reads "Wi-Fi (cell down)" while it does.
+* **Cellular only** asks Android to keep mobile data up alongside Wi-Fi and binds every outbound socket to the cellular network, so unlike the iPhone it keeps using cellular while the phone is on Wi-Fi. It falls back to any network only after cellular has been unusable for 10 seconds, and the radio pill reads "Wi-Fi (cell down)" while it does.
 * **The Mac starts adb itself.** It looks for platform-tools in the usual places (Homebrew, Android Studio's SDK, `ANDROID_HOME`) and runs `adb start-server` when nothing answers. Settings ▸ General ▸ Android shows whether adb was found and can turn Android support off.
 * **Radio label.** Android files the network type (5G, LTE) under its phone permission, which it describes as making and managing calls. It is therefore opt-in from Settings; without it the label reads "Cellular".
 * **A wake lock** keeps the CPU serving while the proxy runs. It is renewed every minute and released on stop.
@@ -84,7 +84,7 @@ How it is layered (all in the root helper, `VPNEngine.swift`):
 * DNS: over the passthrough the helper swaps the passthrough service's resolvers for the ones the VPN pushed (Nord's, or your WireGuard `DNS =`); over Wi-Fi it publishes the VPN interface as the primary service.
 * Passthrough connecting or disconnecting underneath restarts the VPN session automatically so the flow follows the new underlay.
 * **Block IPv6** (default on): most VPN servers, NordVPN included, hand out no IPv6, and the kernel won't route v6 into an interface without a v6 address, so v6 would otherwise slip past the VPN to the underlay. The helper rejects v6 while the VPN is up (apps fall back to v4 instantly). Settings ▸ VPN can turn it off if you need v6 and accept the bypass; when the VPN does carry v6, it is routed through it either way.
-* **Kill switch** (default on): while the VPN is down the `/2` routes become reject routes, so nothing falls back to the bare underlay until the session is back. With it off, traffic falls through to the passthrough/Wi-Fi meanwhile. The helper retries with backoff; an auth failure or bad profile stops with the reason shown under the toggle.
+* **Kill switch** (default on): while the VPN is down, `/3` reject routes override the VPN's `/2` routes, so nothing falls back to the bare underlay until the session is back. With it off, traffic falls through to the passthrough/Wi-Fi meanwhile. The helper retries with backoff; an auth failure or bad profile stops with the reason shown under the toggle.
 * Engines are signed on copy with your Team ID and the helper verifies that signature before executing them as root, since the app bundle sits in a user-writable location.
 * OpenVPN credentials go to the engine over stdin (`--auth-user-pass /dev/stdin`), never to disk or the process list; the profile text is written to a root-only file under `/var/run/passthrough` for the duration of the session.
 
@@ -97,11 +97,14 @@ Diagnostics: `PASSTHROUGH_NO_AUTOCONNECT=1` launches the app without taking over
 ## Layout
 
 ```
-Packages/PassthroughCore   Swift package: SOCKS5 server, control channel, pairing, stats,
-                           usbmuxd and adb clients, local forwarder, shared SwiftUI design layer, tests
+protocol/                  Wire protocol spec and fixtures.json, read by both the Swift and Kotlin tests
+Packages/PassthroughCore   Swift package:
+  PassthroughCore            SOCKS5 server, control channel, pairing, stats (the phone side)
+  PhoneTransport             phone links (usbmuxd, adb), device watchers, local forwarder, control client (the Mac side)
+  PassthroughUI              shared SwiftUI design layer
 iOS/App                    SwiftUI iPhone app
 iOS/Tunnel                 Packet tunnel extension hosting the servers
-macOS/App                  SwiftUI menu bar app
+macOS/App                  SwiftUI menu bar app: Session/, VPN/, Power/, Views/
 macOS/Helper               Root helper: utun + tun2socks + routes + DNS
 macOS/Shared               XPC protocol shared by app and helper
 android/                   Kotlin + Jetpack Compose Android app (same protocol, own tests)
@@ -110,6 +113,20 @@ Vendor/hev-socks5-tunnel   Engine source (MIT), rebuilt with scripts/build-hev.s
 Vendor/VPNEngines          Prebuilt wireguard-go + openvpn (arm64) for the VPN layer, plus licences
 project.yml                XcodeGen spec that produces Passthrough.xcodeproj
 ```
+
+### Seams
+
+The code is built around a few small interfaces, so a new phone, link or host plugs in without touching the rest:
+
+| Interface | Implementations | What it hides |
+|-----------|-----------------|---------------|
+| `PhoneLink` (Swift) | `USBMuxLink`, `ADBLink` | How the Mac opens a stream to a port on the phone |
+| `DeviceWatcher` (Swift) | `USBMuxWatcher`, `ADBWatcher` | How phones are found; `DeviceDirectory` merges them |
+| `ControlConnection` / `LineBuffer` (Swift), `LineReader` (Kotlin) | shared by both ends | Control-channel framing |
+| `ProxyHost` (iOS) | `ExtensionHost`, `InProcessHost` | Whether the proxy runs in the VPN extension or the app |
+| `Egress` / `EgressProvider` (Kotlin) | `DefaultEgress`, `CellularEgressProvider` | Which network outbound connections leave on |
+
+On the Mac, `SessionCoordinator` runs the passthrough link and owns two independent parts, `VPNLayer` and `KeepAwakeController`, which the views observe directly.
 
 ## Setup
 
@@ -140,12 +157,15 @@ The Mac app runs unsandboxed (it needs the usbmuxd and adb sockets) with hardene
 ## Failure recovery
 
 * The helper sweeps the system at every start: leftover kill-switch or VPN routes, dummy `feth` interfaces, a disabled sleep setting, stale network-service entries and engine files from a crashed run are all removed before it accepts clients. Network-service entries are published as temporary values, so configd drops them by itself if the helper dies.
-* OpenVPN keepalives are forced to ping 10 s / restart 25 s (servers' pushed timers are ignored; NordVPN pushes ping-restart 180), so a dead session after a cellular drop is re-established within about half a minute of the radio returning.
-* The VPN layer has a 60 s connect deadline; an engine that never establishes a session is restarted with backoff, and a fatal failure (rejected credentials, bad profile) lifts the kill switch instead of leaving the Mac blackholed. Endpoint addresses are cached so reconnects under the kill switch need no DNS.
+* OpenVPN pings the server every 10 s (whatever it pushes) so carrier NAT never drops the flow, and uses the server's own ping-restart (NordVPN: 180 s; 120 s if none is pushed). The timeout has to outlast the server's ping interval: OpenVPN pings are one-way, so an idle session hears from a NordVPN server only once a minute, and a shorter timeout restarts it every idle half minute. Network changes under the VPN restart the session straight away regardless.
+* The helper checks the VPN session is alive: while data arrives it is; after a quiet spell it sends one DNS question through the VPN interface, and two unanswered probes in a row (about 30 s after the session died) restart it. When the phone under the passthrough moves between Wi-Fi and cellular its public address changes, so the Mac restarts the VPN session straight away.
+* The kill switch blocks with reject routes one step more specific (/3) than the VPN's /2 routes, added fresh so the kernel really rejects (it ignores `-reject` on `route change`): blocked connections fail at once instead of hanging, and turning it on or off never leaves a moment without a route.
+* The VPN layer has a 60 s connect deadline; an engine that never establishes a session is restarted with backoff, and a fatal failure (rejected credentials, bad profile) stops retrying and shows why; the kill switch stays engaged until you turn the layer off. Endpoint addresses are cached so reconnects under the kill switch need no DNS.
 * The Mac app keeps retrying the USB link (backoff capped at 30 s) for as long as a phone is attached, so starting the proxy on the phone later just works. Routes are removed before the loopback listener closes on disconnect.
 * The phone's tunnel is registered with an on-demand "always connect" rule, so iOS relaunches the extension by itself if it is killed or after a reboot; stopping it from the app clears the rule. New connections tolerate up to 30 s without a viable path (tower handoff, radio waking) before failing, and existing ones simply resume if the path returns in time.
-* On the phone, "Cellular only" now degrades gracefully: a path monitor tracks whether cellular data is actually usable, and while it isn't (radio asleep after a handoff, brief carrier outage) new connections use whatever network the phone has instead of failing with "network is down"; it switches back the moment cellular is viable, logging both transitions. Private, link-local and multicast destinations (home-LAN probes, the router's DNS) are refused immediately rather than waiting on the radio.
+* On the phone, "Cellular only" now degrades gracefully: a path monitor tracks whether cellular data is actually usable, and while it isn't (radio asleep after a handoff, brief carrier outage) new connections use whatever network the phone has instead of failing with "network is down"; it switches back the moment cellular is viable, logging both transitions. Private, link-local and multicast destinations (home-LAN probes) are refused immediately rather than waiting on the radio. DNS aimed at a private address is the exception: Tailscale, for one, keeps sending lookups to the last Wi-Fi router the Mac saw, even with the Mac's Wi-Fi off, so the phone forwards those queries to its own network's DNS server (the carrier's, or its Wi-Fi's; 1.1.1.1 if it knows none) instead of letting every lookup fail.
 * On the phone, a UDP peer whose socket fails or never becomes viable is replaced on the next packet; a client that never completes the SOCKS handshake is dropped after 20 s; sessions are capped.
+* The phone reports whether its current network routes IPv6. When it doesn't (plenty of home Wi-Fi, some carriers), the helper turns the tunnel's IPv6 routes into reject routes, so apps fall back to IPv4 immediately instead of hanging on IPv6 connections tun2socks accepts but the phone can never make; they flip back when IPv6 returns. A tunnel engine that won't stop makes the helper restart itself, since its utun would otherwise block every new tunnel.
 * If launchd is still running the helper from an old bundle location, the app re-registers it from its current location the next time nothing is connected.
 
 ## Verifying without a phone
@@ -154,7 +174,7 @@ The SOCKS server can run on the Mac for protocol testing:
 
 ```
 cd Packages/PassthroughCore
-swift test                       # handshake, auth, CONNECT, UDP framing, pairing, control, adb parsing
+swift test                       # handshake, auth, CONNECT, UDP framing, pairing, control, adb parsing, protocol fixtures
 swift run passthrough-devserver  # then:
 curl --socks5-hostname 127.0.0.1:7890 --proxy-user dev:dev-token https://example.com
 ```
@@ -170,7 +190,7 @@ Panel previews: `Passthrough.app/Contents/MacOS/Passthrough --snapshot /tmp/pane
 ## Troubleshooting
 
 * **Connecting cuts every open connection on the Mac** (SSH sessions, terminals talking to an API, video calls). That is the default route switching to the tunnel, the same as any VPN. Connect before you start long-lived work, not in the middle of it.
-* **Same public IP as before**: the phone was on Wi-Fi and *Cellular only* was off. It is on by default now; check the pill next to the power button on the phone, it reads "Wi-Fi" when the Mac would ride the phone's Wi-Fi.
+* **Same public IP as before**: the phone is on Wi-Fi, so the Mac rides its Wi-Fi. On the iPhone this happens even with *Cellular only* on: while Wi-Fi is up iOS lets cellular data sleep, and forced-cellular UDP (DNS, QUIC, VPNs) then never gets a route, so everything but plain web pages would fail. The phone and the Mac menu both say when this is happening; turn off Wi-Fi on the phone to use cellular.
 * **Tailscale over the tunnel (verified working, incl. wifi off):** Tailscale's transport rides the phone like everything else, and MagicDNS stays the resolver. One macOS quirk had to be worked around: Tailscale hard-ignores every interface named `utun` when deciding whether the machine has any network (`isInterestingInterface` in `net/netmon/netmon_darwin.go`). With only our `utun` tunnel present (laptop truly remote, wifi off) it would declare itself offline even though the tunnel works. The helper therefore brings up a tiny dummy `feth` ("fake ethernet") interface with a private address whenever the tunnel is active, purely so that check passes. No traffic is routed over it; real traffic still follows the default route into the tunnel. It is torn down when the tunnel stops. Behind carrier NAT, Tailscale connects via DERP relay (expected), which is fully functional.
 * **Reading logs**: if your shell aliases `log`, call `/usr/bin/log show --last 10m --info --predicate 'subsystem == "dev.dpatel.passthrough"'`. Crashes land in `~/Library/Logs/DiagnosticReports` (app) and `/Library/Logs/DiagnosticReports` (helper).
 

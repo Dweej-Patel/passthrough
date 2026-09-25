@@ -24,8 +24,7 @@ public final class ControlClient: @unchecked Sendable {
     private let port: UInt16
     private let identity: Identity
     private let queue = DispatchQueue(label: "dev.dpatel.passthrough.control-client")
-    private var connection: NWConnection?
-    private var buffer = Data()
+    private var channel: ControlConnection?
     private var heartbeat: DispatchSourceTimer?
     private var lastPong = Date()
     private var closed = false
@@ -41,30 +40,28 @@ public final class ControlClient: @unchecked Sendable {
     public func connect() {
         device.connect(port: port, queue: queue) { [weak self] result in
             guard let self else { return }
-            self.queue.async {
-                switch result {
-                case .failure(let error):
-                    self.finish(error)
-                case .success(let connection):
-                    guard !self.closed else { connection.cancel(); return }
-                    self.connection = connection
-                    connection.stateUpdateHandler = { [weak self] state in
-                        switch state {
-                        case .failed(let error): self?.finish(error)
-                        case .cancelled: self?.finish(nil)
-                        default: break
-                        }
-                    }
-                    var hello = ControlEnvelope(t: ControlEnvelope.hello)
-                    hello.protocolVersion = PassthroughProtocol.version
-                    hello.clientID = self.identity.clientID
-                    hello.name = self.identity.name
-                    hello.token = self.identity.token
-                    self.send(hello)
-                    self.receive()
-                    self.startHeartbeat()
-                }
-            }
+            self.queue.async { self.opened(result) }
+        }
+    }
+
+    private func opened(_ result: Result<NWConnection, Error>) {
+        switch result {
+        case .failure(let error):
+            finish(error)
+        case .success(let connection):
+            guard !closed else { connection.cancel(); return }
+            let channel = ControlConnection(connection)
+            channel.onMessage = { [weak self] message in self?.handle(message) }
+            channel.onClose = { [weak self] error in self?.finish(error) }
+            self.channel = channel
+            channel.start(queue: queue)
+            var hello = ControlEnvelope(t: ControlEnvelope.hello)
+            hello.protocolVersion = PassthroughProtocol.version
+            hello.clientID = identity.clientID
+            hello.name = identity.name
+            hello.token = identity.token
+            send(hello)
+            startHeartbeat()
         }
     }
 
@@ -99,31 +96,12 @@ public final class ControlClient: @unchecked Sendable {
     }
 
     private func send(_ message: ControlEnvelope) {
-        guard let connection, let data = try? message.encodedLine() else { return }
-        connection.send(content: data, completion: .contentProcessed { [weak self] error in
-            if let error { self?.finish(error) }
-        })
-    }
-
-    private func receive() {
-        connection?.receive(minimumIncompleteLength: 1, maximumLength: 64 * 1024) { [weak self] data, _, isComplete, error in
-            guard let self, !self.closed else { return }
-            if let data { self.buffer.append(data) }
-            if self.buffer.count > 256 * 1024 { self.finish(NWError.posix(.EMSGSIZE)); return }
-            while let newline = self.buffer.firstIndex(of: 0x0A) {
-                let line = self.buffer.subdata(in: self.buffer.startIndex..<newline)
-                self.buffer.removeSubrange(self.buffer.startIndex...newline)
-                if let message = try? ControlEnvelope.decode(line) { self.handle(message) }
-            }
-            if let error { self.finish(error); return }
-            if isComplete { self.finish(nil); return }
-            self.receive()
-        }
+        channel?.send(message)
     }
 
     private func handle(_ m: ControlEnvelope) {
         lastPong = Date()
-        let status = DeviceStatus(deviceName: m.deviceName ?? "iPhone", radio: m.radio, carrier: m.carrier, battery: m.battery, hosting: m.hosting ?? "")
+        let status = DeviceStatus(deviceName: m.deviceName ?? device.kindName, radio: m.radio, carrier: m.carrier, battery: m.battery, hosting: m.hosting ?? "", ipv6: m.ipv6)
         switch m.t {
         case ControlEnvelope.welcome:
             handler(.welcomed(paired: m.paired ?? false, status: status, socksPort: UInt16(m.socksPort ?? Int(PassthroughProtocol.defaultSOCKSPort))))
@@ -141,8 +119,8 @@ public final class ControlClient: @unchecked Sendable {
         guard !closed else { return }
         closed = true
         heartbeat?.cancel()
-        connection?.cancel()
-        connection = nil
+        channel?.cancel()
+        channel = nil
         if !silent { handler(.disconnected(error)) }
     }
 }

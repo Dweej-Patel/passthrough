@@ -27,19 +27,13 @@ final class TunnelController {
         }
     }
 
-    func configure(deviceName: String, cellularOnly: Bool, allowUDP: Bool, socksPort: UInt16, controlPort: UInt16) async throws {
+    func configure(_ options: PassthroughService.Options) async throws {
         if manager == nil { try await load() }
         let manager = self.manager ?? NETunnelProviderManager()
         let proto = (manager.protocolConfiguration as? NETunnelProviderProtocol) ?? NETunnelProviderProtocol()
         proto.providerBundleIdentifier = Self.providerBundleID
         proto.serverAddress = "USB"
-        proto.providerConfiguration = [
-            "deviceName": deviceName,
-            "cellularOnly": cellularOnly,
-            "allowUDP": allowUDP,
-            "socksPort": Int(socksPort),
-            "controlPort": Int(controlPort),
-        ]
+        proto.providerConfiguration = options.providerConfiguration
         proto.disconnectOnSleep = false
         manager.protocolConfiguration = proto
         manager.localizedDescription = "Passthrough"

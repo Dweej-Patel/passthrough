@@ -16,8 +16,8 @@ public final class PassthroughService: @unchecked Sendable {
 
     public let registry: PairingRegistry
     public let options: Options
-    /// Fires when "cellular only" has to fall back to another network (false) or recovers (true).
-    public var onCellularUsableChange: (@Sendable (Bool) -> Void)?
+    /// Fires when "cellular only" moves new connections to another network, or back.
+    public var onEgressChange: (@Sendable (Egress) -> Void)?
     public private(set) var socks: SOCKS5Server?
     public private(set) var control: ControlServer?
     public var counter: ByteCounter { socks?.counter ?? fallbackCounter }
@@ -36,6 +36,7 @@ public final class PassthroughService: @unchecked Sendable {
 
     public func start() throws {
         guard !isRunning else { return }
+        Self.raiseFileDescriptorLimit()
         var config = SOCKS5Server.Configuration()
         config.port = options.socksPort
         config.cellularOnly = options.cellularOnly
@@ -47,9 +48,14 @@ public final class PassthroughService: @unchecked Sendable {
             authenticator = { user, password in registry.verify(clientID: user, token: password) }
         }
         let socks = SOCKS5Server(configuration: config, authenticator: authenticator)
-        socks.onCellularUsableChange = { [weak self] usable in self?.onCellularUsableChange?(usable) }
+        socks.onEgressChange = { [weak self] egress in self?.onEgressChange?(egress) }
+        let provider = statusProvider
         let control = ControlServer(port: options.controlPort, socksPort: options.socksPort, registry: registry,
-                                    counter: socks.counter, statusProvider: statusProvider)
+                                    counter: socks.counter) { [weak socks] in
+            var status = provider()
+            status.ipv6 = socks?.egressSupportsIPv6
+            return status
+        }
         control.onClientsChanged = { [weak self] macs in self?.onClientsChanged?(macs) }
         try socks.start()
         do { try control.start() } catch { socks.stop(); throw error }
@@ -67,4 +73,20 @@ public final class PassthroughService: @unchecked Sendable {
     }
 
     public var connectedMacs: [ConnectedMac] { control?.connectedMacs ?? [] }
+
+    /// Every proxied connection costs two descriptors (the stream from the Mac
+    /// and the one to the internet). iOS starts processes at 256, which a
+    /// speed test or a busy browser exhausts; new connections then fail.
+    static func raiseFileDescriptorLimit() {
+        var limit = rlimit()
+        guard getrlimit(RLIMIT_NOFILE, &limit) == 0 else { return }
+        let before = limit.rlim_cur
+        limit.rlim_cur = min(rlim_t(OPEN_MAX), limit.rlim_max)
+        if setrlimit(RLIMIT_NOFILE, &limit) != 0 {
+            limit.rlim_cur = min(4096, limit.rlim_max)
+            _ = setrlimit(RLIMIT_NOFILE, &limit)
+        }
+        _ = getrlimit(RLIMIT_NOFILE, &limit)
+        ptLog(.info, "File descriptor limit: \(before) → \(limit.rlim_cur)")
+    }
 }
