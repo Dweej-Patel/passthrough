@@ -67,7 +67,7 @@ struct GeneralSettings: View {
                     }
                 if let loginError { Text(loginError).font(.caption).foregroundStyle(PTTheme.danger) }
             } footer: {
-                Text("Keep awake stops the Mac from sleeping so long sessions survive when you step away, including with the lid closed (via the root helper). It reverts automatically when you turn it off or quit Passthrough. Caution: a closed, running Mac in a bag can overheat and drain the battery, so only use lid-closed on power or in open air.")
+                Text("Keep awake stops the Mac from sleeping so long sessions survive when you step away, including with the lid closed (via the root helper). It reverts automatically when you turn it off or quit Passthrough, and switches itself off at low battery or when the Mac runs hot (below). Still, a closed, running Mac in a bag can overheat, so use lid-closed on power or in open air.")
             }
             Section {
                 Toggle("Turn off keep awake at low battery", isOn: $keepAwake.batteryAutoOff)
@@ -84,6 +84,13 @@ struct GeneralSettings: View {
                 Text("Battery")
             } footer: {
                 Text(batteryFooter)
+            }
+            Section {
+                Toggle("Turn off keep awake when the Mac runs hot", isOn: $keepAwake.thermalAutoOff)
+            } header: {
+                Text("Heat")
+            } footer: {
+                Text("macOS reports how hard it is working to stay cool. When it reaches “serious”, where it starts slowing the Mac down, keep awake switches off so a closed laptop can sleep and cool. Right now the Mac is \(KeepAwakeController.describe(keepAwake.thermal)).")
             }
             Section {
                 Picker("Connect over", selection: $session.connectionMode) {

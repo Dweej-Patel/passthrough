@@ -75,9 +75,11 @@ It is **off by default**, sits directly under the passthrough switch, and works 
 
 **Low-battery auto-off:** in Settings ▸ General you set a battery percentage (default 20%). When keep-awake is on and the Mac is on battery power, it switches keep-awake off automatically at that level so a closed laptop can sleep instead of draining. It does not trigger on AC power. Turning keep-awake **on** while already at or below the limit is refused up front (the toggle stays off), and a warning appears under the toggle stating the current level and the limit.
 
+**Heat auto-off** (Settings ▸ General ▸ Heat, on by default): macOS reports how hard it is working to stay cool. When that reaches *serious*, the point where it starts slowing the Mac down, keep-awake switches itself off so a closed laptop can sleep and cool, and turning it on is refused until the Mac has cooled. It uses the public thermal state rather than raw sensor temperatures.
+
 The menu-bar icon composes the three toggles: a phone (plain when passthrough is off, radiating when connected), a lock while the VPN layer is connected, and a coffee cup while keep-awake is on.
 
-Caution: a closed, running Mac in a bag can overheat and drain the battery — use lid-closed on power or in open air.
+Caution: the heat and battery limits are a safety net, not a licence. A closed, running Mac in a bag can still get very hot; use lid-closed on power or in open air.
 
 ## VPN layer
 
