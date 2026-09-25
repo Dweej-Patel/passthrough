@@ -292,7 +292,8 @@ struct FlowCard: View {
                             busy: session.phase.isBusy || (viaWiFi && vpnLayer.status.isBusy),
                             radio: viaWiFi ? nil : session.phoneStatus?.radio,
                             vpn: vpn, keepAwake: keepAwake.isOn, downRate: session.meter.downRate, upRate: session.meter.upRate,
-                            activeConnections: session.phoneActiveConnections, viaWiFi: viaWiFi, localNetworkName: localName)
+                            activeConnections: session.phoneActiveConnections, viaWiFi: viaWiFi, localNetworkName: localName,
+                            wireless: session.device.map { $0.medium == .wireless } ?? (session.connectionMode == .wireless))
     }
 
     var body: some View {

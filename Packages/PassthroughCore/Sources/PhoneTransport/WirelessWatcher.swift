@@ -83,6 +83,9 @@ public final class WirelessWatcher: DeviceWatcher {
                 self.publish()
             }
         }
+        mux.onSuspend = { error in
+            ptLog(.info, "wireless: \(phone.label) dropped (\(error.localizedDescription)); waiting for it to redial")
+        }
         let device = PhoneDevice.wireless(phoneID: id, kind: phone.isAndroid ? .android : .iPhone, label: phone.label,
                                           pairingSlot: phone.pairingSlot, link: MuxLink(mux: mux))
         links[id] = (mux, device)

@@ -53,13 +53,18 @@ public enum WirelessLink {
         SHA256.hash(data: certificate).map { String(format: "%02x", $0) }.joined()
     }
 
+    /// Handshake lines: challenge (Mac), proof (phone), then resume or fresh (Mac).
     public struct Handshake: Codable, Sendable {
         public var t: String
         public var nonce: String?
         public var phoneID: String?
         public var mac: String?
-        public init(t: String, nonce: String? = nil, phoneID: String? = nil, mac: String? = nil) {
-            self.t = t; self.nonce = nonce; self.phoneID = phoneID; self.mac = mac
+        /// The session the phone wants to continue (proof), or the new one (fresh).
+        public var session: String?
+        /// Stream positions of the side that sends the line (proof, resume).
+        public var streams: [MuxStreamState]?
+        public init(t: String, nonce: String? = nil, phoneID: String? = nil, mac: String? = nil, session: String? = nil, streams: [MuxStreamState]? = nil) {
+            self.t = t; self.nonce = nonce; self.phoneID = phoneID; self.mac = mac; self.session = session; self.streams = streams
         }
     }
 
@@ -98,15 +103,17 @@ public struct LinkCredential: Codable, Equatable, Sendable {
 /// The phone's side: finds linked Macs advertising over peer-to-peer Wi-Fi
 /// (or the network the phone hosts), dials each, proves who it is, and then
 /// serves the streams the Mac opens by connecting them to its own proxy.
+/// When a link drops (peer-to-peer Wi-Fi comes and goes, especially while the
+/// phone is locked) it redials at once and resumes the same session, so the
+/// Mac's connections pause instead of failing.
 public final class WirelessDialer: @unchecked Sendable {
     private let queue = DispatchQueue(label: "dev.dpatel.passthrough.wireless-dialer")
     private let credentials: @Sendable () -> [LinkCredential]
     private let allowedPorts: Set<UInt16>
     private var browser: NWBrowser?
-    private var sessions: [String: Session] = [:]   // by macTag
-    private var retryAt: [String: Date] = [:]
+    private var links: [String: MacLink] = [:]   // by macTag
     private var running = false
-    /// Fires on the dialer's queue when a Mac connects or drops.
+    /// Fires on the dialer's queue when a Mac's link comes up or ends for good.
     public var onChange: (@Sendable (_ connectedMacTags: [String]) -> Void)?
 
     /// `allowedPorts`: the only loopback ports the Mac may open streams to.
@@ -114,6 +121,9 @@ public final class WirelessDialer: @unchecked Sendable {
         self.allowedPorts = allowedPorts
         self.credentials = credentials
     }
+
+    /// Macs whose link is up right now.
+    public var connectedMacTags: [String] { queue.sync { links.filter { $0.value.isUp }.map(\.key) } }
 
     public func start() {
         queue.async { [self] in
@@ -123,7 +133,11 @@ public final class WirelessDialer: @unchecked Sendable {
             params.includePeerToPeer = true
             let browser = NWBrowser(for: .bonjourWithTXTRecord(type: WirelessLink.serviceType, domain: nil), using: params)
             browser.stateUpdateHandler = { state in
-                if case .failed(let e) = state { ptLog(.warning, "wireless: browsing failed: \(e)") }
+                switch state {
+                case .failed(let e): ptLog(.warning, "wireless: browsing failed: \(e)")
+                case .waiting(let e): ptLog(.warning, "wireless: browsing is waiting: \(e)")
+                default: break
+                }
             }
             browser.browseResultsChangedHandler = { [weak self] results, _ in self?.queue.async { self?.found(results) } }
             browser.start(queue: queue)
@@ -136,126 +150,185 @@ public final class WirelessDialer: @unchecked Sendable {
         queue.async { [self] in
             running = false
             browser?.cancel(); browser = nil
-            sessions.values.forEach { $0.close() }
-            sessions.removeAll()
+            links.values.forEach { $0.stop() }
+            links.removeAll()
         }
     }
 
     /// Dials `endpoint` directly (tests, and hosts found without Bonjour).
     public func dial(_ endpoint: NWEndpoint, credential: LinkCredential, peerToPeer: Bool = true) {
-        queue.async { [self] in connect(endpoint, credential: credential, peerToPeer: peerToPeer) }
+        queue.async { [self] in link(for: credential, peerToPeer: peerToPeer).reach(endpoint) }
     }
 
     private func found(_ results: Set<NWBrowser.Result>) {
         guard running else { return }
         let known = Dictionary(credentials().map { ($0.macTag, $0) }, uniquingKeysWith: { a, _ in a })
         for result in results {
-            guard case .bonjour(let txt) = result.metadata, let tag = txt["m"], let credential = known[tag],
-                  sessions[tag] == nil, (retryAt[tag] ?? .distantPast) <= Date() else { continue }
-            connect(result.endpoint, credential: credential, peerToPeer: true)
+            guard case .bonjour(let txt) = result.metadata, let tag = txt["m"], let credential = known[tag] else { continue }
+            link(for: credential, peerToPeer: true).reach(result.endpoint)
         }
     }
 
-    private func connect(_ endpoint: NWEndpoint, credential: LinkCredential, peerToPeer: Bool) {
-        let tag = credential.macTag
-        let session = Session(endpoint: endpoint, credential: credential, peerToPeer: peerToPeer,
-                              allowedPorts: allowedPorts, queue: queue) { [weak self] error in
+    private func link(for credential: LinkCredential, peerToPeer: Bool) -> MacLink {
+        if let existing = links[credential.macTag] { return existing }
+        let link = MacLink(credential: credential, peerToPeer: peerToPeer, allowedPorts: allowedPorts, queue: queue) { [weak self] in
             guard let self else { return }
-            self.sessions[tag] = nil
-            self.retryAt[tag] = Date().addingTimeInterval(3)
-            ptLog(.info, "wireless: link to Mac \(tag.prefix(6)) ended: \(error?.localizedDescription ?? "closed")")
-            self.onChange?(Array(self.sessions.keys))
-            // Bonjour won't report the Mac again while it stays visible: retry ourselves.
-            self.queue.asyncAfter(deadline: .now() + 3) { [weak self] in
-                guard let self, self.running, self.sessions[tag] == nil else { return }
-                self.connect(endpoint, credential: credential, peerToPeer: peerToPeer)
-            }
-        } onReady: { [weak self] in
-            guard let self else { return }
-            ptLog(.info, "wireless: linked with Mac \(tag.prefix(6))")
-            self.onChange?(Array(self.sessions.keys))
+            self.onChange?(self.links.filter { $0.value.isUp }.map(\.key))
         }
-        sessions[tag] = session
-        session.start()
+        links[credential.macTag] = link
+        return link
+    }
+}
+
+/// The phone's link to one Mac: one multiplexed session, carried by whichever
+/// connection currently works. Everything runs on `queue`.
+private final class MacLink: @unchecked Sendable {
+    private let credential: LinkCredential
+    private let peerToPeer: Bool
+    private let allowedPorts: Set<UInt16>
+    private let queue: DispatchQueue
+    private let changed: () -> Void
+    private var endpoint: NWEndpoint?
+    private var mux: Mux?
+    private var attempt: ConnectionStream?
+    private var attemptID = 0
+    private var failures = 0
+    private var redial: DispatchWorkItem?
+    private var stopped = false
+    private var splices: [ObjectIdentifier: Splice] = [:]
+    private(set) var isUp = false
+
+    init(credential: LinkCredential, peerToPeer: Bool, allowedPorts: Set<UInt16>, queue: DispatchQueue, changed: @escaping () -> Void) {
+        self.credential = credential
+        self.peerToPeer = peerToPeer
+        self.allowedPorts = allowedPorts
+        self.queue = queue
+        self.changed = changed
     }
 
-    /// One dialed connection to one Mac.
-    private final class Session: @unchecked Sendable {
-        private let connection: NWConnection
-        private let stream: ConnectionStream
-        private let credential: LinkCredential
-        private let allowedPorts: Set<UInt16>
-        private let queue: DispatchQueue
-        private let onEnd: (Error?) -> Void
-        private let onReady: () -> Void
-        private var mux: Mux?
-        private var splices: [ObjectIdentifier: Splice] = [:]
-        private var ended = false
+    private var tag: String { String(credential.macTag.prefix(6)) }
 
-        init(endpoint: NWEndpoint, credential: LinkCredential, peerToPeer: Bool, allowedPorts: Set<UInt16>,
-             queue: DispatchQueue, onEnd: @escaping (Error?) -> Void, onReady: @escaping () -> Void) {
-            self.credential = credential
-            self.allowedPorts = allowedPorts
-            self.queue = queue
-            self.onEnd = onEnd
-            self.onReady = onReady
-            connection = NWConnection(to: endpoint, using: WirelessLink.pinnedClientParameters(pin: credential.certSHA256, peerToPeer: peerToPeer))
-            stream = ConnectionStream(connection, queue: queue)
+    /// The Mac is (still) at `endpoint`: connect unless already up or trying.
+    func reach(_ endpoint: NWEndpoint) {
+        self.endpoint = endpoint
+        guard !stopped, !isUp, attempt == nil, redial == nil else { return }
+        dial()
+    }
+
+    func stop() {
+        stopped = true
+        redial?.cancel(); redial = nil
+        attempt?.cancel(); attempt = nil
+        mux?.close(); mux = nil
+        splices.values.forEach { $0.close() }
+        splices.removeAll()
+    }
+
+    private func dial() {
+        guard !stopped, let endpoint else { return }
+        redial = nil
+        attemptID += 1
+        let id = attemptID
+        let connection = NWConnection(to: endpoint, using: WirelessLink.pinnedClientParameters(pin: credential.certSHA256, peerToPeer: peerToPeer))
+        let stream = ConnectionStream(connection, queue: queue)
+        attempt = stream
+        stream.onTerminated = { [weak self] error in self?.queue.async { self?.attemptFailed(id, error) } }
+        queue.asyncAfter(deadline: .now() + WirelessLink.handshakeTimeout) { [weak self] in
+            self?.attemptFailed(id, MuxError.protocolViolation("handshake timed out"))
         }
+        WirelessLink.readLine(stream) { [weak self] result in self?.queue.async { self?.challenged(id, stream, result) } }
+    }
 
-        func start() {
-            stream.onTerminated = { [weak self] error in self?.queue.async { self?.end(error) } }
-            queue.asyncAfter(deadline: .now() + WirelessLink.handshakeTimeout) { [weak self] in
-                guard let self, self.mux == nil else { return }
-                self.end(MuxError.protocolViolation("handshake timed out"))
-            }
-            WirelessLink.readLine(stream) { [weak self] result in
-                self?.queue.async { self?.challenged(result) }
-            }
+    private func challenged(_ id: Int, _ stream: ConnectionStream, _ result: Result<(Data, Data), Error>) {
+        guard id == attemptID, attempt === stream else { return }
+        guard case .success(let (line, _)) = result else { attemptFailed(id, result.failure); return }
+        guard let message = try? JSONDecoder().decode(WirelessLink.Handshake.self, from: line),
+              message.t == "challenge", let nonce = message.nonce.flatMap({ Data(base64Encoded: $0) }), nonce.count == 32 else {
+            attemptFailed(id, MuxError.protocolViolation("bad challenge")); return
         }
+        let proof = WirelessLink.proof(linkKey: credential.linkKey, nonce: nonce).base64EncodedString()
+        let send = { [self] (states: [MuxStreamState]?) in
+            WirelessLink.sendLine(.init(t: "proof", phoneID: credential.phoneID, mac: proof, session: mux?.sessionID, streams: states), on: stream)
+            WirelessLink.readLine(stream) { [weak self] result in self?.queue.async { self?.answered(id, stream, result) } }
+        }
+        if let mux { mux.streamStates { states in self.queue.async { send(states) } } } else { send(nil) }
+    }
 
-        private func challenged(_ result: Result<(Data, Data), Error>) {
-            guard !ended else { return }
-            guard case .success(let (line, _)) = result else { end(result.failure ?? MuxError.linkClosed); return }
-            guard let message = try? JSONDecoder().decode(WirelessLink.Handshake.self, from: line),
-                  message.t == "challenge", let nonce = message.nonce.flatMap({ Data(base64Encoded: $0) }), nonce.count == 32 else {
-                end(MuxError.protocolViolation("bad challenge")); return
-            }
-            let proof = WirelessLink.proof(linkKey: credential.linkKey, nonce: nonce)
-            WirelessLink.sendLine(.init(t: "proof", phoneID: credential.phoneID, mac: proof.base64EncodedString()), on: stream)
-            let mux = Mux(transport: stream, isOpener: false, queue: queue)
+    private func answered(_ id: Int, _ stream: ConnectionStream, _ result: Result<(Data, Data), Error>) {
+        guard id == attemptID, attempt === stream else { return }
+        guard case .success(let (line, rest)) = result,
+              let message = try? JSONDecoder().decode(WirelessLink.Handshake.self, from: line) else {
+            attemptFailed(id, result.failure ?? MuxError.protocolViolation("bad handshake reply")); return
+        }
+        stream.onTerminated = nil
+        attempt = nil
+        failures = 0
+        if message.t == "resume", let mux {
+            mux.resume(on: stream, peerStreams: message.streams ?? [], initialBytes: rest)
+        } else if message.t == "fresh", let session = message.session {
+            // The Mac didn't know our session (it restarted): start over.
+            mux?.close()
+            let mux = Mux(transport: stream, isOpener: false, queue: queue, initialBytes: rest, sessionID: session, resumable: true)
             mux.onOpen = { [weak self] port, muxStream in self?.serve(port: port, muxStream) }
-            mux.onClose = { [weak self] error in self?.end(error) }
+            mux.onSuspend = { [weak self] _ in self?.suspended() }
+            mux.onClose = { [weak self, weak mux] error in
+                guard let self, self.mux === mux else { return }
+                self.mux = nil
+                self.isUp = false
+                ptLog(.info, "wireless: link to Mac \(self.tag) ended: \(error?.localizedDescription ?? "closed")")
+                self.changed()
+                self.scheduleRedial()
+            }
             self.mux = mux
             mux.start()
-            onReady()
-        }
-
-        /// A stream the Mac opened: connect it to our own proxy on loopback.
-        private func serve(port: UInt16, _ muxStream: MuxStream) {
-            guard allowedPorts.contains(port), let nwPort = NWEndpoint.Port(rawValue: port) else { muxStream.cancel(); return }
-            let local = ConnectionStream(NWConnection(host: .ipv4(.loopback), port: nwPort, using: .tcp), queue: queue)
-            var key: ObjectIdentifier?
-            let splice = Splice(muxStream, local, queue: queue) { [weak self] in
-                if let key { self?.splices[key] = nil }
-            }
-            key = ObjectIdentifier(splice)
-            splices[ObjectIdentifier(splice)] = splice
-            splice.start()
-        }
-
-        func close() { queue.async { self.end(nil) } }
-
-        private func end(_ error: Error?) {
-            guard !ended else { return }
-            ended = true
-            stream.onTerminated = nil
-            mux?.close()
+        } else {
             stream.cancel()
-            splices.values.forEach { $0.close() }
-            splices.removeAll()
-            onEnd(error)
+            attemptFailed(id, MuxError.protocolViolation("unexpected handshake reply"))
+            return
         }
+        isUp = true
+        ptLog(.info, "wireless: linked with Mac \(tag)")
+        changed()
+    }
+
+    private func suspended() {
+        isUp = false
+        changed()
+        scheduleRedial(immediately: true)
+    }
+
+    private func attemptFailed(_ id: Int, _ error: Error?) {
+        guard id == attemptID, let stream = attempt else { return }
+        stream.onTerminated = nil
+        stream.cancel()
+        attempt = nil
+        failures += 1
+        if failures == 1 || failures % 10 == 0 {
+            ptLog(.info, "wireless: couldn't reach Mac \(tag) (\(error?.localizedDescription ?? "no answer")); retrying")
+        }
+        scheduleRedial()
+    }
+
+    /// Soon while a session is waiting to resume; then backing off to 5 s.
+    private func scheduleRedial(immediately: Bool = false) {
+        guard !stopped, redial == nil, attempt == nil else { return }
+        let delay = immediately ? 0.2 : min(5, 0.5 * pow(2, Double(max(0, failures - 1))))
+        let work = DispatchWorkItem { [weak self] in self?.dial() }
+        redial = work
+        queue.asyncAfter(deadline: .now() + delay, execute: work)
+    }
+
+    /// A stream the Mac opened: connect it to our own proxy on loopback.
+    private func serve(port: UInt16, _ muxStream: MuxStream) {
+        guard allowedPorts.contains(port), let nwPort = NWEndpoint.Port(rawValue: port) else { muxStream.cancel(); return }
+        let local = ConnectionStream(NWConnection(host: .ipv4(.loopback), port: nwPort, using: .tcp), queue: queue)
+        var key: ObjectIdentifier?
+        let splice = Splice(muxStream, local, queue: queue) { [weak self] in
+            if let key { self?.splices[key] = nil }
+        }
+        key = ObjectIdentifier(splice)
+        splices[ObjectIdentifier(splice)] = splice
+        splice.start()
     }
 }
 

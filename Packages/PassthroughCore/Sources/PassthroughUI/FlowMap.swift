@@ -36,13 +36,16 @@ public struct FlowMapState: Equatable {
     public var viaWiFi: Bool
     /// Label for that local network ("Wi-Fi", "Ethernet").
     public var localNetworkName: String
+    /// The Mac and phone talk over the wireless link instead of the cable.
+    public var wireless: Bool
 
     public init(perspective: Perspective, macName: String = "Mac", phoneName: String = "iPhone", phoneIcon: String = "iphone.gen3", linkUp: Bool = false, busy: Bool = false,
                 radio: String? = nil, vpn: VPN? = nil, keepAwake: Bool = false, downRate: Double = 0, upRate: Double = 0, activeConnections: Int = 0,
-                viaWiFi: Bool = false, localNetworkName: String = "Wi-Fi") {
+                viaWiFi: Bool = false, localNetworkName: String = "Wi-Fi", wireless: Bool = false) {
         self.perspective = perspective; self.macName = macName; self.phoneName = phoneName; self.phoneIcon = phoneIcon; self.linkUp = linkUp; self.busy = busy
         self.radio = radio; self.vpn = vpn; self.keepAwake = keepAwake; self.downRate = downRate; self.upRate = upRate
         self.activeConnections = activeConnections; self.viaWiFi = viaWiFi; self.localNetworkName = localNetworkName
+        self.wireless = wireless
     }
 }
 
@@ -115,7 +118,8 @@ public struct FlowMap: View {
     }
 
     private var accessibilityText: String {
-        var s = state.linkUp ? "Traffic flows from \(state.macName) over USB to \(state.phoneName)" : "No traffic; USB link down"
+        let link = state.wireless ? "the wireless link" : "USB"
+        var s = state.linkUp ? "Traffic flows from \(state.macName) over \(link) to \(state.phoneName)" : "No traffic; \(link) down"
         if let radio = state.radio { s += ", then over \(radio)" }
         if let vpn = state.vpn { s += vpn.connected ? ", encrypted through \(vpn.name)" : ", VPN \(vpn.name) connecting" }
         return s
@@ -331,14 +335,14 @@ private struct FlowNodes: View {
             }
             NodeView(icon: "globe", label: "Internet", tint: .secondary, dim: !state.linkUp, radius: g.nodeR)
                 .position(x: g.internet, y: y + 8)
-            WireLabel(state.viaWiFi ? state.localNetworkName : "USB").position(x: (g.mac + g.phone) / 2, y: y + 15)
+            WireLabel(state.viaWiFi ? state.localNetworkName : (state.wireless ? "Wi-Fi link" : "USB")).position(x: (g.mac + g.phone) / 2, y: y + 15)
             if !state.viaWiFi { WireLabel(state.radio ?? "cellular").position(x: g.radioMid, y: y + 15) }
             if state.keepAwake {
                 Image(systemName: "cup.and.saucer.fill").font(.system(size: 10, weight: .bold)).foregroundStyle(PTTheme.warning)
                     .position(x: g.mac + g.nodeR - 2, y: y - g.nodeR + 2)
             }
             if !state.linkUp && !state.busy && state.perspective == .mac && !state.viaWiFi {
-                Image(systemName: "cable.connector.slash").font(.system(size: 10, weight: .semibold)).foregroundStyle(.tertiary)
+                Image(systemName: state.wireless ? "wifi.slash" : "cable.connector.slash").font(.system(size: 10, weight: .semibold)).foregroundStyle(.tertiary)
                     .position(x: (g.mac + g.phone) / 2, y: y - 12)
             }
         }

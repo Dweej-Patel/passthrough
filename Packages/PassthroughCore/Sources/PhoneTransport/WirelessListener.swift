@@ -19,6 +19,8 @@ public final class WirelessListener: @unchecked Sendable {
     private let queue = DispatchQueue(label: "dev.dpatel.passthrough.wireless-listener")
     private var listener: NWListener?
     private var pending = 0
+    /// Live sessions by ID, so a phone that redials resumes instead of starting over.
+    private var sessions: [String: (phoneID: String, mux: Mux)] = [:]
     /// A phone proved itself; on the listener's queue.
     public var onLink: (@Sendable (Link) -> Void)?
     /// The TCP port once listening (tests).
@@ -58,6 +60,8 @@ public final class WirelessListener: @unchecked Sendable {
                 self?.port = port
                 if let port { onReady?(port) }
                 ptLog(.info, "wireless: listening on port \(port ?? 0)")
+            case .waiting(let error):
+                ptLog(.warning, "wireless: listener waiting (\(error)); allow Passthrough on the local network in System Settings if asked")
             case .failed(let error):
                 ptLog(.error, "wireless: listener failed: \(error)")
             default: break
@@ -99,8 +103,22 @@ public final class WirelessListener: @unchecked Sendable {
                     ptLog(.warning, "wireless: rejected a connection that could not prove a link")
                     finish(nil); return
                 }
-                let mux = Mux(transport: stream, isOpener: true,
-                              queue: DispatchQueue(label: "dev.dpatel.passthrough.wireless-mux"), initialBytes: rest)
+                self.sessions = self.sessions.filter { !$0.value.mux.isClosed }
+                if let id = message.session, let session = self.sessions[id], session.phoneID == phoneID {
+                    // Same phone, same session: carry on over the new connection.
+                    session.mux.streamStates { states in
+                        WirelessLink.sendLine(.init(t: "resume", streams: states), on: stream)
+                        session.mux.resume(on: stream, peerStreams: message.streams ?? [], initialBytes: rest)
+                    }
+                    self.pending -= 1
+                    done = true
+                    return
+                }
+                let id = UUID().uuidString
+                let mux = Mux(transport: stream, isOpener: true, queue: DispatchQueue(label: "dev.dpatel.passthrough.wireless-mux"),
+                              initialBytes: rest, sessionID: id, resumable: true)
+                self.sessions[id] = (phoneID, mux)
+                WirelessLink.sendLine(.init(t: "fresh", session: id), on: stream)
                 finish(Link(phoneID: phoneID, mux: mux))
             }
         }

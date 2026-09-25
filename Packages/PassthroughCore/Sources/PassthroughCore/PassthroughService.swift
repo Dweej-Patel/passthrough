@@ -84,6 +84,8 @@ public final class PassthroughService: @unchecked Sendable {
     }
 
     public var connectedMacs: [ConnectedMac] { control?.connectedMacs ?? [] }
+    /// Macs linked over the air right now.
+    public var wirelessMacTags: [String] { dialer?.connectedMacTags ?? [] }
 
     /// Every proxied connection costs two descriptors (the stream from the Mac
     /// and the one to the internet). iOS starts processes at 256, which a

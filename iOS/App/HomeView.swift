@@ -96,7 +96,7 @@ struct FlowCard: View {
                             linkUp: model.state == .running && !macs.isEmpty,
                             busy: model.state == .starting || (model.state == .running && macs.isEmpty),
                             radio: model.radio, downRate: model.meter.downRate, upRate: model.meter.upRate,
-                            activeConnections: model.stats.active)
+                            activeConnections: model.stats.active, wireless: model.servingWirelessly)
     }
 
     var body: some View {
@@ -149,7 +149,7 @@ struct HeroCard: View {
                     }
                     HStack(spacing: 8) {
                         if let radio = model.radio { PTPill(radio, icon: "antenna.radiowaves.left.and.right", tint: PTTheme.down) }
-                        PTPill("USB", icon: "cable.connector", tint: .secondary)
+                        PTPill(model.servingWirelessly ? "Wi-Fi link" : "USB", icon: model.servingWirelessly ? "wifi" : "cable.connector", tint: .secondary)
                         PTPill(model.hosting == .background ? "Background" : "Foreground", icon: model.hosting == .background ? "moon.zzz.fill" : "sun.max.fill", tint: .secondary)
                         if model.state == .running {
                             PTPill("\(model.stats.active) open", icon: "arrow.left.arrow.right", tint: PTTheme.up)

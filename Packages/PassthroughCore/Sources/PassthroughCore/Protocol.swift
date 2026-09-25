@@ -85,8 +85,16 @@ public struct ProviderStats: Codable, Sendable, Equatable {
     public var totalConnections: Int
     public var macs: [ConnectedMac]
     public var startedAt: Date?
-    public init(rx: Int64, tx: Int64, active: Int, totalConnections: Int, macs: [ConnectedMac], startedAt: Date?) {
+    /// `WirelessLink.macTag` of the Macs whose link is up over the air.
+    public var wirelessMacTags: [String]?
+    public init(rx: Int64, tx: Int64, active: Int, totalConnections: Int, macs: [ConnectedMac], startedAt: Date?, wirelessMacTags: [String]? = nil) {
         self.rx = rx; self.tx = tx; self.active = active; self.totalConnections = totalConnections; self.macs = macs; self.startedAt = startedAt
+        self.wirelessMacTags = wirelessMacTags
+    }
+
+    /// Whether `mac` is connected over the wireless link rather than the cable.
+    public func isWireless(_ mac: ConnectedMac) -> Bool {
+        wirelessMacTags?.contains(WirelessLink.macTag(clientID: mac.id)) ?? false
     }
 }
 

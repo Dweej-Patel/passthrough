@@ -223,7 +223,7 @@ private final class Peer: @unchecked Sendable {
     func authenticate(id: String, name: String) {
         if mac == nil {
             mac = ConnectedMac(id: id, name: name, since: Date())
-            ptLog(.info, "\(name) connected over USB")
+            ptLog(.info, "\(name) connected")
             server.clientsChanged()
         }
     }

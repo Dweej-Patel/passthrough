@@ -159,4 +159,71 @@ final class MuxTests: XCTestCase {
         mux.start()
         wait(for: [closed], timeout: 3)
     }
+
+    /// A 3 MB echo survives the connection breaking halfway: each side keeps
+    /// what the other hasn't confirmed and resends exactly the missing part.
+    func testStreamsSurviveAReconnect() {
+        let (a1, b1) = MemoryStream.pair()
+        let mac = Mux(transport: a1, isOpener: true, queue: DispatchQueue(label: "mac"), sessionID: "s", resumable: true)
+        let phone = Mux(transport: b1, isOpener: false, queue: DispatchQueue(label: "phone"), sessionID: "s", resumable: true)
+        let suspended = expectation(description: "both suspended")
+        suspended.expectedFulfillmentCount = 2
+        mac.onSuspend = { _ in suspended.fulfill() }
+        phone.onSuspend = { _ in suspended.fulfill() }
+        phone.onOpen = { _, stream in
+            func echo() {
+                stream.receive(maximumLength: 40_000) { data, complete, _ in
+                    if let data { stream.send(data, isComplete: false) { _ in } }
+                    if complete { stream.send(nil, isComplete: true) { _ in }; return }
+                    echo()
+                }
+            }
+            echo()
+        }
+        mac.start(); phone.start()
+        let payload = Data((0..<3_000_000).map { UInt8(truncatingIfNeeded: $0 &* 13) })
+        let stream = mac.open(port: 7890)
+        let got = Locked(Data()), done = expectation(description: "echoed")
+        let dropped = Locked(false)
+        func read() {
+            stream.receive(maximumLength: 65536) { chunk, complete, error in
+                if let chunk { got.set(got.get() + chunk) }
+                if !dropped.get(), got.get().count > 1_000_000 {
+                    dropped.set(true)
+                    mac.interruptForTesting()
+                }
+                if complete || error != nil { XCTAssertNil(error); done.fulfill(); return }
+                read()
+            }
+        }
+        read()
+        stream.send(payload, isComplete: true) { XCTAssertNil($0) }
+        wait(for: [suspended], timeout: 10)
+        let (a2, b2) = MemoryStream.pair()
+        mac.streamStates { macStates in
+            phone.streamStates { phoneStates in
+                mac.resume(on: a2, peerStreams: phoneStates)
+                phone.resume(on: b2, peerStreams: macStates)
+            }
+        }
+        wait(for: [done], timeout: 20)
+        XCTAssertEqual(got.get(), payload)
+    }
+
+    func testUnresumedLinkEventuallyCloses() {
+        let saved = Mux.suspendTimeout
+        Mux.suspendTimeout = 0.3
+        defer { Mux.suspendTimeout = saved }
+        let (a, b) = MemoryStream.pair()
+        defer { withExtendedLifetime(b) {} }
+        let mux = Mux(transport: a, isOpener: true, queue: DispatchQueue(label: "m"), resumable: true)
+        let closed = expectation(description: "closed")
+        mux.onClose = { error in XCTAssertEqual(error as? MuxError, .timeout); closed.fulfill() }
+        mux.start()
+        let stream = mux.open(port: 7890)
+        let failed = expectation(description: "stream failed")
+        stream.receive(maximumLength: 10) { _, _, error in XCTAssertNotNil(error); failed.fulfill() }
+        mux.interruptForTesting()
+        wait(for: [closed, failed], timeout: 3)
+    }
 }

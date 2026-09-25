@@ -116,6 +116,31 @@ final class WirelessLinkTests: XCTestCase {
         XCTAssertEqual(got.get(), payload)
     }
 
+    /// Break the real TLS link mid-transfer: the phone redials, the Mac
+    /// resumes the same session, and every byte still arrives once.
+    func testLinkResumesAfterADrop() {
+        guard let mux = link() else { return XCTFail("no link") }
+        let payload = Data((0..<3_000_000).map { UInt8(truncatingIfNeeded: $0 &* 11) })
+        let got = Locked(Data()), done = expectation(description: "echoed")
+        let dropped = Locked(false)
+        MuxLink(mux: mux).connect(port: echoPort, queue: .global()) { result in
+            guard case .success(let stream) = result else { return XCTFail() }
+            func read() {
+                stream.receive(maximumLength: 65536) { chunk, complete, error in
+                    if let chunk { got.set(got.get() + chunk) }
+                    if !dropped.get(), got.get().count > 500_000 { dropped.set(true); mux.interruptForTesting() }
+                    if complete || error != nil { XCTAssertNil(error); done.fulfill(); return }
+                    read()
+                }
+            }
+            read()
+            stream.send(payload, isComplete: true) { XCTAssertNil($0) }
+        }
+        wait(for: [done], timeout: 20)
+        XCTAssertTrue(dropped.get())
+        XCTAssertEqual(got.get(), payload)
+    }
+
     func testOnlyAllowedPortsCanBeOpened() {
         guard let mux = link() else { return XCTFail("no link") }
         let refused = expectation(description: "refused")

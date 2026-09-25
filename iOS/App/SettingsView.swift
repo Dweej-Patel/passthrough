@@ -47,11 +47,14 @@ struct SettingsView: View {
                 .disabled(model.state.isActive)
                 Section {
                     Toggle("Wireless link", isOn: $model.wireless)
-                        .onChange(of: model.wireless) { _, on in if on { LocalNetworkPermission.request() } }
+                        .onChange(of: model.wireless) { _, on in
+                            if on { LocalNetworkPermission.request() }
+                            model.restartIfRunning()
+                        }
                 } header: {
                     Text("Wireless")
                 } footer: {
-                    Text("Also reach linked Macs over a direct Wi-Fi link, no cable or router needed. A Mac links the first time it connects over USB. The link is encrypted and only a Mac this iPhone paired with can use it. Takes effect the next time the proxy starts.")
+                    Text("Also reach linked Macs over a direct Wi-Fi link, no cable or router needed. A Mac links the first time it connects over USB. The link is encrypted and only a Mac this iPhone paired with can use it. A running proxy restarts to apply the change.")
                 }
                 Section("Diagnostics") {
                     DisclosureGroup("Log", isExpanded: $showLog) {

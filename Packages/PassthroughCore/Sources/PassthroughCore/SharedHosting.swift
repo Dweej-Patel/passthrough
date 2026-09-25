@@ -50,6 +50,6 @@ extension PassthroughService {
     public func stats() -> ProviderStats {
         let snap = counter.snapshot()
         return ProviderStats(rx: snap.rx, tx: snap.tx, active: snap.active, totalConnections: snap.totalConnections,
-                             macs: connectedMacs, startedAt: startedAt)
+                             macs: connectedMacs, startedAt: startedAt, wirelessMacTags: wirelessMacTags)
     }
 }
