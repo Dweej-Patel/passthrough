@@ -130,7 +130,7 @@ final class MuxTests: XCTestCase {
         let total = 128 * 1024 * 1024
         let received = Locked(0), done = expectation(description: "drained")
         let before = try XCTUnwrap(PassthroughService.footprintMB())
-        let grown = Locked(0)
+        let grown = Locked<Int?>(nil)
         phone.onOpen = { _, stream in
             func drain() {
                 // Reads smaller than a frame, like a slow uplink: the buffer never empties.
@@ -138,7 +138,7 @@ final class MuxTests: XCTestCase {
                     let was = received.get(), now = was + (data?.count ?? 0)
                     received.set(now)
                     // Measure mid-transfer: closing the stream frees whatever it kept.
-                    if was < total * 3 / 4, now >= total * 3 / 4 { grown.set((PassthroughService.footprintMB() ?? 0) - before) }
+                    if was < total * 3 / 4, now >= total * 3 / 4 { grown.set(PassthroughService.footprintMB().map { $0 - before }) }
                     complete ? done.fulfill() : drain()
                 }
             }
@@ -154,7 +154,21 @@ final class MuxTests: XCTestCase {
         push(total)
         wait(for: [done], timeout: 60)
         XCTAssertEqual(received.get(), total)
-        XCTAssertLessThan(grown.get(), 16, "memory grew \(grown.get()) MB moving \(total >> 20) MB")
+        let growth = try XCTUnwrap(grown.get(), "no mid-transfer measurement")
+        XCTAssertLessThan(growth, 16, "memory grew \(growth) MB moving \(total >> 20) MB")
+    }
+
+    /// A stream opened just as the mux closes must fail its reads and writes, not hang.
+    func testStreamOpenedOnAClosedMuxFails() {
+        let (mac, _) = linked()
+        mac.close()
+        let stream = mac.open(port: 7890)
+        let read = expectation(description: "receive fails"), wrote = expectation(description: "send fails")
+        stream.receive(maximumLength: 10) { data, complete, error in
+            XCTAssertNil(data); XCTAssertTrue(complete); XCTAssertNotNil(error); read.fulfill()
+        }
+        stream.send(Data([1]), isComplete: false) { error in XCTAssertNotNil(error); wrote.fulfill() }
+        wait(for: [read, wrote], timeout: 2)
     }
 
     func testResetAndLinkLossReachTheOtherSide() {

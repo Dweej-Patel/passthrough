@@ -112,9 +112,8 @@ public final class WirelessListener: @unchecked Sendable {
                 self.sessions = self.sessions.filter { !$0.value.mux.isClosed }
                 if let id = message.session, let session = self.sessions[id], session.phoneID == phoneID {
                     // Same phone, same session: carry on over the new connection.
-                    session.mux.streamStates { states in
+                    session.mux.resume(on: stream, peerStreams: message.streams ?? [], initialBytes: rest) { states in
                         WirelessLink.sendLine(.init(t: "resume", streams: states), on: stream)
-                        session.mux.resume(on: stream, peerStreams: message.streams ?? [], initialBytes: rest)
                     }
                     self.onResume?(phoneID, WirelessLink.carrier(of: stream))
                     self.pending -= 1

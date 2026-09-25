@@ -42,7 +42,6 @@ public struct MuxFrame: Equatable, Sendable {
         return frames
     }
 
-    static func uint32(_ value: UInt32) -> Data { withUnsafeBytes(of: value.bigEndian) { Data($0) } }
     static func uint64(_ value: UInt64) -> Data { withUnsafeBytes(of: value.bigEndian) { Data($0) } }
     static func readUInt64(_ data: Data) -> UInt64? {
         data.count == 8 ? data.reduce(UInt64(0)) { $0 << 8 | UInt64($1) } : nil
@@ -54,7 +53,7 @@ public enum MuxError: LocalizedError, Equatable {
     public var errorDescription: String? {
         switch self {
         case .badFrame: return "Malformed frame on the wireless link"
-        case .reset: return "The phone closed the stream"
+        case .reset: return "The other side reset the stream"
         case .linkClosed: return "The wireless link closed"
         case .timeout: return "The wireless link stopped responding"
         case .protocolViolation(let why): return "Wireless link protocol error: \(why)"
@@ -150,13 +149,12 @@ public final class Mux: @unchecked Sendable {
             nextID &+= 2
             streams[stream.id] = stream
             write(stream.openFrame)
-            stream.linked()
         }
         return stream
     }
 
     public func close(_ error: Error? = nil) {
-        queue.async { [self] in close(error ?? MuxError.linkClosed) }
+        queue.async { [self] in end(error ?? MuxError.linkClosed) }
     }
 
     /// Where every stream stands, for the resume handshake.
@@ -166,18 +164,23 @@ public final class Mux: @unchecked Sendable {
 
     /// Continues on a new transport. `peerStreams` is what the other side
     /// holds; streams it lost are reset, and whatever it missed is resent.
-    public func resume(on transport: ByteStream, peerStreams: [MuxStreamState], initialBytes: Data = Data()) {
+    /// `announce` gets this side's stream states, taken once the old
+    /// transport is detached so nothing more can arrive on it, and must send
+    /// them before the new transport carries frames.
+    public func resume(on transport: ByteStream, peerStreams: [MuxStreamState], initialBytes: Data = Data(),
+                       announce: (([MuxStreamState]) -> Void)? = nil) {
         queue.async { [self] in
             guard !closed else { transport.cancel(); return }
             expiry?.cancel(); expiry = nil
             detachTransport()
+            announce?(streams.values.map(\.state))
             buffer = Data()
             let peer = Dictionary(peerStreams.map { ($0.i, $0) }, uniquingKeysWith: { a, _ in a })
             self.transport = transport
             for stream in Array(streams.values).sorted(by: { $0.id < $1.id }) {
                 if let state = peer[stream.id] {
                     stream.resume(peer: state)
-                } else if isOpener, stream.id % 2 == 1, !stream.peerSawOpen {
+                } else if isOpener, !stream.peerSawOpen {
                     // The phone never got our OPEN: open again and send it all.
                     write(stream.openFrame)
                     stream.resume(peer: MuxStreamState(i: stream.id, r: 0, f: false))
@@ -197,9 +200,6 @@ public final class Mux: @unchecked Sendable {
 
     /// Tests: behave as if the connection just failed.
     func interruptForTesting() { queue.async { [self] in lost(MuxError.linkClosed, epoch: epoch) } }
-
-    /// Streams currently open; on `queue`.
-    public var streamCount: Int { streams.count }
 
     // MARK: Internals (on queue)
 
@@ -232,12 +232,12 @@ public final class Mux: @unchecked Sendable {
     /// The transport failed: wait for a resume if we can, else end.
     private func lost(_ error: Error, epoch lostEpoch: Int) {
         guard !closed, lostEpoch == epoch else { return }
-        guard resumable else { close(error); return }
+        guard resumable else { end(error); return }
         detachTransport()
         setSuspended(true)
         guard expiry == nil else { return }
         ptLog(.info, "wireless: link interrupted (\(error.localizedDescription)); holding \(streams.count) stream(s)")
-        let expiry = DispatchWorkItem { [weak self] in self?.close(MuxError.timeout) }
+        let expiry = DispatchWorkItem { [weak self] in self?.end(MuxError.timeout) }
         queue.asyncAfter(deadline: .now() + Self.suspendTimeout, execute: expiry)
         self.expiry = expiry
         onSuspend?(error)
@@ -254,7 +254,9 @@ public final class Mux: @unchecked Sendable {
 
     fileprivate func remove(_ id: UInt32) { streams[id] = nil }
 
-    private func close(_ error: Error) {
+    /// Ends the mux now (on `queue`); streams use it for protocol violations
+    /// so nothing after the offending frame is handled.
+    fileprivate func end(_ error: Error) {
         guard !closed else { return }
         closed = true
         closedLock.lock(); _isClosed = true; closedLock.unlock()
@@ -300,7 +302,7 @@ public final class Mux: @unchecked Sendable {
             break
         case .open:
             guard !isOpener, frame.payload.count == 2 else {
-                close(MuxError.protocolViolation("unexpected OPEN")); return
+                end(MuxError.protocolViolation("unexpected OPEN")); return
             }
             if streams[frame.stream] != nil { return }   // a resent OPEN we already had
             let port = UInt16(frame.payload[frame.payload.startIndex]) << 8 | UInt16(frame.payload[frame.payload.startIndex + 1])
@@ -308,7 +310,6 @@ public final class Mux: @unchecked Sendable {
             stream.id = frame.stream
             stream.port = port
             streams[frame.stream] = stream
-            stream.linked()
             if let onOpen { onOpen(port, stream) } else { stream.cancel() }
         case .data, .fin, .reset, .window:
             guard let stream = streams[frame.stream] else {
@@ -329,8 +330,6 @@ public final class MuxStream: ByteStream, @unchecked Sendable {
     fileprivate var port: UInt16 = 0
     /// The peer has shown it knows this stream (sent anything on it).
     fileprivate var peerSawOpen = false
-    private var registered = false
-    private var queuedBeforeLink: [() -> Void] = []
 
     // Buffers are trimmed with removeSubrange, never removeFirst: on Data,
     // removeFirst only moves the start index, so a busy stream would keep
@@ -393,15 +392,11 @@ public final class MuxStream: ByteStream, @unchecked Sendable {
 
     // MARK: On the mux queue
 
+    /// Every call is queued behind the block that registers the stream
+    /// (`open` queues it before returning the stream), so state is only
+    /// touched on the mux queue, in order.
     private func onQueue(_ work: @escaping () -> Void) {
-        mux.queue.async { [self] in registered ? work() : queuedBeforeLink.append(work) }
-    }
-
-    fileprivate func linked() {
-        registered = true
-        let pending = queuedBeforeLink
-        queuedBeforeLink = []
-        pending.forEach { $0() }
+        mux.queue.async(execute: work)
     }
 
     fileprivate var openFrame: MuxFrame {
@@ -431,7 +426,7 @@ public final class MuxStream: ByteStream, @unchecked Sendable {
         case .data:
             received.append(frame.payload)
             receivedTotal += UInt64(frame.payload.count)
-            if received.count > Mux.initialWindow { mux.close(MuxError.protocolViolation("stream over its window")); return }
+            if received.count > Mux.initialWindow { mux.end(MuxError.protocolViolation("stream over its window")); return }
             deliver()
         case .fin:
             remoteFinished = true
@@ -440,8 +435,9 @@ public final class MuxStream: ByteStream, @unchecked Sendable {
             mux.remove(id)
             terminate(MuxError.reset)
         case .window:
-            guard let total = MuxFrame.readUInt64(frame.payload) else { mux.close(MuxError.badFrame); return }
-            peerConsumed = max(peerConsumed, total)
+            guard let total = MuxFrame.readUInt64(frame.payload) else { mux.end(MuxError.badFrame); return }
+            // Never more than was sent: a bogus total must not overflow the credit.
+            peerConsumed = max(peerConsumed, min(total, sent))
             confirm(upTo: total)
             flush()
         default:
@@ -478,7 +474,9 @@ public final class MuxStream: ByteStream, @unchecked Sendable {
         guard let pending = pendingReceive else { return }
         if !received.isEmpty {
             let n = min(pending.max, received.count)
-            let chunk = received.prefix(n)
+            // A copy, not a slice: a slice would share (and pin) the buffer and
+            // make the trim below copy everything that is left.
+            let chunk = received.subdata(in: received.startIndex ..< received.startIndex + n)
             received.removeSubrange(received.startIndex ..< received.startIndex + n)
             consumed += UInt64(n)
             if consumed - advertised >= UInt64(Mux.windowUpdate), !remoteFinished {
@@ -486,7 +484,7 @@ public final class MuxStream: ByteStream, @unchecked Sendable {
                 advertised = consumed
             }
             pendingReceive = nil
-            pending.completion(Data(chunk), false, nil)
+            pending.completion(chunk, false, nil)
         } else if remoteFinished {
             pendingReceive = nil
             pending.completion(nil, true, nil)
@@ -496,17 +494,23 @@ public final class MuxStream: ByteStream, @unchecked Sendable {
         }
     }
 
+    /// Sends queued data as credit allows. Walks each item by offset and
+    /// stores back only the unsent rest, so no chunk copies the whole item.
     private func flush() {
-        while var item = sendQueue.first, failure == nil {
-            while !item.data.isEmpty {
+        while let item = sendQueue.first, failure == nil {
+            var offset = item.data.startIndex
+            while offset < item.data.endIndex {
                 let credit = Int(peerConsumed + UInt64(Mux.initialWindow) - sent)
-                let n = min(credit, item.data.count, MuxFrame.maxPayload)
-                guard n > 0 else { sendQueue[0] = item; return }
-                let chunk = item.data.prefix(n)
-                mux.write(MuxFrame(.data, stream: id, payload: Data(chunk)))
+                let n = min(credit, item.data.endIndex - offset, MuxFrame.maxPayload)
+                guard n > 0 else {
+                    if offset > item.data.startIndex { sendQueue[0].data = item.data.subdata(in: offset ..< item.data.endIndex) }
+                    return
+                }
+                let chunk = item.data.subdata(in: offset ..< offset + n)
+                mux.write(MuxFrame(.data, stream: id, payload: chunk))
                 unconfirmed.append(chunk)
                 sent += UInt64(n)
-                item.data.removeSubrange(item.data.startIndex ..< item.data.startIndex + n)
+                offset += n
             }
             sendQueue.removeFirst()
             if item.isComplete {
