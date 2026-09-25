@@ -102,6 +102,8 @@ func freshConnectionTest() {
     queue.asyncAfter(deadline: .now() + 10) { if !done { done = true; log("fresh: TIMEOUT after 10s"); c.cancel() } }
 }
 
+var retained: [AnyObject] = []
+
 if listenMode {
     var lastPing = Date()
     let params = NWParameters.tcp
@@ -169,6 +171,7 @@ if listenMode {
             }
         }
         echo.resume()
+        retained.append(echo)
         c.start(queue: queue)
     }
     listener.start(queue: queue)

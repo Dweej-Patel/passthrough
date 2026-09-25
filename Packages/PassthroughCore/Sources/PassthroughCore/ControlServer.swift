@@ -30,7 +30,7 @@ public final class ControlServer: @unchecked Sendable {
     private let counter: ByteCounter
     private let statusProvider: @Sendable () -> DeviceStatus
     private let socksPort: UInt16
-    private let queue = DispatchQueue(label: "dev.dpatel.passthrough.control")
+    fileprivate let queue = DispatchQueue(label: "dev.dpatel.passthrough.control")
     private var listeners: [NWListener] = []
     private var peers: [ObjectIdentifier: Peer] = [:]
     public private(set) var isRunning = false
@@ -190,7 +190,7 @@ private final class Peer: @unchecked Sendable {
 
     init(server: ControlServer, connection: NWConnection) {
         self.server = server
-        self.channel = ControlConnection(connection)
+        self.channel = ControlConnection(connection, queue: server.queue)
     }
 
     func start(on queue: DispatchQueue) {

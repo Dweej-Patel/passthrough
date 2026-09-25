@@ -44,13 +44,13 @@ public final class ControlClient: @unchecked Sendable {
         }
     }
 
-    private func opened(_ result: Result<NWConnection, Error>) {
+    private func opened(_ result: Result<ByteStream, Error>) {
         switch result {
         case .failure(let error):
             finish(error)
-        case .success(let connection):
-            guard !closed else { connection.cancel(); return }
-            let channel = ControlConnection(connection)
+        case .success(let stream):
+            guard !closed else { stream.cancel(); return }
+            let channel = ControlConnection(stream)
             channel.onMessage = { [weak self] message in self?.handle(message) }
             channel.onClose = { [weak self] error in self?.finish(error) }
             self.channel = channel

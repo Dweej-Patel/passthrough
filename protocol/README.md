@@ -67,3 +67,69 @@ exception: DNS (port 53) sent to a private IP address, usually the router
 the Mac last had, is forwarded unchanged to the phone's own network's DNS
 server, or to 1.1.1.1 when the phone knows none. Replies come back under the
 address the Mac asked (`DNSRedirect`, `DnsRedirect`).
+
+## Wireless link
+
+An optional second transport, carrying exactly the same control channel and
+SOCKS5 streams as the cable. The phone **dials the Mac**: iOS delivers no
+incoming connections to the background extension, while outgoing ones work
+with the phone locked.
+
+| Phone | Network |
+|-------|---------|
+| iPhone | Apple peer-to-peer Wi-Fi (AWDL), no access point involved |
+| Android (10+) | A Wi-Fi Direct group the phone hosts; the Mac joins it as an ordinary network |
+
+### Discovery
+
+The Mac advertises Bonjour service `_passthrough._tcp` (peer-to-peer
+included). The instance name and TXT key `m` are the first 16 hex digits of
+SHA-256(the Mac's clientID), so nothing personal is broadcast. A phone dials
+only Macs it has linked with.
+
+### Linking (over the cable, once per phone and Mac)
+
+After the control channel is authenticated, the Mac sends:
+
+```
+{"t":"link","linkKey":"<32 random bytes, base64>","certSHA256":"<hex>"}
+```
+
+and the phone answers:
+
+```
+{"t":"linked","phoneID":"<random, stable per phone>","network":"DIRECT-…","passphrase":"…"}
+```
+
+`network`/`passphrase` come only from Android: the Wi-Fi Direct group the
+Mac should join. The phone keeps `linkKey` and `certSHA256` next to the
+pairing; the Mac keeps `linkKey` per phone, keyed by `phoneID`.
+
+### Connection
+
+1. TLS 1.3 over TCP. The Mac presents its self-made certificate (P-256); the
+   phone accepts only the one whose SHA-256 it received when linking.
+2. The Mac sends one line `{"t":"challenge","nonce":"<32 bytes, base64>"}`.
+3. The phone answers `{"t":"proof","phoneID":"…","mac":"<base64>"}` where
+   `mac` = HMAC-SHA256(linkKey, "passthrough-link-v1" ‖ nonce).
+4. From then on the connection carries multiplexed streams.
+
+### Multiplexing
+
+Frames: `[type:1][stream:4][length:2][payload]`, big-endian, payload ≤ 16384.
+
+| Type | Name | Direction | Payload |
+|------|------|-----------|---------|
+| 1 | OPEN | Mac → phone | port (2 bytes): 7890 SOCKS or 7891 control |
+| 2 | DATA | both | bytes |
+| 3 | FIN | both | none: that side sends no more |
+| 4 | RESET | both | none: stream aborted |
+| 5 | WINDOW | both | credit (4 bytes) |
+| 6 | PING | both | 8 bytes, echoed in PONG |
+| 7 | PONG | both | the PING's 8 bytes |
+
+The Mac opens streams (odd IDs from 1). The phone connects each one to
+127.0.0.1:port, so the same servers answer as over the cable. Each direction
+of each stream starts with 256 KiB of credit; a receiver returns WINDOW credit
+as its consumer drains. Either side pings every 10 s and drops the connection
+after 30 s without any frame; the phone then redials.
