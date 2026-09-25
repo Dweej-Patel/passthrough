@@ -1,6 +1,6 @@
 # Passthrough
 
-USB-only internet for your Mac, served by your phone's own network stack. Works with an **iPhone** or an **Android phone**. No hotspot, no Wi-Fi, no Bluetooth: the only link between the two devices is the cable.
+Internet for your Mac over a USB cable, served by your phone's own network stack. Works with an **iPhone** or an **Android phone**. By default the cable is the only link between the two devices; an optional [wireless link](#wireless-link) (iPhone for now) carries the same traffic when it is unplugged.
 
 ```
 ┌──────────── Mac ─────────────┐        USB         ┌──────────── Phone ─────────────┐
@@ -38,6 +38,7 @@ Because the phone opens every connection with its own stack, the carrier sees th
 * Engine binaries are copied into the root-only state directory and that copy is verified (strict validation, Team ID and identifier) before it is executed, so nothing can be swapped between check and exec.
 * NordVPN profiles are accepted only if their certificate authority is Nord's (pinned by hash) and they pin the exact server that was requested.
 * Pairing codes are withdrawn after five wrong guesses; tokens are validated for format before use; the control channel is capped at eight peers.
+* The wireless link is set up over the cable: the Mac hands the phone its certificate fingerprint and a per-phone link key. The phone dials out (it still never listens), accepts only TLS 1.3 with that certificate, and proves the key by answering a fresh challenge (HMAC-SHA256); the Mac accepts only phones linked this way. The key sits in the Keychain on both sides (this device only).
 * A fatal VPN failure (rejected credentials, bad profile) keeps the kill switch engaged until you turn the layer off, so no peer can "fail" you into the clear. Kill-switch reject routes sit one step more specific than the VPN's routes, so engaging or lifting them never leaves a gap.
 * Profiles, keys and credentials live in the data-protection keychain, this device only.
 * The helper tears the tunnel down automatically if the menu bar app quits or crashes.
@@ -52,6 +53,15 @@ Because the phone opens every connection with its own stack, the carrier sees th
 ## Flow map
 
 All the apps show a live map of the route traffic takes: Mac ⟶ USB ⟶ phone ⟶ radio ⟶ (VPN) ⟶ Internet. Particles ride the wires at a speed and density that follow the current throughput (teal toward the Mac, violet away from it), the VPN node slides in with a lock over the encrypted hop when the layer is on, the Mac gets a pulsing halo while keep-awake holds it up, and the USB hop shows the live rates. It is one `Canvas` driven by a `TimelineView` at up to 30 fps (15 fps when idle, fully paused when nothing is connected), with stateless particle math and no per-particle views, so it costs next to nothing (`PassthroughUI/FlowMap.swift`).
+
+## Wireless link
+
+Off by default. Set **Connect over** to **Wireless only** or **Automatic** in the Mac's settings and turn on **Wireless link** in the iPhone's settings. The phone links the next time it is connected over USB, and from then on it can serve the Mac without the cable (Automatic prefers the cable when one is plugged in).
+
+* The Mac joins the iPhone's **Personal Hotspot**; the phone finds the Mac there and dials it. While passthrough is down, the Mac's **hotspot guard** (on by default) rejects everything but the link to the phone, so the hotspot's own data allowance is not spent.
+* **Use peer-to-peer Wi-Fi** (Apple's AWDL, no hotspot needed) is an option on the iPhone. It drops for a minute or more while the phone is locked, so the hotspot is the default.
+* A dropped link resumes: both sides keep the session's connections for up to two minutes while the phone redials, so apps see a pause rather than errors. Traffic is the same SOCKS5 and control streams as over the cable, multiplexed over one TLS connection (see [protocol/README.md](protocol/README.md)).
+* Android's wireless link (a Wi-Fi Direct group the phone hosts) is not built yet.
 
 ## Keep Mac awake
 

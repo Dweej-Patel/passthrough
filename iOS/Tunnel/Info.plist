@@ -32,6 +32,6 @@
 		<string>$(PRODUCT_MODULE_NAME).PacketTunnelProvider</string>
 	</dict>
 	<key>NSLocalNetworkUsageDescription</key>
-	<string>Passthrough reaches your Mac over the USB cable, or over a direct Wi-Fi link when you turn that on.</string>
+	<string>Passthrough finds your linked Mac on this iPhone's Personal Hotspot, or over peer-to-peer Wi-Fi, when the wireless link is on.</string>
 </dict>
 </plist>

@@ -76,8 +76,19 @@ public final class WirelessWatcher: DeviceWatcher {
         listener = nil
         links.values.forEach { $0.mux.close() }
         links.removeAll()
+        carriers.removeAll()
         order.removeAll()
         status = WatchStatus()
+        publish()
+    }
+
+    /// Ends a phone's link now (it was forgotten): it would otherwise carry
+    /// on until it dropped.
+    public func drop(phoneID: String) {
+        guard let link = links.removeValue(forKey: phoneID) else { return }
+        carriers[phoneID] = nil
+        order.removeAll { $0 == phoneID }
+        link.mux.close()
         publish()
     }
 
@@ -99,6 +110,7 @@ public final class WirelessWatcher: DeviceWatcher {
                 guard let self, self.links[id]?.mux === mux else { return }
                 ptLog(.info, "wireless: \(phone.label) went out of reach (\(error?.localizedDescription ?? "closed"))")
                 self.links[id] = nil
+                self.carriers[id] = nil
                 self.order.removeAll { $0 == id }
                 self.publish()
             }

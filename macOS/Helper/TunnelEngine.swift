@@ -243,11 +243,12 @@ final class TunnelEngine {
         return (fd, String(cString: nameBuffer))
     }
 
-    /// Where a stuck engine's thread stacks are saved (readable without root).
-    static let stuckEnginePath = "/var/tmp/passthrough-engine-stuck.txt"
+    /// Where a stuck engine's thread stacks are saved: the root-only state
+    /// directory, never a shared one a local user could plant a link in.
+    static let stuckEnginePath = BundledEngines.stateDirectory + "/engine-stuck.txt"
 
-    /// Samples this process while the engine thread is stuck, so the next
-    /// report shows exactly what it is waiting on instead of just "stuck".
+    /// Samples this process while the engine thread is stuck and logs that
+    /// thread's stack, so the report shows what it is waiting on.
     private static func recordStuckEngine() {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/sample")
@@ -255,12 +256,29 @@ final class TunnelEngine {
         process.standardOutput = FileHandle.nullDevice
         process.standardError = FileHandle.nullDevice
         do {
+            try BundledEngines.prepareStateDirectory()
             try process.run()
             process.waitUntilExit()
-            HelperLog.error("engine stacks saved to \(stuckEnginePath)")
         } catch {
             HelperLog.warn("could not sample the stuck engine: \(error.localizedDescription)")
+            return
         }
+        guard let text = try? String(contentsOfFile: stuckEnginePath, encoding: .utf8) else { return }
+        let lines = text.split(separator: "\n").map(String.init)
+        // A thread's header is "<count> Thread_<id>…"; its frames start with "+".
+        let isHeader = { (line: String) in line.range(of: #"^\s*\d+ Thread_\d+"#, options: .regularExpression) != nil }
+        guard let start = lines.firstIndex(where: { isHeader($0) && $0.hasSuffix("tun2socks") }) else {
+            HelperLog.warn("stuck engine: no engine thread in the sample")
+            return
+        }
+        let thread = [lines[start]] + lines[(start + 1)...].prefix { !isHeader($0) }.prefix(60)
+        // In pieces: the unified log truncates long messages.
+        var piece = ""
+        for line in thread {
+            if piece.count + line.count > 900 { HelperLog.error("stuck engine stack:\n\(piece)"); piece = "" }
+            piece += line + "\n"
+        }
+        if !piece.isEmpty { HelperLog.error("stuck engine stack:\n\(piece)") }
     }
 
     // MARK: Engine config

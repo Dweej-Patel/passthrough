@@ -2,10 +2,10 @@ import Foundation
 import Network
 import PassthroughCore
 
-/// The Mac's side of the wireless link: a TLS 1.3 listener advertised over
-/// peer-to-peer Wi-Fi (and whatever network the Mac is on, which is how an
-/// Android phone's Wi-Fi Direct group reaches it). Each connection must answer
-/// a challenge with a linked phone's key before it becomes a link.
+/// The Mac's side of the wireless link: a TLS 1.3 listener advertised on the
+/// networks the Mac is on (a phone's Personal Hotspot, typically) and over
+/// peer-to-peer Wi-Fi when that is enabled. Each connection must answer a
+/// challenge with a linked phone's key before it becomes a link.
 public final class WirelessListener: @unchecked Sendable {
     public struct Link {
         public let phoneID: String
@@ -21,6 +21,7 @@ public final class WirelessListener: @unchecked Sendable {
     private let linkKey: @Sendable (String) -> Data?
     private let queue = DispatchQueue(label: "dev.dpatel.passthrough.wireless-listener")
     private var listener: NWListener?
+    private var stopped = false
     private var pending = 0
     /// Live sessions by ID, so a phone that redials resumes instead of starting over.
     private var sessions: [String: (phoneID: String, mux: Mux)] = [:]
@@ -78,8 +79,9 @@ public final class WirelessListener: @unchecked Sendable {
         self.listener = listener
     }
 
+    /// Handshakes still in flight end without a link.
     public func stop() {
-        queue.async { [self] in listener?.cancel(); listener = nil }
+        queue.async { [self] in stopped = true; listener?.cancel(); listener = nil }
     }
 
     private func accept(_ connection: NWConnection) {
@@ -93,13 +95,14 @@ public final class WirelessListener: @unchecked Sendable {
             guard !done, let self else { return }
             done = true
             self.pending -= 1
-            if let link { self.onLink?(link) } else { stream.cancel() }
+            if let link, !self.stopped { self.onLink?(link) } else { link?.mux.close(); stream.cancel() }
         }
         queue.asyncAfter(deadline: .now() + WirelessLink.handshakeTimeout) { finish(nil) }
         WirelessLink.sendLine(.init(t: "challenge", nonce: nonce.base64EncodedString()), on: stream)
         WirelessLink.readLine(stream) { [weak self] result in
             guard let self else { return }
             self.queue.async {
+                guard !done, !self.stopped else { finish(nil); return }   // timed out or stopped meanwhile
                 guard case .success(let (line, rest)) = result,
                       let message = try? JSONDecoder().decode(WirelessLink.Handshake.self, from: line),
                       message.t == "proof", let phoneID = message.phoneID,

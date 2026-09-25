@@ -28,10 +28,15 @@ public struct MacIdentity {
 
     /// The identity stored under `label`, created on first use. The app uses
     /// the data-protection keychain; tests use the login keychain.
+    /// Only a missing identity is replaced: a new one changes the fingerprint
+    /// every linked phone pins, so any other keychain error is thrown instead.
     public static func loadOrCreate(label: String, dataProtection: Bool = true) throws -> MacIdentity {
-        if let existing = try? load(label: label, dataProtection: dataProtection) { return existing }
-        delete(label: label, dataProtection: dataProtection)
-        return try create(label: label, dataProtection: dataProtection)
+        do {
+            return try load(label: label, dataProtection: dataProtection)
+        } catch IdentityError.keychain(errSecItemNotFound, _) {
+            delete(label: label, dataProtection: dataProtection)   // a key left without its certificate
+            return try create(label: label, dataProtection: dataProtection)
+        }
     }
 
     public static func delete(label: String, dataProtection: Bool = true) {

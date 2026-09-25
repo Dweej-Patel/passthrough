@@ -282,6 +282,7 @@ final class VPNEngine {
                 lastError = fatal
                 state = .failed
                 HelperLog.error("vpn: \(fatal)")
+                underlayWatch.stop()   // a network change must not retry it either
                 removeEndpointRoutes()
                 return
             }
@@ -298,7 +299,7 @@ final class VPNEngine {
     /// still points at the old gateway, so start over on the new one. The
     /// short wait lets the new default route settle before it is read.
     private func underlayMoved(_ interface: String) {
-        guard let config, state != .off else { return }
+        guard let config, state != .off, state != .failed else { return }
         HelperLog.info("vpn: \(interface) joined another network; restarting \(config.engine.rawValue)")
         restart(after: 2)
     }

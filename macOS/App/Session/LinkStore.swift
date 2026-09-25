@@ -27,9 +27,11 @@ final class LinkStore: @unchecked Sendable {
         return key
     }
 
+    /// A slot holds one phone's pairing, so a phone that relinks with a new
+    /// ID (reinstalled) replaces the slot's old entry.
     func record(_ phone: WirelessPhone) {
         lock.lock()
-        cached.removeAll { $0.phoneID == phone.phoneID }
+        cached.removeAll { $0.phoneID == phone.phoneID || $0.pairingSlot == phone.pairingSlot }
         cached.append(phone)
         let list = cached
         lock.unlock()

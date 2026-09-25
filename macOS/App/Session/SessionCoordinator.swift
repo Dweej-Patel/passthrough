@@ -97,7 +97,6 @@ final class SessionCoordinator: ObservableObject {
     /// The Mac's Wi-Fi is a metered network, which is how macOS marks a phone's hotspot.
     @Published private(set) var onPhoneHotspot = false
     private let wifiMonitor = NWPathMonitor(requiredInterfaceType: .wifi)
-    private var guardApplied: Bool?
 
     /// Also watch for Android phones through adb. On by default; harmless without platform-tools.
     @Published var androidEnabled: Bool = UserDefaults.standard.object(forKey: "androidEnabled") as? Bool ?? true {
@@ -141,10 +140,11 @@ final class SessionCoordinator: ObservableObject {
     /// Keychain slot of the attached phone's pairing token (the iPhone slot when none is attached).
     private var pairingSlot: String { device?.pairingSlot ?? PhoneDevice.Kind.iPhone.defaultPairingSlot }
     var hasToken: Bool { Keychain.read(pairingSlot) != nil }
-    /// "over USB" or "over Wi-Fi", for status copy.
     var linkedPhoneCount: Int { links.phones.count }
+    /// "over USB" or "over Hotspot" (the wireless carrier), for status copy.
     var linkName: String { device?.medium == .wireless ? "over \(wirelessCarrier ?? "Wi-Fi")" : "over USB" }
-    /// What carries the wireless link right now: "Hotspot", "Peer-to-peer", "USB" or "Wi-Fi network".
+    /// What carries the wireless link right now: "Hotspot", "Peer-to-peer",
+    /// "USB", "Wi-Fi network", or "Wireless" when not known.
     @Published private(set) var wirelessCarrier: String?
     private func refreshWirelessCarrier() {
         guard let device, device.medium == .wireless, device.id.hasPrefix("wifi:") else { wirelessCarrier = nil; return }
@@ -170,9 +170,8 @@ final class SessionCoordinator: ObservableObject {
         #endif
         androidWatcher = ADBWatcher(includeNonUSB: env["PASSTHROUGH_ADB_ANY_TRANSPORT"] == "1")
         let links = self.links
-        let clientIDDefault = UserDefaults.standard
         wirelessWatcher = WirelessWatcher(
-            macTag: { WirelessLink.macTag(clientID: clientIDDefault.string(forKey: "clientID") ?? "") },
+            macTag: { WirelessLink.macTag(clientID: UserDefaults.standard.string(forKey: "clientID") ?? "") },
             identity: { try MacIdentity.loadOrCreate(label: SessionCoordinator.identityLabel) },
             phones: { links.phones })
         directory = DeviceDirectory(watchers: [USBMuxWatcher(), androidWatcher, wirelessWatcher])
@@ -191,6 +190,7 @@ final class SessionCoordinator: ObservableObject {
             self.phase = .helperRequired
         }
         directory.onChange = { [weak self] change in self?.devicesChanged(change) }
+        helper.onInterrupted = { [weak self] in Task { @MainActor in self?.syncHotspotGuard() } }
         androidWatcher.onStatusChange = { [weak self] status in self?.androidWatch = status }
         wirelessWatcher.onStatusChange = { [weak self] status in self?.wirelessWatch = status }
         wirelessWatcher.peerToPeer = peerToPeer
@@ -275,10 +275,10 @@ final class SessionCoordinator: ObservableObject {
 
     /// On while the Mac sits on a phone's hotspot for the wireless link but
     /// passthrough isn't carrying its traffic.
+    /// Always sent, never cached here: the helper ignores repeats, and it
+    /// loses the guard when it restarts or its last client goes away.
     private func syncHotspotGuard() {
         let on = hotspotGuard && connectionMode != .cable && onPhoneHotspot && !phase.isConnected
-        guard on != guardApplied else { return }
-        guardApplied = on
         Task { await helper.setHotspotGuard(on) }
     }
 
@@ -288,8 +288,9 @@ final class SessionCoordinator: ObservableObject {
         guard let device, device.medium == .usb, let control else { return }
         do {
             let identity = try MacIdentity.loadOrCreate(label: Self.identityLabel)
-            pendingLink = (links.key(forSlot: device.pairingSlot), device)
-            control.link(linkKey: pendingLink!.key, certificateSHA256: identity.fingerprint)
+            let key = links.key(forSlot: device.pairingSlot)
+            pendingLink = (key, device)
+            control.link(linkKey: key, certificateSHA256: identity.fingerprint)
         } catch {
             ptLog(.warning, "wireless: could not prepare the link: \(error.localizedDescription)")
         }
@@ -317,8 +318,10 @@ final class SessionCoordinator: ObservableObject {
             phase = .helperRequired
             return
         }
-        await ensureHelperCurrent()
+        // The previous tunnel must be gone first: whether the helper may be
+        // re-registered depends on nothing still running through it.
         await teardownTask?.value
+        await ensureHelperCurrent()
         guard generation == gen else { return }
 
         // 2. Loopback forwarder over the phone's link
@@ -400,9 +403,12 @@ final class SessionCoordinator: ObservableObject {
     private func bringTunnelUp(generation gen: Int) async {
         guard let device, let token = Keychain.read(device.pairingSlot) else { phase = .pairingRequired; return }
         phase = .connecting("Routing the Mac through the \(phoneKindName)")
+        tunnelStartInFlight = true
+        defer { if gen == generation { tunnelStartInFlight = false } }
         do {
             let iface = try await helper.startTunnel(tunnelConfig(socksPort: UInt16(localPort), username: clientID, password: token, ipv6: ipv6Enabled))
-            guard gen == generation else { await helper.stopTunnel(); return }
+            // Torn down meanwhile: teardown already queued a stop behind this start.
+            guard gen == generation else { return }
             tunnelInterface = iface
             connectedSince = Date()
             meter.reset()
@@ -470,7 +476,9 @@ final class SessionCoordinator: ObservableObject {
 
     func forgetPairing() {
         Keychain.delete(pairingSlot)
+        let forgotten = links.phones.filter { $0.pairingSlot == pairingSlot }.map(\.phoneID)
         links.forget(slot: pairingSlot)
+        forgotten.forEach { wirelessWatcher.drop(phoneID: $0) }
         if phase.isConnected { disconnect() }
         objectWillChange.send()
     }
@@ -497,7 +505,10 @@ final class SessionCoordinator: ObservableObject {
 
     private func teardown(to next: Phase) {
         generation += 1
-        let hadTunnel = phase.isConnected || tunnelInterface != nil
+        // A start still in flight counts: the helper handles calls in order, so
+        // a stop sent now lands after it and before any new connection's start.
+        let hadTunnel = phase.isConnected || tunnelInterface != nil || tunnelStartInFlight
+        tunnelStartInFlight = false
         control?.close()
         control = nil
         let forwarder = self.forwarder
@@ -508,6 +519,7 @@ final class SessionCoordinator: ObservableObject {
         connectedSince = nil
         phoneActiveConnections = 0
         pairingInFlight = false
+        pendingLink = nil
         phase = next
         // Routes first, then the loopback listener: while the utun still owns the
         // default route, a closed listener would just refuse every connection.
@@ -521,6 +533,7 @@ final class SessionCoordinator: ObservableObject {
     /// The last teardown; a new connection waits for it, or its forwarder
     /// would find the loopback port still taken.
     private var teardownTask: Task<Void, Never>?
+    private var tunnelStartInFlight = false
 
     private func shutdownForQuit() {
         wantsConnection = false
@@ -540,6 +553,7 @@ final class SessionCoordinator: ObservableObject {
     private func ensureHelperCurrent() async {
         await helper.ensureCurrent(mayReregister: !phase.isConnected && !vpnLayer.isWanted)
         helperAvailability = helper.availability
+        syncHotspotGuard()   // a re-registered helper starts without it
     }
 
     // MARK: Ticking

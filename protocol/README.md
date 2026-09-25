@@ -77,13 +77,13 @@ with the phone locked.
 
 | Phone | Network |
 |-------|---------|
-| iPhone | Apple peer-to-peer Wi-Fi (AWDL), no access point involved |
+| iPhone | The phone's Personal Hotspot, which the Mac joins (the Mac's hotspot guard keeps it from using the hotspot's data while passthrough is down). Optionally Apple peer-to-peer Wi-Fi (AWDL) instead, with no access point; it drops for a minute or more while the phone is locked |
 | Android (10+) | A Wi-Fi Direct group the phone hosts; the Mac joins it as an ordinary network |
 
 ### Discovery
 
-The Mac advertises Bonjour service `_passthrough._tcp` (peer-to-peer
-included). The instance name and TXT key `m` are the first 16 hex digits of
+The Mac advertises Bonjour service `_passthrough._tcp` on its networks, and
+over peer-to-peer Wi-Fi when that is enabled. The instance name and TXT key `m` are the first 16 hex digits of
 SHA-256(the Mac's clientID), so nothing personal is broadcast. A phone dials
 only Macs it has linked with.
 
@@ -110,9 +110,25 @@ pairing; the Mac keeps `linkKey` per phone, keyed by `phoneID`.
 1. TLS 1.3 over TCP. The Mac presents its self-made certificate (P-256); the
    phone accepts only the one whose SHA-256 it received when linking.
 2. The Mac sends one line `{"t":"challenge","nonce":"<32 bytes, base64>"}`.
-3. The phone answers `{"t":"proof","phoneID":"…","mac":"<base64>"}` where
-   `mac` = HMAC-SHA256(linkKey, "passthrough-link-v1" ‖ nonce).
-4. From then on the connection carries multiplexed streams.
+3. The phone answers `{"t":"proof","phoneID":"…","mac":"<base64>","session":"…","streams":[…]}`
+   where `mac` = HMAC-SHA256(linkKey, "passthrough-link-v1" ‖ nonce).
+   `session` and `streams` are present only when the phone is resuming (below).
+4. The Mac answers `{"t":"fresh","session":"<id>"}` for a new session, or
+   `{"t":"resume","streams":[…]}` to continue the phone's.
+5. From then on the connection carries multiplexed streams.
+
+### Resuming
+
+A connection that drops does not end the session: both sides keep its
+streams for up to 120 s and the phone redials. Each side keeps what it sent
+until the other has consumed it (at most one window per stream). On
+resuming, both send `streams`, one `{"i":<id>,"r":<bytes received>,"f":<end received>}`
+per stream, and each then resends exactly what the other is missing, plus
+any FIN it has not seen. A stream only the phone still has is reset by the
+Mac; one the Mac opened during the outage is opened again. While a session
+waits to resume, the Mac refuses new streams at once rather than queueing
+them. A session unknown to the Mac (it restarted) gets `fresh`, and the
+phone starts over.
 
 ### Multiplexing
 
@@ -124,12 +140,13 @@ Frames: `[type:1][stream:4][length:2][payload]`, big-endian, payload ≤ 16384.
 | 2 | DATA | both | bytes |
 | 3 | FIN | both | none: that side sends no more |
 | 4 | RESET | both | none: stream aborted |
-| 5 | WINDOW | both | credit (4 bytes) |
+| 5 | WINDOW | both | bytes consumed so far on the stream (8 bytes, cumulative) |
 | 6 | PING | both | 8 bytes, echoed in PONG |
 | 7 | PONG | both | the PING's 8 bytes |
 
 The Mac opens streams (odd IDs from 1). The phone connects each one to
 127.0.0.1:port, so the same servers answer as over the cable. Each direction
-of each stream starts with 256 KiB of credit; a receiver returns WINDOW credit
-as its consumer drains. Either side pings every 10 s and drops the connection
+of each stream has 128 KiB of credit: a sender may be at most that far ahead
+of what the receiver reported consumed, and the receiver sends WINDOW after
+each 64 KiB it consumes. Either side pings every 10 s and drops the connection
 after 30 s without any frame; the phone then redials.

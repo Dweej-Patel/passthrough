@@ -33,6 +33,6 @@
 	<key>NSHumanReadableCopyright</key>
 	<string></string>
 	<key>NSLocalNetworkUsageDescription</key>
-	<string>Passthrough listens for your linked phone over a direct Wi-Fi link when you choose Wireless.</string>
+	<string>Passthrough listens for your linked phone on the local network, such as the phone's Personal Hotspot, when it connects wirelessly.</string>
 </dict>
 </plist>

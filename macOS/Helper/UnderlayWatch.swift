@@ -14,7 +14,8 @@ import SystemConfiguration
 /// this key, so a restart can't trigger another.
 final class UnderlayWatch {
     private let queue: DispatchQueue
-    private let read: (_ key: String) -> [String]
+    private let readOverride: ((_ key: String) -> [String])?
+    private lazy var readStore = SCDynamicStoreCreate(nil, "PassthroughUnderlayRead" as CFString, nil, nil)
     private var store: SCDynamicStore?
     private var key: String?
     private var addresses: [String] = []
@@ -23,10 +24,12 @@ final class UnderlayWatch {
     /// `read` returns a key's IPv4 addresses; tests replace it.
     init(queue: DispatchQueue, read: ((String) -> [String])? = nil) {
         self.queue = queue
-        self.read = read ?? { key in
-            guard let store = SCDynamicStoreCreate(nil, "PassthroughUnderlayRead" as CFString, nil, nil) else { return [] }
-            return Self.addresses(in: SCDynamicStoreCopyValue(store, key as CFString))
-        }
+        self.readOverride = read
+    }
+
+    private func read(_ key: String) -> [String] {
+        if let readOverride { return readOverride(key) }
+        return Self.addresses(in: readStore.flatMap { SCDynamicStoreCopyValue($0, key as CFString) })
     }
 
     /// Starts watching `interface`; `onMove` runs on the queue when it has moved.

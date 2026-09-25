@@ -86,23 +86,30 @@ enum RouteTable {
         })
     }
 
-    /// The gateway column of `prefix`'s route, if it is in the table.
-    static func gateway(of prefix: String, v6: Bool) -> String? {
-        let name = netstatName(prefix)
+    /// Destination → gateway for every route in one family's table, from one netstat run.
+    static func gateways(v6: Bool) -> [String: String] {
+        var result: [String: String] = [:]
         for line in Shell.capture("/usr/sbin/netstat", ["-rn", "-f", v6 ? "inet6" : "inet"]).split(separator: "\n") {
             let fields = line.split(separator: " ", omittingEmptySubsequences: true)
-            if fields.count >= 2, fields[0] == name { return String(fields[1]) }
+            if fields.count >= 2, result[String(fields[0])] == nil { result[String(fields[0])] = String(fields[1]) }
         }
-        return nil
+        return result
+    }
+
+    /// The gateway column of `prefix`'s route, if it is in the table.
+    static func gateway(of prefix: String, v6: Bool) -> String? {
+        gateways(v6: v6)[netstatName(prefix)]
     }
 
     static func exists(_ prefix: String, v6: Bool, in table: Set<String>) -> Bool {
         table.contains(netstatName(prefix))
     }
 
-    /// Whether `prefix` is one of our reject routes (gateway 127.0.0.1 or ::1).
-    static func isReject(_ prefix: String, v6: Bool) -> Bool {
-        gateway(of: prefix, v6: v6) == (v6 ? "::1" : "127.0.0.1")
+    /// Whether `prefix` is one of our reject routes (gateway 127.0.0.1 or ::1),
+    /// in `gateways` when given (one snapshot for many prefixes).
+    static func isReject(_ prefix: String, v6: Bool, in gateways: [String: String]? = nil) -> Bool {
+        let gateway = gateways.map { $0[netstatName(prefix)] } ?? gateway(of: prefix, v6: v6)
+        return gateway == (v6 ? "::1" : "127.0.0.1")
     }
 
     /// Deletes `prefix` only if it is really in the table. Returns true if removed.

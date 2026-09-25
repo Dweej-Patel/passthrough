@@ -22,6 +22,9 @@ final class HelperClient {
 
     private let service = SMAppService.daemon(plistName: HelperConstants.plistName)
     private var connection: NSXPCConnection?
+    /// The helper process went away (it restarted, or crashed); state it held,
+    /// like the hotspot guard, is gone. Called on an XPC queue.
+    var onInterrupted: (() -> Void)?
 
     var availability: Availability {
         switch service.status {
@@ -78,7 +81,10 @@ final class HelperClient {
             let c = NSXPCConnection(machServiceName: HelperConstants.machService, options: .privileged)
             c.remoteObjectInterface = NSXPCInterface(with: PassthroughHelperProtocol.self)
             c.invalidationHandler = { [weak self] in self?.connection = nil }
-            c.interruptionHandler = { ptLog(.warning, "Helper connection interrupted") }
+            c.interruptionHandler = { [weak self] in
+                ptLog(.warning, "Helper connection interrupted")
+                self?.onInterrupted?()
+            }
             c.resume()
             connection = c
         }
