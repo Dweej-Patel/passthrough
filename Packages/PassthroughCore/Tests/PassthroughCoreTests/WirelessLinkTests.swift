@@ -203,3 +203,48 @@ final class WirelessLinkTests: XCTestCase {
         XCTAssertNil(link(dialKey: WirelessLink.randomBytes(32), timeout: 3))
     }
 }
+
+/// The Mac's watcher must replace a phone that links again with a new session,
+/// not keep handing out the closed link under the same device ID.
+@available(macOS 15, *)
+@MainActor
+final class WirelessWatcherTests: XCTestCase {
+    func testRelinkedPhoneIsReportedAsNew() async throws {
+        let identity = try makeTestIdentity()
+        let key = WirelessLink.randomBytes(32)
+        let phone = WirelessPhone(phoneID: "P", linkKey: key, isAndroid: false, label: "iPhone", pairingSlot: "token")
+        let watcher = WirelessWatcher(macTag: { "t" }, identity: { identity }, phones: { [phone] })
+        let directory = DeviceDirectory(watchers: [watcher])
+        var changes: [String] = []
+        var devices: [PhoneDevice] = []
+        directory.onChange = { change in
+            switch change {
+            case .attached(let d): changes.append("+"); devices.append(d)
+            case .detached: changes.append("-")
+            }
+        }
+        watcher.start()
+        defer { watcher.stop() }
+        // Find the listener's port, then dial twice with fresh dialers (a phone restart).
+        var port: UInt16?
+        for _ in 0..<50 where port == nil {
+            try await Task.sleep(nanoseconds: 50_000_000)
+            port = Mirror(reflecting: watcher).descendant("listener", "some", "port") as? UInt16
+        }
+        let endpoint = NWEndpoint.hostPort(host: "127.0.0.1", port: NWEndpoint.Port(rawValue: try XCTUnwrap(port))!)
+        let credential = LinkCredential(macTag: "t", certSHA256: identity.fingerprint, linkKey: key, phoneID: "P")
+        for round in 1...2 {
+            let dialer = WirelessDialer(allowedPorts: []) { [] }
+            dialer.dial(endpoint, credential: credential, peerToPeer: false)
+            for _ in 0..<100 where changes.filter({ $0 == "+" }).count < round {
+                try await Task.sleep(nanoseconds: 50_000_000)
+            }
+            if round == 1 { withExtendedLifetime(dialer) {} }
+        }
+        XCTAssertEqual(changes, ["+", "-", "+"])
+        XCTAssertEqual(devices.count, 2)
+        XCTAssertFalse(devices[0].link as? MuxLink == nil)
+        XCTAssertTrue((devices[0].link as! MuxLink).mux.isClosed, "the first link was closed")
+        XCTAssertFalse((devices[1].link as! MuxLink).mux.isClosed, "the new link is live")
+    }
+}

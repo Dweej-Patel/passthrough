@@ -70,9 +70,16 @@ public final class WirelessWatcher: DeviceWatcher {
 
     private func linked(_ link: WirelessListener.Link) {
         guard listener != nil, let phone = phones().first(where: { $0.phoneID == link.phoneID }) else { link.mux.close(); return }
-        // A phone that redials replaces its previous link.
-        links[link.phoneID]?.mux.close()
         let id = link.phoneID
+        // A phone that comes back with a new session (it restarted, or was
+        // gone too long to resume) replaces its old link. Report that as the
+        // old device leaving and a new one arriving: the device ID is the same,
+        // so a silent swap would leave the Mac using the closed link.
+        if let old = links.removeValue(forKey: id) {
+            order.removeAll { $0 == id }
+            publish()
+            old.mux.close()
+        }
         let mux = link.mux
         mux.onClose = { [weak self] error in
             Task { @MainActor in
