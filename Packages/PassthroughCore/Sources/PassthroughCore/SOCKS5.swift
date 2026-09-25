@@ -779,7 +779,7 @@ private final class UDPPeer: @unchecked Sendable {
                 timer.schedule(deadline: .now() + self.waitTimeout)
                 timer.setEventHandler { [weak self] in
                     guard let self, !self.ready else { return }
-                    self.markDead("no route for \(Int(self.waitTimeout))s (radio asleep or destination unreachable)")
+                    self.markDead("no route for \(Int(self.waitTimeout))s (\(Session.describe(error)))")
                 }
                 timer.resume()
                 self.waitTimer = timer

@@ -36,6 +36,7 @@ public final class PassthroughService: @unchecked Sendable {
 
     public func start() throws {
         guard !isRunning else { return }
+        Self.raiseFileDescriptorLimit()
         var config = SOCKS5Server.Configuration()
         config.port = options.socksPort
         config.cellularOnly = options.cellularOnly
@@ -72,4 +73,20 @@ public final class PassthroughService: @unchecked Sendable {
     }
 
     public var connectedMacs: [ConnectedMac] { control?.connectedMacs ?? [] }
+
+    /// Every proxied connection costs two descriptors (the stream from the Mac
+    /// and the one to the internet). iOS starts processes at 256, which a
+    /// speed test or a busy browser exhausts; new connections then fail.
+    static func raiseFileDescriptorLimit() {
+        var limit = rlimit()
+        guard getrlimit(RLIMIT_NOFILE, &limit) == 0 else { return }
+        let before = limit.rlim_cur
+        limit.rlim_cur = min(rlim_t(OPEN_MAX), limit.rlim_max)
+        if setrlimit(RLIMIT_NOFILE, &limit) != 0 {
+            limit.rlim_cur = min(4096, limit.rlim_max)
+            _ = setrlimit(RLIMIT_NOFILE, &limit)
+        }
+        _ = getrlimit(RLIMIT_NOFILE, &limit)
+        ptLog(.info, "File descriptor limit: \(before) → \(limit.rlim_cur)")
+    }
 }
