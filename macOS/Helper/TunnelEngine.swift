@@ -141,13 +141,15 @@ final class TunnelEngine {
     /// Follows the phone's network: without IPv6 there, the tunnel's IPv6
     /// routes become reject routes, so apps fall back to IPv4 at once instead of
     /// hanging on connections tun2socks accepts but the phone can never make.
-    /// Each flip is one atomic `route change` per half.
+    /// Delete and re-add rather than `route change`: XNU ignores -reject on a
+    /// change, which leaves a plain route to lo0 that hangs just the same.
     func setIPv6Available(_ available: Bool) {
         guard isRunning, let name = interfaceName, config?.ipv6 == true, available == ipv6Blocked else { return }
         for half in Self.ipv6Halves {
+            RouteTable.deleteIfPresent(half, v6: true)
             let target = available ? ["-interface", name] : ["::1", "-reject"]
-            if (try? run("/sbin/route", ["-q", "-n", "change", "-inet6", half] + target)) == nil {
-                HelperLog.warn("route change \(half) failed")
+            if (try? run("/sbin/route", ["-q", "-n", "add", "-inet6", half] + target)) == nil {
+                HelperLog.warn("route add \(half) failed")
             }
         }
         ipv6Blocked = !available
