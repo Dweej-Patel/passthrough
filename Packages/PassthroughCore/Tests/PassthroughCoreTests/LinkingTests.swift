@@ -1,5 +1,6 @@
 import XCTest
 import Network
+import notify
 @testable import PassthroughCore
 @testable import PhoneTransport
 
@@ -85,5 +86,23 @@ final class LinkingTests: XCTestCase {
         XCTAssertFalse(registry.link(clientID: "mac1", certificateSHA256: String(repeating: "b", count: 64), linkKey: WirelessLink.randomBytes(32)))
         XCTAssertNil(registry.clients.first?.linkCertificate, "no certificate recorded without its key")
         XCTAssertFalse(registry.link(clientID: "unknown", certificateSHA256: String(repeating: "b", count: 64), linkKey: WirelessLink.randomBytes(32)))
+    }
+
+    /// Every change to the paired Macs is announced across processes, so the
+    /// tunnel extension hears when the app forgets one.
+    func testPairingChangesAreAnnounced() {
+        let suite = "dev.dpatel.passthrough.tests.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let registry = PairingRegistry(defaults: defaults, secrets: InMemorySecrets())
+        let (code, _) = registry.issueCode()
+        guard case .success = registry.pair(code: code, clientID: "mac1", name: "MacBook") else { return XCTFail("pairing failed") }
+        let posted = expectation(description: "announced")
+        posted.assertForOverFulfill = false
+        var token: Int32 = 0
+        XCTAssertEqual(notify_register_dispatch(PairingRegistry.changedNotification, &token, .global()) { _ in posted.fulfill() }, UInt32(NOTIFY_STATUS_OK))
+        defer { notify_cancel(token) }
+        registry.revoke(clientID: "mac1")
+        wait(for: [posted], timeout: 2)
     }
 }

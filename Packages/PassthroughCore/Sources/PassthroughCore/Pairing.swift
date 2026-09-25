@@ -1,4 +1,5 @@
 import Foundation
+import notify
 import CryptoKit
 
 /// The secret a phone issues each Mac it pairs with: 32 random bytes as
@@ -45,6 +46,10 @@ public struct PairedClient: Codable, Identifiable, Equatable, Sendable {
 /// defaults so the tunnel extension and the app share one view of the world.
 public final class PairingRegistry: @unchecked Sendable {
     public static let clientsKey = "pairing.clients"
+    /// Posted (a Darwin notification, so across processes) whenever the list
+    /// of paired or linked Macs changes: the app forgets a Mac while the
+    /// tunnel extension's wireless link is running.
+    public static let changedNotification = "dev.dpatel.passthrough.pairings-changed"
     public static let codeKey = "pairing.code"
     public static let codeExpiryKey = "pairing.codeExpiry"
     /// Wrong guesses against the current code. Kept with the code in the shared
@@ -112,6 +117,7 @@ public final class PairingRegistry: @unchecked Sendable {
     private func save(_ clients: [PairedClient]) {
         defaults.set(try? JSONEncoder().encode(clients), forKey: Self.clientsKey)
         onChange?()
+        notify_post(Self.changedNotification)
     }
 
     // MARK: Pairing code

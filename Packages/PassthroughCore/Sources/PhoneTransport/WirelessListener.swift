@@ -23,6 +23,14 @@ public final class WirelessListener: @unchecked Sendable {
     private var listener: NWListener?
     private var stopped = false
     private var pending = 0
+    private var pendingByHost: [String: Int] = [:]
+    /// Handshakes at once, in all and from one address: anyone on the same
+    /// network can connect, so a stranger may hold a couple, never all.
+    static let maxHandshakes = 16
+    static let maxHandshakesPerHost = 2
+    /// A phone's first line (its proof, plus its streams when resuming). Read
+    /// before it has proved anything, so far below the general line limit.
+    static let proofLineLimit = 128 * 1024
     /// Live sessions by ID, so a phone that redials resumes instead of starting over.
     private var sessions: [String: (phoneID: String, mux: Mux)] = [:]
     /// A phone proved itself; on the listener's queue.
@@ -85,21 +93,31 @@ public final class WirelessListener: @unchecked Sendable {
     }
 
     private func accept(_ connection: NWConnection) {
-        // A handful of phones handshaking at once, not a flood from a stranger.
-        guard pending < 8 else { connection.cancel(); return }
+        let host = Self.host(of: connection)
+        guard pending < Self.maxHandshakes, pendingByHost[host, default: 0] < Self.maxHandshakesPerHost else {
+            connection.cancel(); return
+        }
         pending += 1
+        pendingByHost[host, default: 0] += 1
         let stream = ConnectionStream(connection, queue: queue)
         let nonce = WirelessLink.randomBytes(32)
         var done = false
-        let finish: (Link?) -> Void = { [weak self] link in
-            guard !done, let self else { return }
+        /// Frees this handshake's slot, once; false if it was already freed.
+        let release: () -> Bool = { [weak self] in
+            guard !done, let self else { return false }
             done = true
             self.pending -= 1
+            let left = (self.pendingByHost[host] ?? 1) - 1
+            self.pendingByHost[host] = left > 0 ? left : nil
+            return true
+        }
+        let finish: (Link?) -> Void = { [weak self] link in
+            guard let self, release() else { return }
             if let link, !self.stopped { self.onLink?(link) } else { link?.mux.close(); stream.cancel() }
         }
         queue.asyncAfter(deadline: .now() + WirelessLink.handshakeTimeout) { finish(nil) }
         WirelessLink.sendLine(.init(t: "challenge", nonce: nonce.base64EncodedString()), on: stream)
-        WirelessLink.readLine(stream) { [weak self] result in
+        WirelessLink.readLine(stream, limit: Self.proofLineLimit) { [weak self] result in
             guard let self else { return }
             self.queue.async {
                 guard !done, !self.stopped else { finish(nil); return }   // timed out or stopped meanwhile
@@ -119,8 +137,7 @@ public final class WirelessListener: @unchecked Sendable {
                         WirelessLink.sendLine(.init(t: "resume", streams: states), on: stream)
                     }
                     self.onResume?(phoneID, WirelessLink.carrier(of: stream))
-                    self.pending -= 1
-                    done = true
+                    _ = release()
                     return
                 }
                 let id = UUID().uuidString
@@ -131,6 +148,13 @@ public final class WirelessListener: @unchecked Sendable {
                 finish(Link(phoneID: phoneID, mux: mux, carrier: WirelessLink.carrier(of: stream)))
             }
         }
+    }
+}
+
+extension WirelessListener {
+    static func host(of connection: NWConnection) -> String {
+        if case .hostPort(let host, _) = connection.endpoint { return "\(host)" }
+        return "\(connection.endpoint)"
     }
 }
 

@@ -1,4 +1,5 @@
 import Foundation
+import notify
 
 /// Bundles the SOCKS5 server and the control channel behind one switch.
 /// Hosted either inside the packet tunnel extension or the foreground app.
@@ -25,6 +26,7 @@ public final class PassthroughService: @unchecked Sendable {
     public private(set) var socks: SOCKS5Server?
     public private(set) var control: ControlServer?
     private var dialer: WirelessDialer?
+    private var pairingsToken: Int32?
     private var memoryTimer: DispatchSourceTimer?
     public var counter: ByteCounter { socks?.counter ?? fallbackCounter }
     private let fallbackCounter = ByteCounter()
@@ -71,7 +73,12 @@ public final class PassthroughService: @unchecked Sendable {
             let registry = self.registry
             let dialer = WirelessDialer(allowedPorts: [options.socksPort, options.controlPort], peerToPeer: options.peerToPeer) { registry.linkCredentials() }
             dialer.start()
-            control.onLinked = { [weak dialer] in dialer?.refresh() }
+            // A Mac linked over the cable, or forgotten in the app (another
+            // process): dial it now, or end its link now.
+            var token: Int32 = 0
+            if notify_register_dispatch(PairingRegistry.changedNotification, &token, .global(qos: .utility), { [weak dialer] _ in dialer?.refresh() }) == NOTIFY_STATUS_OK {
+                pairingsToken = token
+            }
             self.dialer = dialer
         }
         startedAt = Date()
@@ -105,6 +112,8 @@ public final class PassthroughService: @unchecked Sendable {
     public func stop() {
         memoryTimer?.cancel()
         memoryTimer = nil
+        if let pairingsToken { notify_cancel(pairingsToken) }
+        pairingsToken = nil
         dialer?.stop()
         dialer = nil
         control?.stop()

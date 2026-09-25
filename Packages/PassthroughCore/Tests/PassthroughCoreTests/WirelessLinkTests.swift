@@ -225,6 +225,90 @@ final class WirelessLinkTests: XCTestCase {
     func testWrongLinkKeyIsRefused() {
         XCTAssertNil(link(dialKey: WirelessLink.randomBytes(32), timeout: 3))
     }
+
+    /// A Mac forgotten on the phone (in the app, another process) loses its
+    /// link as soon as the dialer looks again, not whenever the link next drops.
+    func testForgottenMacLosesItsLink() {
+        let key = self.key
+        let listener = WirelessListener(identity: identity, macTag: "t", advertise: false) { $0 == "phone-1" ? key : nil }
+        let linked = expectation(description: "linked"), dropped = expectation(description: "dropped")
+        listener.onLink = { link in
+            link.mux.onSuspend = { _ in dropped.fulfill() }
+            link.mux.start()
+            linked.fulfill()
+        }
+        let listening = expectation(description: "listening")
+        try! listener.start { _ in listening.fulfill() }
+        wait(for: [listening], timeout: 5)
+        let credential = LinkCredential(macTag: "t", certSHA256: identity.fingerprint, linkKey: key, phoneID: "phone-1")
+        let known = Locked([credential])
+        let dialer = WirelessDialer(allowedPorts: [echoPort]) { known.get() }
+        addTeardownBlock { dialer.stop(); listener.stop() }
+        dialer.start()
+        dialer.dial(.hostPort(host: "127.0.0.1", port: NWEndpoint.Port(rawValue: listener.port!)!), credential: credential, peerToPeer: false)
+        wait(for: [linked], timeout: 5)
+        known.set([])
+        dialer.refresh()
+        wait(for: [dropped], timeout: 5)
+    }
+
+    private func startListener() -> WirelessListener {
+        let listener = WirelessListener(identity: identity, macTag: "t", advertise: false) { _ in nil }
+        let listening = expectation(description: "listening")
+        try! listener.start { _ in listening.fulfill() }
+        wait(for: [listening], timeout: 5)
+        addTeardownBlock { listener.stop() }
+        return listener
+    }
+
+    /// Anyone on the network can connect: one address may hold two
+    /// handshakes, and a third from it is refused at once.
+    func testOneAddressCannotHoldEveryHandshakeSlot() {
+        let port = NWEndpoint.Port(rawValue: startListener().port!)!
+        let held = Locked<[NWConnection]>([])
+        addTeardownBlock { held.get().forEach { $0.cancel() } }
+        func connect(_ closed: XCTestExpectation) {
+            let c = NWConnection(host: "127.0.0.1", port: port, using: .tcp)   // never starts TLS
+            held.set(held.get() + [c])
+            c.stateUpdateHandler = { state in
+                guard case .ready = state else { return }
+                c.receive(minimumIncompleteLength: 1, maximumLength: 1) { _, _, complete, error in
+                    if complete || error != nil { closed.fulfill() }
+                }
+            }
+            c.start(queue: .global())
+        }
+        let first = expectation(description: "first kept"), second = expectation(description: "second kept")
+        first.isInverted = true; second.isInverted = true
+        connect(first); connect(second)
+        Thread.sleep(forTimeInterval: 0.3)   // both accepted before the third arrives
+        let third = expectation(description: "third refused")
+        connect(third)
+        wait(for: [third], timeout: 3)
+        wait(for: [first, second], timeout: 0.5)
+    }
+
+    /// Before it has proved anything, a connection may not send more than a
+    /// proof's worth: it is closed long before the handshake would time out.
+    func testOversizedFirstLineIsRefused() {
+        let port = NWEndpoint.Port(rawValue: startListener().port!)!
+        let connection = NWConnection(to: .hostPort(host: "127.0.0.1", port: port),
+                                      using: WirelessLink.pinnedClientParameters(pin: identity.fingerprint, peerToPeer: false))
+        let stream = ConnectionStream(connection, queue: .global())
+        addTeardownBlock { stream.cancel() }
+        let closed = expectation(description: "closed")
+        WirelessLink.readLine(stream) { result in   // the challenge
+            guard case .success = result else { return XCTFail("no challenge") }
+            stream.send(Data(repeating: 0x61, count: WirelessListener.proofLineLimit + 4096), isComplete: false) { _ in }
+            func drain() {
+                stream.receive(maximumLength: 65536) { _, complete, error in
+                    if complete || error != nil { closed.fulfill() } else { drain() }
+                }
+            }
+            drain()
+        }
+        wait(for: [closed], timeout: WirelessLink.handshakeTimeout / 2)
+    }
 }
 
 /// The Mac's watcher must replace a phone that links again with a new session,

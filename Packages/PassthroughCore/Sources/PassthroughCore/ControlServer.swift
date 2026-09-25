@@ -35,8 +35,6 @@ public final class ControlServer: @unchecked Sendable {
     private var peers: [ObjectIdentifier: Peer] = [:]
     public private(set) var isRunning = false
     public var onClientsChanged: (@Sendable ([ConnectedMac]) -> Void)?
-    /// A Mac was just linked for the wireless link, on the control queue.
-    public var onLinked: (@Sendable () -> Void)?
 
     public init(port: UInt16 = PassthroughProtocol.defaultControlPort,
                 socksPort: UInt16,
@@ -157,7 +155,6 @@ public final class ControlServer: @unchecked Sendable {
             var reply = ControlEnvelope(t: ControlEnvelope.linked)
             reply.phoneID = registry.phoneID
             ptLog(.info, "Linked \(mac.name) for the wireless link")
-            onLinked?()
             return [reply]
         case ControlEnvelope.ping:
             return [ControlEnvelope(t: ControlEnvelope.pong)]

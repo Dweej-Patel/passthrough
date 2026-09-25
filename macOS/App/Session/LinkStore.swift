@@ -18,13 +18,14 @@ final class LinkStore: @unchecked Sendable {
 
     var phones: [WirelessPhone] { lock.lock(); defer { lock.unlock() }; return cached }
 
-    /// The key for phones in `slot`, created on first use.
-    func key(forSlot slot: String) -> Data {
+    /// The key for phones in `slot`, created on first use. Nil if a new key
+    /// could not be stored: a key only this run knows would be handed to the
+    /// phone and then fail to match after the next launch.
+    func key(forSlot slot: String) -> Data? {
         let account = "link." + slot
         if let stored = Keychain.read(account).flatMap({ Data(base64Encoded: $0) }), stored.count == 32 { return stored }
         let key = WirelessLink.randomBytes(32)
-        _ = Keychain.write(key.base64EncodedString(), account: account)
-        return key
+        return Keychain.write(key.base64EncodedString(), account: account) ? key : nil
     }
 
     /// A slot holds one phone's pairing, so a phone that relinks with a new

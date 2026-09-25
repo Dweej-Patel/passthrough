@@ -288,7 +288,10 @@ final class SessionCoordinator: ObservableObject {
         guard let device, device.medium == .usb, let control else { return }
         do {
             let identity = try MacIdentity.loadOrCreate(label: Self.identityLabel)
-            let key = links.key(forSlot: device.pairingSlot)
+            guard let key = links.key(forSlot: device.pairingSlot) else {
+                ptLog(.warning, "wireless: could not store a link key; the phone is not linked this time")
+                return
+            }
             pendingLink = (key, device)
             control.link(linkKey: key, certificateSHA256: identity.fingerprint)
         } catch {
