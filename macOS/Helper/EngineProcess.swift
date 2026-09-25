@@ -2,15 +2,16 @@ import Foundation
 import HevSocks5Tunnel
 
 /// The tun2socks engine runs in a child process: the helper's own binary,
-/// relaunched with `flag`. lwIP can spin forever while shutting down (a
-/// corrupted connection list, seen spinning in tcp_fasttmr), and a thread that
-/// never returns can't be stopped; a process can be killed. Killing it frees
-/// the utun and everything else at once, with no helper restart.
+/// relaunched with `flag`. The engine's own shutdown is unreliable: it waits
+/// for a packet on the utun that stops coming once the routes are gone, and
+/// lwIP has been seen spinning in it (tcp_fasttmr over a corrupted connection
+/// list). A process needs none of it: SIGTERM ends it at once, the kernel
+/// closes its sockets and releases the utun, and the helper tidies the rest.
 ///
 /// The child gets the utun on fd 3 and the engine config on stdin (it holds
 /// the SOCKS password, so never the command line). It writes a stats line to
 /// stdout every second and the engine's own log to stderr; when the helper
-/// goes away those writes fail and the child quits.
+/// goes away those writes fail and the child exits.
 enum EngineProcess {
     static let flag = "--tun2socks"
     static let tunFD: Int32 = 3
@@ -18,7 +19,7 @@ enum EngineProcess {
     /// Child side: runs the engine until SIGTERM or the helper goes away.
     static func run() -> Never {
         signal(SIGPIPE, SIG_IGN)
-        signal(SIGTERM) { _ in hev_socks5_tunnel_quit() }
+        signal(SIGTERM) { _ in _exit(0) }
         let config = Array(FileHandle.standardInput.readDataToEndOfFile())
         let done = DispatchSemaphore(value: 0)
         let result = Locked(Int32(0))
@@ -36,13 +37,7 @@ enum EngineProcess {
                 var tx = 0, txb = 0, rx = 0, rxb = 0
                 hev_socks5_tunnel_stats(&tx, &txb, &rx, &rxb)
                 let line = Array("stats \(tx) \(txb) \(rx) \(rxb)\n".utf8)
-                if write(1, line, line.count) != line.count {
-                    // The helper is gone. Quit, and don't trust the quit: it is
-                    // what can spin forever.
-                    hev_socks5_tunnel_quit()
-                    sleep(3)
-                    exit(2)
-                }
+                if write(1, line, line.count) != line.count { _exit(2) }   // the helper is gone
             }
         }
         done.wait()
@@ -167,7 +162,7 @@ final class EngineChild: @unchecked Sendable {
         return true
     }
 
-    /// Asks the engine to quit; true if it did within `timeout`.
+    /// Ends the engine (SIGTERM exits it at once); true if it was gone within `timeout`.
     func stop(timeout: TimeInterval) -> Bool {
         guard isAlive else { return true }
         Darwin.kill(pid, SIGTERM)
