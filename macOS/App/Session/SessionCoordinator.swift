@@ -26,7 +26,7 @@ final class SessionCoordinator: ObservableObject {
 
     // Observable state
     @Published private(set) var phase: Phase = .noDevice { didSet { if phase.isConnected != oldValue.isConnected { syncHotspotGuard() } } }
-    @Published private(set) var device: PhoneDevice?
+    @Published private(set) var device: PhoneDevice? { didSet { refreshWirelessCarrier() } }
     /// Android over adb: whether platform-tools were found, and anything the user must do on the phone.
     @Published private(set) var androidWatch = WatchStatus()
     @Published private(set) var meter = TrafficMeter()
@@ -143,7 +143,14 @@ final class SessionCoordinator: ObservableObject {
     var hasToken: Bool { Keychain.read(pairingSlot) != nil }
     /// "over USB" or "over Wi-Fi", for status copy.
     var linkedPhoneCount: Int { links.phones.count }
-    var linkName: String { device?.medium == .wireless ? "over Wi-Fi" : "over USB" }
+    var linkName: String { device?.medium == .wireless ? "over \(wirelessCarrier ?? "Wi-Fi")" : "over USB" }
+    /// What carries the wireless link right now: "Hotspot", "Peer-to-peer" or "Wi-Fi network".
+    @Published private(set) var wirelessCarrier: String?
+    private func refreshWirelessCarrier() {
+        guard let device, device.medium == .wireless, device.id.hasPrefix("wifi:") else { wirelessCarrier = nil; return }
+        let interface = wirelessWatcher.interfaces[String(device.id.dropFirst(5))]
+        wirelessCarrier = WirelessLink.carrier(interface: interface, onPhoneHotspot: onPhoneHotspot)
+    }
     /// "iPhone" or "Android phone" for the attached device; "phone" when none.
     var phoneKindName: String { device?.kindName ?? "phone" }
     var dnsList: [String] { dnsServers.split(whereSeparator: { $0 == "," || $0 == " " }).map(String.init).filter { !$0.isEmpty } }
@@ -187,11 +194,13 @@ final class SessionCoordinator: ObservableObject {
         androidWatcher.onStatusChange = { [weak self] status in self?.androidWatch = status }
         wirelessWatcher.onStatusChange = { [weak self] status in self?.wirelessWatch = status }
         wirelessWatcher.peerToPeer = peerToPeer
+        wirelessWatcher.onInterfaceChange = { [weak self] in self?.refreshWirelessCarrier() }
         wifiMonitor.pathUpdateHandler = { [weak self] path in
             let hotspot = path.status == .satisfied && path.isExpensive
             Task { @MainActor in
                 guard let self, self.onPhoneHotspot != hotspot else { return }
                 self.onPhoneHotspot = hotspot
+                self.refreshWirelessCarrier()
                 ptLog(.info, hotspot ? "This Mac is on a phone's hotspot (metered Wi-Fi)" : "This Mac left the phone's hotspot")
                 self.syncHotspotGuard()
             }

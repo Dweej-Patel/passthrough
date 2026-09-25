@@ -10,6 +10,8 @@ public final class WirelessListener: @unchecked Sendable {
     public struct Link {
         public let phoneID: String
         public let mux: Mux
+        /// Interface the phone's connection arrived on ("en0", "awdl0", …).
+        public let interface: String?
     }
 
     private let identity: MacIdentity
@@ -24,6 +26,8 @@ public final class WirelessListener: @unchecked Sendable {
     private var sessions: [String: (phoneID: String, mux: Mux)] = [:]
     /// A phone proved itself; on the listener's queue.
     public var onLink: (@Sendable (Link) -> Void)?
+    /// A phone resumed its link, possibly over another interface; on the listener's queue.
+    public var onResume: (@Sendable (_ phoneID: String, _ interface: String?) -> Void)?
     /// The TCP port once listening (tests).
     public private(set) var port: UInt16?
 
@@ -112,6 +116,7 @@ public final class WirelessListener: @unchecked Sendable {
                         WirelessLink.sendLine(.init(t: "resume", streams: states), on: stream)
                         session.mux.resume(on: stream, peerStreams: message.streams ?? [], initialBytes: rest)
                     }
+                    self.onResume?(phoneID, WirelessLink.interfaceName(of: stream))
                     self.pending -= 1
                     done = true
                     return
@@ -121,7 +126,7 @@ public final class WirelessListener: @unchecked Sendable {
                               initialBytes: rest, sessionID: id, resumable: true)
                 self.sessions[id] = (phoneID, mux)
                 WirelessLink.sendLine(.init(t: "fresh", session: id), on: stream)
-                finish(Link(phoneID: phoneID, mux: mux))
+                finish(Link(phoneID: phoneID, mux: mux, interface: WirelessLink.interfaceName(of: stream)))
             }
         }
     }

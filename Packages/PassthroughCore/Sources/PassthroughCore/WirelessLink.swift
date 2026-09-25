@@ -49,6 +49,19 @@ public enum WirelessLink {
         return params
     }
 
+    /// What carries a link, from the interface its connection uses: short
+    /// names for the flow maps and menus.
+    public static func carrier(interface: String?, onPhoneHotspot: Bool = false) -> String {
+        guard let name = interface else { return "Wireless" }
+        if name.hasPrefix("awdl") || name.hasPrefix("llw") { return "Peer-to-peer" }
+        if name.hasPrefix("bridge") || name.hasPrefix("ap") || onPhoneHotspot { return "Hotspot" }
+        return "Wi-Fi network"
+    }
+
+    public static func interfaceName(of stream: ByteStream) -> String? {
+        (stream as? ConnectionStream)?.connection.currentPath?.availableInterfaces.first?.name
+    }
+
     public static func fingerprint(_ certificate: Data) -> String {
         SHA256.hash(data: certificate).map { String(format: "%02x", $0) }.joined()
     }
@@ -132,6 +145,8 @@ public final class WirelessDialer: @unchecked Sendable {
 
     /// Macs whose link is up right now.
     public var connectedMacTags: [String] { queue.sync { links.filter { $0.value.isUp }.map(\.key) } }
+    /// What carries each link that is up ("Hotspot", "Peer-to-peer", …), by Mac tag.
+    public var carriers: [String: String] { queue.sync { links.filter { $0.value.isUp }.compactMapValues(\.carrier) } }
 
     public func start() {
         queue.async { [self] in
@@ -205,6 +220,7 @@ private final class MacLink: @unchecked Sendable {
     private var stopped = false
     private var splices: [ObjectIdentifier: Splice] = [:]
     private(set) var isUp = false
+    private(set) var carrier: String?
 
     init(credential: LinkCredential, peerToPeer: Bool, allowedPorts: Set<UInt16>, queue: DispatchQueue, changed: @escaping () -> Void) {
         self.credential = credential
@@ -271,6 +287,7 @@ private final class MacLink: @unchecked Sendable {
         stream.onTerminated = nil
         attempt = nil
         failures = 0
+        carrier = WirelessLink.carrier(interface: WirelessLink.interfaceName(of: stream))
         if message.t == "resume", let mux {
             mux.resume(on: stream, peerStreams: message.streams ?? [], initialBytes: rest)
         } else if message.t == "fresh", let session = message.session {
@@ -295,7 +312,7 @@ private final class MacLink: @unchecked Sendable {
             return
         }
         isUp = true
-        ptLog(.info, "wireless: linked with Mac \(tag)")
+        ptLog(.info, "wireless: linked with Mac \(tag) over \(carrier ?? "?")")
         changed()
     }
 

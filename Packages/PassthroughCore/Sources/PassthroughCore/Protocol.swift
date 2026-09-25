@@ -87,9 +87,12 @@ public struct ProviderStats: Codable, Sendable, Equatable {
     public var startedAt: Date?
     /// `WirelessLink.macTag` of the Macs whose link is up over the air.
     public var wirelessMacTags: [String]?
-    public init(rx: Int64, tx: Int64, active: Int, totalConnections: Int, macs: [ConnectedMac], startedAt: Date?, wirelessMacTags: [String]? = nil) {
+    /// What carries the wireless link: "Hotspot", "Peer-to-peer" or "Wi-Fi network".
+    public var wirelessCarrier: String?
+    public init(rx: Int64, tx: Int64, active: Int, totalConnections: Int, macs: [ConnectedMac], startedAt: Date?,
+                wirelessMacTags: [String]? = nil, wirelessCarrier: String? = nil) {
         self.rx = rx; self.tx = tx; self.active = active; self.totalConnections = totalConnections; self.macs = macs; self.startedAt = startedAt
-        self.wirelessMacTags = wirelessMacTags
+        self.wirelessMacTags = wirelessMacTags; self.wirelessCarrier = wirelessCarrier
     }
 
     /// Whether `mac` is connected over the wireless link rather than the cable.
