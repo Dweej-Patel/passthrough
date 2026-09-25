@@ -67,6 +67,7 @@ public final class ControlClient: @unchecked Sendable {
             hello.clientID = identity.clientID
             hello.name = identity.name
             hello.token = identity.token
+            hello.via = device.medium == .wireless ? "wireless" : "usb"
             send(hello)
             startHeartbeat()
         }

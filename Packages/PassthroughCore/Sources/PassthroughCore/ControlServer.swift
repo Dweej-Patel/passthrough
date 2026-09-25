@@ -20,7 +20,11 @@ public struct ConnectedMac: Identifiable, Sendable, Equatable, Codable {
     public let id: String
     public let name: String
     public let since: Date
-    public init(id: String, name: String, since: Date) { self.id = id; self.name = name; self.since = since }
+    /// Over the wireless link rather than the cable; nil when the Mac didn't say.
+    public let wireless: Bool?
+    public init(id: String, name: String, since: Date, wireless: Bool? = nil) {
+        self.id = id; self.name = name; self.since = since; self.wireless = wireless
+    }
 }
 
 /// Newline-delimited JSON control channel: pairing, heartbeat, live status.
@@ -116,6 +120,7 @@ public final class ControlServer: @unchecked Sendable {
                 var e = ControlEnvelope(t: ControlEnvelope.error); e.reason = PairingFailure.unsupportedVersion.rawValue
                 return [e]
             }
+            peer.via = message.via
             var paired = false
             if let id = message.clientID, let token = message.token, registry.verify(clientID: id, token: token) {
                 paired = true
@@ -201,6 +206,8 @@ private final class Peer: @unchecked Sendable {
     private var timer: DispatchSourceTimer?
     private var cancelled = false
     private(set) var mac: ConnectedMac?
+    /// What the Mac's hello said carries this connection ("usb" or "wireless").
+    var via: String?
 
     init(server: ControlServer, connection: NWConnection) {
         self.server = server
@@ -227,7 +234,7 @@ private final class Peer: @unchecked Sendable {
 
     func authenticate(id: String, name: String) {
         if mac == nil {
-            mac = ConnectedMac(id: id, name: name, since: Date())
+            mac = ConnectedMac(id: id, name: name, since: Date(), wireless: via.map { $0 == "wireless" })
             ptLog(.info, "\(name) connected")
             server.clientsChanged()
         }

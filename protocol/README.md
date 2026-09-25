@@ -29,7 +29,7 @@ absent (never `null`). Unknown fields are ignored.
 
 | `t` | From | Fields | Meaning |
 |-----|------|--------|---------|
-| `hello` | Mac | `protocolVersion`, `clientID`, `name`, `token`? | First message. With a valid token the Mac is authenticated. |
+| `hello` | Mac | `protocolVersion`, `clientID`, `name`, `token`?, `via`? | First message. With a valid token the Mac is authenticated. `via` is `usb` or `wireless`: how this connection reaches the phone (a phone may have a wireless link up while the Mac uses the cable). |
 | `welcome` | phone | `protocolVersion`, `paired`, `socksPort`, device facts | Reply to `hello`. `paired: false` means pair first. |
 | `pair` | Mac | `clientID`, `name`, `code` | The six digits shown on the phone. |
 | `paired` | phone | `token`, `socksPort`, `deviceName` | Pairing worked; followed by a `status`. |

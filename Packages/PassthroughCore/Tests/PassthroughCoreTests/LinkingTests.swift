@@ -105,4 +105,39 @@ final class LinkingTests: XCTestCase {
         registry.revoke(clientID: "mac1")
         wait(for: [posted], timeout: 2)
     }
+
+    /// The Mac says how it reaches the phone, and the phone labels the link
+    /// from that: a wireless link can be up while the Mac uses the cable.
+    func testMacSaysHowItIsConnected() throws {
+        for wireless in [false, true] {
+            let suite = "dev.dpatel.passthrough.tests.\(UUID().uuidString)"
+            let defaults = UserDefaults(suiteName: suite)!
+            defer { defaults.removePersistentDomain(forName: suite) }
+            let registry = PairingRegistry(defaults: defaults, secrets: InMemorySecrets())
+            let (code, _) = registry.issueCode()
+            guard case .success(let token) = registry.pair(code: code, clientID: "mac1", name: "MacBook") else { return XCTFail("pairing failed") }
+            let port = freePort()
+            let server = ControlServer(port: port, socksPort: 7890, registry: registry, counter: ByteCounter()) {
+                DeviceStatus(deviceName: "Test iPhone", hosting: "test")
+            }
+            let seen = Locked<ConnectedMac?>(nil), connected = expectation(description: "connected")
+            connected.assertForOverFulfill = false
+            server.onClientsChanged = { macs in if let mac = macs.first { seen.set(mac); connected.fulfill() } }
+            try server.start()
+            let device = wireless
+                ? PhoneDevice.wireless(phoneID: "p", kind: .iPhone, label: "test", pairingSlot: "t", link: LoopbackLink())
+                : PhoneDevice(id: "test", kind: .iPhone, label: "test", pairingSlot: "t", link: LoopbackLink())
+            let client = ControlClient(device: device, port: port, identity: .init(clientID: "mac1", name: "MacBook", token: token)) { _ in }
+            client.connect()
+            wait(for: [connected], timeout: 5)
+            client.close()
+            server.stop()
+            let mac = try XCTUnwrap(seen.get())
+            XCTAssertEqual(mac.wireless, wireless)
+            // The Mac's word wins over whether a wireless link happens to be up.
+            let stats = ProviderStats(rx: 0, tx: 0, active: 0, totalConnections: 0, macs: [mac], startedAt: nil,
+                                      wirelessMacTags: wireless ? [] : [WirelessLink.macTag(clientID: "mac1")])
+            XCTAssertEqual(stats.isWireless(mac), wireless)
+        }
+    }
 }

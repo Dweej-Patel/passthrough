@@ -44,6 +44,10 @@ public struct ControlEnvelope: Codable, Equatable, Sendable {
     public var phoneID: String?
     public var network: String?
     public var passphrase: String?
+    /// hello: how the Mac reaches the phone on this connection, "usb" or
+    /// "wireless". A phone can have a wireless link up while the Mac uses the
+    /// cable, so only the Mac knows which carries its traffic.
+    public var via: String?
 
     public init(t: String) { self.t = t }
 
@@ -95,9 +99,10 @@ public struct ProviderStats: Codable, Sendable, Equatable {
         self.wirelessMacTags = wirelessMacTags; self.wirelessCarrier = wirelessCarrier
     }
 
-    /// Whether `mac` is connected over the wireless link rather than the cable.
+    /// Whether `mac` is connected over the wireless link rather than the cable:
+    /// as the Mac said, or for a Mac too old to say, whether a link to it is up.
     public func isWireless(_ mac: ConnectedMac) -> Bool {
-        wirelessMacTags?.contains(WirelessLink.macTag(clientID: mac.id)) ?? false
+        mac.wireless ?? wirelessMacTags?.contains(WirelessLink.macTag(clientID: mac.id)) ?? false
     }
 }
 
