@@ -119,13 +119,56 @@ if listenMode {
             default: break
             }
         }
-        readLines(c) { line in
-            let gap = Date().timeIntervalSince(lastPing)
-            lastPing = Date()
-            let parts = line.split(separator: " ")
-            let n = Int(parts.dropFirst().first ?? "") ?? 0
-            if gap > 12 || n % 12 == 0 { log("ping \(n) gap=\(Int(gap))s\(gap > 12 ? "  <-- GAP" : "")") }
+        // Mac-driven: echo every 2 s (like a request waiting for an answer),
+        // and a 4 MB bulk download once a minute.
+        var echoSent: [Int: Date] = [:]
+        var echoSeq = 0, bulkStart: Date?, bulkBytes = 0
+        var rtts: [Double] = [], lost = 0
+        func pump() {
+            c.receive(minimumIncompleteLength: 1, maximumLength: 1 << 20) { data, _, done, error in
+                if let data {
+                    for line in String(decoding: data, as: UTF8.self).split(separator: "\n", omittingEmptySubsequences: false) {
+                        if line.hasPrefix("ping ") { lastPing = Date() }
+                        else if line.hasPrefix("re "), let n = Int(line.dropFirst(3)), let at = echoSent.removeValue(forKey: n) {
+                            let rtt = Date().timeIntervalSince(at) * 1000
+                            rtts.append(rtt)
+                            if rtt > 1000 { log("echo \(n) slow: \(Int(rtt))ms  <-- SLOW") }
+                        }
+                    }
+                    if let start = bulkStart {
+                        bulkBytes += data.filter { $0 == 0x61 }.count
+                        if bulkBytes >= 4 << 20 {
+                            let s = Date().timeIntervalSince(start)
+                            log(String(format: "bulk 4 MB in %.2fs = %.1f MB/s", s, 4 / s))
+                            bulkStart = nil
+                        }
+                    }
+                }
+                if done || error != nil { return }
+                pump()
+            }
         }
+        pump()
+        let echo = DispatchSource.makeTimerSource(queue: queue)
+        echo.schedule(deadline: .now() + 2, repeating: 2)
+        echo.setEventHandler {
+            guard c.state == .ready else { return }
+            lost += echoSent.filter { Date().timeIntervalSince($0.value) > 10 }.count
+            echoSent = echoSent.filter { Date().timeIntervalSince($0.value) <= 10 }
+            echoSeq += 1; echoSent[echoSeq] = Date()
+            c.send(content: Data("echo \(echoSeq)\n".utf8), completion: .contentProcessed { _ in })
+            if echoSeq % 30 == 0 {
+                let sorted = rtts.sorted()
+                let p = { (q: Double) in sorted.isEmpty ? 0 : Int(sorted[min(sorted.count - 1, Int(Double(sorted.count) * q))]) }
+                log("echo last minute: \(rtts.count) answered, \(lost) lost, median \(p(0.5))ms, p90 \(p(0.9))ms, max \(p(1))ms")
+                rtts = []; lost = 0
+            }
+            if echoSeq % 30 == 15, bulkStart == nil {
+                bulkStart = Date(); bulkBytes = 0
+                c.send(content: Data("bulk \(4 << 20)\n".utf8), completion: .contentProcessed { _ in })
+            }
+        }
+        echo.resume()
         c.start(queue: queue)
     }
     listener.start(queue: queue)

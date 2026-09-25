@@ -148,10 +148,22 @@ public final class PeerProbeDialer: @unchecked Sendable {
         receive(c)
     }
 
-    private func receive(_ c: NWConnection) {
-        c.receive(minimumIncompleteLength: 1, maximumLength: 4096) { [weak self] _, _, done, error in
+    /// Answers the Mac: "echo <x>" comes straight back, "bulk <n>" returns n bytes.
+    private func receive(_ c: NWConnection, buffer: LineBuffer = LineBuffer(limit: 4096)) {
+        c.receive(minimumIncompleteLength: 1, maximumLength: 4096) { [weak self] data, _, done, error in
+            var buffer = buffer
+            for line in (try? buffer.append(data ?? Data())) ?? [] {
+                let text = String(decoding: line, as: UTF8.self)
+                if text.hasPrefix("echo ") {
+                    c.send(content: Data("re\(text.dropFirst(4))\n".utf8), completion: .contentProcessed { _ in })
+                } else if text.hasPrefix("bulk "), let n = Int(text.dropFirst(5)), n <= 16 << 20 {
+                    var chunk = Data(repeating: 0x61, count: n)
+                    chunk.append(0x0A)
+                    c.send(content: chunk, completion: .contentProcessed { _ in })
+                }
+            }
             if done || error != nil { return }
-            self?.receive(c)
+            self?.receive(c, buffer: buffer)
         }
     }
 
