@@ -3,6 +3,11 @@ import Foundation
 /// Joins two byte streams: whatever one receives the other sends, half-closes
 /// pass through, and either side failing tears both down. The Mac's local
 /// forwarder and the phone's end of the wireless link both use it.
+///
+/// Failure is taken from reads and writes, not from `onTerminated`: a TCP
+/// connection reports "failed" (ENETDOWN) as soon as both directions have
+/// ended, while bytes it already received may still be waiting to be read.
+/// Closing on that signal loses them.
 public final class Splice: @unchecked Sendable {
     private let a: ByteStream
     private let b: ByteStream
@@ -19,8 +24,8 @@ public final class Splice: @unchecked Sendable {
     }
 
     public func start() {
-        a.onTerminated = { [weak self] _ in self?.close() }
-        b.onTerminated = { [weak self] _ in self?.close() }
+        a.onTerminated = nil
+        b.onTerminated = nil
         pump(from: a, to: b, aToB: true)
         pump(from: b, to: a, aToB: false)
     }
@@ -29,8 +34,6 @@ public final class Splice: @unchecked Sendable {
         queue.async { [self] in
             guard !closed else { return }
             closed = true
-            a.onTerminated = nil
-            b.onTerminated = nil
             a.cancel()
             b.cancel()
             onClose()
@@ -62,9 +65,15 @@ public final class Splice: @unchecked Sendable {
         }
     }
 
+    /// Counts once the end-of-stream has actually gone out: data still queued
+    /// behind flow control would be lost if both streams were torn down sooner.
     private func halfClose(_ sink: ByteStream) {
-        sink.send(nil, isComplete: true) { _ in }
-        halfClosures += 1
-        if halfClosures >= 2 { close() }
+        sink.send(nil, isComplete: true) { [weak self] _ in
+            guard let self else { return }
+            self.queue.async {
+                self.halfClosures += 1
+                if self.halfClosures >= 2 { self.close() }
+            }
+        }
     }
 }

@@ -98,6 +98,7 @@ public final class LocalForwarder: @unchecked Sendable {
                 close()
             case .success(let device):
                 guard !closed else { device.cancel(); return }
+                client.onTerminated = nil   // the splice judges failure from reads and writes
                 let counter = forwarder.counter
                 let splice = Splice(client, device, queue: queue,
                                     onBytes: { upload, n in upload ? counter.addTx(n) : counter.addRx(n) },

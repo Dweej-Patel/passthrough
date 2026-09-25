@@ -87,11 +87,13 @@ public final class Mux: @unchecked Sendable {
     private var lastHeard = Date()
     private var timer: DispatchSourceTimer?
 
-    /// `isOpener` is true on the Mac, false on the phone.
-    public init(transport: ByteStream, isOpener: Bool, queue: DispatchQueue) {
+    /// `isOpener` is true on the Mac, false on the phone. `initialBytes` are
+    /// frame bytes already read off the transport during the handshake.
+    public init(transport: ByteStream, isOpener: Bool, queue: DispatchQueue, initialBytes: Data = Data()) {
         self.transport = transport
         self.isOpener = isOpener
         self.queue = queue
+        self.buffer = initialBytes
     }
 
     public func start() {
@@ -103,6 +105,9 @@ public final class Mux: @unchecked Sendable {
             timer.setEventHandler { [weak self] in self?.keepalive() }
             timer.resume()
             self.timer = timer
+            if !buffer.isEmpty {
+                do { for frame in try MuxFrame.parse(&buffer) { handle(frame); if closed { return } } } catch { close(error); return }
+            }
             read()
         }
     }
