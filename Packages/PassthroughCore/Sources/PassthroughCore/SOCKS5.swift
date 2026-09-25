@@ -709,13 +709,18 @@ private final class Session: @unchecked Sendable {
             let frame = SOCKS5.frameDatagram(address: address.raw, payload: datagram)
             guard self.udpBacklog + frame.count <= Self.udpBacklogLimit else {
                 self.udpDropped += 1
+                self.udpPeers[address]?.droppedSinceCheck += 1
                 if self.udpDropped == 1 || self.udpDropped % 1000 == 0 {
                     ptLog(.debug, "UDP to the Mac is backed up; dropped \(self.udpDropped) datagram(s) so far")
                 }
                 return
             }
             self.udpBacklog += frame.count
-            self.write(frame) { [weak self] in self?.udpBacklog -= frame.count }
+            self.write(frame) { [weak self] in
+                guard let self else { return }
+                self.udpBacklog -= frame.count
+                self.udpPeers[address]?.relayedSinceCheck += 1
+            }
         }
         peer.onDead = { [weak self, weak peer] in
             guard let self, let peer, self.udpPeers[address] === peer else { return }
@@ -726,7 +731,7 @@ private final class Session: @unchecked Sendable {
     }
 
     private func pruneIdlePeers() {
-        udpPeers.values.forEach { $0.checkSilence(interval: Self.udpCheckInterval) }
+        udpPeers.values.forEach { $0.report(interval: Self.udpCheckInterval, queuedToMac: udpBacklog) }
         let cutoff = Date().addingTimeInterval(-server.configuration.udpIdleTimeout)
         for (key, peer) in udpPeers where peer.lastActivity < cutoff {
             peer.cancel()
@@ -766,11 +771,13 @@ private final class UDPPeer: @unchecked Sendable {
     var lastActivity = Date()
     var onDead: (() -> Void)?
     private let onDatagram: (Data) -> Void
-    // Datagrams each way since the last `checkSilence`, and whether the flow
-    // was last reported as unanswered.
+    // Datagrams since the last `report`: from the Mac (sent on), from the
+    // server, and handed back to the Mac or dropped on the way.
     private var sentSinceCheck = 0
     private var receivedSinceCheck = 0
-    private var silent = false
+    var relayedSinceCheck = 0
+    var droppedSinceCheck = 0
+    private let born = Date()
     private let label: String
 
     /// Datagrams go to `target` when given (a redirected DNS query), else to `address`.
@@ -837,17 +844,14 @@ private final class UDPPeer: @unchecked Sendable {
         connection.send(content: datagram, completion: .idempotent)
     }
 
-    /// Logs a flow that keeps sending but hears nothing back for a whole
-    /// interval, and when it hears again: tells where a stalled flow (a VPN
-    /// session, say) stops, at the far end or before it reaches this phone.
-    func checkSilence(interval: TimeInterval) {
-        defer { sentSinceCheck = 0; receivedSinceCheck = 0 }
-        if receivedSinceCheck > 0 {
-            if silent { silent = false; ptLog(.info, "UDP to \(label) answering again (\(receivedSinceCheck) back, \(sentSinceCheck) out)") }
-        } else if sentSinceCheck >= 2, !silent {
-            silent = true
-            ptLog(.info, "UDP to \(label): \(sentSinceCheck) datagram(s) out, nothing back in \(Int(interval)) s")
-        }
+    /// Logs a long-lived flow's datagrams per hop over the last interval, so
+    /// a stalled flow (a VPN session, say) shows which hop stopped: the Mac's
+    /// side of the link, the far end, or the way back to the Mac.
+    func report(interval: TimeInterval, queuedToMac: Int) {
+        defer { sentSinceCheck = 0; receivedSinceCheck = 0; relayedSinceCheck = 0; droppedSinceCheck = 0 }
+        guard Date().timeIntervalSince(born) >= interval else { return }   // skip one-shot DNS
+        ptLog(.info, "UDP \(label), last \(Int(interval)) s: \(sentSinceCheck) from Mac, \(receivedSinceCheck) from server, "
+              + "\(relayedSinceCheck) to Mac, \(droppedSinceCheck) dropped, \(queuedToMac) B queued")
     }
 
     private func receiveLoop() {
