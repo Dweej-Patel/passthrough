@@ -93,6 +93,11 @@ final class VPNEngine {
     private var startedAt: Date?
     private var activeDNS: [String] = []
     private var publishedKeys: [String] = []
+    private lazy var liveness: VPNLiveness = {
+        let l = VPNLiveness(queue: queue)
+        l.onDead = { [weak self] in self?.restart(after: 0.5) }
+        return l
+    }()
     private var retryTimer: DispatchSourceTimer?
     private var deadlineTimer: DispatchSourceTimer?
     private var retryAttempt = 0
@@ -125,6 +130,7 @@ final class VPNEngine {
         guard config != nil else { return }
         HelperLog.info("vpn: stopping")
         generation += 1
+        liveness.stop()
         retryTimer?.cancel(); retryTimer = nil
         deadlineTimer?.cancel(); deadlineTimer = nil
         runner?.onEvent = nil
@@ -149,6 +155,15 @@ final class VPNEngine {
     func underlayChanged() {
         guard let config, state != .off else { return }
         HelperLog.info("vpn: underlay changed; restarting \(config.engine.rawValue)")
+        restart(after: 0.5)
+    }
+
+    /// The phone under the passthrough moved between Wi-Fi and cellular: its
+    /// public address changed, so a session riding it is dead. Restart now
+    /// rather than wait for the liveness check.
+    func phoneNetworkChanged() {
+        guard let config, state != .off, underlay?.isPassthrough == true else { return }
+        HelperLog.info("vpn: the phone changed networks; restarting \(config.engine.rawValue)")
         restart(after: 0.5)
     }
 
@@ -239,6 +254,10 @@ final class VPNEngine {
             applyDNS(dns.isEmpty ? config.fallbackDNS : dns, interface: iface, address: address, gateway: gateway)
             state = .connected
             HelperLog.info("vpn: connected on \(iface) (dns \(activeDNS.joined(separator: ", ")))")
+            // WireGuard re-handshakes every two minutes and has its own check.
+            if config.engine == .openvpn, let dns = activeDNS.first {
+                liveness.start(interface: iface, dnsServer: dns) { [weak self] in self?.runner?.stats().0 ?? 0 }
+            }
         case .reconnecting(let why):
             HelperLog.warn("vpn: session lost (\(why)); engine is reconnecting")
             state = .reconnecting
@@ -268,6 +287,7 @@ final class VPNEngine {
     }
 
     private func restart(after delay: TimeInterval) {
+        liveness.stop()
         retryTimer?.cancel()
         deadlineTimer?.cancel(); deadlineTimer = nil
         runner?.onEvent = nil

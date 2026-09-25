@@ -132,6 +132,10 @@ final class HelperClient {
         await call(timeout: 4, fallback: ()) { proxy, finish in proxy.setTunnelIPv6(available) { finish(()) } }
     }
 
+    func phoneNetworkChanged() async {
+        await call(timeout: 4, fallback: ()) { proxy, finish in proxy.phoneNetworkChanged { finish(()) } }
+    }
+
     func stopTunnel() async {
         await call(timeout: 6, fallback: ()) { proxy, finish in proxy.stopTunnel { finish(()) } }
     }

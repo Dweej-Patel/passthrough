@@ -77,6 +77,8 @@ final class SessionCoordinator: ObservableObject {
     private var suppressAutoConnect = false
     /// What the helper was last told about IPv6 in the tunnel (it starts open).
     private var tunnelIPv6: Bool?
+    /// Whether the phone was last on Wi-Fi, to spot it switching networks.
+    private var phoneOnWiFi: Bool?
 
     var adbStatus: WatchStatus.State { androidWatch.state }
     var androidHint: String? { androidWatch.hint }
@@ -244,6 +246,7 @@ final class SessionCoordinator: ObservableObject {
             phoneStatus = status
             phoneActiveConnections = active
             syncTunnelIPv6()
+            notePhoneNetwork()
         case .disconnected(let error):
             let why = error?.localizedDescription ?? "The \(phoneKindName) closed the connection"
             if case .pairingRequired = phase {
@@ -284,6 +287,17 @@ final class SessionCoordinator: ObservableObject {
         ptLog(.info, available ? "The \(phoneKindName)'s network routes IPv6; IPv6 goes through the tunnel"
                                : "The \(phoneKindName)'s network has no IPv6; IPv6 is blocked so apps use IPv4")
         Task { await helper.setTunnelIPv6(available) }
+    }
+
+    /// A VPN session riding the passthrough dies when the phone moves between
+    /// Wi-Fi and cellular (new public address); tell the helper at once.
+    private func notePhoneNetwork() {
+        guard phase.isConnected, let radio = phoneStatus?.radio else { return }
+        let onWiFi = radio.hasPrefix("Wi-Fi")
+        defer { phoneOnWiFi = onWiFi }
+        guard let before = phoneOnWiFi, before != onWiFi else { return }
+        ptLog(.info, "The \(phoneKindName) moved to \(onWiFi ? "Wi-Fi" : "cellular")")
+        if vpnLayer.isWanted { Task { await helper.phoneNetworkChanged() } }
     }
 
     private func tunnelConfig(socksPort: UInt16, username: String, password: String, ipv6: Bool) -> HelperClient.TunnelConfig {
@@ -350,6 +364,7 @@ final class SessionCoordinator: ObservableObject {
         self.forwarder = nil
         tunnelInterface = nil
         tunnelIPv6 = nil
+        phoneOnWiFi = nil
         connectedSince = nil
         phoneActiveConnections = 0
         pairingInFlight = false

@@ -124,6 +124,13 @@ final class HelperService: NSObject, PassthroughHelperProtocol {
         }
     }
 
+    func phoneNetworkChanged(reply: @escaping () -> Void) {
+        queue.async {
+            self.vpn.phoneNetworkChanged()
+            reply()
+        }
+    }
+
     func getStatus(reply: @escaping ([String: Any]) -> Void) {
         queue.async {
             var status = self.engine.status()
