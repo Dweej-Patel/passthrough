@@ -16,9 +16,14 @@ func log(_ s: String) {
     fflush(stdout)
 }
 
+/// The AWDL interface from the browse result: connections go over the
+/// direct link only, never USB or a shared network.
+var awdl: NWInterface?
+
 func p2pParameters() -> NWParameters {
     let p = NWParameters.tcp
     p.includePeerToPeer = true
+    if let awdl { p.requiredInterface = awdl }
     return p
 }
 
@@ -46,9 +51,15 @@ func openPersistent() {
     guard let endpoint else { return }
     persistent?.cancel()
     let c = NWConnection(to: endpoint, using: p2pParameters())
+    var became = false
+    queue.asyncAfter(deadline: .now() + 15) {
+        guard !became, persistent === c else { return }
+        log("persistent: not ready after 15s (\(c.state)); retrying")
+        openPersistent()
+    }
     c.stateUpdateHandler = { state in
         switch state {
-        case .ready: log("persistent: ready \(describe(c))")
+        case .ready: became = true; log("persistent: ready \(describe(c))")
         case .waiting(let e): log("persistent: waiting \(e)")
         case .failed(let e): log("persistent: FAILED \(e); reopening in 5s"); queue.asyncAfter(deadline: .now() + 5) { openPersistent() }
         case .cancelled: break
@@ -92,8 +103,10 @@ let browser = NWBrowser(for: .bonjour(type: PeerProbeServer.serviceType, domain:
 browser.stateUpdateHandler = { log("browser: \($0)") }
 browser.browseResultsChangedHandler = { results, _ in
     log("browser: \(results.count) result(s) \(results.map { "\($0.endpoint) \($0.interfaces.map(\.name))" })")
-    if endpoint == nil, let first = results.first {
-        endpoint = first.endpoint
+    if endpoint == nil, let hit = results.first(where: { $0.interfaces.contains { $0.name.hasPrefix("awdl") } }) {
+        endpoint = hit.endpoint
+        awdl = hit.interfaces.first { $0.name.hasPrefix("awdl") }
+        log("using \(hit.endpoint) over \(awdl?.name ?? "?")")
         openPersistent()
     }
 }

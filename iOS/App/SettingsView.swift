@@ -47,6 +47,7 @@ struct SettingsView: View {
                 .disabled(model.state.isActive)
                 Section {
                     Toggle("Wireless link test", isOn: $model.peerProbe)
+                        .onChange(of: model.peerProbe) { _, on in if on { LocalNetworkPermission.request() } }
                 } footer: {
                     Text("Answers pings from the Mac over a direct Wi-Fi link, to test whether a wireless connection holds while this iPhone is locked. Carries no traffic. Takes effect the next time the proxy starts.")
                 }
