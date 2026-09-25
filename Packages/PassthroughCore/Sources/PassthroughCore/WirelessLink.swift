@@ -114,6 +114,7 @@ public final class WirelessDialer: @unchecked Sendable {
     private let queue = DispatchQueue(label: "dev.dpatel.passthrough.wireless-dialer")
     private let credentials: @Sendable () -> [LinkCredential]
     private let allowedPorts: Set<UInt16>
+    private let peerToPeer: Bool
     private var browser: NWBrowser?
     private var links: [String: MacLink] = [:]   // by macTag
     private var running = false
@@ -121,8 +122,11 @@ public final class WirelessDialer: @unchecked Sendable {
     public var onChange: (@Sendable (_ connectedMacTags: [String]) -> Void)?
 
     /// `allowedPorts`: the only loopback ports the Mac may open streams to.
-    public init(allowedPorts: Set<UInt16>, credentials: @escaping @Sendable () -> [LinkCredential]) {
+    /// Without `peerToPeer` the Mac is found only on a network both share,
+    /// typically this iPhone's Personal Hotspot.
+    public init(allowedPorts: Set<UInt16>, peerToPeer: Bool = false, credentials: @escaping @Sendable () -> [LinkCredential]) {
         self.allowedPorts = allowedPorts
+        self.peerToPeer = peerToPeer
         self.credentials = credentials
     }
 
@@ -134,7 +138,7 @@ public final class WirelessDialer: @unchecked Sendable {
             guard !running else { return }
             running = true
             let params = NWParameters.tcp
-            params.includePeerToPeer = true
+            params.includePeerToPeer = peerToPeer
             let browser = NWBrowser(for: .bonjourWithTXTRecord(type: WirelessLink.serviceType, domain: nil), using: params)
             browser.stateUpdateHandler = { state in
                 switch state {
@@ -146,7 +150,7 @@ public final class WirelessDialer: @unchecked Sendable {
             browser.browseResultsChangedHandler = { [weak self] results, _ in self?.queue.async { self?.found(results) } }
             browser.start(queue: queue)
             self.browser = browser
-            ptLog(.info, "wireless: looking for linked Macs nearby")
+            ptLog(.info, "wireless: looking for linked Macs \(peerToPeer ? "nearby and on shared networks" : "on shared networks (Personal Hotspot)")")
         }
     }
 
@@ -169,7 +173,7 @@ public final class WirelessDialer: @unchecked Sendable {
         let known = Dictionary(credentials().map { ($0.macTag, $0) }, uniquingKeysWith: { a, _ in a })
         for result in results {
             guard case .bonjour(let txt) = result.metadata, let tag = txt["m"], let credential = known[tag] else { continue }
-            link(for: credential, peerToPeer: true).reach(result.endpoint)
+            link(for: credential, peerToPeer: peerToPeer).reach(result.endpoint)
         }
     }
 

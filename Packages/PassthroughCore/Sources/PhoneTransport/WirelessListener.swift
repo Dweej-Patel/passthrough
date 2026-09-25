@@ -15,6 +15,7 @@ public final class WirelessListener: @unchecked Sendable {
     private let identity: MacIdentity
     private let macTag: String
     private let advertise: Bool
+    private let peerToPeer: Bool
     private let linkKey: @Sendable (String) -> Data?
     private let queue = DispatchQueue(label: "dev.dpatel.passthrough.wireless-listener")
     private var listener: NWListener?
@@ -28,10 +29,11 @@ public final class WirelessListener: @unchecked Sendable {
 
     /// `linkKey` returns the key shared with the phone of that ID, if linked.
     /// `advertise` is false in tests (no Bonjour).
-    public init(identity: MacIdentity, macTag: String, advertise: Bool = true, linkKey: @escaping @Sendable (String) -> Data?) {
+    public init(identity: MacIdentity, macTag: String, advertise: Bool = true, peerToPeer: Bool = false, linkKey: @escaping @Sendable (String) -> Data?) {
         self.identity = identity
         self.macTag = macTag
         self.advertise = advertise
+        self.peerToPeer = peerToPeer
         self.linkKey = linkKey
     }
 
@@ -47,7 +49,7 @@ public final class WirelessListener: @unchecked Sendable {
         tcp.enableKeepalive = true
         tcp.keepaliveIdle = 10
         let params = NWParameters(tls: tls, tcp: tcp)
-        params.includePeerToPeer = true
+        params.includePeerToPeer = peerToPeer
         let listener = try NWListener(using: params)
         if advertise {
             let txt = NWTXTRecord(["m": macTag])

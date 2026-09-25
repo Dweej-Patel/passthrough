@@ -122,6 +122,8 @@ public enum SharedKeys {
     public static let egress = "state.egress"
     /// Dial linked Macs over the wireless link too.
     public static let wireless = "settings.wireless"
+    /// Let the wireless link use Apple peer-to-peer Wi-Fi as well.
+    public static let peerToPeer = "settings.peerToPeer"
     public static let usageMonthRx = "usage.month.rx"
     public static let usageMonthTx = "usage.month.tx"
     public static let usageMonthStart = "usage.month.start"

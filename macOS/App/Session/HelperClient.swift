@@ -132,6 +132,10 @@ final class HelperClient {
         await call(timeout: 4, fallback: ()) { proxy, finish in proxy.setTunnelIPv6(available) { finish(()) } }
     }
 
+    func setHotspotGuard(_ on: Bool) async {
+        await call(timeout: 4, fallback: ()) { proxy, finish in proxy.setHotspotGuard(on) { finish(()) } }
+    }
+
     func phoneNetworkChanged() async {
         await call(timeout: 4, fallback: ()) { proxy, finish in proxy.phoneNetworkChanged { finish(()) } }
     }

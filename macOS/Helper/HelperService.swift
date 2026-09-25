@@ -31,6 +31,10 @@ final class HelperService: NSObject, PassthroughHelperProtocol {
                 self.vpn.underlayChanged()
                 self.restartIfEngineStuck()
             }
+            if self.clients.isEmpty && HotspotGuard.isOn {
+                HelperLog.info("last client gone; lifting the hotspot guard")
+                HotspotGuard.set(false)
+            }
             if self.clients.isEmpty && self.sleepDisabled {
                 HelperLog.info("last client gone; re-enabling system sleep")
                 self.applyDisableSleep(false)
@@ -120,6 +124,13 @@ final class HelperService: NSObject, PassthroughHelperProtocol {
     func setTunnelIPv6(_ available: Bool, reply: @escaping () -> Void) {
         queue.async {
             self.engine.setIPv6Available(available)
+            reply()
+        }
+    }
+
+    func setHotspotGuard(_ on: Bool, reply: @escaping () -> Void) {
+        queue.async {
+            HotspotGuard.set(on)
             reply()
         }
     }

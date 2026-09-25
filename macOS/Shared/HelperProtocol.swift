@@ -10,6 +10,9 @@ import Foundation
     func setTunnelIPv6(_ available: Bool, reply: @escaping () -> Void)
     /// The phone switched between Wi-Fi and cellular; a VPN session riding it must restart.
     func phoneNetworkChanged(reply: @escaping () -> Void)
+    /// Blocks the internet (not the link to the phone) while the Mac sits on a
+    /// phone's hotspot without passthrough, so the hotspot's data isn't used.
+    func setHotspotGuard(_ on: Bool, reply: @escaping () -> Void)
     func getStatus(reply: @escaping ([String: Any]) -> Void)
     /// Disables/enables ALL system sleep (incl. lid-close) via pmset. Root only.
     func setDisableSleep(_ on: Bool, reply: @escaping (Bool) -> Void)
@@ -24,7 +27,7 @@ public enum HelperConstants {
     public static let machService = "dev.dpatel.passthrough.helper"
     public static let plistName = "dev.dpatel.passthrough.helper.plist"
     /// Bump together with the helper binary so the app can detect stale daemons.
-    public static let version = "1.2.15"
+    public static let version = "1.2.16"
 }
 
 /// Keys of the configuration dictionary handed to `startTunnel`.

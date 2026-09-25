@@ -137,6 +137,7 @@ enum RecoverySweep {
         for q in VPNEngine.v4Eighths where RouteTable.isReject(q, v6: false) && RouteTable.deleteIfPresent(q, v6: false, table: v4) {
             cleaned.append(q)
         }
+        cleaned += HotspotGuard.removeAll()
         for name in Shell.capture("/sbin/ifconfig", ["-l"]).split(separator: " ").map(String.init) where name.hasPrefix("feth") {
             if Shell.capture("/sbin/ifconfig", [name]).contains("10.83.0.1"), (try? Shell.run("/sbin/ifconfig", [name, "destroy"], quiet: true)) != nil {
                 cleaned.append(name)

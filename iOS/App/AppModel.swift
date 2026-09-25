@@ -43,6 +43,7 @@ final class AppModel: ObservableObject {
     @AppStorage(SharedKeys.socksPort, store: AppModel.groupDefaults) var socksPort = Int(PassthroughProtocol.defaultSOCKSPort)
     @AppStorage(SharedKeys.controlPort, store: AppModel.groupDefaults) var controlPort = Int(PassthroughProtocol.defaultControlPort)
     @AppStorage(SharedKeys.wireless, store: AppModel.groupDefaults) var wireless = false
+    @AppStorage(SharedKeys.peerToPeer, store: AppModel.groupDefaults) var peerToPeer = false
     @AppStorage("hosting", store: AppModel.groupDefaults) var hostingRaw = Hosting.background.rawValue
     var hosting: Hosting {
         get { Hosting(rawValue: hostingRaw) ?? .background }
@@ -127,6 +128,7 @@ final class AppModel: ObservableObject {
         options.cellularOnly = cellularOnly
         options.allowUDP = allowUDP
         options.wireless = wireless
+        options.peerToPeer = peerToPeer
         let host = activeHost
         Task {
             do {

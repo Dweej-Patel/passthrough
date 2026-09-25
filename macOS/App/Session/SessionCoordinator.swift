@@ -1,6 +1,7 @@
 import Foundation
 import SwiftUI
 import Combine
+import Network
 import PassthroughCore
 import PhoneTransport
 
@@ -24,7 +25,7 @@ final class SessionCoordinator: ObservableObject {
     }
 
     // Observable state
-    @Published private(set) var phase: Phase = .noDevice
+    @Published private(set) var phase: Phase = .noDevice { didSet { if phase.isConnected != oldValue.isConnected { syncHotspotGuard() } } }
     @Published private(set) var device: PhoneDevice?
     /// Android over adb: whether platform-tools were found, and anything the user must do on the phone.
     @Published private(set) var androidWatch = WatchStatus()
@@ -74,9 +75,29 @@ final class SessionCoordinator: ObservableObject {
             UserDefaults.standard.set(connectionMode.rawValue, forKey: "connectionMode")
             connectionMode == .cable ? wirelessWatcher.stop() : wirelessWatcher.start()
             reconsiderDevice()
+            syncHotspotGuard()
         }
     }
     @Published private(set) var wirelessWatch = WatchStatus()
+    /// Let the wireless link use Apple peer-to-peer Wi-Fi too (it drops while
+    /// an iPhone is locked); otherwise it runs over a shared network such as
+    /// the iPhone's Personal Hotspot.
+    @Published var peerToPeer: Bool = UserDefaults.standard.bool(forKey: "wirelessPeerToPeer") {
+        didSet {
+            UserDefaults.standard.set(peerToPeer, forKey: "wirelessPeerToPeer")
+            wirelessWatcher.peerToPeer = peerToPeer
+            if connectionMode != .cable { wirelessWatcher.stop(); wirelessWatcher.start() }
+        }
+    }
+    /// Block the internet while the Mac is on a phone's hotspot but passthrough
+    /// is down, so the hotspot's own data allowance is never used.
+    @Published var hotspotGuard: Bool = UserDefaults.standard.object(forKey: "hotspotGuard") as? Bool ?? true {
+        didSet { UserDefaults.standard.set(hotspotGuard, forKey: "hotspotGuard"); syncHotspotGuard() }
+    }
+    /// The Mac's Wi-Fi is a metered network, which is how macOS marks a phone's hotspot.
+    @Published private(set) var onPhoneHotspot = false
+    private let wifiMonitor = NWPathMonitor(requiredInterfaceType: .wifi)
+    private var guardApplied: Bool?
 
     /// Also watch for Android phones through adb. On by default; harmless without platform-tools.
     @Published var androidEnabled: Bool = UserDefaults.standard.object(forKey: "androidEnabled") as? Bool ?? true {
@@ -165,6 +186,17 @@ final class SessionCoordinator: ObservableObject {
         directory.onChange = { [weak self] change in self?.devicesChanged(change) }
         androidWatcher.onStatusChange = { [weak self] status in self?.androidWatch = status }
         wirelessWatcher.onStatusChange = { [weak self] status in self?.wirelessWatch = status }
+        wirelessWatcher.peerToPeer = peerToPeer
+        wifiMonitor.pathUpdateHandler = { [weak self] path in
+            let hotspot = path.status == .satisfied && path.isExpensive
+            Task { @MainActor in
+                guard let self, self.onPhoneHotspot != hotspot else { return }
+                self.onPhoneHotspot = hotspot
+                ptLog(.info, hotspot ? "This Mac is on a phone's hotspot (metered Wi-Fi)" : "This Mac left the phone's hotspot")
+                self.syncHotspotGuard()
+            }
+        }
+        wifiMonitor.start(queue: DispatchQueue(label: "dev.dpatel.passthrough.wifi-path"))
         _ = clientID   // the wireless listener advertises a tag derived from it
         for watcher in directory.watchers {
             switch watcher.transport {
@@ -230,6 +262,15 @@ final class SessionCoordinator: ObservableObject {
         } else {
             phase = .noDevice
         }
+    }
+
+    /// On while the Mac sits on a phone's hotspot for the wireless link but
+    /// passthrough isn't carrying its traffic.
+    private func syncHotspotGuard() {
+        let on = hotspotGuard && connectionMode != .cable && onPhoneHotspot && !phase.isConnected
+        guard on != guardApplied else { return }
+        guardApplied = on
+        Task { await helper.setHotspotGuard(on) }
     }
 
     /// Over the cable, after pairing: hand the phone what it needs to reach

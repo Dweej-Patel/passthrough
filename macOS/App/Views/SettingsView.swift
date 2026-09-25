@@ -92,11 +92,13 @@ struct GeneralSettings: View {
                 if session.connectionMode != .cable {
                     LabeledContent("Wireless") { Text(wirelessText) }
                     LabeledContent("Linked phones") { Text("\(session.linkedPhoneCount)") }
+                    Toggle("Don't use the hotspot's own data", isOn: $session.hotspotGuard)
+                    Toggle("Use peer-to-peer Wi-Fi", isOn: $session.peerToPeer)
                 }
             } header: {
                 Text("Connection")
             } footer: {
-                Text("Wireless reaches a phone over a direct Wi-Fi link: Apple's peer-to-peer Wi-Fi for an iPhone, a Wi-Fi Direct network the phone hosts for Android. Turn on Wireless link in Passthrough on the phone too. A phone links the first time it connects over USB, and the link is encrypted with a key only the two of them share. Automatic prefers the cable when both are available.")
+                Text("Wireless: join the iPhone's Personal Hotspot from the Wi-Fi menu (it stays up while the iPhone is locked) and turn on Wireless link in Passthrough on the phone. Traffic still goes through Passthrough; with \"Don't use the hotspot's own data\" the Mac reaches nothing but the phone while passthrough is down, so the hotspot allowance isn't touched. Peer-to-peer Wi-Fi needs no hotspot but drops for minutes while an iPhone is locked. A phone links the first time it connects over USB. Automatic prefers the cable.")
             }
             Section {
                 Toggle("Android phones (via adb)", isOn: $session.androidEnabled)

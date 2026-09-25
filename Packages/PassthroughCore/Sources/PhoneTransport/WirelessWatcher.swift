@@ -30,6 +30,8 @@ public final class WirelessWatcher: DeviceWatcher {
     private let macTag: @Sendable () -> String
     private let identity: () throws -> MacIdentity
     private let phones: @Sendable () -> [WirelessPhone]
+    /// Also listen over Apple peer-to-peer Wi-Fi; takes effect on the next start.
+    public var peerToPeer = false
     private var listener: WirelessListener?
     private var links: [String: (mux: Mux, device: PhoneDevice)] = [:]   // by phoneID
     private var order: [String] = []
@@ -45,7 +47,7 @@ public final class WirelessWatcher: DeviceWatcher {
         guard listener == nil else { return }
         do {
             let phones = self.phones
-            let listener = WirelessListener(identity: try identity(), macTag: macTag()) { id in
+            let listener = WirelessListener(identity: try identity(), macTag: macTag(), peerToPeer: peerToPeer) { id in
                 phones().first { $0.phoneID == id }?.linkKey
             }
             listener.onLink = { [weak self] link in Task { @MainActor in self?.linked(link) } }

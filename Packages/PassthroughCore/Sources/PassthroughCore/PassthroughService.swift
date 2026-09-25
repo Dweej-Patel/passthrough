@@ -13,6 +13,8 @@ public final class PassthroughService: @unchecked Sendable {
         public var refuseLocalDestinations = true
         /// Also dial linked Macs over the wireless link.
         public var wireless = false
+        /// Let that link use Apple peer-to-peer Wi-Fi, not only a shared network.
+        public var peerToPeer = false
         public init() {}
     }
 
@@ -66,7 +68,7 @@ public final class PassthroughService: @unchecked Sendable {
         self.control = control
         if options.wireless {
             let registry = self.registry
-            let dialer = WirelessDialer(allowedPorts: [options.socksPort, options.controlPort]) { registry.linkCredentials() }
+            let dialer = WirelessDialer(allowedPorts: [options.socksPort, options.controlPort], peerToPeer: options.peerToPeer) { registry.linkCredentials() }
             dialer.start()
             self.dialer = dialer
         }
