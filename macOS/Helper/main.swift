@@ -63,6 +63,9 @@ enum HelperLog {
     static func error(_ s: String) { logger.error("\(s, privacy: .public)") }
 }
 
+// The tun2socks engine: this same binary, started by the helper (see EngineProcess).
+if CommandLine.arguments.count == 2, CommandLine.arguments[1] == EngineProcess.flag { EngineProcess.run() }
+
 guard getuid() == 0 else {
     HelperLog.error("must run as root (launched by launchd via SMAppService)")
     exit(1)

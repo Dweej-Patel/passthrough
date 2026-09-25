@@ -128,6 +128,12 @@ enum RouteTable {
 enum RecoverySweep {
     static func run() {
         var cleaned: [String] = []
+        // An engine left by a helper that died: it quits by itself once it
+        // notices, but its quit is what can spin forever.
+        let staleEngine = BundledEngines.stateDirectory + "/bin/"
+        if (try? Shell.run("/usr/bin/pkill", ["-9", "-f", "^" + staleEngine + ".* " + EngineProcess.flag + "$"], quiet: true)) != nil {
+            cleaned.append("engine process")
+        }
         let v4 = RouteTable.present(v6: false), v6 = RouteTable.present(v6: true)
         for q in ["0.0.0.0/2", "64.0.0.0/2", "128.0.0.0/2", "192.0.0.0/2"] where RouteTable.deleteIfPresent(q, v6: false, table: v4) {
             cleaned.append(q)
@@ -191,7 +197,7 @@ enum BundledEngines {
     /// the root-only state directory, the *copy* is verified (strictly, and by
     /// identifier as well as Team ID) and the copy is what gets executed, so
     /// nothing can be swapped between check and exec.
-    static func stagedEngine(_ url: URL) throws -> URL {
+    static func stagedEngine(_ url: URL, identifier: String? = nil) throws -> URL {
         guard FileManager.default.isExecutableFile(atPath: url.path) else { throw EngineFileError.missing(url.lastPathComponent) }
         try prepareStateDirectory()
         let binDir = URL(fileURLWithPath: stateDirectory).appendingPathComponent("bin", isDirectory: true)
@@ -200,18 +206,19 @@ enum BundledEngines {
         try? FileManager.default.removeItem(at: staged)
         try FileManager.default.copyItem(at: url, to: staged)
         try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: staged.path)
-        try verifySignature(of: staged)
+        try verifySignature(of: staged, identifier: identifier ?? url.lastPathComponent)
         return staged
     }
 
-    static func verifySignature(of url: URL) throws {
+    /// `identifier`: the signing identifier the file must carry.
+    static func verifySignature(of url: URL, identifier: String) throws {
         guard let team = CodeSigning.ownTeamIdentifier() else { throw EngineFileError.unsigned(url.lastPathComponent) }
         var staticCode: SecStaticCode?
         guard SecStaticCodeCreateWithPath(url as CFURL, [], &staticCode) == errSecSuccess, let staticCode else {
             throw EngineFileError.unsigned(url.lastPathComponent)
         }
         var requirement: SecRequirement?
-        let text = "anchor apple generic and certificate leaf[subject.OU] = \"\(team)\" and identifier \"\(url.lastPathComponent)\"" as CFString
+        let text = "anchor apple generic and certificate leaf[subject.OU] = \"\(team)\" and identifier \"\(identifier)\"" as CFString
         guard SecRequirementCreateWithString(text, [], &requirement) == errSecSuccess, let requirement else {
             throw EngineFileError.unsigned(url.lastPathComponent)
         }

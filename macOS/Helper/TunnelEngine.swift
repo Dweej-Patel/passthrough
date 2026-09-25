@@ -1,8 +1,7 @@
 import Foundation
 import SystemConfiguration
-import HevSocks5Tunnel
 
-/// Owns the utun interface and the embedded tun2socks engine.
+/// Owns the utun interface and the tun2socks engine process (`EngineChild`).
 final class TunnelEngine {
     struct Config {
         var socksPort: UInt16 = 17890
@@ -36,8 +35,7 @@ final class TunnelEngine {
     private static let serviceID = "dev.dpatel.passthrough.tunnel"
     private var fd: Int32 = -1
     private(set) var interfaceName: String?
-    private var thread: Thread?
-    private var exited = DispatchSemaphore(value: 0)
+    private var child: EngineChild?
     /// Kept for the tunnel's lifetime: values are published as *temporary* so
     /// configd drops them by itself if this process dies.
     private lazy var store: SCDynamicStore? = SCDynamicStoreCreate(nil, "Passthrough" as CFString, nil, nil)
@@ -45,13 +43,8 @@ final class TunnelEngine {
     private var startedAt: Date?
     private var storeKeys: [String] = []
     private var keepaliveIf: String?
-    private let alive = NSLock()
-    private var engineAlive = false
 
-    var isRunning: Bool { thread != nil && isEngineAlive }
-    /// Set when the engine ignored a stop request. It still owns its utun and
-    /// that utun's fixed addresses, so no new tunnel can start in this process.
-    private(set) var isStuck = false
+    var isRunning: Bool { child?.isAlive == true }
     /// IPv6 is rejected at the tunnel's routes because the phone's network has none.
     private(set) var ipv6Blocked = false
     static let ipv6Halves = ["::/1", "8000::/1"]
@@ -81,17 +74,13 @@ final class TunnelEngine {
             HelperLog.warn("failed to update DNS: \(String(cString: SCErrorString(SCError())))")
         }
     }
-    private var isEngineAlive: Bool { alive.lock(); defer { alive.unlock() }; return engineAlive }
-    private func setEngineAlive(_ v: Bool) { alive.lock(); engineAlive = v; alive.unlock() }
 
     // MARK: Start / stop
 
     func start(_ config: Config) throws {
         guard !isRunning else { throw EngineError.alreadyRunning }
-        if thread != nil { stop() }
+        if child != nil || fd >= 0 { stop() }
         self.config = config
-        var limit = rlimit(rlim_cur: 65536, rlim_max: 65536)
-        _ = setrlimit(RLIMIT_NOFILE, &limit)
         let (fd, name) = try Self.openUTun()
         self.fd = fd
         interfaceName = name
@@ -102,26 +91,10 @@ final class TunnelEngine {
             try run("/sbin/ifconfig", [name, "inet6", config.ipv6Address, config.ipv6Gateway, "prefixlen", "128"])
         }
 
-        let yaml = Self.yaml(for: config)
-        let bytes = Array(yaml.utf8)
-        let tunFD = fd
-        setEngineAlive(true)
-        let exited = DispatchSemaphore(value: 0)
-        self.exited = exited
-        let thread = Thread { [exited, weak self] in
-            let result = bytes.withUnsafeBufferPointer { buf in
-                hev_socks5_tunnel_main_from_str(buf.baseAddress, UInt32(buf.count), tunFD)
-            }
-            HelperLog.info("engine exited with \(result)")
-            self?.setEngineAlive(false)
-            exited.signal()
-        }
-        thread.name = "tun2socks"
-        thread.stackSize = 4 << 20
-        self.thread = thread
-        thread.start()
-        if exited.wait(timeout: .now() + 0.6) == .success {
-            self.thread = nil
+        let child = try EngineChild.spawn(executable: try Self.engineExecutable(), config: Self.yaml(for: config), tunFD: fd)
+        self.child = child
+        if child.waitForExit(timeout: 0.6) {
+            self.child = nil
             throw EngineError.engineExited
         }
 
@@ -174,21 +147,17 @@ final class TunnelEngine {
                 _ = try? run("/sbin/route", ["-q", "-n", "delete", "-inet6", "8000::/1", "-interface", name])
             }
         }
-        var engineGone = true
-        if thread != nil {
-            if isEngineAlive {
-                hev_socks5_tunnel_quit()
-                if exited.wait(timeout: .now() + 8) != .success {
-                    HelperLog.error("engine did not stop in time; leaving its descriptor open")
-                    Self.recordStuckEngine()
-                    engineGone = false
-                    isStuck = true
-                }
+        if let child {
+            if !child.stop(timeout: 2) {
+                HelperLog.error("engine did not stop within 2 s; killing it")
+                Self.recordStuckEngine(pid: child.pid)
+                child.kill()
             }
-            thread = nil
+            self.child = nil
         }
-        // Never close the utun while the engine thread might still use it.
-        if fd >= 0, engineGone { close(fd) }
+        // The utun goes away once no process holds it: ours here, the
+        // engine's when it exited.
+        if fd >= 0 { close(fd) }
         fd = -1
         interfaceName = nil
         startedAt = nil
@@ -196,14 +165,13 @@ final class TunnelEngine {
     }
 
     func status() -> [String: Any] {
-        var tx = 0, txb = 0, rx = 0, rxb = 0
-        if isRunning { hev_socks5_tunnel_stats(&tx, &txb, &rx, &rxb) }
+        let stats = isRunning ? child?.stats ?? EngineChild.Stats() : EngineChild.Stats()
         var dict: [String: Any] = [
             TunnelStatusKey.running: isRunning,
-            TunnelStatusKey.txPackets: tx,
-            TunnelStatusKey.txBytes: txb,
-            TunnelStatusKey.rxPackets: rx,
-            TunnelStatusKey.rxBytes: rxb,
+            TunnelStatusKey.txPackets: stats.txPackets,
+            TunnelStatusKey.txBytes: stats.txBytes,
+            TunnelStatusKey.rxPackets: stats.rxPackets,
+            TunnelStatusKey.rxBytes: stats.rxBytes,
         ]
         if let interfaceName { dict[TunnelStatusKey.interface] = interfaceName }
         if let startedAt { dict[TunnelStatusKey.since] = startedAt.timeIntervalSince1970 }
@@ -247,12 +215,23 @@ final class TunnelEngine {
     /// directory, never a shared one a local user could plant a link in.
     static let stuckEnginePath = BundledEngines.stateDirectory + "/engine-stuck.txt"
 
-    /// Samples this process while the engine thread is stuck and logs that
-    /// thread's stack, so the report shows what it is waiting on.
-    private static func recordStuckEngine() {
+    /// A verified root-only copy of this helper, made once per helper run:
+    /// the engine is never started from the user-writable app bundle.
+    private static var engineCopy: URL?
+    private static func engineExecutable() throws -> URL {
+        if let engineCopy, FileManager.default.isExecutableFile(atPath: engineCopy.path) { return engineCopy }
+        guard let helper = Bundle.main.executableURL else { throw EngineError.engineExited }
+        let copy = try BundledEngines.stagedEngine(helper, identifier: Bundle.main.bundleIdentifier ?? "dev.dpatel.passthrough.helper")
+        engineCopy = copy
+        return copy
+    }
+
+    /// Samples the engine process before it is killed and logs its engine
+    /// thread's stack, so the report shows what it was stuck on.
+    private static func recordStuckEngine(pid: pid_t) {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/sample")
-        process.arguments = ["\(getpid())", "1", "-mayDie", "-file", stuckEnginePath]
+        process.arguments = ["\(pid)", "1", "-mayDie", "-file", stuckEnginePath]
         process.standardOutput = FileHandle.nullDevice
         process.standardError = FileHandle.nullDevice
         do {
