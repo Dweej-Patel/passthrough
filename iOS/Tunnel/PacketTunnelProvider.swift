@@ -7,7 +7,6 @@ import PassthroughCore
 final class PacketTunnelProvider: NEPacketTunnelProvider {
     private var service: PassthroughService?
 
-
     override init() {
         super.init()
         if let url = PassthroughProtocol.sharedLogURL { PassthroughLog.shared.attachFile(url) }
@@ -34,7 +33,6 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
                 try service.start()
                 self?.service = service
                 self?.drainPackets()
-
                 ptLog(.info, "Background host started")
                 completionHandler(nil)
             } catch {
@@ -53,7 +51,6 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         ptLog(.info, "Background host stopping (\(reason.rawValue))")
         service?.stop()
         service = nil
-
         completionHandler()
     }
 

@@ -5,7 +5,8 @@ import Security
 /// wireless link keys). The apps use the Keychain; tests use memory.
 public protocol SecretStore: AnyObject, Sendable {
     func read(_ account: String) -> Data?
-    func write(_ data: Data, account: String)
+    /// False when the secret could not be stored.
+    @discardableResult func write(_ data: Data, account: String) -> Bool
     func delete(_ account: String)
 }
 
@@ -14,7 +15,7 @@ public final class InMemorySecrets: SecretStore, @unchecked Sendable {
     private var items: [String: Data] = [:]
     public init() {}
     public func read(_ account: String) -> Data? { lock.lock(); defer { lock.unlock() }; return items[account] }
-    public func write(_ data: Data, account: String) { lock.lock(); items[account] = data; lock.unlock() }
+    public func write(_ data: Data, account: String) -> Bool { lock.lock(); items[account] = data; lock.unlock(); return true }
     public func delete(_ account: String) { lock.lock(); items[account] = nil; lock.unlock() }
 }
 
@@ -40,15 +41,17 @@ public final class KeychainSecrets: SecretStore, @unchecked Sendable {
         return SecItemCopyMatching(q as CFDictionary, &item) == errSecSuccess ? item as? Data : nil
     }
 
-    public func write(_ data: Data, account: String) {
+    public func write(_ data: Data, account: String) -> Bool {
         let q = query(account)
         let update: [CFString: Any] = [kSecValueData: data, kSecAttrAccessible: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly]
-        if SecItemUpdate(q as CFDictionary, update as CFDictionary) == errSecItemNotFound {
+        var status = SecItemUpdate(q as CFDictionary, update as CFDictionary)
+        if status == errSecItemNotFound {
             var add = q
             update.forEach { add[$0.key] = $0.value }
-            let status = SecItemAdd(add as CFDictionary, nil)
-            if status != errSecSuccess { ptLog(.error, "Could not store a link key (\(status))") }
+            status = SecItemAdd(add as CFDictionary, nil)
         }
+        if status != errSecSuccess { ptLog(.error, "Could not store a link key (\(status))") }
+        return status == errSecSuccess
     }
 
     public func delete(_ account: String) { SecItemDelete(query(account) as CFDictionary) }

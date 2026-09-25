@@ -71,6 +71,7 @@ public final class PassthroughService: @unchecked Sendable {
             let registry = self.registry
             let dialer = WirelessDialer(allowedPorts: [options.socksPort, options.controlPort], peerToPeer: options.peerToPeer) { registry.linkCredentials() }
             dialer.start()
+            control.onLinked = { [weak dialer] in dialer?.refresh() }
             self.dialer = dialer
         }
         startedAt = Date()

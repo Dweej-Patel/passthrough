@@ -67,4 +67,23 @@ final class LinkingTests: XCTestCase {
         registry.revoke(clientID: "mac1")
         XCTAssertTrue(registry.linkCredentials().isEmpty, "unpairing forgets the link")
     }
+
+    /// A link key that cannot be stored leaves the Mac unlinked, so the phone
+    /// sends no "linked" and the Mac offers the link again next time.
+    func testUnstoredKeyDoesNotLink() {
+        final class RefusingSecrets: SecretStore, @unchecked Sendable {
+            func read(_ account: String) -> Data? { nil }
+            func write(_ data: Data, account: String) -> Bool { false }
+            func delete(_ account: String) {}
+        }
+        let suite = "dev.dpatel.passthrough.tests.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let registry = PairingRegistry(defaults: defaults, secrets: RefusingSecrets())
+        let (code, _) = registry.issueCode()
+        guard case .success = registry.pair(code: code, clientID: "mac1", name: "MacBook") else { return XCTFail("pairing failed") }
+        XCTAssertFalse(registry.link(clientID: "mac1", certificateSHA256: String(repeating: "b", count: 64), linkKey: WirelessLink.randomBytes(32)))
+        XCTAssertNil(registry.clients.first?.linkCertificate, "no certificate recorded without its key")
+        XCTAssertFalse(registry.link(clientID: "unknown", certificateSHA256: String(repeating: "b", count: 64), linkKey: WirelessLink.randomBytes(32)))
+    }
 }

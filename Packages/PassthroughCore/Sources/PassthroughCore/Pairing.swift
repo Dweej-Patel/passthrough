@@ -76,14 +76,18 @@ public final class PairingRegistry: @unchecked Sendable {
     }
 
     /// Records what a paired Mac sent over the cable to link wirelessly.
-    public func link(clientID: String, certificateSHA256: String, linkKey: Data) {
+    /// False if the Mac isn't paired or its key could not be stored; the
+    /// Mac is then not linked.
+    @discardableResult
+    public func link(clientID: String, certificateSHA256: String, linkKey: Data) -> Bool {
         lock.lock()
         var list = loadClients()
-        guard let i = list.firstIndex(where: { $0.id == clientID }) else { lock.unlock(); return }
-        secrets.write(linkKey, account: "link." + clientID)
+        guard let i = list.firstIndex(where: { $0.id == clientID }),
+              secrets.write(linkKey, account: "link." + clientID) else { lock.unlock(); return false }
         list[i].linkCertificate = certificateSHA256
         save(list)
         lock.unlock()
+        return true
     }
 
     /// Everything the wireless dialer needs, for every linked Mac.

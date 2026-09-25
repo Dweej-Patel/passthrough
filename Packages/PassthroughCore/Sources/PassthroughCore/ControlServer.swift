@@ -35,6 +35,8 @@ public final class ControlServer: @unchecked Sendable {
     private var peers: [ObjectIdentifier: Peer] = [:]
     public private(set) var isRunning = false
     public var onClientsChanged: (@Sendable ([ConnectedMac]) -> Void)?
+    /// A Mac was just linked for the wireless link, on the control queue.
+    public var onLinked: (@Sendable () -> Void)?
 
     public init(port: UInt16 = PassthroughProtocol.defaultControlPort,
                 socksPort: UInt16,
@@ -146,10 +148,16 @@ public final class ControlServer: @unchecked Sendable {
             // Only a Mac that already proved its pairing token may link.
             guard let mac = peer.mac, let cert = message.certSHA256, cert.count == 64,
                   let key = message.linkKey.flatMap({ Data(base64Encoded: $0) }), key.count == 32 else { return [] }
-            registry.link(clientID: mac.id, certificateSHA256: cert, linkKey: key)
+            // No reply if the key could not be stored: the Mac stays unlinked
+            // and offers the link again next time.
+            guard registry.link(clientID: mac.id, certificateSHA256: cert, linkKey: key) else {
+                ptLog(.error, "Could not link \(mac.name) for the wireless link")
+                return []
+            }
             var reply = ControlEnvelope(t: ControlEnvelope.linked)
             reply.phoneID = registry.phoneID
             ptLog(.info, "Linked \(mac.name) for the wireless link")
+            onLinked?()
             return [reply]
         case ControlEnvelope.ping:
             return [ControlEnvelope(t: ControlEnvelope.pong)]

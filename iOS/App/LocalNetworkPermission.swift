@@ -3,8 +3,9 @@ import Network
 import PassthroughCore
 
 /// Only the app can show iOS's Local Network prompt, and until it has been
-/// answered the tunnel extension's listeners silently receive nothing. A short
-/// peer-to-peer browse from the app raises the prompt.
+/// answered the tunnel extension's browser finds no Macs. A short browse for
+/// the same service from the app raises the prompt; peer-to-peer is included
+/// so the answer covers that setting too.
 enum LocalNetworkPermission {
     private static var browser: NWBrowser?
 

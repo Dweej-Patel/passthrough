@@ -160,7 +160,7 @@ final class AppModel: ObservableObject {
         case .starting: state = .starting
         case .stopping: state = .stopping
         case .stopped:
-            if case .failed = state { return }
+            if case .failed = state { restartWhenStopped = false; return }
             state = .stopped
             inProcessIsActive = false
             stats = ProviderStats(rx: stats.rx, tx: stats.tx, active: 0, totalConnections: stats.totalConnections, macs: [], startedAt: nil)
