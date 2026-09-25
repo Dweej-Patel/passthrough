@@ -22,8 +22,12 @@
 	<string>1</string>
 	<key>ITSAppUsesNonExemptEncryption</key>
 	<false/>
+	<key>NSBonjourServices</key>
+	<array>
+		<string>_ptprobe._tcp</string>
+	</array>
 	<key>NSLocalNetworkUsageDescription</key>
-	<string>Passthrough only listens on the USB link to your Mac.</string>
+	<string>Passthrough reaches your Mac over the USB cable, or over a direct Wi-Fi link when you turn that on.</string>
 	<key>UIApplicationSceneManifest</key>
 	<dict>
 		<key>UIApplicationSupportsMultipleScenes</key>

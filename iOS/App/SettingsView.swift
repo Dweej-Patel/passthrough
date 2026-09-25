@@ -45,6 +45,11 @@ struct SettingsView: View {
                     Button("Forget all paired Macs", role: .destructive) { model.registry.revokeAll() }
                 }
                 .disabled(model.state.isActive)
+                Section {
+                    Toggle("Wireless link test", isOn: $model.peerProbe)
+                } footer: {
+                    Text("Answers pings from the Mac over a direct Wi-Fi link, to test whether a wireless connection holds while this iPhone is locked. Carries no traffic. Takes effect the next time the proxy starts.")
+                }
                 Section("Diagnostics") {
                     DisclosureGroup("Log", isExpanded: $showLog) {
                         if model.logEntries.isEmpty {

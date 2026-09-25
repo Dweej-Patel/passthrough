@@ -16,6 +16,7 @@ let package = Package(
         .target(name: "PhoneTransport", dependencies: ["PassthroughCore"]),
         .target(name: "PassthroughUI", dependencies: ["PassthroughCore"]),
         .executableTarget(name: "passthrough-devserver", dependencies: ["PassthroughCore"]),
+        .executableTarget(name: "passthrough-p2p-probe", dependencies: ["PassthroughCore"]),
         .testTarget(name: "PassthroughCoreTests", dependencies: ["PassthroughCore", "PhoneTransport"]),
     ]
 )

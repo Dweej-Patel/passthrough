@@ -42,6 +42,7 @@ final class AppModel: ObservableObject {
     @AppStorage(SharedKeys.allowUDP, store: AppModel.groupDefaults) var allowUDP = true
     @AppStorage(SharedKeys.socksPort, store: AppModel.groupDefaults) var socksPort = Int(PassthroughProtocol.defaultSOCKSPort)
     @AppStorage(SharedKeys.controlPort, store: AppModel.groupDefaults) var controlPort = Int(PassthroughProtocol.defaultControlPort)
+    @AppStorage(SharedKeys.peerProbe, store: AppModel.groupDefaults) var peerProbe = false
     @AppStorage("hosting", store: AppModel.groupDefaults) var hostingRaw = Hosting.background.rawValue
     var hosting: Hosting {
         get { Hosting(rawValue: hostingRaw) ?? .background }

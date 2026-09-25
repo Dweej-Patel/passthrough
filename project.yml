@@ -47,7 +47,8 @@ targets:
         ITSAppUsesNonExemptEncryption: false
         UIApplicationSceneManifest:
           UIApplicationSupportsMultipleScenes: false
-        NSLocalNetworkUsageDescription: Passthrough only listens on the USB link to your Mac.
+        NSLocalNetworkUsageDescription: Passthrough reaches your Mac over the USB cable, or over a direct Wi-Fi link when you turn that on.
+        NSBonjourServices: [_ptprobe._tcp]
     entitlements:
       path: iOS/App/Passthrough.entitlements
       properties:
@@ -75,6 +76,8 @@ targets:
       path: iOS/Tunnel/Info.plist
       properties:
         CFBundleDisplayName: Passthrough Tunnel
+        NSLocalNetworkUsageDescription: Passthrough reaches your Mac over the USB cable, or over a direct Wi-Fi link when you turn that on.
+        NSBonjourServices: [_ptprobe._tcp]
         NSExtension:
           NSExtensionPointIdentifier: com.apple.networkextension.packet-tunnel
           NSExtensionPrincipalClass: $(PRODUCT_MODULE_NAME).PacketTunnelProvider
