@@ -68,13 +68,17 @@ public enum WirelessLink {
         }
     }
 
-    /// Reads one newline-terminated line (≤ 4 KB); hands back any bytes after it.
+    /// Handshake lines carry every open stream's position when resuming:
+    /// thousands of streams fit well within this.
+    static let handshakeLineLimit = 1 << 20
+
+    /// Reads one newline-terminated line; hands back any bytes after it.
     public static func readLine(_ stream: ByteStream, buffered: Data = Data(), completion: @escaping @Sendable (Result<(Data, Data), Error>) -> Void) {
         if let newline = buffered.firstIndex(of: 0x0A) {
             completion(.success((Data(buffered[..<newline]), Data(buffered[buffered.index(after: newline)...])))); return
         }
-        guard buffered.count < 4096 else { completion(.failure(MuxError.protocolViolation("handshake line too long"))); return }
-        stream.receive(maximumLength: 4096) { data, complete, error in
+        guard buffered.count < handshakeLineLimit else { completion(.failure(MuxError.protocolViolation("handshake line too long"))); return }
+        stream.receive(maximumLength: 65536) { data, complete, error in
             if let error { completion(.failure(error)); return }
             guard let data, !data.isEmpty else { completion(.failure(complete ? MuxError.linkClosed : MuxError.badFrame)); return }
             readLine(stream, buffered: buffered + data, completion: completion)

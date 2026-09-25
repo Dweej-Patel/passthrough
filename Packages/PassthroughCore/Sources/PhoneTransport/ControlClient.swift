@@ -33,6 +33,10 @@ public final class ControlClient: @unchecked Sendable {
     private var closed = false
     private let handler: @Sendable (Event) -> Void
 
+    /// Silence after which the phone counts as gone: short over the cable,
+    /// longer than a wireless link's resume window over the air.
+    private var silenceLimit: TimeInterval { device.medium == .wireless ? Mux.suspendTimeout + 30 : 20 }
+
     public init(device: PhoneDevice, port: UInt16 = PassthroughProtocol.defaultControlPort, identity: Identity, handler: @escaping @Sendable (Event) -> Void) {
         self.device = device
         self.port = port
@@ -98,7 +102,7 @@ public final class ControlClient: @unchecked Sendable {
         timer.schedule(deadline: .now() + 5, repeating: 5)
         timer.setEventHandler { [weak self] in
             guard let self else { return }
-            if Date().timeIntervalSince(self.lastPong) > 20 {
+            if Date().timeIntervalSince(self.lastPong) > self.silenceLimit {
                 self.finish(NSError(domain: "Passthrough", code: 1, userInfo: [NSLocalizedDescriptionKey: "The phone stopped responding"]))
                 return
             }

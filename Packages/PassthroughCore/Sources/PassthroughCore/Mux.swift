@@ -88,7 +88,9 @@ public final class Mux: @unchecked Sendable {
     static let windowUpdate = 64 * 1024
     public static var pingInterval: TimeInterval = 10
     public static var deadAfter: TimeInterval = 30
-    public static var suspendTimeout: TimeInterval = 60
+    /// How long a resumable mux holds its streams for the transport to come
+    /// back. A locked iPhone's peer-to-peer Wi-Fi can vanish for 45 s or more.
+    public static var suspendTimeout: TimeInterval = 120
 
     public let queue: DispatchQueue
     /// Identifies this mux across reconnects.
@@ -178,8 +180,10 @@ public final class Mux: @unchecked Sendable {
                     stream.terminate(MuxError.reset)
                 }
             }
-            // Streams the peer still has but we dropped.
-            for id in peer.keys where streams[id] == nil { write(MuxFrame(.reset, stream: id)) }
+            // Streams the phone still has but the Mac dropped. Only the opener
+            // knows: on the phone an unknown ID may be one the Mac opened during
+            // the outage, whose OPEN is on its way.
+            if isOpener { for id in peer.keys where streams[id] == nil { write(MuxFrame(.reset, stream: id)) } }
             ptLog(.info, "wireless: link resumed with \(streams.count) stream(s)")
             attach(transport, initialBytes: initialBytes)
         }

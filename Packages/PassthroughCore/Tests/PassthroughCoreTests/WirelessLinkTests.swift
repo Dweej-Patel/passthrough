@@ -141,6 +141,50 @@ final class WirelessLinkTests: XCTestCase {
         XCTAssertEqual(got.get(), payload)
     }
 
+    /// Hundreds of open streams make the resume handshake line long; the
+    /// link must still resume, keeping old streams and taking new ones.
+    func testResumeWithManyOpenStreams() {
+        guard let mux = link() else { return XCTFail("no link") }
+        let link = MuxLink(mux: mux)
+        var streams: [ByteStream] = []
+        let opened = expectation(description: "opened")
+        opened.expectedFulfillmentCount = 300
+        // In batches, as real traffic arrives: 300 connects in one instant
+        // would overflow the echo server's listen backlog (128).
+        for batch in 0..<6 {
+            for _ in 0..<50 {
+                link.connect(port: echoPort, queue: .global()) { result in
+                    if case .success(let s) = result { streams.append(s) }
+                    opened.fulfill()
+                }
+            }
+            if batch < 5 { Thread.sleep(forTimeInterval: 0.2) }
+        }
+        wait(for: [opened], timeout: 10)
+        // Let the phone see all 300 before the drop.
+        let settled = expectation(description: "settled")
+        DispatchQueue.global().asyncAfter(deadline: .now() + 1) { settled.fulfill() }
+        wait(for: [settled], timeout: 3)
+        mux.interruptForTesting()
+        func roundTrip(_ stream: ByteStream, _ text: String) -> XCTestExpectation {
+            let done = expectation(description: text)
+            stream.send(Data(text.utf8), isComplete: false) { _ in }
+            stream.receive(maximumLength: 100) { data, _, error in
+                XCTAssertNil(error); XCTAssertEqual(data.map { String(decoding: $0, as: UTF8.self) }, text); done.fulfill()
+            }
+            return done
+        }
+        let old = roundTrip(streams[150], "still here")
+        var fresh: ByteStream?
+        let newOne = expectation(description: "new stream")
+        link.connect(port: echoPort, queue: .global()) { result in
+            if case .success(let s) = result { fresh = s }
+            newOne.fulfill()
+        }
+        wait(for: [old, newOne], timeout: 15)
+        wait(for: [roundTrip(fresh!, "and new")], timeout: 10)
+    }
+
     func testOnlyAllowedPortsCanBeOpened() {
         guard let mux = link() else { return XCTFail("no link") }
         let refused = expectation(description: "refused")
