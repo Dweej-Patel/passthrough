@@ -148,8 +148,8 @@ final class SessionCoordinator: ObservableObject {
     @Published private(set) var wirelessCarrier: String?
     private func refreshWirelessCarrier() {
         guard let device, device.medium == .wireless, device.id.hasPrefix("wifi:") else { wirelessCarrier = nil; return }
-        let interface = wirelessWatcher.interfaces[String(device.id.dropFirst(5))]
-        wirelessCarrier = WirelessLink.carrier(interface: interface, onPhoneHotspot: onPhoneHotspot)
+        let carrier = wirelessWatcher.carriers[String(device.id.dropFirst(5))] ?? WirelessLink.carrier(interface: nil)
+        wirelessCarrier = carrier == "Wi-Fi network" && onPhoneHotspot ? "Hotspot" : carrier
     }
     /// "iPhone" or "Android phone" for the attached device; "phone" when none.
     var phoneKindName: String { device?.kindName ?? "phone" }
@@ -194,7 +194,7 @@ final class SessionCoordinator: ObservableObject {
         androidWatcher.onStatusChange = { [weak self] status in self?.androidWatch = status }
         wirelessWatcher.onStatusChange = { [weak self] status in self?.wirelessWatch = status }
         wirelessWatcher.peerToPeer = peerToPeer
-        wirelessWatcher.onInterfaceChange = { [weak self] in self?.refreshWirelessCarrier() }
+        wirelessWatcher.onCarrierChange = { [weak self] in self?.refreshWirelessCarrier() }
         wifiMonitor.pathUpdateHandler = { [weak self] path in
             let hotspot = path.status == .satisfied && path.isExpensive
             Task { @MainActor in
@@ -318,6 +318,7 @@ final class SessionCoordinator: ObservableObject {
             return
         }
         await ensureHelperCurrent()
+        await teardownTask?.value
         guard generation == gen else { return }
 
         // 2. Loopback forwarder over the phone's link
@@ -510,11 +511,16 @@ final class SessionCoordinator: ObservableObject {
         phase = next
         // Routes first, then the loopback listener: while the utun still owns the
         // default route, a closed listener would just refuse every connection.
-        Task {
+        let previous = teardownTask
+        teardownTask = Task {
+            await previous?.value
             if hadTunnel { await helper.stopTunnel() }
             forwarder?.stop()
         }
     }
+    /// The last teardown; a new connection waits for it, or its forwarder
+    /// would find the loopback port still taken.
+    private var teardownTask: Task<Void, Never>?
 
     private func shutdownForQuit() {
         wantsConnection = false

@@ -49,7 +49,7 @@ final class MemoryStream: ByteStream, @unchecked Sendable {
         guard let (completion, max) = waiting else { lock.unlock(); return }
         if !buffer.isEmpty {
             let n = min(max, buffer.count)
-            let chunk = buffer.prefix(n); buffer.removeFirst(n)
+            let chunk = buffer.prefix(n); buffer.removeSubrange(buffer.startIndex ..< buffer.startIndex + n)
             waiting = nil; lock.unlock()
             DispatchQueue.global().async { completion(Data(chunk), false, nil) }
         } else if finished {
@@ -121,6 +121,40 @@ final class MuxTests: XCTestCase {
         wait(for: expectations, timeout: 20)
         for got in results { XCTAssertEqual(got.get(), payload) }
         XCTAssertEqual(Set(ports.get()), [7890, 7891])
+    }
+
+    /// A long, busy stream must not keep what it already delivered: the phone's
+    /// tunnel has a 50 MB memory limit and a speed test moves hundreds of MB.
+    func testLongStreamDoesNotHoldDeliveredBytes() throws {
+        let (mac, phone) = linked()
+        let total = 128 * 1024 * 1024
+        let received = Locked(0), done = expectation(description: "drained")
+        let before = try XCTUnwrap(PassthroughService.footprintMB())
+        let grown = Locked(0)
+        phone.onOpen = { _, stream in
+            func drain() {
+                // Reads smaller than a frame, like a slow uplink: the buffer never empties.
+                stream.receive(maximumLength: 5_000) { data, complete, _ in
+                    let was = received.get(), now = was + (data?.count ?? 0)
+                    received.set(now)
+                    // Measure mid-transfer: closing the stream frees whatever it kept.
+                    if was < total * 3 / 4, now >= total * 3 / 4 { grown.set((PassthroughService.footprintMB() ?? 0) - before) }
+                    complete ? done.fulfill() : drain()
+                }
+            }
+            // Start once the window is full, so the buffer stays partly filled.
+            DispatchQueue.global().asyncAfter(deadline: .now() + 0.05) { drain() }
+        }
+        let stream = mac.open(port: 7890)
+        let chunk = Data(repeating: 7, count: 256 * 1024)
+        func push(_ left: Int) {
+            guard left > 0 else { stream.send(nil, isComplete: true) { _ in }; return }
+            stream.send(chunk, isComplete: false) { error in if error == nil { push(left - chunk.count) } }
+        }
+        push(total)
+        wait(for: [done], timeout: 60)
+        XCTAssertEqual(received.get(), total)
+        XCTAssertLessThan(grown.get(), 16, "memory grew \(grown.get()) MB moving \(total >> 20) MB")
     }
 
     func testResetAndLinkLossReachTheOtherSide() {

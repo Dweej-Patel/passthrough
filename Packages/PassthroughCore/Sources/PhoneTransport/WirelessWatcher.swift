@@ -26,10 +26,10 @@ public final class WirelessWatcher: DeviceWatcher {
     public private(set) var status = WatchStatus() { didSet { if status != oldValue { onStatusChange?(status) } } }
     public var onDevicesChange: (([PhoneDevice]) -> Void)?
     public var onStatusChange: ((WatchStatus) -> Void)?
-    /// A linked phone's connection now arrives on another interface.
-    public var onInterfaceChange: (() -> Void)?
-    /// Interface each linked phone's connection currently uses.
-    public private(set) var interfaces: [String: String] = [:]
+    /// A linked phone's connection is now carried differently.
+    public var onCarrierChange: (() -> Void)?
+    /// What carries each linked phone's connection ("Hotspot", "Peer-to-peer", …).
+    public private(set) var carriers: [String: String] = [:]
 
     private let macTag: @Sendable () -> String
     private let identity: () throws -> MacIdentity
@@ -55,11 +55,11 @@ public final class WirelessWatcher: DeviceWatcher {
                 phones().first { $0.phoneID == id }?.linkKey
             }
             listener.onLink = { [weak self] link in Task { @MainActor in self?.linked(link) } }
-            listener.onResume = { [weak self] id, interface in
+            listener.onResume = { [weak self] id, carrier in
                 Task { @MainActor in
                     guard let self else { return }
-                    self.interfaces[id] = interface
-                    self.onInterfaceChange?()
+                    self.carriers[id] = carrier
+                    self.onCarrierChange?()
                 }
             }
             try listener.start()
@@ -109,7 +109,7 @@ public final class WirelessWatcher: DeviceWatcher {
         let device = PhoneDevice.wireless(phoneID: id, kind: phone.isAndroid ? .android : .iPhone, label: phone.label,
                                           pairingSlot: phone.pairingSlot, link: MuxLink(mux: mux))
         links[id] = (mux, device)
-        interfaces[id] = link.interface
+        carriers[id] = link.carrier
         if !order.contains(id) { order.append(id) }
         mux.start()
         ptLog(.info, "wireless: \(phone.label) linked")
@@ -118,6 +118,6 @@ public final class WirelessWatcher: DeviceWatcher {
 
     private func publish() {
         onDevicesChange?(order.compactMap { links[$0]?.device })
-        onInterfaceChange?()
+        onCarrierChange?()
     }
 }

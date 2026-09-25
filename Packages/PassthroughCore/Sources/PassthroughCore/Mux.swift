@@ -332,6 +332,10 @@ public final class MuxStream: ByteStream, @unchecked Sendable {
     private var registered = false
     private var queuedBeforeLink: [() -> Void] = []
 
+    // Buffers are trimmed with removeSubrange, never removeFirst: on Data,
+    // removeFirst only moves the start index, so a busy stream would keep
+    // every byte it ever carried until it closed.
+
     // Receiving
     private var received = Data()
     private var receivedTotal: UInt64 = 0
@@ -449,7 +453,7 @@ public final class MuxStream: ByteStream, @unchecked Sendable {
     private func confirm(upTo offset: UInt64) {
         guard offset > unconfirmedStart else { return }
         let n = Int(min(offset - unconfirmedStart, UInt64(unconfirmed.count)))
-        unconfirmed.removeFirst(n)
+        unconfirmed.removeSubrange(unconfirmed.startIndex ..< unconfirmed.startIndex + n)
         unconfirmedStart += UInt64(n)
     }
 
@@ -475,7 +479,7 @@ public final class MuxStream: ByteStream, @unchecked Sendable {
         if !received.isEmpty {
             let n = min(pending.max, received.count)
             let chunk = received.prefix(n)
-            received.removeFirst(n)
+            received.removeSubrange(received.startIndex ..< received.startIndex + n)
             consumed += UInt64(n)
             if consumed - advertised >= UInt64(Mux.windowUpdate), !remoteFinished {
                 mux.write(MuxFrame(.window, stream: id, payload: MuxFrame.uint64(consumed)))
@@ -502,7 +506,7 @@ public final class MuxStream: ByteStream, @unchecked Sendable {
                 mux.write(MuxFrame(.data, stream: id, payload: Data(chunk)))
                 unconfirmed.append(chunk)
                 sent += UInt64(n)
-                item.data.removeFirst(n)
+                item.data.removeSubrange(item.data.startIndex ..< item.data.startIndex + n)
             }
             sendQueue.removeFirst()
             if item.isComplete {

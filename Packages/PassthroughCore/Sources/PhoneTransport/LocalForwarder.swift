@@ -59,7 +59,7 @@ public final class LocalForwarder: @unchecked Sendable {
         stateQueue.async {
             guard Date().timeIntervalSince(self.lastFailureLog) > 2 else { return }
             self.lastFailureLog = Date()
-            ptLog(.warning, "USB connect to the phone failed: \(error.localizedDescription)")
+            ptLog(.warning, "\(self.device.medium == .usb ? "USB" : "Wireless") connect to the phone failed: \(error.localizedDescription)")
         }
     }
 

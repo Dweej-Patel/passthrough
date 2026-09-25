@@ -75,6 +75,19 @@ final class WirelessLinkTests: XCTestCase {
         MacIdentity.delete(label: label, dataProtection: false)
     }
 
+    /// Personal Hotspot is named from its addresses, whatever the interface is called.
+    func testCarrierNames() {
+        XCTAssertTrue(WirelessLink.isHotspotAddress(.hostPort(host: "172.20.10.1", port: 1)))
+        XCTAssertTrue(WirelessLink.isHotspotAddress(.hostPort(host: "172.20.10.14", port: 1)))
+        XCTAssertFalse(WirelessLink.isHotspotAddress(.hostPort(host: "172.20.10.16", port: 1)))
+        XCTAssertFalse(WirelessLink.isHotspotAddress(.hostPort(host: "192.168.1.20", port: 1)))
+        XCTAssertFalse(WirelessLink.isHotspotAddress(nil))
+        XCTAssertEqual(WirelessLink.carrier(interface: "awdl0"), "Peer-to-peer")
+        XCTAssertEqual(WirelessLink.carrier(interface: "bridge100"), "Hotspot")
+        XCTAssertEqual(WirelessLink.carrier(interface: "en0", onPhoneHotspot: true), "Hotspot")
+        XCTAssertEqual(WirelessLink.carrier(interface: "en0"), "Wi-Fi network")
+    }
+
     func testCertificateIsWellFormedAndKeychainIdentityIsStable() throws {
         XCTAssertNotNil(SecCertificateCreateWithData(nil, identity.certificate as CFData))
         let stored = try MacIdentity.loadOrCreate(label: label, dataProtection: false)

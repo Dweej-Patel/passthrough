@@ -58,8 +58,23 @@ public enum WirelessLink {
         return "Wi-Fi network"
     }
 
+    /// What carries a link's connection. Personal Hotspot is also recognised
+    /// by its addresses (always 172.20.10.0/28), whatever iOS names the
+    /// interface on its side.
+    public static func carrier(of stream: ByteStream) -> String {
+        let path = (stream as? ConnectionStream)?.connection.currentPath
+        let hotspot = [path?.localEndpoint, path?.remoteEndpoint].contains { isHotspotAddress($0) }
+        return carrier(interface: interfaceName(of: stream), onPhoneHotspot: hotspot)
+    }
+
     public static func interfaceName(of stream: ByteStream) -> String? {
         (stream as? ConnectionStream)?.connection.currentPath?.availableInterfaces.first?.name
+    }
+
+    static func isHotspotAddress(_ endpoint: NWEndpoint?) -> Bool {
+        guard case .hostPort(.ipv4(let address), _)? = endpoint else { return false }
+        let b = [UInt8](address.rawValue)
+        return b.count == 4 && b[0] == 172 && b[1] == 20 && b[2] == 10 && b[3] < 16
     }
 
     public static func fingerprint(_ certificate: Data) -> String {
@@ -287,7 +302,9 @@ private final class MacLink: @unchecked Sendable {
         stream.onTerminated = nil
         attempt = nil
         failures = 0
-        carrier = WirelessLink.carrier(interface: WirelessLink.interfaceName(of: stream))
+        carrier = WirelessLink.carrier(of: stream)
+        let local = stream.connection.currentPath?.localEndpoint.map { "\($0)" } ?? "?"
+        let via = "\(WirelessLink.interfaceName(of: stream) ?? "?"), \(local)"
         if message.t == "resume", let mux {
             mux.resume(on: stream, peerStreams: message.streams ?? [], initialBytes: rest)
         } else if message.t == "fresh", let session = message.session {
@@ -312,7 +329,7 @@ private final class MacLink: @unchecked Sendable {
             return
         }
         isUp = true
-        ptLog(.info, "wireless: linked with Mac \(tag) over \(carrier ?? "?")")
+        ptLog(.info, "wireless: linked with Mac \(tag) over \(carrier ?? "?") (\(via))")
         changed()
     }
 
