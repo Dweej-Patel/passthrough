@@ -69,7 +69,9 @@ Off by default. Set **Connect over** to **Wireless only** or **Automatic** in th
 A toggle in the menu panel (and Settings ▸ General) keeps the Mac from sleeping so long sessions survive when you step away — a download, a remote/Claude session, or the tunnel itself. It has two layers:
 
 * Idle sleep is held with an `IOPMAssertion` (no privileges).
-* Lid-close sleep is disabled via the root helper running `pmset -a disablesleep 1`.
+* Lid-close sleep is disabled via the root helper running `pmset -a disablesleep 1`. Until the helper is approved only idle sleep is held, and the menu says so.
+
+The display still turns off and the screen still locks on their usual schedule; that pauses nothing. Apps and command-line tools, such as a Claude Code session and the agents it starts, keep running with the lid open or closed. They still need a network: over Passthrough that means the phone link stays up (it does with the phone locked). If the Mac does sleep (keep-awake off, the battery or heat limits below, or macOS forcing it), everything pauses, work in flight is likely to fail, and you resume it after waking.
 
 It is **off by default**, sits directly under the passthrough switch, and works even when passthrough is off. It reverts automatically when you turn it off, quit the app, or if the app disconnects (the helper re-enables sleep when its last client goes away), so the Mac can never get stuck unable to sleep.
 
