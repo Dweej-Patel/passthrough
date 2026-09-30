@@ -259,12 +259,18 @@ final class VPNEngine {
             lastError = nil
             installQuarterRoutes(on: iface)
             removeRejectRoutes()
-            applyDNS(dns.isEmpty ? config.fallbackDNS : dns, interface: iface, address: address, gateway: gateway)
+            // OpenVPN: the pushed resolvers first, then the fallback. NordVPN's stall
+            // for seconds at a time, and with no second choice every lookup, and so
+            // every new connection, stalled with them. The fallback is reached
+            // through the VPN too (the /2 routes), so nothing leaks to the underlay.
+            let servers = config.engine == .openvpn ? dns + config.fallbackDNS.filter { !dns.contains($0) }
+                : dns.isEmpty ? config.fallbackDNS : dns
+            applyDNS(servers, interface: iface, address: address, gateway: gateway)
             state = .connected
             HelperLog.info("vpn: connected on \(iface) (dns \(activeDNS.joined(separator: ", ")))")
             // WireGuard re-handshakes every two minutes and has its own check.
-            if config.engine == .openvpn, let dns = activeDNS.first {
-                liveness.start(interface: iface, dnsServer: dns) { [weak self] in self?.runner?.stats().0 ?? 0 }
+            if config.engine == .openvpn {
+                liveness.start(interface: iface, dnsServers: activeDNS) { [weak self] in (self?.runner as? OpenVPNRunner)?.linkRxBytes() ?? 0 }
             }
         case .reconnecting(let why):
             HelperLog.warn("vpn: session lost (\(why)); engine is reconnecting")
