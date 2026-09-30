@@ -425,17 +425,26 @@ struct TopAppsPanel: View {
     @ObservedObject var usage: NettopSampler
 
     var body: some View {
-        if session.phase.isConnected, !usage.top.isEmpty {
+        if session.phase.isConnected, usage.unavailable || !usage.top.isEmpty {
             PTCard(padding: 14) {
                 VStack(alignment: .leading, spacing: 8) {
                     Text("Top apps this session").font(.caption).foregroundStyle(.secondary)
-                    ForEach(usage.top, id: \.app.key) { entry in
-                        row(Image(nsImage: AppIcon.image(forKey: entry.app.key)), entry.app.name, entry.total)
-                    }
-                    let other = usage.other(sessionTotal: session.sessionRx + session.sessionTx)
-                    if other > 0 {
-                        row(Image(systemName: "ellipsis.circle"),
-                            vpnLayer.status.isConnected ? "Other (short connections, VPN overhead)" : "Other (short connections)", other, lines: 2)
+                    if usage.unavailable {
+                        HStack(alignment: .top, spacing: 6) {
+                            Image(systemName: "exclamationmark.triangle.fill").font(.caption2)
+                            Text("Per-app usage unavailable: nettop isn't running").font(.caption2)
+                            Spacer(minLength: 0)
+                        }
+                        .foregroundStyle(PTTheme.warning)
+                    } else {
+                        let shown = usage.breakdown(sessionTotal: session.sessionRx + session.sessionTx)
+                        ForEach(shown.top, id: \.app.key) { entry in
+                            row(Image(nsImage: AppIcon.image(forKey: entry.app.key)), entry.app.name, entry.total)
+                        }
+                        if shown.other > 0 {
+                            row(Image(systemName: "ellipsis.circle"),
+                                vpnLayer.status.isConnected ? "Other (short connections, VPN overhead)" : "Other (short connections)", shown.other, lines: 2)
+                        }
                     }
                 }
             }

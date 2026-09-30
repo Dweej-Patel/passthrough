@@ -11,6 +11,8 @@ import PhoneTransport
 final class NettopSampler: ObservableObject {
     @Published private(set) var top: [AppUsageEntry] = []
     @Published private(set) var attributed: Int64 = 0
+    /// nettop couldn't be run, or kept exiting: the numbers stopped updating.
+    @Published private(set) var unavailable = false
     private var session: Date?
     private var interfaces: Set<String> = []
     private let engine = NettopEngine()
@@ -23,6 +25,12 @@ final class NettopSampler: ObservableObject {
                 self.attributed = attributed
             }
         }
+        engine.onUnavailable = { [weak self] session in
+            Task { @MainActor in
+                guard let self, self.session == session else { return }
+                self.unavailable = true
+            }
+        }
     }
 
     /// Called on every tick while connected: a new session starts a fresh
@@ -31,11 +39,11 @@ final class NettopSampler: ObservableObject {
         if session != self.session {
             self.session = session
             self.interfaces = interfaces
-            top = []; attributed = 0
-            engine.start(tracked: interfaces, session: session)
+            top = []; attributed = 0; unavailable = false
+            engine.start(tracked: NettopInterface.names(interfaces), session: session)
         } else if interfaces != self.interfaces {
             self.interfaces = interfaces
-            engine.track(interfaces)
+            engine.track(NettopInterface.names(interfaces))
         }
     }
 
@@ -43,11 +51,14 @@ final class NettopSampler: ObservableObject {
         guard session != nil else { return }
         session = nil
         interfaces = []
-        top = []; attributed = 0
+        top = []; attributed = 0; unavailable = false
         engine.stop()
     }
 
-    func other(sessionTotal: Int64) -> Int64 { max(0, sessionTotal - attributed) }
+    /// The top apps and "Other", fitted to the session total the card shows.
+    func breakdown(sessionTotal: Int64) -> AppUsageBreakdown {
+        AppUsageBreakdown(top: top, attributed: attributed, sessionTotal: sessionTotal)
+    }
 
     /// Previews and snapshots.
     func debugApply(_ entries: [AppUsageEntry]) {
@@ -59,6 +70,7 @@ final class NettopSampler: ObservableObject {
 /// The off-main part. All state is confined to `queue`.
 private final class NettopEngine: @unchecked Sendable {
     var onUpdate: ((Date, [AppUsageEntry], Int64) -> Void)?
+    var onUnavailable: ((Date) -> Void)?
     private let queue = DispatchQueue(label: "dev.dpatel.passthrough.nettop", qos: .utility)
     private let resolver = RunningAppResolver()
     private var tally: AppUsageTally?
@@ -77,6 +89,7 @@ private final class NettopEngine: @unchecked Sendable {
         queue.async { [self] in
             halt()
             self.session = session
+            resolver.reset()
             tally = AppUsageTally(tracked: tracked, resolver: resolver)
             policy = BatchRestartPolicy()
             launch(generation)
@@ -135,6 +148,7 @@ private final class NettopEngine: @unchecked Sendable {
         } catch {
             pipe.fileHandleForReading.readabilityHandler = nil
             ptLog(.warning, "Per-app usage unavailable: couldn't run nettop (\(error.localizedDescription))")
+            onUnavailable?(session)
         }
     }
 
@@ -179,6 +193,7 @@ private final class NettopEngine: @unchecked Sendable {
             launch(gen)
         } else {
             ptLog(.warning, "Per-app usage stopped: nettop keeps exiting straight away")
+            onUnavailable?(session)
         }
     }
 }
@@ -188,6 +203,9 @@ private final class NettopEngine: @unchecked Sendable {
 /// Called on the engine's queue only.
 private final class RunningAppResolver: AppResolver, @unchecked Sendable {
     private var cache: [String: AppIdentity] = [:]
+
+    /// A new session: pids from the last one may have been reused since.
+    func reset() { cache = [:] }
 
     func identity(pid: Int32, processName: String) -> AppIdentity {
         let cacheKey = "\(pid)|\(processName)"

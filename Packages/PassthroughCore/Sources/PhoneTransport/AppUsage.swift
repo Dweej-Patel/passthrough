@@ -7,6 +7,11 @@ import Foundation
 // interface, so the tally credits the growth of open sockets on the tunnel's
 // interface; bytes moved by sockets that close between samples can't be tied
 // to the tunnel and stay unattributed ("Other").
+//
+// Socket rows are BSD sockets (`tcp4`, `tcp6`, `udp4`, `udp6`, with the
+// interface's name) and Network.framework QUIC flows (`quic4`, `quic6`, e.g.
+// `quic6 .64600<->.65013,idx-25,...`), whose interface is `idx-` and the
+// interface's index instead.
 
 /// The command the sampler runs, shared with the smoke test so a format change
 /// in the exact production invocation is caught.
@@ -27,6 +32,7 @@ public struct NettopRecord: Equatable, Sendable {
     public var processName: String
     /// e.g. "tcp4 192.0.2.10:52467<->198.51.100.7:443"; with `pid`, names the socket.
     public var label: String
+    /// An interface name ("utun6"), or "idx-" and its index for a QUIC flow ("idx-28").
     public var interface: String
     public var bytesIn: Int64
     public var bytesOut: Int64
@@ -65,11 +71,15 @@ public struct NettopParser {
         }
         guard hasHeader, fields.count > max(label, interface, bytesIn, bytesOut) else { return .skipped }
         let name = fields[label]
-        if ["tcp4 ", "tcp6 ", "udp4 ", "udp6 "].contains(where: name.hasPrefix) {
+        if Self.socketKinds.contains(where: name.hasPrefix) {
             guard let process, let rx = Self.count(fields[bytesIn]), let tx = Self.count(fields[bytesOut]) else { return .skipped }
             return .connection(NettopRecord(pid: process.pid, processName: process.name, label: name,
                                             interface: fields[interface], bytesIn: rx, bytesOut: tx))
         }
+        // A row naming endpoints or an interface is a socket of a kind not
+        // known here, not a process: its trailing port isn't a pid, and the
+        // rows after it still belong to the current process.
+        if name.contains("<->") || !fields[interface].isEmpty { return .skipped }
         guard let dot = name.lastIndex(of: "."), dot > name.startIndex, let pid = Int32(name[name.index(after: dot)...]) else {
             process = nil
             return .skipped
@@ -78,6 +88,8 @@ public struct NettopParser {
         process = (pid, processName)
         return .process(pid: pid, name: processName)
     }
+
+    static let socketKinds = ["tcp4 ", "tcp6 ", "udp4 ", "udp6 ", "quic4 ", "quic6 "]
 
     /// Listening sockets print empty counts.
     private static func count(_ field: String) -> Int64? { field.isEmpty ? 0 : Int64(field) }
@@ -104,15 +116,18 @@ public struct AppUsageEntry: Equatable, Sendable {
 }
 
 /// Session totals per app, from running socket totals. Rows are collected
-/// per sample and credited when the sample closes: each socket's growth since
-/// the last complete sample, so a `nettop` restart never counts anything twice.
+/// per sample and credited when the sample closes: each socket's growth past
+/// the highest totals it has shown, so a `nettop` restart never counts
+/// anything twice, and neither does a bad reading.
 public struct AppUsageTally {
-    /// Interfaces whose sockets count: the tunnel the apps' traffic is on.
+    /// Interfaces whose sockets count: the tunnel the apps' traffic is on,
+    /// by name and as QUIC rows name it (see `NettopInterface.names`).
     public var tracked: Set<String>
     private let resolver: any AppResolver
     private var entries: [String: AppUsageEntry] = [:]
-    /// Running totals per socket in the last closed sample.
-    private var seen: [Socket: Totals] = [:]
+    /// Highest running totals per socket, and how many complete samples in
+    /// a row have left it out.
+    private var seen: [Socket: Seen] = [:]
     /// The sample being read. Rows sharing a key (unconnected UDP) are summed.
     private var current: [Socket: Totals] = [:]
     /// The session's first sample is a baseline: sockets already open on the
@@ -124,6 +139,12 @@ public struct AppUsageTally {
     private var dropNextSample = true
     private var dropping = false
 
+    /// Complete samples a socket can be left out of before it is forgotten.
+    /// A live socket missing from one sample must not count its whole total
+    /// again when it's back; closed sockets must not pile up. 15 samples is
+    /// 30 seconds at the sampler's interval.
+    public static let forgetAfterMissedSamples = 15
+
     private struct Socket: Hashable {
         var pid: Int32
         var label: String
@@ -131,14 +152,14 @@ public struct AppUsageTally {
         var processName: String
     }
     private struct Totals { var rx: Int64; var tx: Int64 }
+    private struct Seen { var totals: Totals; var missed = 0 }
 
     public init(tracked: Set<String>, resolver: any AppResolver) {
         self.tracked = tracked
         self.resolver = resolver
     }
 
-    /// A new sample starts: close the one being read. Sockets it no longer
-    /// listed have closed, so a new socket reusing a label counts from zero.
+    /// A new sample starts: close the one being read.
     public mutating func beginSample() {
         if dropNextSample {
             dropNextSample = false
@@ -146,21 +167,15 @@ public struct AppUsageTally {
             return
         }
         dropping = false
-        guard !current.isEmpty else { return }
-        credit()
-        seen = current
-        current = [:]
+        close(complete: true)
     }
 
     /// The batch ended: credit its last sample, which may have been cut short,
-    /// so remember its sockets without forgetting the ones it didn't reach.
+    /// so the sockets it didn't reach don't count as missing.
     public mutating func endBatch() {
         dropNextSample = true
         dropping = false
-        guard !current.isEmpty else { return }
-        credit()
-        seen.merge(current) { $1 }
-        current = [:]
+        close(complete: false)
     }
 
     public mutating func add(_ record: NettopRecord) {
@@ -170,18 +185,32 @@ public struct AppUsageTally {
         current[socket, default: Totals(rx: 0, tx: 0)].tx += record.bytesOut
     }
 
-    private mutating func credit() {
-        guard baselined else { baselined = true; return }
-        for (socket, now) in current where tracked.contains(socket.interface) {
-            var grewIn = now.rx, grewOut = now.tx
-            if let last = seen[socket], now.rx >= last.rx, now.tx >= last.tx {
-                grewIn -= last.rx; grewOut -= last.tx
-            }
-            guard grewIn > 0 || grewOut > 0 else { continue }
+    private mutating func close(complete: Bool) {
+        guard !current.isEmpty else { return }
+        let counting = baselined
+        baselined = true
+        for (socket, now) in current {
+            // A counter below the socket's highest reading is a bad reading
+            // (nettop lists sockets at 0 before it has read them), not a new
+            // socket: only growth past the highest reading counts.
+            let last = seen[socket]?.totals ?? Totals(rx: 0, tx: 0)
+            let grewIn = max(0, now.rx - last.rx), grewOut = max(0, now.tx - last.tx)
+            seen[socket] = Seen(totals: Totals(rx: max(last.rx, now.rx), tx: max(last.tx, now.tx)))
+            guard counting, tracked.contains(socket.interface), grewIn > 0 || grewOut > 0 else { continue }
             let app = resolver.identity(pid: socket.pid, processName: socket.processName)
             entries[app.key, default: AppUsageEntry(app: app)].bytesIn += grewIn
             entries[app.key, default: AppUsageEntry(app: app)].bytesOut += grewOut
         }
+        if complete {
+            for (socket, entry) in seen where current[socket] == nil {
+                if entry.missed >= Self.forgetAfterMissedSamples {
+                    seen[socket] = nil
+                } else {
+                    seen[socket]?.missed += 1
+                }
+            }
+        }
+        current = [:]
     }
 
     public var attributed: Int64 { entries.values.reduce(0) { $0 + $1.total } }
@@ -190,12 +219,46 @@ public struct AppUsageTally {
         Array(entries.values.sorted { $0.total != $1.total ? $0.total > $1.total : $0.app.name < $1.app.name }.prefix(n))
     }
 
-    /// What the session moved that no open socket on the tunnel accounts for.
-    public func other(sessionTotal: Int64) -> Int64 { max(0, sessionTotal - attributed) }
-
     public mutating func reset() {
         entries = [:]; seen = [:]; current = [:]; baselined = false
         dropNextSample = true; dropping = false
+    }
+}
+
+/// What the card shows: the top apps and "Other", never adding up to more
+/// than the session total. nettop and the tunnel's counters are read at
+/// different moments, so the apps can briefly run ahead of the total; they
+/// are then scaled down to fit it and "Other" is 0.
+public struct AppUsageBreakdown: Equatable, Sendable {
+    public var top: [AppUsageEntry]
+    public var other: Int64
+
+    /// `attributed` is what every app was credited, shown or not.
+    public init(top: [AppUsageEntry], attributed: Int64, sessionTotal: Int64) {
+        let total = max(0, sessionTotal)
+        guard attributed > total else {
+            self.top = top
+            self.other = total - attributed
+            return
+        }
+        let scale = Double(total) / Double(attributed)
+        self.top = top.map {
+            AppUsageEntry(app: $0.app, bytesIn: Int64((Double($0.bytesIn) * scale).rounded(.down)),
+                          bytesOut: Int64((Double($0.bytesOut) * scale).rounded(.down)))
+        }
+        self.other = 0
+    }
+}
+
+public enum NettopInterface {
+    /// `interfaces` as socket rows name them: by name, and as `idx-` and the
+    /// interface's index for QUIC flows. An interface that doesn't exist
+    /// (index 0) keeps only its name.
+    public static func names(_ interfaces: Set<String>, index: (String) -> UInt32 = { if_nametoindex($0) }) -> Set<String> {
+        interfaces.reduce(into: interfaces) { names, interface in
+            let i = index(interface)
+            if i != 0 { names.insert("idx-\(i)") }
+        }
     }
 }
 
