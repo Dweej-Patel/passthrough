@@ -1,0 +1,87 @@
+UDP-in-TCP: a datagram larger than the buffer (1500 bytes less the address)
+made the receive side return -1, and the session splice then stopped reading
+that direction for good while still sending: VPN sessions (OpenVPN packets of
+~1524 bytes) went silent after the first full-size packet from the server.
+
+- UDP_BUF_SIZE 1500 -> 4096 (task stacks are sized from it).
+- An oversized datagram is read and dropped, keeping the stream in sync.
+- Either direction failing ends the UDP session instead of half-running it.
+
+Applies to hev-socks5-tunnel e802f02 (core 162dd99); the same code is upstream.
+diff --git a/src/hev-config-const.h b/src/hev-config-const.h
+index ed6d8ff..e3ae036 100644
+--- a/src/hev-config-const.h
++++ b/src/hev-config-const.h
+@@ -14,7 +14,7 @@
+ #define MINOR_VERSION (17)
+ #define MICRO_VERSION (1)
+ 
+-static const int UDP_BUF_SIZE = 1500;
++static const int UDP_BUF_SIZE = 4096;
+ static const int UDP_POOL_SIZE = 512;
+ static const int TASK_STACK_SIZE = 20480;
+ 
+diff --git a/src/hev-socks5-session-udp.c b/src/hev-socks5-session-udp.c
+index 9a283f2..9d14558 100644
+--- a/src/hev-socks5-session-udp.c
++++ b/src/hev-socks5-session-udp.c
+@@ -287,6 +287,12 @@ hev_socks5_session_udp_splice (HevSocks5Session *base)
+         if (res_b >= 0)
+             res_b = hev_socks5_session_udp_fwd_b (self, num);
+ 
++        /* Either direction failing ends the session. Carrying on with the
++         * other one alone left a session that sent but never read replies,
++         * so the flow went silent until it idled out. */
++        if (res_f < 0 || res_b < 0)
++            break;
++
+         if (res_f > 0 || res_b > 0)
+             type = HEV_TASK_YIELD;
+         else if ((res_f & res_b) == 0)
+diff --git a/src/core/src/hev-socks5-udp.c b/src/core/src/hev-socks5-udp.c
+index 084c03b..6fcf668 100644
+--- a/src/core/src/hev-socks5-udp.c
++++ b/src/core/src/hev-socks5-udp.c
+@@ -44,6 +44,26 @@ task_io_yielder (HevTaskYieldType type, void *data)
+     return hev_socks5_task_io_yielder (type, data);
+ }
+ 
++/* Reads and discards len bytes of the UDP-in-TCP stream. */
++static int
++hev_socks5_udp_skip (HevSocks5UDP *self, int fd, size_t len)
++{
++    char buf[512];
++
++    while (len > 0) {
++        size_t n = (len < sizeof (buf)) ? len : sizeof (buf);
++        ssize_t res;
++
++        res = hev_task_io_socket_recv (fd, buf, n, MSG_WAITALL, task_io_yielder,
++                                       self);
++        if (res != (ssize_t)n)
++            return -1;
++        len -= n;
++    }
++
++    return 0;
++}
++
+ int
+ hev_socks5_udp_get_fd (HevSocks5UDP *self)
+ {
+@@ -196,8 +216,13 @@ hev_socks5_udp_recvmmsg_tcp (HevSocks5UDP *self, HevSocks5UDPMsg *msgv,
+         addrlen = udp.hdrlen - 3;
+         udp.datlen = ntohs (udp.datlen);
+         if (udp.datlen > (msgv[i].len - addrlen)) {
+-            LOG_D ("%p socks5 udp data len", self);
+-            return -1;
++            /* Too big for the buffer: skip this datagram and keep the stream
++             * in sync. Failing here stopped the session reading for good. */
++            LOG_D ("%p socks5 udp data len %u: dropped", self, udp.datlen);
++            if (hev_socks5_udp_skip (self, fd, addrlen - 2 + udp.datlen) < 0)
++                return -1;
++            i--;
++            continue;
+         }
+ 
+         mh.msg_name = NULL;
