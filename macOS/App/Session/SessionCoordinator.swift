@@ -107,6 +107,8 @@ final class SessionCoordinator: ObservableObject {
     }
 
     let vpnLayer: VPNLayer
+    /// Per-app usage while connected (menu panel).
+    let appUsage = NettopSampler()
     let keepAwake: KeepAwakeController
 
     private let helper = HelperClient()
@@ -520,6 +522,7 @@ final class SessionCoordinator: ObservableObject {
         tunnelIPv6 = nil
         phoneOnWiFi = nil
         connectedSince = nil
+        appUsage.stop()
         phoneActiveConnections = 0
         pairingInFlight = false
         pendingLink = nil
@@ -583,11 +586,24 @@ final class SessionCoordinator: ObservableObject {
         } else if !(vpnWanted && vpnLayer.status.isConnected), meter.downRate != 0 || meter.upRate != 0 {
             meter.record(.zero)
         }
+        syncAppUsage()
         let availability = helper.availability
         if availability != helperAvailability {
             helperAvailability = availability
             if availability == .ready, phase == .helperRequired { connect() }
         }
+    }
+
+    /// Counts per-app usage on the interface apps' traffic is on: the VPN's
+    /// while the VPN layer is up, otherwise the passthrough tunnel's.
+    private func syncAppUsage() {
+        guard phase.isConnected, let tunnelInterface, let connectedSince else {
+            appUsage.stop()
+            return
+        }
+        let vpn = vpnLayer.status
+        let interface = vpn.isConnected ? (vpn.interface ?? tunnelInterface) : tunnelInterface
+        appUsage.sync(session: connectedSince, interfaces: [interface])
     }
 
     /// One `getStatus` round trip: VPN layer state, and whether the tunnel still runs.
@@ -657,6 +673,13 @@ final class SessionCoordinator: ObservableObject {
             }
             meter = m
             sessionRx = rx; sessionTx = tx
+            appUsage.debugApply([
+                AppUsageEntry(app: AppIdentity(key: "/Applications/Safari.app", name: "Safari"), bytesIn: 31_400_000, bytesOut: 1_200_000),
+                AppUsageEntry(app: AppIdentity(key: "/System/Applications/Music.app", name: "Music"), bytesIn: 18_900_000, bytesOut: 300_000),
+                AppUsageEntry(app: AppIdentity(key: "/System/Applications/Mail.app", name: "Mail"), bytesIn: 4_100_000, bytesOut: 900_000),
+                AppUsageEntry(app: AppIdentity(key: "/usr/libexec/softwareupdated", name: "softwareupdated"), bytesIn: 2_600_000, bytesOut: 40_000),
+                AppUsageEntry(app: AppIdentity(key: "/usr/bin/curl", name: "curl"), bytesIn: 900_000, bytesOut: 12_000),
+            ])
         }
     }
 }

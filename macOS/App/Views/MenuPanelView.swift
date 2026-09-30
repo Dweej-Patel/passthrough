@@ -36,6 +36,7 @@ struct MenuPanelView: View {
                 VPNRow()
                 KeepAwakeRow()
                 ThroughputPanel()
+                TopAppsPanel(usage: session.appUsage)
                 footer
             }
             .padding(16)
@@ -414,6 +415,50 @@ struct ThroughputPanel: View {
                 }
             }
         }
+    }
+}
+
+/// The apps moving the most data through the tunnel this session.
+struct TopAppsPanel: View {
+    @EnvironmentObject private var session: SessionCoordinator
+    @EnvironmentObject private var vpnLayer: VPNLayer
+    @ObservedObject var usage: NettopSampler
+
+    var body: some View {
+        if session.phase.isConnected, usage.unavailable || !usage.top.isEmpty {
+            PTCard(padding: 14) {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("Top apps this session").font(.caption).foregroundStyle(.secondary)
+                    if usage.unavailable {
+                        HStack(alignment: .top, spacing: 6) {
+                            Image(systemName: "exclamationmark.triangle.fill").font(.caption2)
+                            Text("Per-app usage unavailable: nettop isn't running").font(.caption2)
+                            Spacer(minLength: 0)
+                        }
+                        .foregroundStyle(PTTheme.warning)
+                    } else {
+                        let shown = usage.breakdown(sessionTotal: session.sessionRx + session.sessionTx)
+                        ForEach(shown.top, id: \.app.key) { entry in
+                            row(Image(nsImage: AppIcon.image(forKey: entry.app.key)), entry.app.name, entry.total)
+                        }
+                        if shown.other > 0 {
+                            row(Image(systemName: "ellipsis.circle"),
+                                vpnLayer.status.isConnected ? "Other (short connections, VPN overhead)" : "Other (short connections)", shown.other, lines: 2)
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private func row(_ icon: Image, _ name: String, _ bytes: Int64, lines: Int = 1) -> some View {
+        HStack(spacing: 8) {
+            icon.resizable().aspectRatio(contentMode: .fit).frame(width: 16, height: 16)
+            Text(name).lineLimit(lines).truncationMode(.middle)
+            Spacer(minLength: 8)
+            Text(ByteFormat.bytes(bytes)).font(PTTheme.mono(12)).foregroundStyle(.secondary)
+        }
+        .font(.callout)
     }
 }
 
