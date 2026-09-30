@@ -99,6 +99,8 @@ targets:
       - path: macOS/App
         excludes: ["Info.plist", "*.entitlements", "*.plist"]
       - path: macOS/Shared
+      # The Nord pin checks the parsed profile, exactly as the helper will use it.
+      - path: macOS/Helper/OpenVPNProfile.swift
       - path: macOS/App/dev.dpatel.passthrough.helper.plist
         buildPhase:
           copyFiles:

@@ -173,10 +173,13 @@ enum NordVPN {
         let (data, response) = try await URLSession.shared.data(from: url)
         guard (response as? HTTPURLResponse)?.statusCode == 200, let text = String(data: data, encoding: .utf8) else { throw NordError.badResponse }
         // Identity pinning: Nord's CA, and a certificate name that is this very server.
-        guard let caStart = text.range(of: "<ca>\n"), let caEnd = text.range(of: "</ca>", range: caStart.upperBound..<text.endIndex) else { throw NordError.badResponse }
-        let ca = String(text[caStart.upperBound..<caEnd.lowerBound]).trimmingCharacters(in: .whitespacesAndNewlines)
-        guard SHA256.hex(ca) == expectedCASHA256 else { throw NordError.untrusted("its certificate authority is not NordVPN's") }
-        guard text.contains("remote-cert-tls server"), text.contains("verify-x509-name CN=\(host)") else {
+        // Checked on the parsed profile (what the helper hands openvpn), not the raw
+        // text, so a second <ca> or verify-x509-name can't slip past a substring match.
+        guard let profile = try? OpenVPNProfile(text: text), let ca = profile.inlineCA else { throw NordError.badResponse }
+        guard SHA256.hex(ca.trimmingCharacters(in: .whitespacesAndNewlines)) == expectedCASHA256 else {
+            throw NordError.untrusted("its certificate authority is not NordVPN's")
+        }
+        guard profile.lines.contains("remote-cert-tls server"), profile.lines.contains("verify-x509-name CN=\(host)") else {
             throw NordError.untrusted("it does not pin the server \(host)")
         }
         return text

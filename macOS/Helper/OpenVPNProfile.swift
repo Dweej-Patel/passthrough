@@ -19,6 +19,8 @@ struct OpenVPNProfile {
         case unsupported(String)
         case badArgument(String, String)
         case badBlock(String)
+        case duplicate(String)
+        case lineTooLong
         case missing(String)
         var errorDescription: String? {
             switch self {
@@ -26,6 +28,8 @@ struct OpenVPNProfile {
             case .unsupported(let d): return "The profile uses '\(d)', which Passthrough does not support."
             case .badArgument(let d, let why): return "Bad value for '\(d)': \(why)."
             case .badBlock(let t): return "Unexpected block <\(t)> in the profile."
+            case .duplicate(let d): return "The profile has more than one '\(d)'."
+            case .lineTooLong: return "The profile has a line longer than \(OpenVPNProfile.maxLineBytes) characters."
             case .missing(let what): return "The profile has no \(what)."
             }
         }
@@ -62,6 +66,10 @@ struct OpenVPNProfile {
     private static let digests: Set<String> = ["SHA1", "SHA256", "SHA384", "SHA512"]
     private static let protos: Set<String> = ["udp", "udp4", "udp6", "tcp", "tcp-client", "tcp4", "tcp4-client", "tcp6", "tcp6-client"]
     private static let inlineTags: Set<String> = ["ca", "cert", "key", "tls-auth", "tls-crypt", "tls-crypt-v2", "dh", "extra-certs", "crl-verify", "pkcs12"]
+    /// OpenVPN reads block lines with fgets(line, 256): anything longer is
+    /// split, and the tail is read as a fresh line. Every emitted line must fit.
+    static let maxLineBytes = 254
+    private var blocksSeen: Set<String> = []
 
     init(text: String) throws {
         var blockTag: String?
@@ -92,6 +100,7 @@ struct OpenVPNProfile {
         if blockTag != nil { throw ProfileError.badBlock(blockTag!) }
         guard hasInlineCA else { throw ProfileError.missing("inline <ca> certificate") }
         guard !endpoints.isEmpty else { throw ProfileError.missing("'remote' server") }
+        guard lines.allSatisfy({ $0.utf8.count <= Self.maxLineBytes }) else { throw ProfileError.lineTooLong }
     }
 
     /// Tokeniser matching OpenVPN's parse_line: whitespace-separated, single or
@@ -180,6 +189,8 @@ struct OpenVPNProfile {
             guard args.first?.lowercased() == "server" else { throw ProfileError.badArgument(d, "must be 'server'") }
             lines.append("remote-cert-tls server")
         case "verify-x509-name":
+            // OpenVPN keeps the last one; a second could override a pinned name.
+            guard verifyX509Name == nil else { throw ProfileError.duplicate(d) }
             guard let name = args.first, Self.isToken(name) else { throw ProfileError.badArgument(d, "invalid name") }
             var line = "verify-x509-name \(name)"
             if args.count >= 2 { guard ["subject", "name", "name-prefix"].contains(args[1].lowercased()) else { throw ProfileError.badArgument(d, "invalid type") }; line += " \(args[1].lowercased())" }
@@ -194,9 +205,14 @@ struct OpenVPNProfile {
     }
 
     private mutating func emitBlock(_ tag: String, _ content: [String]) throws {
-        // Certificate/key material only: PEM-ish lines. No directive can hide here
-        // because OpenVPN treats block contents as file data, but keep it clean.
-        for l in content where !l.allSatisfy({ $0.isASCII && !$0.isNewline }) { throw ProfileError.badBlock(tag) }
+        // Certificate/key material only: printable ASCII, no '<'. OpenVPN ends a
+        // block at any line that *starts* with the close tag after whitespace
+        // (so "</ca>x" closes it), and whatever follows would be read as
+        // directives. With no '<' in the content, only our own close tag can.
+        let ok: (Character) -> Bool = { $0.isASCII && ($0 == "\t" || (" "..."~").contains($0)) && $0 != "<" }
+        for l in content where !l.allSatisfy(ok) { throw ProfileError.badBlock(tag) }
+        // OpenVPN keeps the last of each; a second <ca> could replace a pinned one.
+        guard blocksSeen.insert(tag).inserted else { throw ProfileError.duplicate("<\(tag)>") }
         if tag == "ca" { hasInlineCA = true }
         lines.append("<\(tag)>")
         lines.append(contentsOf: content)
