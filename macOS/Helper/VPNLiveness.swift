@@ -26,12 +26,13 @@ final class VPNLiveness {
 
     init(queue: DispatchQueue) { self.queue = queue }
 
-    /// `rx` reads the bytes received from the server so far.
-    func start(interface: String, dnsServers: [String], rx: @escaping () -> Int) {
+    /// `rx` reads the bytes received from the server so far; `describe` sums up
+    /// the engine's counters for the log when the session goes quiet.
+    func start(interface: String, dnsServers: [String], rx: @escaping () -> Int, describe: @escaping () -> String = { "" }) {
         stop()
         let timer = DispatchSource.makeTimerSource(queue: queue)
         timer.schedule(deadline: .now() + Self.interval, repeating: Self.interval)
-        timer.setEventHandler { [weak self] in self?.check(interface: interface, dnsServers: dnsServers, rx: rx()) }
+        timer.setEventHandler { [weak self] in self?.check(interface: interface, dnsServers: dnsServers, rx: rx(), describe: describe) }
         timer.resume()
         self.timer = timer
     }
@@ -41,9 +42,10 @@ final class VPNLiveness {
         lastRx = -1; misses = 0; probing = false
     }
 
-    private func check(interface: String, dnsServers: [String], rx: Int) {
+    private func check(interface: String, dnsServers: [String], rx: Int, describe: () -> String) {
         if rx != lastRx { lastRx = rx; misses = 0; return }
         guard !probing else { return }
+        HelperLog.info("vpn: nothing from the server for \(Int(Self.interval)) s (\(describe())); probing")
         probing = true
         probeQueue.async { [weak self] in
             let answered = Self.probe(dnsServers: dnsServers, interface: interface)

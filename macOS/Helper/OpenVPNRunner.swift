@@ -234,6 +234,13 @@ final class OpenVPNRunner: VPNRunner {
         return lastLinkRx
     }
 
+    /// The link and tunnel byte counts, for the log: which way traffic stopped.
+    func counterSummary() -> String {
+        guard let c = statusCounters() else { return "no status" }
+        return "link sent \(c["TCP/UDP write bytes"] ?? 0) B, received \(c["TCP/UDP read bytes"] ?? 0) B; "
+            + "tunnel in \(c["TUN/TAP read bytes"] ?? 0) B, out \(c["TUN/TAP write bytes"] ?? 0) B"
+    }
+
     private func statusCounters() -> [Substring: Int]? {
         guard let text = try? String(contentsOfFile: Self.statusPath, encoding: .utf8) else { return nil }
         var counters: [Substring: Int] = [:]

@@ -270,7 +270,9 @@ final class VPNEngine {
             HelperLog.info("vpn: connected on \(iface) (dns \(activeDNS.joined(separator: ", ")))")
             // WireGuard re-handshakes every two minutes and has its own check.
             if config.engine == .openvpn {
-                liveness.start(interface: iface, dnsServers: activeDNS) { [weak self] in (self?.runner as? OpenVPNRunner)?.linkRxBytes() ?? 0 }
+                liveness.start(interface: iface, dnsServers: activeDNS,
+                               rx: { [weak self] in (self?.runner as? OpenVPNRunner)?.linkRxBytes() ?? 0 },
+                               describe: { [weak self] in (self?.runner as? OpenVPNRunner)?.counterSummary() ?? "" })
             }
         case .reconnecting(let why):
             HelperLog.warn("vpn: session lost (\(why)); engine is reconnecting")
