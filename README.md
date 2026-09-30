@@ -55,6 +55,10 @@ Because the phone opens every connection with its own stack, the carrier sees th
 
 All the apps show a live map of the route traffic takes: Mac ⟶ USB or wireless ⟶ phone ⟶ radio ⟶ (VPN) ⟶ Internet. Particles ride the wires at a speed and density that follow the current throughput (teal toward the Mac, violet away from it), the VPN node slides in with a lock over the encrypted hop when the layer is on, the Mac gets a pulsing halo while keep-awake holds it up, and the Mac–phone hop shows the live rates and names what carries it. It is one `Canvas` driven by a `TimelineView` at up to 30 fps (15 fps when idle, fully paused when nothing is connected), with stateless particle math and no per-particle views, so it costs next to nothing (`PassthroughUI/FlowMap.swift`).
 
+## Top apps
+
+While passthrough is connected, the Mac's menu panel lists the five apps that have moved the most data through the phone this session, with an "Other" line so the list adds up to the session total. It reads macOS's own `nettop` every two seconds (about 2% of one core) and counts only connections on the tunnel's interface (the VPN's while the VPN layer is on). Connections that open and close between samples can't be tied to the tunnel, so their bytes, and VPN overhead, land in "Other". Nothing is stored after the session ends (`PhoneTransport/AppUsage.swift`, `macOS/App/Session/NettopSampler.swift`).
+
 ## Wireless link
 
 Off by default. Set **Connect over** to **Wireless only** or **Automatic** in the Mac's settings and turn on **Wireless link** in the iPhone's settings. The phone links the next time it is connected over USB, and from then on it can serve the Mac without the cable (Automatic prefers the cable when one is plugged in).
