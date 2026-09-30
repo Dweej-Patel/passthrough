@@ -1,36 +1,19 @@
 import Foundation
+import VPNConfig
 
 /// Drives a bundled `wireguard-go` process: parses a standard wg-quick style
 /// .conf, lets the engine create its utun, then configures it over the UAPI
 /// socket and brings the interface up. The private key only ever lives in
 /// memory and on that root-only socket.
 final class WireGuardRunner: VPNRunner {
-    struct Peer {
-        var publicKeyHex: String
-        var presharedKeyHex: String?
-        var endpointHost: String
-        var endpointPort: Int
-        var allowedIPs: [String]
-        var keepalive: Int?
-    }
-
-    struct Parsed {
-        var privateKeyHex = ""
-        var addresses: [String] = []
-        var dns: [String] = []
-        var mtu: Int?
-        var listenPort: Int?
-        var peers: [Peer] = []
-    }
-
     var onEvent: ((VPNRunnerEvent) -> Void)?
-    var endpoints: [(host: String, port: Int)] { parsed.peers.map { ($0.endpointHost, $0.endpointPort) } }
+    var endpoints: [(host: String, port: Int)] { parsed.endpoints }
     var endpointIPs: [String: String] = [:]
     /// UAPI socket I/O blocks (up to 3 s); keep it off the helper's XPC queue.
     private let ioQueue = DispatchQueue(label: "dev.dpatel.passthrough.wg.io", qos: .utility)
     private let statsLock = NSLock()
 
-    private let parsed: Parsed
+    private let parsed: WireGuardConfig
     private let queue: DispatchQueue
     private var process: Process?
     private var interfaceName: String?
@@ -44,65 +27,12 @@ final class WireGuardRunner: VPNRunner {
     private static let nameFile = BundledEngines.stateDirectory + "/wg.name"
 
     init(configText: String, queue: DispatchQueue) throws {
-        parsed = try Self.parse(configText)
+        do {
+            parsed = try WireGuardConfig(text: configText)
+        } catch let error as WireGuardConfig.ConfigError {
+            throw VPNEngine.VPNError.badConfig(error.errorDescription ?? "invalid config")
+        }
         self.queue = queue
-    }
-
-    // MARK: Parsing
-
-    static func parse(_ text: String) throws -> Parsed {
-        var result = Parsed()
-        var section = ""
-        var peer: Peer?
-        func flushPeer() { if let p = peer { result.peers.append(p) }; peer = nil }
-        for raw in text.split(whereSeparator: \.isNewline) {
-            var line = String(raw)
-            if let hash = line.firstIndex(of: "#") { line = String(line[..<hash]) }
-            line = line.trimmingCharacters(in: .whitespaces)
-            guard !line.isEmpty else { continue }
-            if line.hasPrefix("[") {
-                flushPeer()
-                section = line.lowercased()
-                if section == "[peer]" { peer = Peer(publicKeyHex: "", endpointHost: "", endpointPort: 0, allowedIPs: []) }
-                continue
-            }
-            let parts = line.split(separator: "=", maxSplits: 1).map { $0.trimmingCharacters(in: .whitespaces) }
-            guard parts.count == 2 else { continue }
-            let key = parts[0].lowercased(), value = parts[1]
-            let list = value.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
-            switch (section, key) {
-            case ("[interface]", "privatekey"): result.privateKeyHex = try keyHex(value, "PrivateKey")
-            case ("[interface]", "address"): result.addresses += list
-            case ("[interface]", "dns"): result.dns += list.filter { $0.first?.isNumber == true || $0.contains(":") }
-            case ("[interface]", "mtu"): result.mtu = Int(value)
-            case ("[interface]", "listenport"): result.listenPort = Int(value)
-            case ("[peer]", "publickey"): peer?.publicKeyHex = try keyHex(value, "PublicKey")
-            case ("[peer]", "presharedkey"): peer?.presharedKeyHex = try keyHex(value, "PresharedKey")
-            case ("[peer]", "allowedips"): peer?.allowedIPs += list
-            case ("[peer]", "persistentkeepalive"): peer?.keepalive = Int(value)
-            case ("[peer]", "endpoint"):
-                guard let colon = value.lastIndex(of: ":"), let port = Int(value[value.index(after: colon)...]) else {
-                    throw VPNEngine.VPNError.badConfig("Endpoint must be host:port")
-                }
-                peer?.endpointHost = String(value[..<colon]).trimmingCharacters(in: CharacterSet(charactersIn: "[]"))
-                peer?.endpointPort = port
-            default: break
-            }
-        }
-        flushPeer()
-        guard !result.privateKeyHex.isEmpty else { throw VPNEngine.VPNError.badConfig("missing PrivateKey") }
-        guard !result.addresses.isEmpty else { throw VPNEngine.VPNError.badConfig("missing Address") }
-        guard let first = result.peers.first, !first.publicKeyHex.isEmpty, !first.endpointHost.isEmpty else {
-            throw VPNEngine.VPNError.badConfig("missing [Peer] with PublicKey and Endpoint")
-        }
-        return result
-    }
-
-    private static func keyHex(_ base64: String, _ name: String) throws -> String {
-        guard let data = Data(base64Encoded: base64), data.count == 32 else {
-            throw VPNEngine.VPNError.badConfig("\(name) is not a valid 32-byte base64 key")
-        }
-        return data.map { String(format: "%02x", $0) }.joined()
     }
 
     // MARK: Process

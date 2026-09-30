@@ -1,4 +1,5 @@
 import Foundation
+import VPNConfig
 
 /// Drives a bundled `openvpn` process from an ordinary .ovpn profile. The
 /// profile is written to a root-only file for the process; the username and

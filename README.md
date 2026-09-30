@@ -117,6 +117,7 @@ Packages/PassthroughCore   Swift package:
   PassthroughCore            SOCKS5 server, control channel, pairing, stats, wireless dialer and multiplexer (the phone side)
   PhoneTransport             phone links (usbmuxd, adb, wireless), device watchers, local forwarder, control client (the Mac side)
   PassthroughUI              shared SwiftUI design layer
+  VPNConfig                  OpenVPN allowlist, WireGuard .conf parser, NordVPN pinning (linked by the root helper)
 iOS/App                    SwiftUI iPhone app
 iOS/Tunnel                 Packet tunnel extension hosting the servers
 macOS/App                  SwiftUI menu bar app: Session/, VPN/, Power/, Views/
