@@ -6,7 +6,17 @@ public enum PassthroughProtocol {
     /// log subsystem. Set once as PASSTHROUGH_ID (Config/Identity.xcconfig) and
     /// read from the `PassthroughID` Info.plist key; SwiftPM builds (devserver,
     /// tests) have no such key and get a placeholder.
-    public static let identifier = Bundle.main.object(forInfoDictionaryKey: "PassthroughID") as? String ?? "passthrough.local"
+    public static let identifier: String = {
+        if let id = Bundle.main.object(forInfoDictionaryKey: "PassthroughID") as? String { return id }
+        // An app or extension missing the key would quietly use another App
+        // Group, keychain service and defaults, losing its settings and token.
+        // Judged by the bundle's extension, not bundleIdentifier: xctest has one.
+        let ext = Bundle.main.bundleURL.pathExtension
+        guard ext != "app", ext != "appex" else {
+            fatalError("PassthroughID missing from \(Bundle.main.bundlePath) Info.plist; set PASSTHROUGH_ID in Config/Identity.xcconfig")
+        }
+        return "passthrough.local"
+    }()
     /// Bump when the wire protocol changes incompatibly.
     public static let version = 1
     /// SOCKS5 port the iPhone listens on (loopback only, reached over usbmuxd).

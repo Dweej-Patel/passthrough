@@ -39,7 +39,10 @@ enum CodeSigning {
     /// Builds a requirement that only accepts apps signed by the same team as this helper.
     static func requirementForOwnTeam() -> String? {
         guard let team = ownTeamIdentifier() else { return nil }
-        return "anchor apple generic and certificate leaf[subject.OU] = \"\(team)\" and identifier \"\(HelperConstants.identifier).mac\""
+        let id = HelperConstants.identifier
+        // Checked where it is spliced in, so a bad ID can never loosen the requirement.
+        precondition(HelperConstants.isValidIdentifier(id), "PassthroughID \"\(id)\" is not safe in a code-signing requirement")
+        return "anchor apple generic and certificate leaf[subject.OU] = \"\(team)\" and identifier \"\(id).mac\""
     }
 
     /// The Team ID this helper is signed with, or nil for unsigned dev builds.
