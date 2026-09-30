@@ -23,7 +23,7 @@ final class LinkingTests: XCTestCase {
     /// Pair over the (stand-in) cable, then link: the phone ends up with a
     /// credential for this Mac and answers with its phone ID.
     func testPairThenLink() throws {
-        let suite = "dev.dpatel.passthrough.tests.\(UUID().uuidString)"
+        let suite = "\(PassthroughProtocol.identifier).tests.\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suite)!
         defer { defaults.removePersistentDomain(forName: suite) }
         let registry = PairingRegistry(defaults: defaults, secrets: InMemorySecrets())
@@ -77,7 +77,7 @@ final class LinkingTests: XCTestCase {
             func write(_ data: Data, account: String) -> Bool { false }
             func delete(_ account: String) {}
         }
-        let suite = "dev.dpatel.passthrough.tests.\(UUID().uuidString)"
+        let suite = "\(PassthroughProtocol.identifier).tests.\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suite)!
         defer { defaults.removePersistentDomain(forName: suite) }
         let registry = PairingRegistry(defaults: defaults, secrets: RefusingSecrets())
@@ -91,7 +91,7 @@ final class LinkingTests: XCTestCase {
     /// Every change to the paired Macs is announced across processes, so the
     /// tunnel extension hears when the app forgets one.
     func testPairingChangesAreAnnounced() {
-        let suite = "dev.dpatel.passthrough.tests.\(UUID().uuidString)"
+        let suite = "\(PassthroughProtocol.identifier).tests.\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suite)!
         defer { defaults.removePersistentDomain(forName: suite) }
         let registry = PairingRegistry(defaults: defaults, secrets: InMemorySecrets())
@@ -110,7 +110,7 @@ final class LinkingTests: XCTestCase {
     /// from that: a wireless link can be up while the Mac uses the cable.
     func testMacSaysHowItIsConnected() throws {
         for wireless in [false, true] {
-            let suite = "dev.dpatel.passthrough.tests.\(UUID().uuidString)"
+            let suite = "\(PassthroughProtocol.identifier).tests.\(UUID().uuidString)"
             let defaults = UserDefaults(suiteName: suite)!
             defer { defaults.removePersistentDomain(forName: suite) }
             let registry = PairingRegistry(defaults: defaults, secrets: InMemorySecrets())

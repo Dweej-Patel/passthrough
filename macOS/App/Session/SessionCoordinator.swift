@@ -205,7 +205,7 @@ final class SessionCoordinator: ObservableObject {
                 self.syncHotspotGuard()
             }
         }
-        wifiMonitor.start(queue: DispatchQueue(label: "dev.dpatel.passthrough.wifi-path"))
+        wifiMonitor.start(queue: DispatchQueue(label: "\(PassthroughProtocol.identifier).wifi-path"))
         _ = clientID   // the wireless listener advertises a tag derived from it
         for watcher in directory.watchers {
             switch watcher.transport {
@@ -236,7 +236,7 @@ final class SessionCoordinator: ObservableObject {
 
     // MARK: Devices
 
-    static let identityLabel = "dev.dpatel.passthrough.wireless-identity"
+    static let identityLabel = "\(PassthroughProtocol.identifier).wireless-identity"
 
     private func devicesChanged(_ change: DeviceDirectory.Change) {
         switch change {

@@ -222,7 +222,7 @@ final class ProtocolTests: XCTestCase {
 final class PairingTests: XCTestCase {
     var defaults: UserDefaults!
     var registry: PairingRegistry!
-    let suite = "dev.dpatel.passthrough.tests.\(UUID().uuidString)"
+    let suite = "\(PassthroughProtocol.identifier).tests.\(UUID().uuidString)"
 
     override func setUp() {
         defaults = UserDefaults(suiteName: suite)
@@ -271,7 +271,7 @@ final class PairingTests: XCTestCase {
 
 final class ControlServerTests: XCTestCase {
     func testHelloPairAndStatus() throws {
-        let suite = "dev.dpatel.passthrough.tests.\(UUID().uuidString)"
+        let suite = "\(PassthroughProtocol.identifier).tests.\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suite)!
         defer { defaults.removePersistentDomain(forName: suite) }
         let registry = PairingRegistry(defaults: defaults)

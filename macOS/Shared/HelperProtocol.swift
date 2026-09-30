@@ -24,8 +24,24 @@ import Foundation
 }
 
 public enum HelperConstants {
-    public static let machService = "dev.dpatel.passthrough.helper"
-    public static let plistName = "dev.dpatel.passthrough.helper.plist"
+    /// PASSTHROUGH_ID (Config/Identity.xcconfig), read from the `PassthroughID`
+    /// Info.plist key of the app or the helper. The helper does not link
+    /// PassthroughCore, so this mirrors `PassthroughProtocol.identifier`.
+    public static let identifier: String = {
+        guard let id = Bundle.main.object(forInfoDictionaryKey: "PassthroughID") as? String else {
+            fatalError("PassthroughID missing from \(Bundle.main.bundlePath) Info.plist; set PASSTHROUGH_ID in Config/Identity.xcconfig")
+        }
+        guard isValidIdentifier(id) else { fatalError("PassthroughID \"\(id)\" may only contain A-Z, a-z, 0-9, '.' and '-'") }
+        return id
+    }()
+    /// `^[A-Za-z0-9.-]+$`. The helper splices the ID into its XPC code-signing
+    /// requirement, where a quote or backslash would change what it accepts.
+    public static func isValidIdentifier(_ id: String) -> Bool {
+        let allowed = CharacterSet(charactersIn: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789.-")
+        return !id.isEmpty && id.unicodeScalars.allSatisfy { allowed.contains($0) }
+    }
+    public static let machService = "\(HelperConstants.identifier).helper"
+    public static let plistName = "\(HelperConstants.identifier).helper.plist"
     /// Bump together with the helper binary so the app can detect stale daemons.
     public static let version = "1.2.22"
 }

@@ -39,7 +39,10 @@ enum CodeSigning {
     /// Builds a requirement that only accepts apps signed by the same team as this helper.
     static func requirementForOwnTeam() -> String? {
         guard let team = ownTeamIdentifier() else { return nil }
-        return "anchor apple generic and certificate leaf[subject.OU] = \"\(team)\" and identifier \"dev.dpatel.passthrough.mac\""
+        let id = HelperConstants.identifier
+        // Checked where it is spliced in, so a bad ID can never loosen the requirement.
+        precondition(HelperConstants.isValidIdentifier(id), "PassthroughID \"\(id)\" is not safe in a code-signing requirement")
+        return "anchor apple generic and certificate leaf[subject.OU] = \"\(team)\" and identifier \"\(id).mac\""
     }
 
     /// The Team ID this helper is signed with, or nil for unsigned dev builds.
@@ -57,7 +60,7 @@ enum CodeSigning {
 }
 
 enum HelperLog {
-    static let logger = Logger(subsystem: "dev.dpatel.passthrough", category: "helper")
+    static let logger = Logger(subsystem: HelperConstants.identifier, category: "helper")
     static func info(_ s: String) { logger.notice("\(s, privacy: .public)") }
     static func warn(_ s: String) { logger.warning("\(s, privacy: .public)") }
     static func error(_ s: String) { logger.error("\(s, privacy: .public)") }

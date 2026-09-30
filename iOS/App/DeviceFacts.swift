@@ -23,7 +23,7 @@ final class DeviceFacts {
                 self?.onChange?()
             }
         }
-        pathMonitor.start(queue: DispatchQueue(label: "dev.dpatel.passthrough.path"))
+        pathMonitor.start(queue: DispatchQueue(label: "\(PassthroughProtocol.identifier).path"))
     }
 
     /// The network the Mac's traffic actually leaves on. On Wi-Fi that is

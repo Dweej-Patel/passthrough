@@ -1,0 +1,6 @@
+// Reverse-DNS base for every bundle ID, the App Group, keychain services and
+// the launchd label. Override it in Signing.xcconfig to build under your own
+// team; Swift reads it back through PassthroughProtocol.identifier.
+PASSTHROUGH_ID = dev.dpatel.passthrough
+
+#include? "Signing.xcconfig"

@@ -3,17 +3,17 @@
 <plist version="1.0">
 <dict>
 	<key>Label</key>
-	<string>dev.dpatel.passthrough.helper</string>
+	<string>$(PASSTHROUGH_ID).helper</string>
 	<key>BundleProgram</key>
 	<string>Contents/MacOS/PassthroughHelper</string>
 	<key>MachServices</key>
 	<dict>
-		<key>dev.dpatel.passthrough.helper</key>
+		<key>$(PASSTHROUGH_ID).helper</key>
 		<true/>
 	</dict>
 	<key>AssociatedBundleIdentifiers</key>
 	<array>
-		<string>dev.dpatel.passthrough.mac</string>
+		<string>$(PASSTHROUGH_ID).mac</string>
 	</array>
 	<key>ProcessType</key>
 	<string>Interactive</string>

@@ -23,7 +23,7 @@ public final class PassthroughLog: @unchecked Sendable {
 
     public enum Level: String, Sendable { case debug, info, warning, error }
 
-    private let logger = Logger(subsystem: "dev.dpatel.passthrough", category: "core")
+    private let logger = Logger(subsystem: PassthroughProtocol.identifier, category: "core")
     private let lock = NSLock()
     private var entries: [Entry] = []
     private let capacity = 400
@@ -31,7 +31,7 @@ public final class PassthroughLog: @unchecked Sendable {
     private var fileHandle: FileHandle?
     private var appendedSinceCheck = 0
     /// File I/O happens here, never on the network queues that log.
-    private let fileQueue = DispatchQueue(label: "dev.dpatel.passthrough.log.file", qos: .utility)
+    private let fileQueue = DispatchQueue(label: "\(PassthroughProtocol.identifier).log.file", qos: .utility)
     public var onAppend: (@Sendable (Entry) -> Void)?
 
     /// Mirror every entry to `url` (appended, one line per entry). Call once at

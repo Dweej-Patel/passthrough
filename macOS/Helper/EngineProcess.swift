@@ -100,7 +100,7 @@ final class EngineChild: @unchecked Sendable {
     }
 
     private func watch(output: Int32, errors: Int32) {
-        let queue = DispatchQueue(label: "dev.dpatel.passthrough.engine-child")
+        let queue = DispatchQueue(label: "\(HelperConstants.identifier).engine-child")
         readers = [
             lines(from: output, on: queue) { [weak self] line in self?.parseStats(line) },
             lines(from: errors, on: queue) { line in HelperLog.warn("engine: \(line)") },

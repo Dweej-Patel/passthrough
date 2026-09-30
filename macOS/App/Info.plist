@@ -34,5 +34,7 @@
 	<string></string>
 	<key>NSLocalNetworkUsageDescription</key>
 	<string>Passthrough listens for your linked phone on the local network, such as the phone's Personal Hotspot, when it connects wirelessly.</string>
+	<key>PassthroughID</key>
+	<string>$(PASSTHROUGH_ID)</string>
 </dict>
 </plist>

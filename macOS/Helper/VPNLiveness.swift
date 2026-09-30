@@ -10,7 +10,7 @@ import Darwin
 /// answer twice in a row is restarted, about 30 s after it died.
 final class VPNLiveness {
     private let queue: DispatchQueue
-    private let probeQueue = DispatchQueue(label: "dev.dpatel.passthrough.vpn.probe")
+    private let probeQueue = DispatchQueue(label: "\(HelperConstants.identifier).vpn.probe")
     private var timer: DispatchSourceTimer?
     private var lastRx = -1
     private var misses = 0

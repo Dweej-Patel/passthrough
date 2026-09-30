@@ -4,7 +4,7 @@
 <dict>
 	<key>keychain-access-groups</key>
 	<array>
-		<string>$(AppIdentifierPrefix)dev.dpatel.passthrough.mac</string>
+		<string>$(AppIdentifierPrefix)$(PASSTHROUGH_ID).mac</string>
 	</array>
 </dict>
 </plist>
