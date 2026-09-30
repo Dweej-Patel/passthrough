@@ -85,87 +85,202 @@ final class AppUsageTallyTests: XCTestCase {
     }
     private func tally(_ resolver: StubResolver = StubResolver()) -> AppUsageTally { AppUsageTally(tracked: ["utun6"], resolver: resolver) }
 
-    func testFirstSightingCountsTheRunningTotal() {
-        var t = tally(); t.beginSample(); t.add(rec(1, "curl", 700, 50))
+    /// A batch's first sample, which the tally drops: under load nettop's
+    /// first sample can list sockets with counters not read yet (0).
+    private func startBatch(_ t: inout AppUsageTally, _ records: NettopRecord...) {
+        t.beginSample()
+        records.forEach { t.add($0) }
+    }
+
+    /// One nettop sample: its header, then its rows. Growth is credited when
+    /// the sample closes (the next header, or the end of the batch).
+    private func sample(_ t: inout AppUsageTally, _ records: NettopRecord...) {
+        t.beginSample()
+        records.forEach { t.add($0) }
+    }
+
+    /// Sockets already open when counting starts (a VPN that was up before
+    /// the session) are a baseline, not usage.
+    func testFirstSampleIsABaseline() {
+        var t = tally()
+        startBatch(&t)
+        sample(&t, rec(1, "curl", 1_000_000))
+        sample(&t, rec(1, "curl", 1_000_500))
+        t.endBatch()
+        XCTAssertEqual(t.attributed, 500)
+    }
+
+    /// Measured under CPU load: a run's first sample lists some sockets at 0,
+    /// the next at their real totals. Crediting that jump invented gigabytes.
+    func testFirstSampleOfEveryBatchIsDropped() {
+        var t = tally()
+        startBatch(&t, rec(1, "java", 0))
+        sample(&t, rec(1, "java", 47_000_000))
+        sample(&t, rec(1, "java", 47_000_100))
+        t.endBatch()
+        startBatch(&t, rec(1, "java", 0))
+        sample(&t, rec(1, "java", 47_000_200))
+        t.endBatch()
+        XCTAssertEqual(t.attributed, 200)
+    }
+
+    func testSocketOpenedAfterTheBaselineCountsFromItsStart() {
+        var t = tally()
+        startBatch(&t)
+        sample(&t, rec(9, "idle", 1, label: "udp4 other", interface: "en0"))
+        sample(&t, rec(1, "curl", 700, 50))
+        t.endBatch()
         XCTAssertEqual(t.top(5).map(\.total), [750])
     }
 
     func testLaterSamplesCountOnlyTheIncrease() {
         var t = tally()
-        t.beginSample(); t.add(rec(1, "curl", 100))
-        t.beginSample(); t.add(rec(1, "curl", 250))
-        XCTAssertEqual(t.attributed, 250)
+        startBatch(&t)
+        sample(&t, rec(1, "curl", 100))
+        sample(&t, rec(1, "curl", 250))
+        sample(&t, rec(1, "curl", 400))
+        t.endBatch()
+        XCTAssertEqual(t.attributed, 300)
     }
 
     func testRestartDoesNotDoubleCount() {
         // A new nettop batch reports the same socket's running total again.
         var t = tally()
-        t.beginSample(); t.add(rec(1, "curl", 100))
-        t.beginSample(); t.add(rec(1, "curl", 250))
-        t.beginSample(); t.add(rec(1, "curl", 300))
-        XCTAssertEqual(t.attributed, 300)
+        startBatch(&t)
+        sample(&t, rec(1, "curl", 100))
+        sample(&t, rec(1, "curl", 250))
+        t.endBatch()
+        startBatch(&t)
+        sample(&t, rec(1, "curl", 300))
+        t.endBatch()
+        XCTAssertEqual(t.attributed, 200)
+    }
+
+    func testRestartAfterATruncatedLastSampleDoesNotDoubleCount() {
+        // The batch's last sample was cut short before the socket's row.
+        var t = tally()
+        startBatch(&t)
+        sample(&t, rec(1, "curl", 100))
+        sample(&t, rec(1, "curl", 200))
+        sample(&t, rec(2, "other", 5, label: "tcp4 truncated"))
+        t.endBatch()
+        startBatch(&t)
+        sample(&t, rec(1, "curl", 300))
+        t.endBatch()
+        XCTAssertEqual(t.top(5).first { $0.app.name == "curl" }?.total, 200)
     }
 
     func testSocketMissingFromASampleIsForgotten() {
         var t = tally()
-        t.beginSample(); t.add(rec(1, "curl", 500))
-        t.beginSample()
-        t.beginSample(); t.add(rec(1, "curl", 100))
+        startBatch(&t)
+        sample(&t, rec(9, "idle", 1, label: "udp4 other", interface: "en0"))
+        sample(&t, rec(1, "curl", 500))
+        sample(&t, rec(9, "idle", 1, label: "udp4 other", interface: "en0"))
+        sample(&t, rec(1, "curl", 100))
+        t.endBatch()
         XCTAssertEqual(t.attributed, 600)
     }
 
     func testSmallerTotalIsANewSocket() {
         var t = tally()
-        t.beginSample(); t.add(rec(1, "curl", 500))
-        t.beginSample(); t.add(rec(1, "curl", 100))
+        startBatch(&t)
+        sample(&t, rec(9, "idle", 1, label: "udp4 other", interface: "en0"))
+        sample(&t, rec(1, "curl", 500))
+        sample(&t, rec(1, "curl", 100))
+        t.endBatch()
         XCTAssertEqual(t.attributed, 600)
+    }
+
+    func testSameLabelOnAnotherInterfaceIsAnotherSocket() {
+        // Unconnected UDP (mDNS) shares its label across interfaces.
+        let mdns = "udp4 *:5353<->*:*"
+        var t = tally()
+        startBatch(&t)
+        sample(&t, rec(1, "adb", 100, label: mdns), rec(1, "adb", 5_000, label: mdns, interface: "en0"))
+        sample(&t, rec(1, "adb", 150, label: mdns), rec(1, "adb", 5_100, label: mdns, interface: "en0"))
+        sample(&t, rec(1, "adb", 200, label: mdns), rec(1, "adb", 5_200, label: mdns, interface: "en0"))
+        t.endBatch()
+        XCTAssertEqual(t.attributed, 100)
+    }
+
+    func testDuplicateRowsInOneSampleAreSummed() {
+        let mdns = "udp4 *:5353<->*:*"
+        var t = tally()
+        startBatch(&t)
+        sample(&t, rec(1, "Chrome", 10, label: mdns), rec(1, "Chrome", 20, label: mdns))
+        sample(&t, rec(1, "Chrome", 12, label: mdns), rec(1, "Chrome", 25, label: mdns))
+        t.endBatch()
+        XCTAssertEqual(t.attributed, 7)
     }
 
     func testOnlyTrackedInterfacesCount() {
         var t = tally()
-        t.beginSample()
-        t.add(rec(1, "curl", 500, interface: "en0"))
-        t.add(rec(2, "zoom", 40, label: "udp4 a<->b", interface: "utun6"))
+        startBatch(&t)
+        sample(&t, rec(9, "idle", 1, label: "udp4 other", interface: "en0"))
+        sample(&t, rec(1, "curl", 500, interface: "en0"), rec(2, "zoom", 40, label: "udp4 a<->b", interface: "utun6"))
+        t.endBatch()
         XCTAssertEqual(t.top(5).map(\.app.name), ["zoom"])
     }
 
-    func testChangingTrackedMidSessionCountsOnlyNewGrowth() {
+    func testChangingTrackedMidSessionDoesNotAddHistory() {
+        // Growth is credited against the tracked set when a sample closes, so
+        // the sample read just before the switch counts; the socket's earlier
+        // history (its first 100 bytes) does not.
         var t = tally()
-        t.beginSample(); t.add(rec(1, "curl", 100, interface: "utun9"))
+        startBatch(&t)
+        sample(&t, rec(1, "curl", 100, interface: "utun9"))
+        sample(&t, rec(1, "curl", 120, interface: "utun9"))
         t.tracked = ["utun9"]
-        t.beginSample(); t.add(rec(1, "curl", 150, interface: "utun9"))
+        sample(&t, rec(1, "curl", 150, interface: "utun9"))
+        t.endBatch()
         XCTAssertEqual(t.attributed, 50)
     }
 
     func testHelpersRollUpIntoTheirApp() {
         let chrome = AppIdentity(key: "/Applications/Google Chrome.app", name: "Google Chrome")
         var t = tally(StubResolver(apps: [10: chrome, 11: chrome]))
-        t.beginSample()
-        t.add(rec(10, "Google Chrome", 300))
-        t.add(rec(11, "Google Chrome He", 200, label: "tcp4 192.0.2.10:6000<->198.51.100.2:443"))
+        startBatch(&t)
+        sample(&t, rec(9, "idle", 1, label: "udp4 other", interface: "en0"))
+        sample(&t, rec(10, "Google Chrome", 300), rec(11, "Google Chrome He", 200, label: "tcp4 192.0.2.10:6000<->198.51.100.2:443"))
+        t.endBatch()
         XCTAssertEqual(t.top(5), [AppUsageEntry(app: chrome, bytesIn: 500, bytesOut: 0)])
     }
 
     func testTopOrdersByTotalThenNameAndLimits() {
-        var t = tally(); t.beginSample()
+        var t = tally()
+        startBatch(&t)
+        sample(&t, rec(99, "idle", 1, label: "udp4 other", interface: "en0"))
+        t.beginSample()
         for (i, (name, bytes)) in [("b", 10), ("a", 10), ("c", 30), ("d", 5)].enumerated() {
             t.add(rec(Int32(i), name, Int64(bytes), label: "tcp4 \(i)"))
         }
+        t.endBatch()
         XCTAssertEqual(t.top(3).map(\.app.name), ["c", "a", "b"])
     }
 
     func testOtherIsTheUnattributedRemainderNeverNegative() {
-        var t = tally(); t.beginSample(); t.add(rec(1, "curl", 700))
+        var t = tally()
+        startBatch(&t)
+        sample(&t, rec(9, "idle", 1, label: "udp4 other", interface: "en0"))
+        sample(&t, rec(1, "curl", 700))
+        t.endBatch()
         XCTAssertEqual(t.other(sessionTotal: 1000), 300)
         XCTAssertEqual(t.other(sessionTotal: 500), 0)
     }
 
-    func testResetStartsAFreshSession() {
-        var t = tally(); t.beginSample(); t.add(rec(1, "curl", 700))
+    func testResetStartsAFreshSessionWithANewBaseline() {
+        var t = tally()
+        startBatch(&t)
+        sample(&t, rec(9, "idle", 1, label: "udp4 other", interface: "en0"))
+        sample(&t, rec(1, "curl", 700))
+        t.endBatch()
         t.reset()
         XCTAssertEqual(t.attributed, 0)
-        t.beginSample(); t.add(rec(1, "curl", 800))
-        XCTAssertEqual(t.attributed, 800, "a socket seen before the reset counts from its full total")
+        startBatch(&t)
+        sample(&t, rec(1, "curl", 800))
+        sample(&t, rec(1, "curl", 900))
+        t.endBatch()
+        XCTAssertEqual(t.attributed, 100)
     }
 }
 
@@ -203,37 +318,43 @@ final class BatchRestartPolicyTests: XCTestCase {
 }
 
 #if os(macOS)
-/// Runs the real `nettop` once: if a macOS update changes its output, this
-/// fails instead of the panel silently going empty.
+/// Runs the real `nettop` with the production arguments: if a macOS update
+/// changes its output, this fails instead of the panel silently going wrong.
 final class NettopSmokeTests: XCTestCase {
-    func testEveryLineOfRealOutputParses() throws {
-        let nettop = "/usr/bin/nettop"
-        try XCTSkipUnless(FileManager.default.isExecutableFile(atPath: nettop), "nettop not installed")
+    private func run(samples: Int) throws -> [NettopLine] {
+        try XCTSkipUnless(FileManager.default.isExecutableFile(atPath: NettopCommand.path), "nettop not installed")
         let process = Process()
-        process.executableURL = URL(fileURLWithPath: nettop)
-        process.arguments = ["-x", "-L", "1", "-J", "interface,bytes_in,bytes_out"]
+        process.executableURL = URL(fileURLWithPath: NettopCommand.path)
+        process.arguments = NettopCommand.arguments(samples: samples, interval: 1)
         let pipe = Pipe()
         process.standardOutput = pipe
         process.standardError = FileHandle.nullDevice
         try process.run()
         let output = String(decoding: pipe.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
         process.waitUntilExit()
-
         var parser = NettopParser()
-        var headers = 0, processes = 0, connections = 0
-        var unparsed: [String] = []
-        for line in output.split(separator: "\n") {
-            switch parser.parse(line) {
-            case .header: headers += 1
-            case .process: processes += 1
-            case .connection: connections += 1
-            case .skipped: unparsed.append(String(line))
-            }
+        return output.split(separator: "\n").map { parser.parse($0) }
+    }
+
+    func testEveryLineOfRealOutputParses() throws {
+        let lines = try run(samples: 1)
+        XCTAssertEqual(lines.filter { $0 == .header }.count, 1)
+        XCTAssertTrue(lines.contains { if case .process = $0 { return true }; return false })
+        XCTAssertTrue(lines.contains { if case .connection = $0 { return true }; return false })
+        XCTAssertFalse(lines.contains(.skipped), "nettop's output format changed")
+    }
+
+    /// A socket's label must not change between samples, or the tally takes
+    /// it for a new socket and credits its whole total again. nettop resolves
+    /// addresses to host names in the background unless told not to.
+    func testSocketLabelsStayNumericAcrossSamples() throws {
+        let hosts = try run(samples: 3).compactMap { line -> String? in
+            guard case .connection(let r) = line else { return nil }
+            // Drop the protocol and any %scope; what remains is addresses, ports, '*', ':' '.' '<->'.
+            let body = r.label.dropFirst(5).replacingOccurrences(of: #"%[A-Za-z0-9]+"#, with: "", options: .regularExpression)
+            return body.range(of: "[g-zG-Z]", options: .regularExpression) != nil ? r.label : nil
         }
-        XCTAssertEqual(headers, 1)
-        XCTAssertGreaterThan(processes, 0)
-        XCTAssertGreaterThan(connections, 0)
-        XCTAssertEqual(unparsed, [], "nettop's output format changed")
+        XCTAssertEqual(hosts, [], "labels contain host names")
     }
 }
 #endif

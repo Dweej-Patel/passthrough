@@ -8,6 +8,19 @@ import Foundation
 // interface; bytes moved by sockets that close between samples can't be tied
 // to the tunnel and stay unattributed ("Other").
 
+/// The command the sampler runs, shared with the smoke test so a format change
+/// in the exact production invocation is caught.
+public enum NettopCommand {
+    public static let path = "/usr/bin/nettop"
+
+    /// Bounded batches: an unbounded `-L 0` run ignores `-s` and spins a core.
+    /// `-n` keeps addresses numeric: nettop otherwise swaps in host names as it
+    /// resolves them, changing a socket's label between samples.
+    public static func arguments(samples: Int = 30, interval: Int = 2) -> [String] {
+        ["-n", "-c", "-x", "-s", String(interval), "-L", String(samples), "-J", "interface,bytes_in,bytes_out"]
+    }
+}
+
 /// One socket row: its owner, interface and running totals since it opened.
 public struct NettopRecord: Equatable, Sendable {
     public var pid: Int32
@@ -90,41 +103,85 @@ public struct AppUsageEntry: Equatable, Sendable {
     public init(app: AppIdentity, bytesIn: Int64 = 0, bytesOut: Int64 = 0) { self.app = app; self.bytesIn = bytesIn; self.bytesOut = bytesOut }
 }
 
-/// Session totals per app, from running socket totals. Remembers each socket's
-/// last totals and credits only growth, so a socket first seen mid-life counts
-/// from its start and a `nettop` restart never counts anything twice.
+/// Session totals per app, from running socket totals. Rows are collected
+/// per sample and credited when the sample closes: each socket's growth since
+/// the last complete sample, so a `nettop` restart never counts anything twice.
 public struct AppUsageTally {
     /// Interfaces whose sockets count: the tunnel the apps' traffic is on.
     public var tracked: Set<String>
     private let resolver: any AppResolver
     private var entries: [String: AppUsageEntry] = [:]
-    private var seen: [String: (rx: Int64, tx: Int64)] = [:]
-    private var seenThisSample: Set<String> = []
+    /// Running totals per socket in the last closed sample.
+    private var seen: [Socket: Totals] = [:]
+    /// The sample being read. Rows sharing a key (unconnected UDP) are summed.
+    private var current: [Socket: Totals] = [:]
+    /// The session's first sample is a baseline: sockets already open on the
+    /// tracked interface (a VPN that was up before the session) aren't usage.
+    private var baselined = false
+    /// Each batch's first sample is dropped: under load nettop's first sample
+    /// lists some sockets with counters not read yet (0), and the jump to
+    /// their real totals in the next sample would be credited as usage.
+    private var dropNextSample = true
+    private var dropping = false
+
+    private struct Socket: Hashable {
+        var pid: Int32
+        var label: String
+        var interface: String
+        var processName: String
+    }
+    private struct Totals { var rx: Int64; var tx: Int64 }
 
     public init(tracked: Set<String>, resolver: any AppResolver) {
         self.tracked = tracked
         self.resolver = resolver
     }
 
-    /// A new sample starts: forget sockets the last sample no longer listed
-    /// (they closed), so a new socket reusing the label counts from zero.
+    /// A new sample starts: close the one being read. Sockets it no longer
+    /// listed have closed, so a new socket reusing a label counts from zero.
     public mutating func beginSample() {
-        seen = seen.filter { seenThisSample.contains($0.key) }
-        seenThisSample = []
+        if dropNextSample {
+            dropNextSample = false
+            dropping = true
+            return
+        }
+        dropping = false
+        guard !current.isEmpty else { return }
+        credit()
+        seen = current
+        current = [:]
+    }
+
+    /// The batch ended: credit its last sample, which may have been cut short,
+    /// so remember its sockets without forgetting the ones it didn't reach.
+    public mutating func endBatch() {
+        dropNextSample = true
+        dropping = false
+        guard !current.isEmpty else { return }
+        credit()
+        seen.merge(current) { $1 }
+        current = [:]
     }
 
     public mutating func add(_ record: NettopRecord) {
-        let socket = "\(record.pid)|\(record.label)"
-        seenThisSample.insert(socket)
-        var grewIn = record.bytesIn, grewOut = record.bytesOut
-        if let last = seen[socket], record.bytesIn >= last.rx, record.bytesOut >= last.tx {
-            grewIn -= last.rx; grewOut -= last.tx
+        guard !dropping else { return }
+        let socket = Socket(pid: record.pid, label: record.label, interface: record.interface, processName: record.processName)
+        current[socket, default: Totals(rx: 0, tx: 0)].rx += record.bytesIn
+        current[socket, default: Totals(rx: 0, tx: 0)].tx += record.bytesOut
+    }
+
+    private mutating func credit() {
+        guard baselined else { baselined = true; return }
+        for (socket, now) in current where tracked.contains(socket.interface) {
+            var grewIn = now.rx, grewOut = now.tx
+            if let last = seen[socket], now.rx >= last.rx, now.tx >= last.tx {
+                grewIn -= last.rx; grewOut -= last.tx
+            }
+            guard grewIn > 0 || grewOut > 0 else { continue }
+            let app = resolver.identity(pid: socket.pid, processName: socket.processName)
+            entries[app.key, default: AppUsageEntry(app: app)].bytesIn += grewIn
+            entries[app.key, default: AppUsageEntry(app: app)].bytesOut += grewOut
         }
-        seen[socket] = (record.bytesIn, record.bytesOut)
-        guard tracked.contains(record.interface), grewIn > 0 || grewOut > 0 else { return }
-        let app = resolver.identity(pid: record.pid, processName: record.processName)
-        entries[app.key, default: AppUsageEntry(app: app)].bytesIn += grewIn
-        entries[app.key, default: AppUsageEntry(app: app)].bytesOut += grewOut
     }
 
     public var attributed: Int64 { entries.values.reduce(0) { $0 + $1.total } }
@@ -137,7 +194,8 @@ public struct AppUsageTally {
     public func other(sessionTotal: Int64) -> Int64 { max(0, sessionTotal - attributed) }
 
     public mutating func reset() {
-        entries = [:]; seen = [:]; seenThisSample = []
+        entries = [:]; seen = [:]; current = [:]; baselined = false
+        dropNextSample = true; dropping = false
     }
 }
 

@@ -59,7 +59,6 @@ final class NettopSampler: ObservableObject {
 /// The off-main part. All state is confined to `queue`.
 private final class NettopEngine: @unchecked Sendable {
     var onUpdate: ((Date, [AppUsageEntry], Int64) -> Void)?
-    private static let arguments = ["-c", "-x", "-s", "2", "-L", "30", "-J", "interface,bytes_in,bytes_out"]
     private let queue = DispatchQueue(label: "dev.dpatel.passthrough.nettop", qos: .utility)
     private let resolver = RunningAppResolver()
     private var tally: AppUsageTally?
@@ -68,6 +67,8 @@ private final class NettopEngine: @unchecked Sendable {
     private var process: Process?
     private var generation = 0
     private var batch = 0
+    /// The last batch whose end was handled (by end of file or the fallback).
+    private var endedBatch = 0
     private var session = Date.distantPast
     private var policy = BatchRestartPolicy()
     private var lastPublish = Date.distantPast
@@ -106,24 +107,33 @@ private final class NettopEngine: @unchecked Sendable {
         parser = NettopParser()
         pending = Data()
         let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/nettop")
-        process.arguments = Self.arguments
+        process.executableURL = URL(fileURLWithPath: NettopCommand.path)
+        process.arguments = NettopCommand.arguments()
         let pipe = Pipe()
         process.standardOutput = pipe
         process.standardError = FileHandle.nullDevice
+        let started = Date()
+        // The batch ends at end of file, not at exit: nettop's last sample is
+        // flushed as it exits and can reach us after the termination handler.
+        // The handler runs serially, so EOF is queued after every chunk.
         pipe.fileHandleForReading.readabilityHandler = { [weak self] handle in
             let data = handle.availableData
-            if data.isEmpty { handle.readabilityHandler = nil; return }
+            if data.isEmpty {
+                handle.readabilityHandler = nil
+                self?.queue.async { self?.batchEnded(gen, thisBatch, ran: Date().timeIntervalSince(started)) }
+                return
+            }
             self?.queue.async { self?.consume(data, gen, thisBatch) }
         }
-        let started = Date()
+        // Fallback in case end of file never arrives; a no-op once it has.
         process.terminationHandler = { [weak self] _ in
-            self?.queue.async { self?.batchEnded(gen, thisBatch, ran: Date().timeIntervalSince(started)) }
+            self?.queue.asyncAfter(deadline: .now() + 2) { self?.batchEnded(gen, thisBatch, ran: Date().timeIntervalSince(started)) }
         }
         do {
             try process.run()
             self.process = process
         } catch {
+            pipe.fileHandleForReading.readabilityHandler = nil
             ptLog(.warning, "Per-app usage unavailable: couldn't run nettop (\(error.localizedDescription))")
         }
     }
@@ -134,15 +144,19 @@ private final class NettopEngine: @unchecked Sendable {
         while let newline = pending.firstIndex(of: 0x0A) {
             let line = String(decoding: pending[pending.startIndex..<newline], as: UTF8.self)
             pending.removeSubrange(pending.startIndex...newline)
-            switch parser.parse(line) {
-            case .header:
-                tally?.beginSample()
-                publishIfDue()
-            case .connection(let record):
-                tally?.add(record)
-            case .process, .skipped:
-                break
-            }
+            feed(line)
+        }
+    }
+
+    private func feed(_ line: String) {
+        switch parser.parse(line) {
+        case .header:
+            tally?.beginSample()
+            publishIfDue()
+        case .connection(let record):
+            tally?.add(record)
+        case .process, .skipped:
+            break
         }
     }
 
@@ -153,8 +167,14 @@ private final class NettopEngine: @unchecked Sendable {
     }
 
     private func batchEnded(_ gen: Int, _ thisBatch: Int, ran: TimeInterval) {
-        guard gen == generation, thisBatch == batch else { return }
+        guard gen == generation, thisBatch == batch, thisBatch != endedBatch else { return }
+        endedBatch = thisBatch
         process = nil
+        if !pending.isEmpty { feed(String(decoding: pending, as: UTF8.self)) }
+        pending = Data()
+        tally?.endBatch()
+        lastPublish = .distantPast
+        publishIfDue()
         if policy.shouldRelaunch(afterRunOf: ran) {
             launch(gen)
         } else {
