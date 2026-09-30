@@ -71,7 +71,7 @@ final class NettopSampler: ObservableObject {
 private final class NettopEngine: @unchecked Sendable {
     var onUpdate: ((Date, [AppUsageEntry], Int64) -> Void)?
     var onUnavailable: ((Date) -> Void)?
-    private let queue = DispatchQueue(label: "dev.dpatel.passthrough.nettop", qos: .utility)
+    private let queue = DispatchQueue(label: "\(PassthroughProtocol.identifier).nettop", qos: .utility)
     private let resolver = RunningAppResolver()
     private var tally: AppUsageTally?
     private var parser = NettopParser()
