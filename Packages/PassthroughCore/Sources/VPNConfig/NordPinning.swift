@@ -10,18 +10,19 @@ public enum NordPinning {
     public static let caSHA256 = "0f3e5da3a16471b1885bc1cfbc1965796e0c23b95c4af5beaa75bb4bab629a03"
 
     public enum Failure: Error, Equatable {
+        case invalidProfile
         case missingCA
         case wrongCA
         case notPinned(String)
     }
 
+    /// Checked on the parsed profile (what the helper hands openvpn), not the raw
+    /// text, so a second <ca> or verify-x509-name can't slip past a substring match.
     public static func verify(profileText text: String, host: String, expectedCASHA256: String = caSHA256) throws {
-        guard let caStart = text.range(of: "<ca>\n"), let caEnd = text.range(of: "</ca>", range: caStart.upperBound..<text.endIndex) else {
-            throw Failure.missingCA
-        }
-        let ca = String(text[caStart.upperBound..<caEnd.lowerBound]).trimmingCharacters(in: .whitespacesAndNewlines)
-        guard sha256Hex(ca) == expectedCASHA256 else { throw Failure.wrongCA }
-        guard text.contains("remote-cert-tls server"), text.contains("verify-x509-name CN=\(host)") else {
+        guard let profile = try? OpenVPNProfile(text: text) else { throw Failure.invalidProfile }
+        guard let ca = profile.inlineCA else { throw Failure.missingCA }
+        guard sha256Hex(ca.trimmingCharacters(in: .whitespacesAndNewlines)) == expectedCASHA256 else { throw Failure.wrongCA }
+        guard profile.lines.contains("remote-cert-tls server"), profile.lines.contains("verify-x509-name CN=\(host)") else {
             throw Failure.notPinned(host)
         }
     }

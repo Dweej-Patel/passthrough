@@ -170,7 +170,7 @@ enum NordVPN {
         // Identity pinning: Nord's CA, and a certificate name that is this very server.
         do {
             try NordPinning.verify(profileText: text, host: host)
-        } catch NordPinning.Failure.missingCA {
+        } catch NordPinning.Failure.invalidProfile, NordPinning.Failure.missingCA {
             throw NordError.badResponse
         } catch NordPinning.Failure.wrongCA {
             throw NordError.untrusted("its certificate authority is not NordVPN's")

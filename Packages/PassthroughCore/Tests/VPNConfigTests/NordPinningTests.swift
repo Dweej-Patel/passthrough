@@ -42,9 +42,40 @@ final class NordPinningTests: XCTestCase {
     }
 
     func testRefusesAProfileWithoutACA() {
+        // The parser requires an inline CA, so this never gets as far as the pin.
         XCTAssertThrowsError(try verify("client\nremote-cert-tls server\nverify-x509-name CN=\(host)\n")) { error in
-            XCTAssertEqual(error as? NordPinning.Failure, .missingCA)
+            XCTAssertEqual(error as? NordPinning.Failure, .invalidProfile)
         }
+    }
+
+    func testAcceptsWindowsLineEndings() {
+        XCTAssertNoThrow(try verify(profile().replacingOccurrences(of: "\n", with: "\r\n")))
+    }
+
+    // The pin is checked on the parsed profile, which is what openvpn runs, so
+    // text that merely contains the right values somewhere is not enough.
+
+    func testRefusesASecondCAAfterNords() {
+        let attacker = "-----BEGIN CERTIFICATE-----\nMIIBattacker\n-----END CERTIFICATE-----"
+        for tag in ["ca", "CA"] {
+            XCTAssertThrowsError(try verify(profile() + "<\(tag)>\n\(attacker)\n</\(tag)>\n"), tag) {
+                XCTAssertEqual($0 as? NordPinning.Failure, .invalidProfile)
+            }
+        }
+    }
+
+    func testRefusesASecondServerName() {
+        for override in ["verify-x509-name attacker.example", "VERIFY-X509-NAME CN=attacker.example"] {
+            XCTAssertThrowsError(try verify(profile() + override + "\n")) { XCTAssertEqual($0 as? NordPinning.Failure, .invalidProfile) }
+        }
+    }
+
+    func testRefusesALooserServerName() {
+        for pinned in ["\(host).evil", "\(host) name-prefix"] {
+            XCTAssertThrowsError(try verify(profile(pinnedName: pinned)), pinned)
+        }
+        let commented = profile().replacingOccurrences(of: "verify-x509-name CN=\(host)", with: "# verify-x509-name CN=\(host)")
+        XCTAssertThrowsError(try verify(commented)) { XCTAssertEqual($0 as? NordPinning.Failure, .notPinned(self.host)) }
     }
 
     func testDefaultsToNordsRootCA() {

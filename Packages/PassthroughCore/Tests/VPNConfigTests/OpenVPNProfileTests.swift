@@ -97,6 +97,55 @@ final class OpenVPNProfileTests: XCTestCase {
         }
     }
 
+    // MARK: OpenVPN's reader (block close tags, line buffer, last-one-wins)
+
+    private let pem = "-----BEGIN CERTIFICATE-----\nMIIBfake\n-----END CERTIFICATE-----"
+
+    private func withCABlock(_ lines: String) throws -> OpenVPNProfile {
+        try OpenVPNProfile(text: "client\nremote vpn.example.com 1194\n<ca>\n\(pem)\n\(lines)\n</ca>\n")
+    }
+
+    private func assertRefused(_ make: @autoclosure () throws -> OpenVPNProfile, _ expected: OpenVPNProfile.ProfileError,
+                               file: StaticString = #filePath, line: UInt = #line) {
+        XCTAssertThrowsError(try make(), file: file, line: line) { error in
+            XCTAssertEqual(error as? OpenVPNProfile.ProfileError, expected, file: file, line: line)
+        }
+    }
+
+    func testRefusesAFakeCloseTagInsideABlock() {
+        // OpenVPN ends a block at any line *starting* with the close tag after
+        // whitespace, so these would turn the following lines into directives.
+        assertRefused(try withCABlock("</ca>x\nlog-append /tmp/o.log\nremote 6.6.6.6 443"), .badBlock("ca"))
+        assertRefused(try withCABlock("   </ca>junk\nplugin /tmp/evil.so"), .badBlock("ca"))
+        assertRefused(try withCABlock("\u{0B}</ca>x\nlog /tmp/o.log"), .badBlock("ca"))
+        assertRefused(try profile("<tls-auth>\n</tls-auth>x\nstatus /tmp/s\n</tls-auth>"), .badBlock("tls-auth"))
+    }
+
+    func testBlockLinesFitOpenVPNsLineBuffer() throws {
+        // fgets(256) would split a longer line and read the tail as a new line.
+        assertRefused(try withCABlock(String(repeating: "A", count: 255) + "</ca>\nconfig /tmp/c"), .badBlock("ca"))
+        assertRefused(try withCABlock(String(repeating: "A", count: 255)), .lineTooLong)
+        XCTAssertNoThrow(try withCABlock(String(repeating: "A", count: 254)))
+    }
+
+    func testCanonicalLinesFitOpenVPNsLineBuffer() {
+        assertRefused(try profile("remote " + String(repeating: "a", count: 247) + "log 1194"), .lineTooLong)
+        XCTAssertNoThrow(try profile("remote " + String(repeating: "a", count: 230) + " 1194 udp"))
+    }
+
+    func testRefusesSecondCopiesOfPinnedValues() {
+        // OpenVPN keeps the last one, which would replace the value we checked.
+        assertRefused(try profile("<ca>\n\(pem)\n</ca>"), .duplicate("<ca>"))
+        // An uppercase block only ever closes on "</ca>", so "</CA>" is refused as content.
+        assertRefused(try profile("<CA>\n\(pem)\n</CA>"), .badBlock("ca"))
+        assertRefused(try profile("verify-x509-name CN=a\nverify-x509-name CN=b"), .duplicate("verify-x509-name"))
+        assertRefused(try profile("verify-x509-name CN=a\nVERIFY-X509-NAME CN=b"), .duplicate("verify-x509-name"))
+    }
+
+    func testAcceptsStaticKeyCommentsInABlock() {
+        XCTAssertNoThrow(try profile("key-direction 1\n<tls-auth>\n#\n# 2048 bit OpenVPN static key\n#\n-----BEGIN OpenVPN Static key V1-----\ne685bdaf659a25a200e2b9e4\n-----END OpenVPN Static key V1-----\n</tls-auth>"))
+    }
+
     // MARK: Accepted and canonicalised
 
     func testCanonicalisesAVendorProfile() throws {
