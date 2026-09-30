@@ -27,6 +27,7 @@ final class OpenVPNRunner: VPNRunner {
     private var fatalReason: String?
     private var wasConnected = false
     private var lastStats: (Int, Int, Int?) = (0, 0, nil)
+    private var lastLinkRx = 0
     private static let configPath = BundledEngines.stateDirectory + "/openvpn.conf"
     private static let statusPath = BundledEngines.stateDirectory + "/openvpn.status"
 
@@ -76,6 +77,10 @@ final class OpenVPNRunner: VPNRunner {
             "--connect-retry", "2", "10",
             "--auth-user-pass", "/dev/stdin",
             "--status", Self.statusPath, "1",
+            // Under heavy load (tens of MB/s through the phone) packets arrive
+            // out of order often enough that OpenVPN's default 64-packet window
+            // dropped them as replays; TCP inside then stalled on the gaps.
+            "--replay-window", "1024", "15",
             "--verb", "3",
         ]
         let out = Pipe(), input = Pipe()
@@ -216,15 +221,33 @@ final class OpenVPNRunner: VPNRunner {
     }
 
     func stats() -> (Int, Int, Int?) {
-        guard let text = try? String(contentsOfFile: Self.statusPath, encoding: .utf8) else { return lastStats }
-        var rx = 0, tx = 0
+        guard let counters = statusCounters() else { return lastStats }
+        lastStats = (counters["TUN/TAP write bytes"] ?? 0, counters["TUN/TAP read bytes"] ?? 0, nil)
+        return lastStats
+    }
+
+    /// Bytes read from the server's socket: every packet it sends, keepalives
+    /// and control traffic included, not only tunnel data. For liveness.
+    func linkRxBytes() -> Int {
+        guard let counters = statusCounters() else { return lastLinkRx }
+        lastLinkRx = counters["TCP/UDP read bytes"] ?? 0
+        return lastLinkRx
+    }
+
+    /// The link and tunnel byte counts, for the log: which way traffic stopped.
+    func counterSummary() -> String {
+        guard let c = statusCounters() else { return "no status" }
+        return "link sent \(c["TCP/UDP write bytes"] ?? 0) B, received \(c["TCP/UDP read bytes"] ?? 0) B; "
+            + "tunnel in \(c["TUN/TAP read bytes"] ?? 0) B, out \(c["TUN/TAP write bytes"] ?? 0) B"
+    }
+
+    private func statusCounters() -> [Substring: Int]? {
+        guard let text = try? String(contentsOfFile: Self.statusPath, encoding: .utf8) else { return nil }
+        var counters: [Substring: Int] = [:]
         for line in text.split(separator: "\n") {
             let parts = line.split(separator: ",")
-            guard parts.count == 2, let v = Int(parts[1]) else { continue }
-            if parts[0] == "TUN/TAP write bytes" { rx = v }
-            if parts[0] == "TUN/TAP read bytes" { tx = v }
+            if parts.count == 2, let v = Int(parts[1]) { counters[parts[0]] = v }
         }
-        lastStats = (rx, tx, nil)
-        return lastStats
+        return counters
     }
 }

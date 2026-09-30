@@ -802,12 +802,17 @@ private final class UDPPeer: @unchecked Sendable {
     var droppedSinceCheck = 0
     private var fromMacLastCheck = 0
     private let born = Date()
+    /// Not web (443) or DNS (53): a VPN session, most likely. Its counts are
+    /// logged every interval while it has traffic, since a stalled VPN is
+    /// otherwise hard to place.
+    private let verbose: Bool
     private let label: String
 
     /// Datagrams go to `target` when given (a redirected DNS query), else to `address`.
     init(address: SOCKS5.Address, target: NWEndpoint?, parameters: NWParameters, queue: DispatchQueue, waitTimeout: TimeInterval, onDatagram: @escaping (Data) -> Void) {
         self.onDatagram = onDatagram
         self.label = "\(address)"
+        self.verbose = address.port.rawValue != 443 && address.port.rawValue != 53
         self.queue = queue
         self.waitTimeout = waitTimeout
         connection = NWConnection(to: target ?? .hostPort(host: address.host, port: address.port), using: parameters)
@@ -882,6 +887,7 @@ private final class UDPPeer: @unchecked Sendable {
         else if sentSinceCheck >= 2, receivedSinceCheck == 0 { problem = "unanswered" }
         else if receivedSinceCheck > 0, relayedSinceCheck == 0 { problem = "not reaching the Mac" }
         else if fromMacLastCheck >= 50, sentSinceCheck == 0, receivedSinceCheck == 0 { problem = "went quiet" }
+        else if verbose, sentSinceCheck + receivedSinceCheck > 0 { problem = "flowing" }
         else { return }
         ptLog(.info, "UDP \(label) \(problem), last \(Int(interval)) s: \(sentSinceCheck) from Mac, \(receivedSinceCheck) from server, "
               + "\(relayedSinceCheck) to Mac, \(droppedSinceCheck) dropped, \(queuedToMac) B queued")

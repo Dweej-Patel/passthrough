@@ -9,6 +9,11 @@ if [ ! -d "$VENDOR" ]; then
 fi
 cd "$VENDOR"
 git submodule update --init --recursive 2>/dev/null || true
+# Local fixes (see each patch's header); skipped when already applied.
+for p in ../HevSocks5Tunnel/patches/*.patch; do
+  if patch -p1 -R --dry-run -s -f < "$p" >/dev/null 2>&1; then continue; fi
+  patch -p1 -N -s < "$p" || { echo "failed to apply $p" >&2; exit 1; }
+done
 make clean >/dev/null 2>&1 || true
 make PP="xcrun --sdk macosx clang" CC="xcrun --sdk macosx clang" \
      CFLAGS="-arch arm64 -mmacosx-version-min=14.0" \
