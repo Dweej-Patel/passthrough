@@ -141,7 +141,7 @@ public struct LinkCredential: Codable, Equatable, Sendable {
 /// connecting them to its own proxy. When a link drops it redials and resumes
 /// the same session, so the Mac's connections pause instead of failing.
 public final class WirelessDialer: @unchecked Sendable {
-    private let queue = DispatchQueue(label: "dev.dpatel.passthrough.wireless-dialer")
+    private let queue = DispatchQueue(label: "\(PassthroughProtocol.identifier).wireless-dialer")
     private let credentials: @Sendable () -> [LinkCredential]
     private let allowedPorts: Set<UInt16>
     private let peerToPeer: Bool

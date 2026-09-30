@@ -10,7 +10,7 @@ final class WireGuardRunner: VPNRunner {
     var endpoints: [(host: String, port: Int)] { parsed.endpoints }
     var endpointIPs: [String: String] = [:]
     /// UAPI socket I/O blocks (up to 3 s); keep it off the helper's XPC queue.
-    private let ioQueue = DispatchQueue(label: "dev.dpatel.passthrough.wg.io", qos: .utility)
+    private let ioQueue = DispatchQueue(label: "\(HelperConstants.identifier).wg.io", qos: .utility)
     private let statsLock = NSLock()
 
     private let parsed: WireGuardConfig

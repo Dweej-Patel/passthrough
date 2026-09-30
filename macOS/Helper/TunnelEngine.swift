@@ -32,7 +32,7 @@ final class TunnelEngine {
         }
     }
 
-    private static let serviceID = "dev.dpatel.passthrough.tunnel"
+    private static let serviceID = "\(HelperConstants.identifier).tunnel"
     private var fd: Int32 = -1
     private(set) var interfaceName: String?
     private var child: EngineChild?
@@ -221,7 +221,7 @@ final class TunnelEngine {
     private static func engineExecutable() throws -> URL {
         if let engineCopy, FileManager.default.isExecutableFile(atPath: engineCopy.path) { return engineCopy }
         guard let helper = Bundle.main.executableURL else { throw EngineError.engineExited }
-        let copy = try BundledEngines.stagedEngine(helper, identifier: Bundle.main.bundleIdentifier ?? "dev.dpatel.passthrough.helper")
+        let copy = try BundledEngines.stagedEngine(helper, identifier: Bundle.main.bundleIdentifier ?? "\(HelperConstants.identifier).helper")
         engineCopy = copy
         return copy
     }

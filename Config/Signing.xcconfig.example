@@ -2,3 +2,6 @@
 // Find it in Xcode ▸ Settings ▸ Accounts, or developer.apple.com ▸ Membership.
 // Signing.xcconfig is gitignored so your Team ID is never committed.
 DEVELOPMENT_TEAM = 
+
+// Optional: your own bundle ID base (defaults to Identity.xcconfig's).
+// PASSTHROUGH_ID = com.example.passthrough

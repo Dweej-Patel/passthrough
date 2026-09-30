@@ -7,7 +7,7 @@ import PassthroughCore
 
 let socksPort = UInt16(CommandLine.arguments.dropFirst().first ?? "") ?? PassthroughProtocol.defaultSOCKSPort
 let controlPort = UInt16(CommandLine.arguments.dropFirst(2).first ?? "") ?? PassthroughProtocol.defaultControlPort
-let defaults = UserDefaults(suiteName: "dev.dpatel.passthrough.devserver")!
+let defaults = UserDefaults(suiteName: "\(PassthroughProtocol.identifier).devserver")!
 let registry = PairingRegistry(defaults: defaults)
 
 // Seed a client so hev/curl can be pointed at it without pairing.
@@ -22,7 +22,7 @@ options.disableAuth = CommandLine.arguments.contains("noauth")
 options.socksPort = socksPort
 options.controlPort = controlPort
 let noAuth = CommandLine.arguments.contains("noauth")
-let service = PassthroughService(registry: noAuth ? PairingRegistry(defaults: UserDefaults(suiteName: "dev.dpatel.passthrough.devserver.noauth")!) : registry, options: options) {
+let service = PassthroughService(registry: noAuth ? PairingRegistry(defaults: UserDefaults(suiteName: "\(PassthroughProtocol.identifier).devserver.noauth")!) : registry, options: options) {
     DeviceStatus(deviceName: "Dev server", radio: "LAN", hosting: "devserver")
 }
 PassthroughLog.shared.onAppend = { entry in print("[\(entry.level.rawValue)] \(entry.message)") }

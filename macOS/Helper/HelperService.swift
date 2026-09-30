@@ -3,7 +3,7 @@ import Foundation
 /// Exported XPC object. Serialises all engine calls on one queue.
 final class HelperService: NSObject, PassthroughHelperProtocol {
     private let engine = TunnelEngine()
-    private let queue = DispatchQueue(label: "dev.dpatel.passthrough.helper")
+    private let queue = DispatchQueue(label: "\(HelperConstants.identifier).helper")
     private lazy var vpn = VPNEngine(queue: queue, tunnel: engine)
     private var vpnOwner: ObjectIdentifier?
     private var owner: ObjectIdentifier?

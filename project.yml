@@ -1,6 +1,6 @@
 name: Passthrough
 options:
-  bundleIdPrefix: dev.dpatel.passthrough
+  bundleIdPrefix: $(PASSTHROUGH_ID)
   deploymentTarget:
     iOS: "17.0"
     macOS: "14.0"
@@ -8,8 +8,8 @@ options:
   groupSortPosition: top
   generateEmptyDirectories: true
 configFiles:
-  Debug: Config/Signing.xcconfig
-  Release: Config/Signing.xcconfig
+  Debug: Config/Identity.xcconfig
+  Release: Config/Identity.xcconfig
 settings:
   base:
     SWIFT_VERSION: "5.0"
@@ -40,6 +40,7 @@ targets:
     info:
       path: iOS/App/Info.plist
       properties:
+        PassthroughID: $(PASSTHROUGH_ID)
         CFBundleDisplayName: Passthrough
         UILaunchScreen: {}
         UISupportedInterfaceOrientations: [UIInterfaceOrientationPortrait]
@@ -53,10 +54,10 @@ targets:
       path: iOS/App/Passthrough.entitlements
       properties:
         com.apple.developer.networking.networkextension: [packet-tunnel-provider]
-        com.apple.security.application-groups: [group.dev.dpatel.passthrough]
+        com.apple.security.application-groups: [group.$(PASSTHROUGH_ID)]
     settings:
       base:
-        PRODUCT_BUNDLE_IDENTIFIER: dev.dpatel.passthrough.ios
+        PRODUCT_BUNDLE_IDENTIFIER: $(PASSTHROUGH_ID).ios
         PRODUCT_NAME: Passthrough
         TARGETED_DEVICE_FAMILY: "1"
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
@@ -75,6 +76,7 @@ targets:
     info:
       path: iOS/Tunnel/Info.plist
       properties:
+        PassthroughID: $(PASSTHROUGH_ID)
         CFBundleDisplayName: Passthrough Tunnel
         NSLocalNetworkUsageDescription: Passthrough finds your linked Mac on this iPhone's Personal Hotspot, or over peer-to-peer Wi-Fi, when the wireless link is on.
         NSBonjourServices: [_passthrough._tcp]
@@ -85,10 +87,10 @@ targets:
       path: iOS/Tunnel/PassthroughTunnel.entitlements
       properties:
         com.apple.developer.networking.networkextension: [packet-tunnel-provider]
-        com.apple.security.application-groups: [group.dev.dpatel.passthrough]
+        com.apple.security.application-groups: [group.$(PASSTHROUGH_ID)]
     settings:
       base:
-        PRODUCT_BUNDLE_IDENTIFIER: dev.dpatel.passthrough.ios.tunnel
+        PRODUCT_BUNDLE_IDENTIFIER: $(PASSTHROUGH_ID).ios.tunnel
         PRODUCT_NAME: PassthroughTunnel
 
   # ───────────────────────── macOS ─────────────────────────
@@ -99,11 +101,6 @@ targets:
       - path: macOS/App
         excludes: ["Info.plist", "*.entitlements", "*.plist"]
       - path: macOS/Shared
-      - path: macOS/App/dev.dpatel.passthrough.helper.plist
-        buildPhase:
-          copyFiles:
-            destination: wrapper
-            subpath: Contents/Library/LaunchDaemons
       # VPN-layer engines, spawned by the root helper. Signed on copy so the
       # helper can verify they carry our Team ID before executing them as root.
       - path: Vendor/VPNEngines/bin/wireguard-go
@@ -131,9 +128,17 @@ targets:
         codeSign: true
         copy:
           destination: executables
+    postCompileScripts:
+      - name: Install launchd plist
+        inputFiles: [$(SRCROOT)/macOS/App/LaunchDaemon.plist]
+        outputFiles: [$(TARGET_BUILD_DIR)/$(CONTENTS_FOLDER_PATH)/Library/LaunchDaemons/$(PASSTHROUGH_ID).helper.plist]
+        script: |
+          mkdir -p "$(dirname "$SCRIPT_OUTPUT_FILE_0")"
+          sed "s/\$(PASSTHROUGH_ID)/$PASSTHROUGH_ID/g" "$SCRIPT_INPUT_FILE_0" > "$SCRIPT_OUTPUT_FILE_0"
     info:
       path: macOS/App/Info.plist
       properties:
+        PassthroughID: $(PASSTHROUGH_ID)
         CFBundleDisplayName: Passthrough
         LSUIElement: true
         LSMinimumSystemVersion: "14.0"
@@ -145,10 +150,10 @@ targets:
       path: macOS/App/PassthroughMac.entitlements
       properties:
         # Needed for the data-protection keychain (kSecUseDataProtectionKeychain).
-        keychain-access-groups: [$(AppIdentifierPrefix)dev.dpatel.passthrough.mac]
+        keychain-access-groups: [$(AppIdentifierPrefix)$(PASSTHROUGH_ID).mac]
     settings:
       base:
-        PRODUCT_BUNDLE_IDENTIFIER: dev.dpatel.passthrough.mac
+        PRODUCT_BUNDLE_IDENTIFIER: $(PASSTHROUGH_ID).mac
         PRODUCT_NAME: Passthrough
         ENABLE_HARDENED_RUNTIME: YES
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
@@ -167,7 +172,7 @@ targets:
         product: VPNConfig
     settings:
       base:
-        PRODUCT_BUNDLE_IDENTIFIER: dev.dpatel.passthrough.helper
+        PRODUCT_BUNDLE_IDENTIFIER: $(PASSTHROUGH_ID).helper
         PRODUCT_NAME: PassthroughHelper
         ENABLE_HARDENED_RUNTIME: YES
         SWIFT_INCLUDE_PATHS: $(SRCROOT)/Vendor/HevSocks5Tunnel/include

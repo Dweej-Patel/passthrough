@@ -78,5 +78,5 @@ extension AppDelegate {
 }
 
 extension Notification.Name {
-    static let passthroughWillTerminate = Notification.Name("dev.dpatel.passthrough.willTerminate")
+    static let passthroughWillTerminate = Notification.Name("\(PassthroughProtocol.identifier).willTerminate")
 }

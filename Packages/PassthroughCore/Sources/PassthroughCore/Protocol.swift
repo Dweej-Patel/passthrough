@@ -2,6 +2,11 @@ import Foundation
 
 /// Constants shared by the iPhone server and the Mac client.
 public enum PassthroughProtocol {
+    /// Reverse-DNS base of every bundle ID, App Group, keychain service and
+    /// log subsystem. Set once as PASSTHROUGH_ID (Config/Identity.xcconfig) and
+    /// read from the `PassthroughID` Info.plist key; SwiftPM builds (devserver,
+    /// tests) have no such key and get a placeholder.
+    public static let identifier = Bundle.main.object(forInfoDictionaryKey: "PassthroughID") as? String ?? "passthrough.local"
     /// Bump when the wire protocol changes incompatibly.
     public static let version = 1
     /// SOCKS5 port the iPhone listens on (loopback only, reached over usbmuxd).
@@ -11,7 +16,7 @@ public enum PassthroughProtocol {
     /// Loopback port the Mac exposes to its own tunnel helper.
     public static let defaultLocalSOCKSPort: UInt16 = 17890
     /// App Group shared between the iOS app and its tunnel extension.
-    public static let appGroup = "group.dev.dpatel.passthrough"
+    public static let appGroup = "group.\(PassthroughProtocol.identifier)"
     public static let pairingCodeLifetime: TimeInterval = 300
 }
 

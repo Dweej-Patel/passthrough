@@ -26,7 +26,7 @@ public final class ControlClient: @unchecked Sendable {
     private let device: PhoneDevice
     private let port: UInt16
     private let identity: Identity
-    private let queue = DispatchQueue(label: "dev.dpatel.passthrough.control-client")
+    private let queue = DispatchQueue(label: "\(PassthroughProtocol.identifier).control-client")
     private var channel: ControlConnection?
     private var heartbeat: DispatchSourceTimer?
     private var lastPong = Date()

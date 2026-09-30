@@ -49,7 +49,7 @@ public final class PairingRegistry: @unchecked Sendable {
     /// Posted (a Darwin notification, so across processes) whenever the list
     /// of paired or linked Macs changes: the app forgets a Mac while the
     /// tunnel extension's wireless link is running.
-    public static let changedNotification = "dev.dpatel.passthrough.pairings-changed"
+    public static let changedNotification = "\(PassthroughProtocol.identifier).pairings-changed"
     public static let codeKey = "pairing.code"
     public static let codeExpiryKey = "pairing.codeExpiry"
     /// Wrong guesses against the current code. Kept with the code in the shared

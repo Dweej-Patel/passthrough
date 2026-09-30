@@ -8,7 +8,7 @@
 	</array>
 	<key>com.apple.security.application-groups</key>
 	<array>
-		<string>group.dev.dpatel.passthrough</string>
+		<string>group.$(PASSTHROUGH_ID)</string>
 	</array>
 </dict>
 </plist>

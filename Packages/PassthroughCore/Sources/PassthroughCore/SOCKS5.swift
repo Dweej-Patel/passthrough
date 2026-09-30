@@ -176,8 +176,8 @@ public final class SOCKS5Server: @unchecked Sendable {
     }
     public var onAuthenticated: (@Sendable (String) -> Void)?
     private let authenticator: Authenticator?
-    let queue = DispatchQueue(label: "dev.dpatel.passthrough.socks", qos: .userInitiated, attributes: .concurrent)
-    private let stateQueue = DispatchQueue(label: "dev.dpatel.passthrough.socks.state")
+    let queue = DispatchQueue(label: "\(PassthroughProtocol.identifier).socks", qos: .userInitiated, attributes: .concurrent)
+    private let stateQueue = DispatchQueue(label: "\(PassthroughProtocol.identifier).socks.state")
     private var listeners: [NWListener] = []
     private var sessions: [ObjectIdentifier: Session] = [:]
     public private(set) var isRunning = false
@@ -425,7 +425,7 @@ private final class Session: @unchecked Sendable {
     init(server: SOCKS5Server, client: NWConnection) {
         self.server = server
         self.client = client
-        self.queue = DispatchQueue(label: "dev.dpatel.passthrough.socks.session", target: server.queue)
+        self.queue = DispatchQueue(label: "\(PassthroughProtocol.identifier).socks.session", target: server.queue)
     }
 
     func start() {

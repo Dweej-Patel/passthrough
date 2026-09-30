@@ -81,7 +81,7 @@ public final class USBMuxWatcher: DeviceWatcher {
     private var restartTask: Task<Void, Never>?
     private var devices: [PhoneDevice] = []
 
-    public init(queue: DispatchQueue = DispatchQueue(label: "dev.dpatel.passthrough.usbmux-watch")) {
+    public init(queue: DispatchQueue = DispatchQueue(label: "\(PassthroughProtocol.identifier).usbmux-watch")) {
         self.queue = queue
     }
 
@@ -148,7 +148,7 @@ public final class ADBWatcher: DeviceWatcher {
     private var lastServerStart = Date.distantPast
     private var running = false
 
-    public init(includeNonUSB: Bool = false, queue: DispatchQueue = DispatchQueue(label: "dev.dpatel.passthrough.adb-watch")) {
+    public init(includeNonUSB: Bool = false, queue: DispatchQueue = DispatchQueue(label: "\(PassthroughProtocol.identifier).adb-watch")) {
         self.includeNonUSB = includeNonUSB
         self.queue = queue
     }

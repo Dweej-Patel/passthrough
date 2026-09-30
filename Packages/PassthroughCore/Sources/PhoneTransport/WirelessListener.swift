@@ -19,7 +19,7 @@ public final class WirelessListener: @unchecked Sendable {
     private let advertise: Bool
     private let peerToPeer: Bool
     private let linkKey: @Sendable (String) -> Data?
-    private let queue = DispatchQueue(label: "dev.dpatel.passthrough.wireless-listener")
+    private let queue = DispatchQueue(label: "\(PassthroughProtocol.identifier).wireless-listener")
     private var listener: NWListener?
     private var stopped = false
     private var pending = 0
@@ -141,7 +141,7 @@ public final class WirelessListener: @unchecked Sendable {
                     return
                 }
                 let id = UUID().uuidString
-                let mux = Mux(transport: stream, isOpener: true, queue: DispatchQueue(label: "dev.dpatel.passthrough.wireless-mux"),
+                let mux = Mux(transport: stream, isOpener: true, queue: DispatchQueue(label: "\(PassthroughProtocol.identifier).wireless-mux"),
                               initialBytes: rest, sessionID: id, resumable: true)
                 self.sessions[id] = (phoneID, mux)
                 WirelessLink.sendLine(.init(t: "fresh", session: id), on: stream)

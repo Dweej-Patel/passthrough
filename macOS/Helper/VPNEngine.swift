@@ -70,7 +70,7 @@ final class VPNEngine {
         var isPassthrough: Bool
     }
 
-    private static let serviceID = "dev.dpatel.passthrough.vpn"
+    private static let serviceID = "\(HelperConstants.identifier).vpn"
     private static let v4Quarters = ["0.0.0.0/2", "64.0.0.0/2", "128.0.0.0/2", "192.0.0.0/2"]
     private static let v6Quarters = ["::/2", "4000::/2", "8000::/2", "c000::/2"]
     /// The kill switch rejects at /3, one step more specific than the /2 VPN

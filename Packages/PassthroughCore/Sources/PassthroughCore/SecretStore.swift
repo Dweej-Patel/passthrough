@@ -23,7 +23,7 @@ public final class InMemorySecrets: SecretStore, @unchecked Sendable {
 /// runs while the phone is locked), this device only, shared through
 /// `accessGroup` (the App Group) between the app and the extension.
 public final class KeychainSecrets: SecretStore, @unchecked Sendable {
-    private let service = "dev.dpatel.passthrough.link"
+    private let service = "\(PassthroughProtocol.identifier).link"
     private let accessGroup: String?
 
     public init(accessGroup: String?) { self.accessGroup = accessGroup }

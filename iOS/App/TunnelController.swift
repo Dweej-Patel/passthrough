@@ -5,7 +5,7 @@ import PassthroughCore
 /// Thin wrapper over NETunnelProviderManager for the packet tunnel extension
 /// that hosts the proxy in the background.
 final class TunnelController {
-    static let providerBundleID = "dev.dpatel.passthrough.ios.tunnel"
+    static let providerBundleID = "\(PassthroughProtocol.identifier).ios.tunnel"
     private var manager: NETunnelProviderManager?
     private var observer: NSObjectProtocol?
     var onStatusChange: ((NEVPNStatus) -> Void)?

@@ -28,6 +28,8 @@
 	</array>
 	<key>NSLocalNetworkUsageDescription</key>
 	<string>Passthrough finds your linked Mac on this iPhone's Personal Hotspot, or over peer-to-peer Wi-Fi, when the wireless link is on.</string>
+	<key>PassthroughID</key>
+	<string>$(PASSTHROUGH_ID)</string>
 	<key>UIApplicationSceneManifest</key>
 	<dict>
 		<key>UIApplicationSupportsMultipleScenes</key>

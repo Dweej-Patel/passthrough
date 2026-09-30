@@ -10,8 +10,8 @@ public final class LocalForwarder: @unchecked Sendable {
     public let counter = ByteCounter()
     private let device: PhoneDevice
     private let remotePort: UInt16
-    private let queue = DispatchQueue(label: "dev.dpatel.passthrough.forwarder", qos: .userInitiated, attributes: .concurrent)
-    private let stateQueue = DispatchQueue(label: "dev.dpatel.passthrough.forwarder.state")
+    private let queue = DispatchQueue(label: "\(PassthroughProtocol.identifier).forwarder", qos: .userInitiated, attributes: .concurrent)
+    private let stateQueue = DispatchQueue(label: "\(PassthroughProtocol.identifier).forwarder.state")
     private var listener: NWListener?
     private var pipes: [ObjectIdentifier: Pipe] = [:]
     public var onFailure: (@Sendable (Error) -> Void)?
@@ -78,7 +78,7 @@ public final class LocalForwarder: @unchecked Sendable {
 
         init(forwarder: LocalForwarder, client: NWConnection) {
             self.forwarder = forwarder
-            self.queue = DispatchQueue(label: "dev.dpatel.passthrough.pipe", target: forwarder.queue)
+            self.queue = DispatchQueue(label: "\(PassthroughProtocol.identifier).pipe", target: forwarder.queue)
             self.client = ConnectionStream(client, queue: queue)
         }
 

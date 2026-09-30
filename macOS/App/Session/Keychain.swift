@@ -4,7 +4,7 @@ import PassthroughCore
 
 /// Stores the per-Mac access token issued by the iPhone.
 enum Keychain {
-    private static let service = "dev.dpatel.passthrough"
+    private static let service = PassthroughProtocol.identifier
 
     /// Items live in the data-protection keychain, this device only, so they
     /// never ride a keychain export, iCloud sync or Migration Assistant.

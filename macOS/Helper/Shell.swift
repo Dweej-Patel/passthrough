@@ -161,7 +161,7 @@ enum RecoverySweep {
             cleaned.append("disablesleep")
         }
         if let store = SCDynamicStoreCreate(nil, "PassthroughSweep" as CFString, nil, nil) {
-            for service in ["dev.dpatel.passthrough.tunnel", "dev.dpatel.passthrough.vpn"] {
+            for service in ["\(HelperConstants.identifier).tunnel", "\(HelperConstants.identifier).vpn"] {
                 for suffix in ["", "/IPv4", "/IPv6", "/DNS"] {
                     let key = "State:/Network/Service/\(service)\(suffix)" as CFString
                     if SCDynamicStoreCopyValue(store, key) != nil, SCDynamicStoreRemoveValue(store, key) { cleaned.append(String(key)) }

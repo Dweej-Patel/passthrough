@@ -24,8 +24,12 @@ import Foundation
 }
 
 public enum HelperConstants {
-    public static let machService = "dev.dpatel.passthrough.helper"
-    public static let plistName = "dev.dpatel.passthrough.helper.plist"
+    /// PASSTHROUGH_ID (Config/Identity.xcconfig), read from the `PassthroughID`
+    /// Info.plist key of the app or the helper. The helper does not link
+    /// PassthroughCore, so this mirrors `PassthroughProtocol.identifier`.
+    public static let identifier = Bundle.main.object(forInfoDictionaryKey: "PassthroughID") as! String
+    public static let machService = "\(HelperConstants.identifier).helper"
+    public static let plistName = "\(HelperConstants.identifier).helper.plist"
     /// Bump together with the helper binary so the app can detect stale daemons.
     public static let version = "1.2.22"
 }
