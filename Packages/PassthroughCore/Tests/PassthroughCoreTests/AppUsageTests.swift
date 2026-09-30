@@ -201,3 +201,39 @@ final class BatchRestartPolicyTests: XCTestCase {
         XCTAssertTrue(p.shouldRelaunch(afterRunOf: 0.1))
     }
 }
+
+#if os(macOS)
+/// Runs the real `nettop` once: if a macOS update changes its output, this
+/// fails instead of the panel silently going empty.
+final class NettopSmokeTests: XCTestCase {
+    func testEveryLineOfRealOutputParses() throws {
+        let nettop = "/usr/bin/nettop"
+        try XCTSkipUnless(FileManager.default.isExecutableFile(atPath: nettop), "nettop not installed")
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: nettop)
+        process.arguments = ["-x", "-L", "1", "-J", "interface,bytes_in,bytes_out"]
+        let pipe = Pipe()
+        process.standardOutput = pipe
+        process.standardError = FileHandle.nullDevice
+        try process.run()
+        let output = String(decoding: pipe.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+        process.waitUntilExit()
+
+        var parser = NettopParser()
+        var headers = 0, processes = 0, connections = 0
+        var unparsed: [String] = []
+        for line in output.split(separator: "\n") {
+            switch parser.parse(line) {
+            case .header: headers += 1
+            case .process: processes += 1
+            case .connection: connections += 1
+            case .skipped: unparsed.append(String(line))
+            }
+        }
+        XCTAssertEqual(headers, 1)
+        XCTAssertGreaterThan(processes, 0)
+        XCTAssertGreaterThan(connections, 0)
+        XCTAssertEqual(unparsed, [], "nettop's output format changed")
+    }
+}
+#endif
