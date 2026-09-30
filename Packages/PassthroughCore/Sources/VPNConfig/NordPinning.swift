@@ -1,5 +1,7 @@
 import Foundation
-import CryptoKit
+// CommonCrypto lives in libSystem, so the root helper (which links this
+// target) loads no extra framework for a hash it never computes.
+import CommonCrypto
 
 /// Identity pinning for NordVPN's downloaded manual-setup profiles: the
 /// profile must carry Nord's own CA and pin the very server that was asked
@@ -28,6 +30,9 @@ public enum NordPinning {
     }
 
     private static func sha256Hex(_ text: String) -> String {
-        SHA256.hash(data: Data(text.utf8)).map { String(format: "%02x", $0) }.joined()
+        let data = Data(text.utf8)
+        var digest = [UInt8](repeating: 0, count: Int(CC_SHA256_DIGEST_LENGTH))
+        data.withUnsafeBytes { _ = CC_SHA256($0.baseAddress, CC_LONG(data.count), &digest) }
+        return digest.map { String(format: "%02x", $0) }.joined()
     }
 }

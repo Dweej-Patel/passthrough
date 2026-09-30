@@ -266,8 +266,16 @@ final class OpenVPNProfileTests: XCTestCase {
         XCTAssertEqual(OpenVPNProfile.tokenize("x a#b"), ["x", "a#b"])
     }
 
-    func testACommentCannotHideADirective() {
-        // "up" behind a quoted '#' is still a token OpenVPN would read.
+    func testAQuotedDirectiveNameIsStillRefused() {
         assertForbidden(#""up" /tmp/x.sh"#)
+        assertForbidden(#"'log-append' /tmp/o.log"#)
+    }
+
+    func testCommentCharactersInsideQuotesDontEndTheLine() {
+        // OpenVPN only starts a comment at '#'/';' between tokens, so a quoted
+        // one is part of the argument and everything after it is still read.
+        XCTAssertEqual(OpenVPNProfile.tokenize(#"verify-x509-name "CN=a#b" name"#), ["verify-x509-name", "CN=a#b", "name"])
+        XCTAssertEqual(OpenVPNProfile.tokenize(#"x ';y' z"#), ["x", ";y", "z"])
+        XCTAssertEqual(OpenVPNProfile.tokenize(##"x "#" up"##), ["x", "#", "up"])
     }
 }
