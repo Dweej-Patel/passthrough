@@ -20,6 +20,12 @@ enum EngineProcess {
     static func run() -> Never {
         signal(SIGPIPE, SIG_IGN)
         signal(SIGTERM) { _ in _exit(0) }
+        // A handler does nothing while the signal is blocked, and a spawn from a
+        // dispatch queue hands the child that thread's mask (SIGTERM included).
+        // Unblocked before any thread starts, so every thread inherits it.
+        var term = sigset_t()
+        sigemptyset(&term); sigaddset(&term, SIGTERM)
+        pthread_sigmask(SIG_UNBLOCK, &term, nil)
         let config = Array(FileHandle.standardInput.readDataToEndOfFile())
         let done = DispatchSemaphore(value: 0)
         let result = Locked(Int32(0))
@@ -79,8 +85,14 @@ final class EngineChild: @unchecked Sendable {
         var attributes: posix_spawnattr_t?
         posix_spawnattr_init(&attributes)
         defer { posix_spawnattr_destroy(&attributes) }
-        // Only fds 0-3 reach the child.
-        posix_spawnattr_setflags(&attributes, Int16(POSIX_SPAWN_CLOEXEC_DEFAULT))
+        // Only fds 0-3 reach the child, and it starts with no signals blocked:
+        // posix_spawn otherwise passes on the calling thread's mask, and the
+        // dispatch worker threads we spawn from block SIGTERM. The engine then
+        // ignored the SIGTERM that stops it and was SIGKILLed after 2 s.
+        var noSignals = sigset_t()
+        sigemptyset(&noSignals)
+        posix_spawnattr_setsigmask(&attributes, &noSignals)
+        posix_spawnattr_setflags(&attributes, Int16(POSIX_SPAWN_CLOEXEC_DEFAULT | POSIX_SPAWN_SETSIGMASK))
 
         var pid: pid_t = 0
         let argv = [strdup(executable.path), strdup(EngineProcess.flag), nil]

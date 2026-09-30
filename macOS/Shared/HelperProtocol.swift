@@ -43,7 +43,7 @@ public enum HelperConstants {
     public static let machService = "\(HelperConstants.identifier).helper"
     public static let plistName = "\(HelperConstants.identifier).helper.plist"
     /// Bump together with the helper binary so the app can detect stale daemons.
-    public static let version = "1.2.25"
+    public static let version = "1.2.26"
 }
 
 /// Keys of the configuration dictionary handed to `startTunnel`.
