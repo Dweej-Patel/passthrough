@@ -7,14 +7,14 @@ import Foundation
 /// certificate/key material, and a canonical config is re-emitted. Anything
 /// that could run code, touch files, open control sockets, weaken crypto or
 /// route around our endpoint pinning is rejected with a clear message.
-struct OpenVPNProfile {
-    private(set) var lines: [String] = []
-    private(set) var endpoints: [(host: String, port: Int)] = []
-    private(set) var tunMTU: Int?
-    private(set) var hasInlineCA = false
-    private(set) var verifyX509Name: String?
+public struct OpenVPNProfile {
+    public private(set) var lines: [String] = []
+    public private(set) var endpoints: [(host: String, port: Int)] = []
+    public private(set) var tunMTU: Int?
+    public private(set) var hasInlineCA = false
+    public private(set) var verifyX509Name: String?
 
-    enum ProfileError: LocalizedError {
+    public enum ProfileError: LocalizedError, Equatable {
         case forbidden(String)
         case unsupported(String)
         case badArgument(String, String)
@@ -22,7 +22,7 @@ struct OpenVPNProfile {
         case duplicate(String)
         case lineTooLong
         case missing(String)
-        var errorDescription: String? {
+        public var errorDescription: String? {
             switch self {
             case .forbidden(let d): return "The profile uses '\(d)', which Passthrough does not allow (scripts, files, proxies, control sockets and plugins are refused)."
             case .unsupported(let d): return "The profile uses '\(d)', which Passthrough does not support."
@@ -71,7 +71,7 @@ struct OpenVPNProfile {
     static let maxLineBytes = 254
     private var blocksSeen: Set<String> = []
 
-    init(text: String) throws {
+    public init(text: String) throws {
         var blockTag: String?
         var blockLines: [String] = []
         for rawLine in text.split(omittingEmptySubsequences: false, whereSeparator: { $0 == "\n" || $0 == "\r\n" }) {
@@ -105,7 +105,7 @@ struct OpenVPNProfile {
 
     /// Tokeniser matching OpenVPN's parse_line: whitespace-separated, single or
     /// double quotes, backslash escapes, '#'/';' starting a comment token.
-    static func tokenize(_ line: String) -> [String] {
+    public static func tokenize(_ line: String) -> [String] {
         var tokens: [String] = []
         var current = ""
         var inToken = false
@@ -220,10 +220,10 @@ struct OpenVPNProfile {
     }
 
     /// The canonical config text handed to openvpn.
-    var canonicalText: String { lines.joined(separator: "\n") + "\n" }
+    public var canonicalText: String { lines.joined(separator: "\n") + "\n" }
 
     /// Text of the inline <ca> block, for identity pinning by callers.
-    var inlineCA: String? {
+    public var inlineCA: String? {
         guard let start = lines.firstIndex(of: "<ca>"), let end = lines[start...].firstIndex(of: "</ca>") else { return nil }
         return lines[(start + 1)..<end].joined(separator: "\n")
     }

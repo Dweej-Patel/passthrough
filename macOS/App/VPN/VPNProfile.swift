@@ -1,6 +1,6 @@
 import Foundation
-import CryptoKit
 import PassthroughCore
+import VPNConfig
 
 /// A saved VPN configuration for the VPN layer. Metadata lives in UserDefaults;
 /// the config text (which may contain a private key) and any credentials live
@@ -156,11 +156,6 @@ enum NordVPN {
         return server
     }
 
-    /// SHA-256 of the <ca> block Nord ships in every manual-setup profile
-    /// ("NordVPN Root CA"). A profile whose CA differs is not Nord's, whatever
-    /// the transport said.
-    static let expectedCASHA256 = "0f3e5da3a16471b1885bc1cfbc1965796e0c23b95c4af5beaa75bb4bab629a03"
-
     static func profileText(for server: Server, tcp: Bool) async throws -> String {
         let proto = tcp ? "tcp" : "udp"
         // The hostname comes from Nord's JSON; never let it shape the URL beyond a server name.
@@ -173,21 +168,15 @@ enum NordVPN {
         let (data, response) = try await URLSession.shared.data(from: url)
         guard (response as? HTTPURLResponse)?.statusCode == 200, let text = String(data: data, encoding: .utf8) else { throw NordError.badResponse }
         // Identity pinning: Nord's CA, and a certificate name that is this very server.
-        // Checked on the parsed profile (what the helper hands openvpn), not the raw
-        // text, so a second <ca> or verify-x509-name can't slip past a substring match.
-        guard let profile = try? OpenVPNProfile(text: text), let ca = profile.inlineCA else { throw NordError.badResponse }
-        guard SHA256.hex(ca.trimmingCharacters(in: .whitespacesAndNewlines)) == expectedCASHA256 else {
+        do {
+            try NordPinning.verify(profileText: text, host: host)
+        } catch NordPinning.Failure.missingCA {
+            throw NordError.badResponse
+        } catch NordPinning.Failure.wrongCA {
             throw NordError.untrusted("its certificate authority is not NordVPN's")
-        }
-        guard profile.lines.contains("remote-cert-tls server"), profile.lines.contains("verify-x509-name CN=\(host)") else {
+        } catch {
             throw NordError.untrusted("it does not pin the server \(host)")
         }
         return text
-    }
-}
-
-private enum SHA256 {
-    static func hex(_ text: String) -> String {
-        CryptoKit.SHA256.hash(data: Data(text.utf8)).map { String(format: "%02x", $0) }.joined()
     }
 }
