@@ -13,7 +13,7 @@ Internet for your Mac over a USB cable, served by your phone's own network stack
 
 | | iPhone | Android |
 |---|---|---|
-| Phone app | SwiftUI, iOS 17+ | Kotlin + Jetpack Compose, Android 8.0+ |
+| Phone app | SwiftUI, iOS 17.5+ | Kotlin + Jetpack Compose, Android 8.0+ |
 | Keeps serving with the screen off | Packet tunnel extension | Foreground service |
 | USB link from the Mac | usbmuxd (built into macOS) | adb (`brew install android-platform-tools`) |
 | Phone setup | Trust this Mac | Turn on USB debugging, allow this Mac |
@@ -40,6 +40,11 @@ Because the phone opens every connection with its own stack, the carrier sees th
 * NordVPN profiles are accepted only if their certificate authority is Nord's (pinned by hash) and they pin the exact server that was requested.
 * Pairing codes are withdrawn after five wrong guesses; tokens are validated for format before use; the control channel is capped at eight peers.
 * The wireless link is set up over the cable: the Mac hands the phone its certificate fingerprint and a per-phone link key. The phone dials out (it still never listens), accepts only TLS 1.3 with that certificate, and proves the key by answering a fresh challenge (HMAC-SHA256); the Mac accepts only phones linked this way. The key sits in the Keychain on both sides (this device only). Anyone on the same network can reach the Mac's listener, so before proving the key a connection gets at most two handshake slots per address and a 128 KB first message. Forgetting a Mac on the phone ends its wireless link at once.
+* Remote shell is off by default. While it is off the Mac has no shell listener at all. Turning it on starts a TLS 1.3 listener on port 7893 that accepts peers only from private or Tailscale address ranges (RFC 1918, link-local, loopback, IPv6 ULA, 100.64.0.0/10 and `fd7a:115c:a1e0::/48`). Unless you turn off *Reach this Mac from anywhere (built-in)*, the Mac also runs a built-in [iroh](https://www.iroh.computer) endpoint that is reachable from the internet by design: anyone who can reach its UDP port directly (the same LAN, or public IPv6) or who knows its endpoint id and comes through a relay can start a handshake, which the limits below bound and the shell-key proof gates; see [Reaching the Mac](#remote-shell) and [SECURITY.md](SECURITY.md) for what gates it. With that option off, a Mac with a public address takes no shell connections from the internet.
+* A phone gets shell access only over the cable, while the setting is on: the Mac hands it a per-phone 256-bit key and its certificate fingerprint on the control channel. On the local and Tailscale path the phone pins that certificate (TLS 1.3); on the built-in path the transport is iroh's QUIC (TLS 1.3, the Mac authenticated by its endpoint id), with no further TLS inside. Either way the phone proves the key with an HMAC-SHA256 challenge before anything it sends is read; before that, there are at most 16 unproven connections in total, 2 per remote address on direct paths and 8 arriving through relays, each with 10 seconds from when it arrives and a hard 4096-byte limit on its handshake lines. Revoking a phone in the Mac's settings, or **Forget pairing**, deletes its key and drops its live connection at once. iPhones share one pairing on the Mac, so **Forget pairing** for the iPhone revokes every iPhone granted through it.
+* On the phone the key sits in a user-presence Keychain item (iPhone, this device only) or a Keystore key bound to a strong biometric or the device credential (Android). The whole phone app is behind Face ID / Touch ID / fingerprint / face with passcode fallback and relocks after 60 seconds in the background; a phone with no passcode cannot use Remote shell (an Android phone without a screen lock cannot hold a shell key at all). Someone who has your passcode and your unlocked phone can still open a shell: revoke the phone on the Mac, or remove it from your tailnet.
+* Shells run as your Mac user, inside the Passthrough app, so they inherit its privacy permissions. Turning Remote shell on asks for **Full Disk Access** so unattended scripts do not hang on prompts; while that is granted, a network-reachable app holds it.
+* Every shell session is recorded as output only (typed passwords at no-echo prompts are not captured) in `~/Library/Application Support/<identifier>/ShellHistory/`, readable only by you (folder `0700`, files `0600`). Transcripts are plain text on disk, protected by those permissions and FileVault, and can contain secrets a script printed. They never leave the Mac except when a paired phone fetches one.
 * A fatal VPN failure (rejected credentials, bad profile) keeps the kill switch engaged until you turn the layer off, so no peer can "fail" you into the clear. Kill-switch reject routes sit one step more specific than the VPN's routes, so engaging or lifting them never leaves a gap.
 * Profiles, keys and credentials live in the data-protection keychain, this device only.
 * The helper tears the tunnel down automatically if the menu bar app quits or crashes.
@@ -86,6 +91,60 @@ It is **off by default**, sits directly under the passthrough switch, and works 
 The menu-bar icon composes the three toggles: a phone (plain when passthrough is off, radiating when connected), a lock while the VPN layer is connected, and a coffee cup while keep-awake is on.
 
 Caution: the heat and battery limits are a safety net, not a licence. A closed, running Mac in a bag can still get very hot; use lid-closed on power or in open air.
+
+## Remote shell
+
+A real terminal on your Mac from the phone, so a stalled job (a script only you may run, with your own credentials) does not mean going back to the desk. It works from the iPhone and Android apps; the wire protocol is in [protocol/README.md](protocol/README.md#remote-shell).
+
+**Turning it on.** It is **off by default**; while off, the Mac listens for nothing. Switch it on in Settings ▸ General ▸ Remote shell. It then asks for **Full Disk Access**, because shells started from your phone inherit Passthrough's macOS privacy permissions, not Terminal's: without it, a command that touches Desktop, Documents, Downloads, iCloud Drive or an external drive makes macOS show a prompt on an unattended Mac, and the command hangs until someone answers it. The shell works without it, and the section shows a warning until it is granted. The Mac must be awake to answer, so turn on [Keep Mac awake](#keep-mac-awake) if you will be away.
+
+**Giving a phone access.** Only over the cable (USB), while the setting is on: the Mac gives that phone its own key. Pairing another phone never revokes an existing one. Plugging it in again gives it a fresh key; its old key keeps working until the phone first uses the new one (it picks the new key up the next time the app is unlocked). Revoke a phone under Remote shell in the Mac's settings, or use **Forget pairing**; either ends its live connection immediately. All iPhones share one pairing on the Mac, so forgetting it revokes every iPhone granted shell access through it. Forgetting the Mac on the phone deletes the phone's key.
+
+**Reaching the Mac.** Three ways, tried together:
+
+* On the same Wi-Fi the phone finds the Mac with Bonjour (`_passthrough-sh._tcp`, port 7893).
+* Through [Tailscale](https://tailscale.com) or a similar private network on both devices; the listener accepts only private and Tailscale address ranges.
+* From anywhere, through the built-in connection, which needs no VPN, port forwarding or account. It uses [iroh](https://www.iroh.computer): the Mac keeps a persistent endpoint identity, phones dial it by that id, and the two connect directly when the network allows (hole punching) and through a relay when it doesn't. The relay only forwards end-to-end encrypted QUIC packets: it sees both endpoint ids, IP addresses, timing and traffic volume, never content.
+
+The phone learns the Mac's details (endpoint id, relay, addresses) over the cable when it is granted access, and the Mac re-sends them after every connection, so nothing is typed in. A phone dials the Mac's relay as it was last given: if the Mac's home relay moves while a phone is away, that phone may not reach it through the relay until its next connection on any path (local, Tailscale, or a direct built-in one) brings the new details. If the phone cannot reach the Mac, the Remote shell card says so; when connected it shows *direct* or *via relay*.
+
+**Mac settings** (Settings ▸ General ▸ Remote shell):
+
+* *Reach this Mac from anywhere (built-in)*: on by default while Remote shell is on. Turn it off and the Mac has no iroh endpoint at all.
+* *Relay*: *Default* uses iroh's public relays. They are free but development-grade, with no uptime or performance guarantee, and are run by n0, the iroh developers. Or set a custom relay URL, with an optional access token, to use your own; see [Self-hosting a relay](#self-hosting-a-relay). The Mac is the only source of relay settings; phones follow it. The token is stored in the Mac's Keychain, and the Mac also gives it to each paired phone (when granting access and after every connection), which keeps it in its own secure storage, so a lost phone holds it. To rotate it, change it on the relay and in the Mac's settings; phones get the new one at their next connection on a path that still works (local, Tailscale or direct).
+* A status line shows the short endpoint id, the home relay, and for each phone connected right now over the built-in path whether it is direct or via a relay.
+* *Reset built-in identity...* generates a new endpoint identity (the key is stored in the Mac's Keychain). Phones lose the old one and reconnect once over the cable or the same Wi-Fi or Tailscale, which hands them the new details. Use it if you think the id was exposed or you want to cut off a phone's stale knowledge of the Mac; revoking a phone's shell key is still what removes its access.
+
+**On the phone**, per device: *Connect using* is *Automatic* (default) or *Local and Tailscale only*. Automatic races the local and Tailscale addresses against the built-in path: the built-in attempt starts about 0.75 s later, or immediately when the phone has no local address to try, and the first to be accepted wins. *Local and Tailscale only* never uses the built-in path. On the iPhone the built-in path runs in the app, not the VPN extension, so it works while Passthrough is serving. On Android it is loaded on first use and the phone quietly falls back to local-only if the library cannot load (for example an unsupported CPU). Release builds ship arm64-v8a and armeabi-v7a.
+
+* **iPhone VPN slot.** iOS runs one VPN at a time, and both the Tailscale app and Passthrough's serving tunnel use it, so they cannot both be active on an iPhone. With the built-in connection you do not need Tailscale at all, so the shell works from anywhere while Passthrough is serving. Android's serving does not use the VPN slot, so it has no such limit.
+* **App lock.** The phone app opens with Face ID / Touch ID (iPhone) or fingerprint / face (Android), with passcode fallback, and relocks after 60 seconds in the background. A phone with no passcode opens without a lock but cannot use Remote shell. The lock covers the UI only; serving continues while it is locked.
+* **Key storage.** The shell key lives in a Keychain item that requires user presence (iPhone) or in an Android Keystore key bound to a strong biometric or the device credential. An Android phone without a screen lock cannot hold the key, so it cannot use Remote shell. The Android shell needs Android 10 or later.
+
+**Sessions.** Each is your login shell (`$SHELL -l`) as your Mac user, up to 8 at once, hosted by the Mac app. They keep running when the phone disconnects, locks or loses signal; coming back reattaches and replays what was printed meanwhile. One device is attached to a session at a time: attaching from another takes it over, and the first shows that it was opened elsewhere. Quitting Passthrough ends all sessions.
+
+**History.** Every session is recorded, output only (so passwords typed at a no-echo prompt are not captured), as an [asciicast v2](https://docs.asciinema.org/manual/asciicast/v2/) file in `~/Library/Application Support/<identifier>/ShellHistory/`, in a `0700` folder with `0600` files. It never leaves the Mac except when a paired phone fetches it. View it in the Mac's History window (Remote shell section) or from the phone's Remote shell card. Whatever a script prints, secrets included, is in the transcript; it is protected by file permissions and FileVault, not encrypted by Passthrough. A session's recording stops at 64 MiB (marked `[transcript truncated]`), and viewing or fetching one shows at most its last 8 MiB. Delete one session or clear everything from the Mac; sessions still running cannot be deleted.
+
+### Self-hosting a relay
+
+The default relays are shared and meant for development and testing. For anything you depend on, run your own `iroh-relay` server. Use a 1.x release, to match the iroh 1.x this app is built on (iroh-ffi 1.1.0 and `computer.iroh:iroh-android` 1.1.0), built from the [`iroh-relay` crate](https://github.com/n0-computer/iroh/tree/main/iroh-relay) with its `server` feature. It needs a public hostname. A minimal `config.toml`, started with `iroh-relay -c config.toml`:
+
+```
+http_bind_addr = "[::]:80"
+
+[tls]
+https_bind_addr = "[::]:443"
+hostname = "relay.example.org"
+cert_mode = "LetsEncrypt"
+cert_dir = "/var/lib/iroh-relay/certs"
+contact = "you@example.org"
+
+# Optional access control (default is everyone):
+# access.shared_token = ["a-long-random-token"]
+# or: access.allowlist = ["<endpoint id>"]
+```
+
+Open TCP 80 and 443 (Let's Encrypt and the relay protocol) and UDP 7842 (QUIC address discovery, on by default and requires TLS). Then enter `https://relay.example.org` (and the token, if you set `shared_token`) under *Relay* in the Mac's settings. Phones pick it up at their next connection. Without a token or allowlist anyone can use your relay, so set one if it is public. The config above is a sketch: check the options for the exact version you run in the [iroh relay documentation](https://docs.iroh.computer/concepts/relays) and the [`iroh-relay` source](https://github.com/n0-computer/iroh/tree/main/iroh-relay).
 
 ## VPN layer
 
@@ -169,7 +228,7 @@ The Mac app runs unsandboxed (it needs the usbmuxd and adb sockets) with hardene
 ### Android
 
 1. On the Mac: `brew install android-platform-tools`.
-2. Build and install the app with `./gradlew installDebug` in `android/` (JDK 17 and the Android SDK; see [android/README.md](android/README.md)), or open `android/` in Android Studio.
+2. Build and install the app with `./gradlew installDebug` in `android/` (JDK 25 and the Android SDK; see [android/README.md](android/README.md)), or open `android/` in Android Studio.
 3. On the phone, enable Developer options (tap *Build number* seven times in *About phone*) and turn on *USB debugging*. The app warns you while it is off.
 4. Plug the phone into the Mac and allow this Mac's USB debugging key when asked.
 5. Tap the power button in Passthrough, then flip the switch in the Mac's menu bar and enter the code shown by *Pair your Mac*.
@@ -224,7 +283,8 @@ Panel previews: `Passthrough.app/Contents/MacOS/Passthrough --snapshot /tmp/pane
 
 ## Known limits
 
-* Apple Silicon only for the prebuilt engine. Run `scripts/build-hev.sh` with `x86_64` flags to add Intel.
+* The Mac app needs macOS 14.5 and the iPhone app iOS 17.5, the floors of iroh-ffi's prebuilt library.
+* The Mac app is Apple Silicon only: the prebuilt engine and iroh-ffi's prebuilt library have no Intel slice. Run `scripts/build-hev.sh` with `x86_64` flags to add Intel to the engine.
 * SOCKS5 `UDP ASSOCIATE` (the standard UDP mode) is not offered because usbmuxd, adb and the wireless link carry TCP only; the UDP-in-TCP extension covers it.
 * Android needs USB debugging left on while you use Passthrough, which also lets any Mac the phone has authorised run adb commands on it.
 * The Android app has been tested on an Android 15 emulator, not yet across physical phones and manufacturers.

@@ -23,3 +23,9 @@ Vendor/hev-socks5-tunnel/
 Vendor/vpn-engines-src/
 build-ios/
 build-device/
+
+# VS Code settings
+.vscode/
+
+# Brainstorming mockups
+.superpowers/

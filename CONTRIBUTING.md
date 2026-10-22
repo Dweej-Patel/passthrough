@@ -27,6 +27,21 @@ xcodegen generate
 open Passthrough.xcodeproj
 ```
 
+The Mac and iPhone apps use SwiftTerm, which compiles a Metal shader. Newer Xcodes ship the Metal Toolchain separately, so install it once with `xcodebuild -downloadComponent MetalToolchain` (CI does this).
+
+The apps need iOS 17.5 and macOS 14.5 or later (iroh-ffi's floors), and the Mac app builds for Apple Silicon only (arm64), like its helper, because iroh-ffi's prebuilt library has no Intel slice. The built-in connection (iroh) adds noticeable size: the iOS zip went from about 2.8 MB to 8.9 MB (+6.1 MB), the Mac zip from about 10.2 MB to 14.2 MB (+4.0 MB) and the Android release APK from about 2.7 MB to 26.9 MB (+24.2 MB), so mind new dependencies.
+
+The app's Swift package versions (SwiftTerm, iroh-ffi and their dependencies) are pinned
+in `Config/Package.resolved`; `xcodegen generate` copies it into the project,
+and CI builds with `-onlyUsePackageVersionsFromResolvedFile`, so a dependency
+cannot change underneath a build. To move to a new version, change it in
+`project.yml`, regenerate, resolve in Xcode (File > Packages > Update to
+Latest Package Versions, or `xcodebuild -resolvePackageDependencies`), and
+copy `Passthrough.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved`
+back to `Config/Package.resolved` in the same PR. `Packages/PassthroughCore` also
+depends on iroh-ffi and has its own `Package.resolved`; if you change that pin,
+run `swift package resolve` there and commit both files.
+
 `Config/Signing.xcconfig` and the generated `.xcodeproj` are gitignored. Never
 commit your Team ID, provisioning profiles or device identifiers.
 
@@ -38,10 +53,12 @@ cd Packages/PassthroughCore
 swift test
 ```
 
+If `swift test` hangs on the Keychain from a terminal, use `swift test --disable-keychain`.
+
 Please run the tests before opening a PR, and add tests for anything in
 `PassthroughCore` that you change.
 
-The Android app lives in `android/` and needs JDK 17 and the Android SDK
+The Android app lives in `android/` and needs JDK 25 and the Android SDK
 (see [android/README.md](android/README.md)):
 
 ```
