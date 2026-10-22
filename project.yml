@@ -1,12 +1,16 @@
 name: Passthrough
 options:
   bundleIdPrefix: $(PASSTHROUGH_ID)
+  # iroh-ffi's xcframework sets the floors (iOS 17.5 / macOS 14.5).
   deploymentTarget:
-    iOS: "17.0"
-    macOS: "14.0"
+    iOS: "17.5"
+    macOS: "14.5"
   createIntermediateGroups: true
   groupSortPosition: top
   generateEmptyDirectories: true
+  # The app's Swift package versions (SwiftTerm, iroh-ffi and what they
+  # depend on) are pinned in Config/Package.resolved; put it where Xcode reads it.
+  postGenCommand: mkdir -p Passthrough.xcodeproj/project.xcworkspace/xcshareddata/swiftpm && cp Config/Package.resolved Passthrough.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved
 configFiles:
   Debug: Config/Identity.xcconfig
   Release: Config/Identity.xcconfig
@@ -22,6 +26,10 @@ settings:
 packages:
   PassthroughCore:
     path: Packages/PassthroughCore
+  # Terminal emulator view (MIT): the Mac's shell history window and the iPhone's terminal.
+  SwiftTerm:
+    url: https://github.com/migueldeicaza/SwiftTerm
+    exactVersion: 1.18.0
 
 targets:
   # ───────────────────────── iOS ─────────────────────────
@@ -36,6 +44,11 @@ targets:
         product: PassthroughCore
       - package: PassthroughCore
         product: PassthroughUI
+      # Remote shell over iroh. App only: never link it into the tunnel extension.
+      - package: PassthroughCore
+        product: IrohTransport
+      - package: SwiftTerm
+        product: SwiftTerm
       - target: PassthroughTunnel
     info:
       path: iOS/App/Info.plist
@@ -48,8 +61,9 @@ targets:
         ITSAppUsesNonExemptEncryption: false
         UIApplicationSceneManifest:
           UIApplicationSupportsMultipleScenes: false
-        NSLocalNetworkUsageDescription: Passthrough finds your linked Mac on this iPhone's Personal Hotspot, or over peer-to-peer Wi-Fi, when the wireless link is on.
-        NSBonjourServices: [_passthrough._tcp]
+        NSLocalNetworkUsageDescription: Passthrough finds your linked Mac on this iPhone's Personal Hotspot, or over peer-to-peer Wi-Fi, when the wireless link is on, and reaches your Mac's shell on the same network.
+        NSFaceIDUsageDescription: Passthrough uses Face ID to keep your Mac's shell and settings private.
+        NSBonjourServices: [_passthrough._tcp, _passthrough-sh._tcp]
     entitlements:
       path: iOS/App/Passthrough.entitlements
       properties:
@@ -79,7 +93,7 @@ targets:
         PassthroughID: $(PASSTHROUGH_ID)
         CFBundleDisplayName: Passthrough Tunnel
         NSLocalNetworkUsageDescription: Passthrough finds your linked Mac on this iPhone's Personal Hotspot, or over peer-to-peer Wi-Fi, when the wireless link is on.
-        NSBonjourServices: [_passthrough._tcp]
+        NSBonjourServices: [_passthrough._tcp, _passthrough-sh._tcp]
         NSExtension:
           NSExtensionPointIdentifier: com.apple.networkextension.packet-tunnel
           NSExtensionPrincipalClass: $(PRODUCT_MODULE_NAME).PacketTunnelProvider
@@ -122,6 +136,12 @@ targets:
         product: PhoneTransport
       - package: PassthroughCore
         product: VPNConfig
+      - package: PassthroughCore
+        product: ShellHost
+      - package: PassthroughCore
+        product: IrohTransport
+      - package: SwiftTerm
+        product: SwiftTerm
       - target: PassthroughHelper
         embed: true
         link: false
@@ -141,11 +161,11 @@ targets:
         PassthroughID: $(PASSTHROUGH_ID)
         CFBundleDisplayName: Passthrough
         LSUIElement: true
-        LSMinimumSystemVersion: "14.0"
+        LSMinimumSystemVersion: "14.5"
         NSHumanReadableCopyright: ""
         ITSAppUsesNonExemptEncryption: false
         NSLocalNetworkUsageDescription: Passthrough listens for your linked phone on the local network, such as the phone's Personal Hotspot, when it connects wirelessly.
-        NSBonjourServices: [_passthrough._tcp]
+        NSBonjourServices: [_passthrough._tcp, _passthrough-sh._tcp]
     entitlements:
       path: macOS/App/PassthroughMac.entitlements
       properties:
@@ -159,6 +179,9 @@ targets:
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME: AccentColor
         COMBINE_HIDPI_IMAGES: YES
+        # iroh-ffi ships a macOS arm64 slice only (like the helper's engines).
+        ARCHS: arm64
+        EXCLUDED_ARCHS: x86_64
 
   PassthroughHelper:
     type: tool

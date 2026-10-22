@@ -56,6 +56,36 @@ final class HelperClient {
         invalidate()
     }
 
+    /// Unregisters then registers the daemon. Recovers a helper launchd still
+    /// lists as enabled but that no longer runs (e.g. it was booted out), where
+    /// a plain `register()` only reports "already registered".
+    /// Also waits (up to ~4 s) for launchd to start the helper; `responds` is
+    /// whether it answered.
+    func reregister() async -> (availability: Availability, responds: Bool) {
+        ptLog(.warning, "Helper: unregistering and registering it again")
+        do { try await service.unregister() } catch {
+            ptLog(.warning, "Helper unregister: \(error.localizedDescription)")
+        }
+        invalidate()
+        let result = register()
+        ptLog(.info, "Helper re-registration result: \(Self.describe(result))")
+        guard result == .ready else { return (result, false) }
+        for attempt in 0..<10 {
+            if attempt > 0 { try? await Task.sleep(for: .milliseconds(400)) }
+            if await version() != nil { return (result, true) }
+        }
+        return (result, false)
+    }
+
+    static func describe(_ availability: Availability) -> String {
+        switch availability {
+        case .ready: return "enabled"
+        case .needsApproval: return "needs approval in System Settings"
+        case .notRegistered: return "not registered"
+        case .failed(let why): return "failed (\(why))"
+        }
+    }
+
     /// launchd remembers the bundle that registered the daemon. If this app now
     /// runs from a different location (e.g. moved to /Applications after a dev
     /// build registered it), re-register so the helper launches from here.
@@ -76,7 +106,7 @@ final class HelperClient {
         SMAppService.openSystemSettingsLoginItems()
     }
 
-    private func proxy() -> PassthroughHelperProtocol? {
+    private func proxy(onError: (@Sendable () -> Void)? = nil) -> PassthroughHelperProtocol? {
         if connection == nil {
             let c = NSXPCConnection(machServiceName: HelperConstants.machService, options: .privileged)
             c.remoteObjectInterface = NSXPCInterface(with: PassthroughHelperProtocol.self)
@@ -90,6 +120,7 @@ final class HelperClient {
         }
         return connection?.remoteObjectProxyWithErrorHandler { error in
             ptLog(.error, "Helper XPC error: \(error.localizedDescription)")
+            onError?()
         } as? PassthroughHelperProtocol
     }
 
@@ -101,9 +132,12 @@ final class HelperClient {
     /// One XPC round trip: `fallback` when the helper is unreachable or silent for `timeout` seconds.
     private func call<T>(timeout: Double, fallback: T, _ body: (PassthroughHelperProtocol, @escaping (T) -> Void) -> Void) async -> T {
         await withCheckedContinuation { cont in
-            guard let proxy = proxy() else { cont.resume(returning: fallback); return }
             let done = Locked(false)
             let finish: (T) -> Void = { value in if !done.exchange(true) { cont.resume(returning: value) } }
+            // An interrupted or invalidated connection (no helper behind the
+            // Mach service) fails at once rather than after the timeout.
+            let fail = UncheckedBox { finish(fallback) }
+            guard let proxy = proxy(onError: { fail.value() }) else { finish(fallback); return }
             body(proxy, finish)
             DispatchQueue.global().asyncAfter(deadline: .now() + timeout) { finish(fallback) }
         }
@@ -203,8 +237,11 @@ final class HelperClient {
     /// Restarts a helper older than this app so it runs the bundled binary.
     /// With `mayReregister`, also moves a registration made by another copy of
     /// the app (only safe while nothing routes through the helper).
-    func ensureCurrent(mayReregister: Bool) async {
-        guard availability == .ready, let v = await version() else { return }
+    /// Returns false when the helper is registered but did not answer.
+    @discardableResult
+    func ensureCurrent(mayReregister: Bool) async -> Bool {
+        guard availability == .ready else { return true }
+        guard let v = await version() else { return false }
         var restart = false
         if v != HelperConstants.version {
             ptLog(.warning, "Helper version \(v) ≠ \(HelperConstants.version); restarting helper")
@@ -214,17 +251,24 @@ final class HelperClient {
            let path = await status()[TunnelStatusKey.helperPath] as? String, await reregisterIfStale(helperPath: path) {
             restart = true
         }
-        guard restart else { return }
+        guard restart else { return true }
         quitHelper()
         // Wait for launchd to respawn the new binary before we drive it.
         for _ in 0..<10 {
             try? await Task.sleep(for: .milliseconds(400))
             if let nv = await version(), nv == HelperConstants.version {
                 ptLog(.info, "Helper upgraded to \(nv)")
-                return
+                return true
             }
         }
         ptLog(.warning, "Helper did not report the expected version after restart")
+        return await version() != nil
+    }
+
+    /// Carries a non-Sendable closure into the XPC error handler.
+    private final class UncheckedBox: @unchecked Sendable {
+        let value: () -> Void
+        init(_ value: @escaping () -> Void) { self.value = value }
     }
 
     enum HelperError: LocalizedError {

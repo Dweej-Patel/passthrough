@@ -35,6 +35,7 @@ struct MenuPanelView: View {
                 FlowCard()
                 VPNRow()
                 KeepAwakeRow()
+                ShellSessionsRow()
                 ThroughputPanel()
                 TopAppsPanel(usage: session.appUsage)
                 footer
@@ -267,6 +268,37 @@ struct KeepAwakeRow: View {
         }
         }
         .animation(.easeInOut(duration: 0.2), value: keepAwake.blockedReason)
+    }
+}
+
+/// Shown while phones have shells open on this Mac, so the owner knows someone is in.
+struct ShellSessionsRow: View {
+    @EnvironmentObject private var shell: RemoteShellController
+    @Environment(\.openSettings) private var openSettings
+
+    var body: some View {
+        let open = shell.sessions.filter(\.running).count
+        if open > 0 {
+            Button { SettingsWindow.show(openSettings) } label: {
+                HStack(spacing: 10) {
+                    Image(systemName: "terminal")
+                        .font(.system(size: 14, weight: .semibold))
+                        .foregroundStyle(PTTheme.accent)
+                        .frame(width: 20)
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text("Remote shell").font(.subheadline.weight(.medium))
+                        Text("\(open) session\(open == 1 ? "" : "s") open")
+                            .font(.caption2).foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                    Image(systemName: "chevron.right").font(.caption2.weight(.semibold)).foregroundStyle(.secondary)
+                }
+                .padding(.horizontal, 12).padding(.vertical, 9)
+                .background(Color.primary.opacity(0.04), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+            }
+            .buttonStyle(.plain)
+            .help("Phones have shells open on this Mac. Click to see them in Settings.")
+        }
     }
 }
 

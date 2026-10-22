@@ -4,6 +4,7 @@ import Combine
 import Network
 import PassthroughCore
 import PhoneTransport
+import ShellHost
 
 /// Drives the passthrough link on the Mac: finds a phone (`DeviceDirectory`),
 /// forwards a loopback port over its link, pairs, and asks the root helper to
@@ -37,6 +38,8 @@ final class SessionCoordinator: ObservableObject {
     @Published private(set) var helperAvailability: HelperClient.Availability = .notRegistered
     @Published private(set) var pairingError: String?
     @Published private(set) var pairingInFlight = false
+    /// The outcome of the last "Register again", for Settings.
+    @Published private(set) var helperNote: String?
     @Published private(set) var logEntries: [PassthroughLog.Entry] = []
     @Published private(set) var sessionRx: Int64 = 0
     @Published private(set) var sessionTx: Int64 = 0
@@ -106,10 +109,38 @@ final class SessionCoordinator: ObservableObject {
         }
     }
 
+    /// Let paired phones open a shell on this Mac. Off by default.
+    @Published var remoteShellEnabled: Bool = UserDefaults.standard.object(forKey: "remoteShellEnabled") as? Bool ?? false {
+        didSet {
+            guard remoteShellEnabled != oldValue else { return }
+            UserDefaults.standard.set(remoteShellEnabled, forKey: "remoteShellEnabled")
+            if remoteShellEnabled {
+                startShell()
+                if !FullDiskAccess.isGranted { fullDiskAccessPrompt = true }
+                // A fresh key for every attached phone, now rather than on the next connection.
+                shellGrants.reset()
+                shellControlRetryAt = .distantPast
+                if control != nil { sendShellGrant() } else { ensureShellControl() }
+            } else {
+                pendingShellGrant = nil
+                shell.stop()
+                // A control channel that was only open for the shell key goes too.
+                if control != nil, !tunnelUsesControl {
+                    ptLog(.info, "shell: closing the control channel that was open for the shell key")
+                    closeControl()
+                    if phase == .pairingRequired { phase = device == nil ? .noDevice : .deviceFound }
+                }
+            }
+        }
+    }
+    /// Shown once when Remote shell is turned on without Full Disk Access.
+    @Published var fullDiskAccessPrompt = false
+
     let vpnLayer: VPNLayer
     /// Per-app usage while connected (menu panel).
     let appUsage = NettopSampler()
     let keepAwake: KeepAwakeController
+    let shell = RemoteShellController()
 
     private let helper = HelperClient()
     private let directory: DeviceDirectory
@@ -117,7 +148,26 @@ final class SessionCoordinator: ObservableObject {
     private let wirelessWatcher: WirelessWatcher
     private let links = LinkStore()
     private var forwarder: LocalForwarder?
+    /// The control channel to the current phone. Opened by a connect, or on
+    /// its own over the cable with Remote shell on (pairing, wireless link and
+    /// shell key need no tunnel); a later connect reuses it.
     private var control: ControlClient?
+    private var controlDeviceID: String?
+    /// Bumped whenever the control channel is opened or closed, so late events from an old one are ignored.
+    private var controlGeneration = 0
+    private enum ControlState { case opening, paired, needsPairing }
+    private var controlState = ControlState.opening
+    /// The connect attempt that reached the control step and waits on it.
+    private var tunnelGen: Int?
+    private var tunnelRequested = false
+    private var tunnelUsesControl: Bool { phase.isConnected || (tunnelGen != nil && tunnelGen == generation) }
+    /// Not before this, reopen a shell-only control channel the phone closed.
+    private var shellControlRetryAt = Date.distantPast
+    private var shellControlBackoff = ShellChannelBackoff()
+    /// One automatic helper re-registration per series of connect attempts.
+    private var helperRecovery = HelperRecoveryPolicy()
+    /// Shell keys go out once per cable connection, not on every tunnel retry.
+    private var shellGrants = ShellGrantLedger()
     private var ticker: AnyCancellable?
     private var cancellables: Set<AnyCancellable> = []
     private var retryTask: Task<Void, Never>?
@@ -217,6 +267,17 @@ final class SessionCoordinator: ObservableObject {
             }
         }
 
+        if remoteShellEnabled { startShell() }
+        // Revoked access: the next grant hands out a key again (also after re-pairing).
+        shell.onAccessRevoked = { [weak self] slots in self?.shellAccessRevoked(pairingSlots: slots) }
+        // What grants carry changed (endpoint up or down, relay, reach from
+        // anywhere, identity reset): tell the phone on the cable. The ledger
+        // only sends when the contents differ from what the phone holds.
+        Publishers.Merge3(shell.$irohStatus.map { _ in () }, shell.$relay.map { _ in () }, shell.$reachAnywhere.map { _ in () })
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] in self?.sendShellGrant() }
+            .store(in: &cancellables)
+
         ticker = Timer.publish(every: 1, on: .main, in: .common).autoconnect().sink { [weak self] _ in self?.tick() }
         NotificationCenter.default.publisher(for: .passthroughWillTerminate)
             .sink { [weak self] _ in self?.shutdownForQuit() }
@@ -244,9 +305,11 @@ final class SessionCoordinator: ObservableObject {
         switch change {
         case .attached(let d):
             retryAttempts = 0
+            if d.medium == .usb { helperRecovery.reset() }
             ptLog(.info, "\(d.kindName) \(d.medium == .usb ? "attached over USB" : "reachable wirelessly") (\(d.label))")
             reconsiderDevice()
         case .detached(let gone):
+            shellGrants.detached(deviceID: gone.id)
             ptLog(.info, "\(gone.kindName) \(gone.medium == .usb ? "detached" : "out of wireless reach")")
             reconsiderDevice()
         }
@@ -265,11 +328,14 @@ final class SessionCoordinator: ObservableObject {
         // Keep a working link unless the cable just became available in Automatic.
         if currentStillFine, !(device?.medium == .wireless && best?.medium == .usb) { return }
         guard best?.id != device?.id else { return }
-        if device != nil { teardown(to: best == nil ? .noDevice : .deviceFound) }
+        if device != nil { teardown(to: best == nil ? .noDevice : .deviceFound, keepControl: false) }
         device = best
         if best != nil {
             if phase == .noDevice { phase = .deviceFound }
-            if autoConnect, !suppressAutoConnect { connect() }
+            shellControlRetryAt = .distantPast
+            shellControlBackoff.succeeded()
+            ensureShellControl()
+            if autoConnect, !suppressAutoConnect { beginConnect() }
         } else {
             phase = .noDevice
         }
@@ -302,10 +368,143 @@ final class SessionCoordinator: ObservableObject {
     }
     private var pendingLink: (key: Data, device: PhoneDevice)?
 
+    private func startShell() {
+        do {
+            shell.start(identity: try MacIdentity.loadOrCreate(label: Self.identityLabel))
+        } catch {
+            ptLog(.error, "shell: could not load this Mac's identity: \(error.localizedDescription)")
+        }
+    }
+
+    /// Over the cable, after pairing, with Remote shell on: give the phone a
+    /// fresh shell key and how to reach this Mac's shell.
+    private func sendShellGrant() {
+        guard remoteShellEnabled, let device, device.medium == .usb, let control, controlDeviceID == device.id,
+              controlState == .paired else { return }
+        do {
+            let identity = try MacIdentity.loadOrCreate(label: Self.identityLabel)
+            // The iroh details only while the endpoint is up.
+            let iroh = shell.irohGrant
+            let port = shell.port ?? RemoteShell.defaultPort
+            // Once per cable connection, and again whenever what a grant says changes.
+            let contents = ShellGrantLedger.contents(certificateSHA256: identity.fingerprint, port: port, macName: macName,
+                                                     irohID: iroh?.id, irohRelay: iroh?.relay, relayToken: iroh?.token)
+            guard shellGrants.shouldGrant(deviceID: device.id, contents: contents) else { return }
+            let key = ShellAccessStore.newKey()
+            let grantID = UUID().uuidString
+            pendingShellGrant = (key, device, grantID)
+            shellGrants.sent(deviceID: device.id, contents: contents, grantID: grantID)
+            control.grantShell(shellKey: key, certificateSHA256: identity.fingerprint, port: port,
+                               addresses: RemoteShellController.localAddresses(), macName: macName,
+                               irohID: iroh?.id, irohRelay: iroh?.relay, relayToken: iroh?.token, grantID: grantID)
+            // A phone that can't store the key may never answer: don't let that block later grants.
+            let deviceID = device.id
+            Task { [weak self] in
+                try? await Task.sleep(for: .seconds(ShellGrantLedger.answerTimeout))
+                self?.shellGrantTimedOut(deviceID: deviceID, grantID: grantID)
+            }
+        } catch {
+            ptLog(.warning, "shell: could not prepare the grant: \(error.localizedDescription)")
+        }
+    }
+    /// The one grant in flight (the ledger allows one per device); the
+    /// phone's answer records exactly this key.
+    private var pendingShellGrant: (key: Data, device: PhoneDevice, grantID: String)?
+
+    /// The phone did not answer grant `grantID` in time: grant again after a
+    /// growing delay, then every few minutes (see `ShellGrantLedger.expired`).
+    private func shellGrantTimedOut(deviceID: String, grantID: String) {
+        let expiry = shellGrants.expired(deviceID: deviceID, grantID: grantID)
+        if expiry != .stale, pendingShellGrant?.grantID == grantID { pendingShellGrant = nil }
+        let waited = Int(ShellGrantLedger.answerTimeout)
+        switch expiry {
+        case .stale:
+            return
+        case .retry(let delay, let first):
+            ptLog(first ? .warning : .debug,
+                  "shell: the \(phoneKindName) did not confirm its shell key in \(waited) s; it may not have stored it. Trying again in \(Int(delay)) s")
+            // A little slack so the ledger's wait is surely over when this runs.
+            Task { [weak self] in
+                try? await Task.sleep(for: .seconds(delay + 0.5))
+                self?.sendShellGrant()
+            }
+        }
+    }
+
+    /// Access revoked for these pairing slots: hold grants to the attached
+    /// phone if it is one of them (until a new channel or a new pairing), and
+    /// drop its grant in flight so a late answer can't record that key.
+    private func shellAccessRevoked(pairingSlots: Set<String>) {
+        guard let device, pairingSlots.contains(device.pairingSlot) else { return }
+        shellGrants.revoked(deviceID: device.id)
+        if pendingShellGrant?.device.id == device.id { pendingShellGrant = nil }
+    }
+
+    // MARK: Control channel
+
+    private func openControl(for device: PhoneDevice) {
+        if control != nil, controlDeviceID == device.id { return }
+        closeControl()
+        controlGeneration += 1
+        let cgen = controlGeneration
+        let identity = ControlClient.Identity(clientID: clientID, name: macName, token: Keychain.read(device.pairingSlot))
+        let control = ControlClient(device: device, identity: identity) { [weak self] event in
+            Task { @MainActor in self?.handleControl(event, control: cgen) }
+        }
+        self.control = control
+        controlDeviceID = device.id
+        controlState = .opening
+        shellGrants.channelOpened(deviceID: device.id)
+        control.connect()
+    }
+
+    private func closeControl() {
+        guard let control else { return }
+        control.close()
+        self.control = nil
+        if let id = controlDeviceID { shellGrants.channelClosed(deviceID: id) }
+        controlDeviceID = nil
+        controlGeneration += 1
+        controlState = .opening
+        pairingInFlight = false
+        pendingLink = nil
+        pendingShellGrant = nil
+    }
+
+    /// With Remote shell on and a phone on the cable, keep a control channel
+    /// open whether or not the Mac routes through the phone, so the phone gets
+    /// paired, linked and its shell key.
+    private func ensureShellControl() {
+        guard remoteShellEnabled, let device, device.medium == .usb, control == nil, Date() >= shellControlRetryAt else { return }
+        ptLog(.info, "shell: opening the control channel to the \(device.kindName) for pairing and the shell key")
+        openControl(for: device)
+    }
+
+    /// The channel kept open for the shell waits for a pairing code.
+    private var shellNeedsPairing: Bool { control != nil && controlState == .needsPairing }
+
+    /// The connect attempt waiting on the control channel may route now.
+    private func continueTunnel() {
+        guard let gen = tunnelGen, gen == generation, !tunnelRequested else { return }
+        tunnelRequested = true
+        Task { await bringTunnelUp(generation: gen) }
+    }
+
     // MARK: Connect flow
 
+    /// The user asked to connect: a new series of attempts.
     func connect() {
+        helperRecovery.reset()
+        beginConnect()
+    }
+
+    private func beginConnect() {
         guard let device else { phase = .noDevice; return }
+        // "Register again" is replacing the helper: connect once it is done.
+        guard !helperRetryInFlight else {
+            connectAfterHelperRetry = true
+            return
+        }
         guard !phase.isConnected, !phase.isBusy else { return }
         wantsConnection = true
         retryTask?.cancel()
@@ -320,14 +519,40 @@ final class SessionCoordinator: ObservableObject {
         let ready = helper.ensureRegistered()
         helperAvailability = helper.availability
         guard ready else {
+            // Pairing and the shell key still go ahead over the shell's channel.
             phase = .helperRequired
+            ensureShellControl()
             return
         }
         // The previous tunnel must be gone first: whether the helper may be
         // re-registered depends on nothing still running through it.
         await teardownTask?.value
-        await ensureHelperCurrent()
+        var responded = await ensureHelperCurrent()
         guard generation == gen else { return }
+        // launchd can list the helper as enabled while nothing runs behind it
+        // (e.g. it was booted out); register() then only says "already
+        // registered". Unregister and register it once per series of attempts.
+        if helperRecovery.shouldReregister(registered: helper.availability == .ready, responded: responded,
+                                           inUse: phase.isConnected || vpnLayer.isWanted) {
+            ptLog(.warning, "Helper is registered but did not respond; re-registering it (once for this connection)")
+            phase = .connecting("Restarting the helper")
+            let result = await helper.reregister()
+            helperAvailability = result.availability
+            syncHotspotGuard()   // a re-registered helper starts without it
+            guard generation == gen else { return }
+            guard result.availability == .ready else {
+                phase = .helperRequired
+                ensureShellControl()
+                return
+            }
+            responded = result.responds
+            ptLog(responded ? .info : .error, responded ? "Helper responds again after re-registering"
+                                                        : "Helper still does not respond after re-registering")
+        }
+        guard responded else {
+            fail(HelperClient.HelperError.unreachable.localizedDescription)
+            return
+        }
 
         // 2. Loopback forwarder over the phone's link
         phase = .connecting(device.medium == .usb ? "Opening USB link" : "Opening wireless link")
@@ -339,29 +564,45 @@ final class SessionCoordinator: ObservableObject {
         self.forwarder = forwarder
         forwarder.onFailure = { [weak self] error in Task { @MainActor in self?.fail(error.localizedDescription) } }
 
-        // 3. Control channel
+        // 3. Control channel: the one already open (for the shell) or a new one
         phase = .connecting("Talking to the \(device.kindName)")
-        let identity = ControlClient.Identity(clientID: clientID, name: macName, token: Keychain.read(device.pairingSlot))
-        let control = ControlClient(device: device, identity: identity) { [weak self] event in
-            Task { @MainActor in self?.handleControl(event, generation: gen) }
-        }
-        self.control = control
-        control.connect()
-    }
-
-    private func handleControl(_ event: ControlClient.Event, generation gen: Int) {
-        guard gen == generation, let device else { return }
-        switch event {
-        case .welcomed(let paired, let status, _):
-            phoneStatus = status
-            syncTunnelIPv6()
-            retryAttempts = 0
-            if paired {
-                sendLink()
-                Task { await bringTunnelUp(generation: gen) }
-            } else {
+        tunnelGen = gen
+        tunnelRequested = false
+        if control != nil, controlDeviceID == device.id {
+            switch controlState {
+            case .paired: continueTunnel()
+            case .needsPairing:
                 phase = .pairingRequired
                 pairingError = nil
+            case .opening: break   // its welcome continues from here
+            }
+        } else {
+            openControl(for: device)
+        }
+    }
+
+    private func handleControl(_ event: ControlClient.Event, control cgen: Int) {
+        guard cgen == controlGeneration, let device, device.id == controlDeviceID else { return }
+        switch event {
+        case .welcomed(let paired, let status, _):
+            shellControlBackoff.succeeded()
+            phoneStatus = status
+            syncTunnelIPv6()
+            if paired {
+                controlState = .paired
+                sendLink()
+                sendShellGrant()
+                continueTunnel()
+            } else {
+                controlState = .needsPairing
+                // A connect still checking the helper reaches the control step and shows pairing itself.
+                // Pairing takes the panel even over .helperRequired: it is the one
+                // step the user can finish now (and it gets the phone its shell key).
+                // Once paired, or if pairing is cancelled, .helperRequired returns.
+                if !phase.isBusy || tunnelUsesControl {
+                    phase = .pairingRequired
+                    pairingError = nil
+                }
             }
         case .paired(let token):
             pairingInFlight = false
@@ -371,9 +612,24 @@ final class SessionCoordinator: ObservableObject {
             }
             Keychain.write(token, account: device.pairingSlot)
             pairingError = nil
+            controlState = .paired
+            shellGrants.paired(deviceID: device.id)
             ptLog(.info, "Paired with \(phoneStatus?.deviceName ?? phoneKindName)")
             sendLink()
-            Task { await bringTunnelUp(generation: gen) }
+            sendShellGrant()
+            if tunnelUsesControl {
+                continueTunnel()
+            } else if phase == .pairingRequired {
+                // Paired over a channel opened for the shell. A helper that is
+                // not ready comes back into view; otherwise route if that was wanted.
+                helperAvailability = helper.availability
+                if helperAvailability != .ready {
+                    phase = .helperRequired
+                } else {
+                    phase = .deviceFound
+                    if wantsConnection { beginConnect() }
+                }
+            }
         case .linked(let phoneID, let network, let passphrase):
             guard let pending = pendingLink else { return }
             pendingLink = nil
@@ -381,6 +637,25 @@ final class SessionCoordinator: ObservableObject {
                                        label: phoneStatus?.deviceName ?? pending.device.kindName,
                                        pairingSlot: pending.device.pairingSlot, network: network, passphrase: passphrase))
             ptLog(.info, "Linked \(phoneStatus?.deviceName ?? phoneKindName) for the wireless link")
+        case .shellGranted(let phoneID, let grantID):
+            guard let pending = pendingShellGrant else { return }
+            // An answer to an earlier grant (e.g. one that timed out) says
+            // nothing about the key in flight now. Phones that predate grant
+            // IDs echo none; theirs counts for the grant in flight.
+            guard ShellGrantLedger.answerMatches(echoedGrantID: grantID, inFlightGrantID: pending.grantID) else {
+                ptLog(.debug, "shell: ignoring the \(phoneKindName)'s answer to an earlier shell grant")
+                return
+            }
+            pendingShellGrant = nil
+            guard shellGrants.confirmed(deviceID: pending.device.id, grantID: pending.grantID) else {
+                // A stale answer: still make sure the phone gets what it should hold now.
+                if !shellGrants.isHeld(deviceID: pending.device.id) { sendShellGrant() }
+                return
+            }
+            shell.record(ShellPhone(phoneID: phoneID, label: phoneStatus?.deviceName ?? pending.device.kindName,
+                                    pairingSlot: pending.device.pairingSlot, key: pending.key, grantedAt: Date()))
+            // What grants carry may have changed while this one was in flight.
+            sendShellGrant()
         case .pairingFailed(let failure):
             pairingInFlight = false
             switch failure {
@@ -396,7 +671,15 @@ final class SessionCoordinator: ObservableObject {
             notePhoneNetwork()
         case .disconnected(let error):
             let why = error?.localizedDescription ?? "The \(phoneKindName) closed the connection"
-            if case .pairingRequired = phase {
+            let forTunnel = tunnelUsesControl
+            closeControl()
+            if !forTunnel {
+                // Only open for the shell: try again later, backing off while the phone keeps refusing.
+                let retry = shellControlBackoff.failed()
+                if retry.log { ptLog(.warning, "shell: control channel to the \(phoneKindName) closed: \(why); retrying in the background") }
+                shellControlRetryAt = Date().addingTimeInterval(retry.delay)
+                if phase == .pairingRequired { phase = .error("Lost the \(phoneKindName) while pairing: \(why)") }
+            } else if case .pairingRequired = phase {
                 fail("Lost the \(phoneKindName) while pairing: \(why)")
             } else if phase.isConnected || phase.isBusy {
                 ptLog(.warning, "Control channel dropped: \(why)")
@@ -406,6 +689,7 @@ final class SessionCoordinator: ObservableObject {
     }
 
     private func bringTunnelUp(generation gen: Int) async {
+        guard gen == generation else { return }
         guard let device, let token = Keychain.read(device.pairingSlot) else { phase = .pairingRequired; return }
         phase = .connecting("Routing the Mac through the \(phoneKindName)")
         tunnelStartInFlight = true
@@ -416,6 +700,7 @@ final class SessionCoordinator: ObservableObject {
             guard gen == generation else { return }
             tunnelInterface = iface
             connectedSince = Date()
+            retryAttempts = 0
             meter.reset()
             sessionRx = 0; sessionTx = 0
             phase = .connected
@@ -465,32 +750,108 @@ final class SessionCoordinator: ObservableObject {
     func disconnect() {
         wantsConnection = false
         retryTask?.cancel()
-        teardown(to: device == nil ? .noDevice : .deviceFound)
+        connectAfterHelperRetry = false
+        // Cancelling a pairing shown over a helper that isn't ready shows the helper again.
+        let helperPending = phase == .pairingRequired && !tunnelUsesControl && helper.availability != .ready
+        teardown(to: device == nil ? .noDevice : helperPending ? .helperRequired : .deviceFound)
     }
 
     func toggle() {
         phase.isConnected || phase.isBusy || phase == .pairingRequired ? disconnect() : connect()
     }
 
+    /// "Register again": unregister then register, which also recovers a
+    /// helper launchd lists as enabled but that no longer runs.
     func retryHelper() {
-        helperAvailability = helper.register()
-        if helperAvailability == .ready { connect() }
+        guard !helperRetryInFlight else { return }
+        guard !phase.isConnected, !vpnLayer.isWanted else {
+            helperNote = "The helper is in use. Disconnect first to register it again."
+            return
+        }
+        guard !phase.isBusy, !tunnelStartInFlight else {
+            helperNote = "A connection is starting. Try again once it has finished or failed."
+            return
+        }
+        helperRetryInFlight = true
+        connectAfterHelperRetry = false
+        retryTask?.cancel()
+        if phase == .helperRequired { teardown(to: device == nil ? .noDevice : .deviceFound) }
+        helperNote = "Registering the helper again…"
+        Task {
+            defer { finishHelperRetry() }
+            // Nothing may still be on its way to the old helper.
+            await teardownTask?.value
+            guard !phase.isBusy, !tunnelStartInFlight else {
+                helperNote = "A connection is starting. Try again once it has finished or failed."
+                return
+            }
+            let result = await helper.reregister()
+            helperAvailability = result.availability
+            helperRecovery.reset()
+            syncHotspotGuard()   // a re-registered helper starts without it
+            switch result.availability {
+            case .ready:
+                helperNote = result.responds ? "Registered again; the helper responds."
+                    : "Registered again, but the helper does not respond. Check Login Items in System Settings."
+                ptLog(result.responds ? .info : .error, "Helper \(result.responds ? "responds" : "does not respond") after Register again")
+                if result.responds {
+                    // Connect now; finishHelperRetry then has nothing left to run.
+                    helperRetryInFlight = false
+                    connectAfterHelperRetry = false
+                    if device != nil, !phase.isConnected, !phase.isBusy { beginConnect() }
+                }
+            case .needsApproval:
+                helperNote = "Registered again; approve Passthrough in Login Items in System Settings."
+                if device != nil, !phase.isConnected, !phase.isBusy { phase = .helperRequired }
+            case .notRegistered:
+                helperNote = "The helper is still not registered."
+            case .failed(let why):
+                helperNote = "Registration failed: \(why)"
+            }
+        }
+    }
+    private var helperRetryInFlight = false
+    /// A connect asked for while "Register again" ran; it runs when that ends.
+    private var connectAfterHelperRetry = false
+
+    private func finishHelperRetry() {
+        helperRetryInFlight = false
+        guard connectAfterHelperRetry else { return }
+        connectAfterHelperRetry = false
+        if device != nil, !phase.isConnected, !phase.isBusy { beginConnect() }
     }
 
     func openLoginItems() { HelperClient.openLoginItemsSettings() }
 
     func forgetPairing() {
+        // Mid-connect too: the attempt's forwarder and control step go with it.
+        if phase.isConnected || phase.isBusy || tunnelUsesControl || phase == .pairingRequired { disconnect() }
+        // The open channel was authenticated with the forgotten token; a fresh one asks to pair.
+        closeControl()
+        if phase == .pairingRequired { phase = device == nil ? .noDevice : .deviceFound }
         Keychain.delete(pairingSlot)
         let forgotten = links.phones.filter { $0.pairingSlot == pairingSlot }.map(\.phoneID)
         links.forget(slot: pairingSlot)
         forgotten.forEach { wirelessWatcher.drop(phoneID: $0) }
-        if phase.isConnected { disconnect() }
+        shell.revoke(pairingSlot: pairingSlot)
+        // The fresh channel below grants again once the phone is paired anew.
+        shellGrants.reset()
+        shellControlRetryAt = .distantPast
+        shellControlBackoff.succeeded()
+        ensureShellControl()
         objectWillChange.send()
     }
 
     private func fail(_ message: String) {
         ptLog(.error, message)
         teardown(to: .error(message))
+        // A phone waiting to pair over the shell's channel: show pairing, and
+        // connect again once paired rather than retrying behind it.
+        if shellNeedsPairing {
+            phase = .pairingRequired
+            pairingError = nil
+            return
+        }
         // Never give up while the user wants the link and a phone is attached:
         // the phone side may simply not be running yet. Backoff caps at 30 s.
         if wantsConnection, device != nil { scheduleRetry() }
@@ -504,18 +865,23 @@ final class SessionCoordinator: ObservableObject {
         retryTask = Task { [weak self] in
             try? await Task.sleep(for: .seconds(delay))
             guard !Task.isCancelled else { return }
-            self?.connect()
+            self?.beginConnect()
         }
     }
 
-    private func teardown(to next: Phase) {
+    /// `keepControl`: with Remote shell on over the cable, the control channel
+    /// stays open (for the shell, and for the next retry to reuse) unless the
+    /// phone itself is changing.
+    private func teardown(to next: Phase, keepControl: Bool = true) {
         generation += 1
         // A start still in flight counts: the helper handles calls in order, so
         // a stop sent now lands after it and before any new connection's start.
         let hadTunnel = phase.isConnected || tunnelInterface != nil || tunnelStartInFlight
         tunnelStartInFlight = false
-        control?.close()
-        control = nil
+        tunnelGen = nil
+        tunnelRequested = false
+        let keep = keepControl && remoteShellEnabled && device?.medium == .usb && control != nil && controlDeviceID == device?.id
+        if !keep { closeControl() }
         let forwarder = self.forwarder
         self.forwarder = nil
         tunnelInterface = nil
@@ -525,7 +891,6 @@ final class SessionCoordinator: ObservableObject {
         appUsage.stop()
         phoneActiveConnections = 0
         pairingInFlight = false
-        pendingLink = nil
         phase = next
         // Routes first, then the loopback listener: while the utun still owns the
         // default route, a closed listener would just refuse every connection.
@@ -544,8 +909,10 @@ final class SessionCoordinator: ObservableObject {
     private func shutdownForQuit() {
         wantsConnection = false
         for watcher in directory.watchers { watcher.stop() }
-        control?.close()
+        closeControl()
         forwarder?.stop()
+        // Quitting ends every session; wait so their transcripts are finished.
+        shell.stop(wait: true)
         // The app quits 0.8 s from now: release sleep and tear down routes side by side.
         Task { await keepAwake.shutdown() }
         Task {
@@ -556,10 +923,13 @@ final class SessionCoordinator: ObservableObject {
     }
 
     /// Restarts a stale helper; moving its registration is only safe while nothing routes through it.
-    private func ensureHelperCurrent() async {
-        await helper.ensureCurrent(mayReregister: !phase.isConnected && !vpnLayer.isWanted)
+    /// False when the helper is registered but did not answer.
+    @discardableResult
+    private func ensureHelperCurrent() async -> Bool {
+        let responded = await helper.ensureCurrent(mayReregister: !phase.isConnected && !vpnLayer.isWanted)
         helperAvailability = helper.availability
         syncHotspotGuard()   // a re-registered helper starts without it
+        return responded
     }
 
     // MARK: Ticking
@@ -590,8 +960,9 @@ final class SessionCoordinator: ObservableObject {
         let availability = helper.availability
         if availability != helperAvailability {
             helperAvailability = availability
-            if availability == .ready, phase == .helperRequired { connect() }
+            if availability == .ready, phase == .helperRequired { beginConnect() }
         }
+        ensureShellControl()
     }
 
     /// Counts per-app usage on the interface apps' traffic is on: the VPN's

@@ -123,8 +123,12 @@ struct GeneralSettings: View {
                 LabeledContent("Paired") { Text(session.hasToken ? "Yes" : "Not yet") }
                 Button("Forget pairing", role: .destructive) { session.forgetPairing() }.disabled(!session.hasToken)
             }
+            RemoteShellSettings()
             Section("Helper") {
                 LabeledContent("Status") { Text(helperText) }
+                if let note = session.helperNote {
+                    Text(note).font(.caption).foregroundStyle(.secondary)
+                }
                 HStack {
                     Button("Open Login Items") { session.openLoginItems() }
                     Button("Register again") { session.retryHelper() }
