@@ -7,6 +7,8 @@ import java.net.InetAddress
 import java.net.InetSocketAddress
 import java.net.ServerSocket
 import java.net.Socket
+import java.util.Base64
+import java.util.Locale
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.Executors
 import java.util.concurrent.ScheduledExecutorService
@@ -63,7 +65,8 @@ class ControlServer(
         ticker?.shutdownNow(); ticker = null
         runCatching { serverSocket?.close() }
         serverSocket = null
-        peers.toList().forEach { it.cancel() }
+        // A snapshot by toArray: toList() sizes the list first and can throw if a peer leaves meanwhile.
+        ArrayList(peers).forEach { it.cancel() }
         peers.clear()
         onClientsChanged?.invoke(emptyList())
     }
@@ -114,8 +117,33 @@ class ControlServer(
                 is PairingRegistry.PairResult.Failure -> listOf(ControlEnvelope(ControlEnvelope.ERROR, reason = r.reason.wire))
             }
         }
+        ControlEnvelope.SHELL_GRANT -> grantShell(m, peer)
         ControlEnvelope.PING -> listOf(ControlEnvelope(ControlEnvelope.PONG))
         else -> emptyList()
+    }
+
+    /** Only a Mac that already proved its pairing token may be granted a shell; anything malformed is ignored. */
+    private fun grantShell(m: ControlEnvelope, peer: Peer): List<ControlEnvelope> {
+        val mac = peer.mac ?: return emptyList()
+        val cert = m.certSHA256?.takeIf { it.length == 64 && it.all { c -> c in '0'..'9' || c in 'a'..'f' || c in 'A'..'F' } } ?: return emptyList()
+        val key = m.shellKey?.let { runCatching { Base64.getDecoder().decode(it) }.getOrNull() }?.takeIf { it.size == 32 } ?: return emptyList()
+        val port = m.shellPort?.takeIf { it in 1..65535 } ?: return emptyList()
+        // The iroh details are all or nothing; bad ones never cost the LAN grant.
+        val irohOk = IrohInfo.areValid(m.irohID, m.irohRelay, m.relayToken)
+        if (!irohOk && (m.irohID != null || m.irohRelay != null || m.relayToken != null)) ptLog(PtLog.Level.INFO, "shell: ignoring invalid iroh info in grant")
+        val irohID = m.irohID.takeIf { irohOk }
+        val irohRelay = m.irohRelay.takeIf { irohOk }
+        val relayToken = m.relayToken.takeIf { irohOk }
+        val grant = ShellGrant(cert.lowercase(Locale.ROOT), port, (m.addresses ?: emptyList()).take(IrohInfo.MAX_ADDRESSES), (m.macName ?: mac.name).take(64),
+            irohID, irohRelay)
+        if (!registry.grantShell(mac.id, grant, key, relayToken)) {
+            ptLog(PtLog.Level.ERROR, "Could not store the shell key from ${mac.name}")
+            return emptyList()
+        }
+        ptLog(PtLog.Level.INFO, "Granted ${mac.name} a shell")
+        // Echo the grant's name so the Mac records the key this answer is for.
+        val grantID = m.grantID?.takeIf { it.isNotEmpty() && it.toByteArray(Charsets.UTF_8).size <= ControlEnvelope.MAX_GRANT_ID_LENGTH }
+        return listOf(ControlEnvelope(ControlEnvelope.SHELL_GRANTED, phoneID = registry.phoneID, grantID = grantID))
     }
 
     private fun welcome(): ControlEnvelope {

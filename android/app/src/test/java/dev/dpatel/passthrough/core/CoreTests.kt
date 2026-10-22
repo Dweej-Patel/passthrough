@@ -151,7 +151,7 @@ class Socks5Tests {
 
 class PairingTests {
     private var now = 1_000_000L
-    private val registry = PairingRegistry(MemoryStore()) { now }
+    private val registry = PairingRegistry(MemoryStore(), clock = { now })
 
     @Test fun pairsAndVerifies() {
         val code = registry.issueCode()

@@ -29,6 +29,7 @@ import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.ChevronRight
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
@@ -55,12 +56,14 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import dev.dpatel.passthrough.core.ShellConnectMode
+import dev.dpatel.passthrough.ui.shell.ShellViewModel
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 
 @Composable
-fun SettingsScreen(vm: AppViewModel, onDone: () -> Unit) {
+fun SettingsScreen(vm: AppViewModel, shell: ShellViewModel, onDone: () -> Unit) {
     val c = LocalPT.current
     val s = vm.settings
     val state by vm.state.collectAsStateWithLifecycle()
@@ -69,7 +72,9 @@ fun SettingsScreen(vm: AppViewModel, onDone: () -> Unit) {
     val allowUDP by s.allowUDP.collectAsStateWithLifecycle()
     val socksPort by s.socksPort.collectAsStateWithLifecycle()
     val controlPort by s.controlPort.collectAsStateWithLifecycle()
+    val connectMode by s.shellConnectMode.collectAsStateWithLifecycle()
     val log by vm.log.collectAsStateWithLifecycle()
+    val clients by vm.pairedClients.collectAsStateWithLifecycle()
     val locked = state.isActive
     var showLog by rememberSaveable { mutableStateOf(false) }
     var showDebug by rememberSaveable { mutableStateOf(false) }
@@ -137,6 +142,25 @@ fun SettingsScreen(vm: AppViewModel, onDone: () -> Unit) {
                         } else {
                             Text("Allow", style = PT.display(16.sp, FontWeight.SemiBold), color = PT.accentEnd,
                                 modifier = Modifier.clickable { phonePermission.launch(Manifest.permission.READ_PHONE_STATE) }.padding(4.dp))
+                        }
+                    }
+                }
+                val shellMacs = clients.filter { it.shell != null }
+                if (shellMacs.isNotEmpty()) {
+                    Section(
+                        "Remote shell",
+                        footer = "Automatic also reaches your Mac from anywhere through its built-in connection, when the Mac offers it. " +
+                            "Local and Tailscale only never leaves the local network and Tailscale.\n\n" +
+                            "An address to try first when the Mac isn't found on the local network, such as its Tailscale name or IP. Leave empty to use the addresses the Mac sent.",
+                    ) {
+                        Text("Connect using", style = PT.display(13.sp, FontWeight.Normal), color = c.secondary,
+                            modifier = Modifier.padding(start = 16.dp, end = 16.dp, top = 12.dp))
+                        ChoiceRow("Automatic", connectMode == ShellConnectMode.AUTOMATIC) { s.setShellConnectMode(ShellConnectMode.AUTOMATIC) }
+                        Divider()
+                        ChoiceRow("Local and Tailscale only", connectMode == ShellConnectMode.LOCAL_ONLY) { s.setShellConnectMode(ShellConnectMode.LOCAL_ONLY) }
+                        shellMacs.forEach { client ->
+                            Divider()
+                            ManualShellAddressRow(shell, client.id, client.shell?.macName ?: client.name)
                         }
                     }
                 }
@@ -234,6 +258,16 @@ private fun ToggleRow(title: String, value: Boolean, enabled: Boolean, onChange:
     }
 }
 
+/** One option of a choice; the selected one shows a check. */
+@Composable
+private fun ChoiceRow(title: String, selected: Boolean, onSelect: () -> Unit) {
+    val c = LocalPT.current
+    Row(Modifier.fillMaxWidth().clickable(onClick = onSelect).padding(horizontal = 16.dp, vertical = 14.dp), verticalAlignment = Alignment.CenterVertically) {
+        Text(title, style = PT.display(16.sp, FontWeight.Normal), color = c.primary, modifier = Modifier.weight(1f))
+        if (selected) Icon(Icons.Filled.Check, contentDescription = "Selected", tint = PT.accentEnd)
+    }
+}
+
 @Composable
 private fun PortRow(title: String, value: Int, enabled: Boolean, onChange: (Int) -> Unit) {
     val c = LocalPT.current
@@ -253,3 +287,28 @@ private fun PortRow(title: String, value: Int, enabled: Boolean, onChange: (Int)
     }
 }
 
+/** One Mac's manual shell address, saved as it is typed. */
+@Composable
+private fun ManualShellAddressRow(shell: ShellViewModel, macID: String, macName: String) {
+    val c = LocalPT.current
+    var text by remember(macID) { mutableStateOf(shell.manualAddress(macID).orEmpty()) }
+    Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 14.dp), verticalAlignment = Alignment.CenterVertically) {
+        Text(macName, style = PT.display(16.sp, FontWeight.Normal), color = c.primary, maxLines = 1, modifier = Modifier.weight(1f))
+        BasicTextField(
+            value = text, singleLine = true,
+            onValueChange = { v ->
+                text = v.take(253)
+                shell.setManualAddress(macID, text)
+            },
+            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri, autoCorrectEnabled = false),
+            textStyle = PT.display(16.sp, FontWeight.Normal).copy(color = c.secondary, textAlign = TextAlign.End),
+            cursorBrush = SolidColor(PT.accentEnd), modifier = Modifier.width(180.dp),
+            decorationBox = { inner ->
+                Box(contentAlignment = Alignment.CenterEnd) {
+                    if (text.isEmpty()) Text("Host or IP", style = PT.display(16.sp, FontWeight.Normal), color = c.tertiary)
+                    inner()
+                }
+            },
+        )
+    }
+}

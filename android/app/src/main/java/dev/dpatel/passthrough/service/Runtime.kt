@@ -1,5 +1,6 @@
 package dev.dpatel.passthrough.service
 
+import dev.dpatel.passthrough.core.IrohAvailability
 import dev.dpatel.passthrough.core.PairedClient
 import dev.dpatel.passthrough.core.PairingRegistry
 import dev.dpatel.passthrough.core.ProviderStats
@@ -26,8 +27,11 @@ object Runtime {
     lateinit var settings: AppSettings
     lateinit var registry: PairingRegistry
     lateinit var usage: UsageLedger
+    lateinit var shellVault: ShellKeyVault
     @android.annotation.SuppressLint("StaticFieldLeak") // holds the application context only
     lateinit var facts: DeviceFacts
+    /** iroh's native library, loaded the first time Remote shell dials from anywhere. */
+    lateinit var iroh: IrohAvailability
 
     private val _state = MutableStateFlow<ServiceState>(ServiceState.Stopped)
     val state: StateFlow<ServiceState> = _state

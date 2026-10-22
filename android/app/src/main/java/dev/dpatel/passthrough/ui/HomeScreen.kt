@@ -66,12 +66,22 @@ import androidx.lifecycle.compose.currentStateAsState
 import dev.dpatel.passthrough.core.ByteFormat
 import dev.dpatel.passthrough.core.PairedClient
 import dev.dpatel.passthrough.service.ServiceState
+import dev.dpatel.passthrough.ui.shell.RemoteShellCard
+import dev.dpatel.passthrough.ui.shell.ShellViewModel
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 
 @Composable
-fun HomeScreen(vm: AppViewModel, onPower: () -> Unit, onPair: () -> Unit, onSettings: () -> Unit) {
+fun HomeScreen(
+    vm: AppViewModel,
+    shell: ShellViewModel,
+    onPower: () -> Unit,
+    onPair: () -> Unit,
+    onSettings: () -> Unit,
+    onOpenTerminal: (String?) -> Unit,
+    onShellHistory: () -> Unit,
+) {
     val state by vm.state.collectAsStateWithLifecycle()
     PTBackground(glow = if (state == ServiceState.Running) 1f else 0.45f) {
         Column(
@@ -87,6 +97,7 @@ fun HomeScreen(vm: AppViewModel, onPower: () -> Unit, onPair: () -> Unit, onSett
             FlowCard(vm)
             ThroughputCard(vm)
             UsageCard(vm)
+            RemoteShellCard(shell, onOpen = onOpenTerminal, onHistory = onShellHistory)
             MacsCard(vm, onPair)
             Text(
                 "Traffic between the Mac and this phone travels only over the USB cable. The Mac's connections are opened by this phone's own network stack.",

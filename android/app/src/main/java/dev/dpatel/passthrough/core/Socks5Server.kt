@@ -95,7 +95,7 @@ class Socks5Server(
         isRunning = false
         runCatching { serverSocket?.close() }
         serverSocket = null
-        sessions.toList().forEach { it.close("server stopped") }
+        ArrayList(sessions).forEach { it.close("server stopped") }   // toList() can throw if one ends meanwhile
         sessions.clear()
         ptLog(PtLog.Level.INFO, "SOCKS5 stopped")
     }

@@ -41,6 +41,20 @@ data class ControlEnvelope(
     var rxBytes: Long? = null,
     var txBytes: Long? = null,
     var timestamp: Double? = null,
+    // Granting remote shell access (protocol/README.md, "Remote shell").
+    var certSHA256: String? = null,
+    var phoneID: String? = null,
+    var shellKey: String? = null,
+    var shellPort: Int? = null,
+    /** shellGrant: addresses a phone can dial the Mac's shell listener on. */
+    var addresses: List<String>? = null,
+    var macName: String? = null,
+    /** shellGrant: the Mac's iroh endpoint id, home relay URL and the relay's token. */
+    var irohID: String? = null,
+    var irohRelay: String? = null,
+    var relayToken: String? = null,
+    /** shellGrant: names this grant (at most 64 UTF-8 bytes); the phone echoes it in shellGranted. */
+    var grantID: String? = null,
 ) {
     fun encodeLine(): ByteArray = (json.encodeToString(serializer(), this) + "\n").toByteArray(Charsets.UTF_8)
 
@@ -53,6 +67,10 @@ data class ControlEnvelope(
         const val PING = "ping"
         const val PONG = "pong"
         const val STATUS = "status"
+        const val SHELL_GRANT = "shellGrant"
+        const val SHELL_GRANTED = "shellGranted"
+        /** The longest grantID (UTF-8 bytes) a phone echoes. */
+        const val MAX_GRANT_ID_LENGTH = 64
 
         internal val json = Json {
             ignoreUnknownKeys = true
