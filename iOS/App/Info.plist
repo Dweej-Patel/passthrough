@@ -25,9 +25,12 @@
 	<key>NSBonjourServices</key>
 	<array>
 		<string>_passthrough._tcp</string>
+		<string>_passthrough-sh._tcp</string>
 	</array>
+	<key>NSFaceIDUsageDescription</key>
+	<string>Passthrough uses Face ID to keep your Mac's shell and settings private.</string>
 	<key>NSLocalNetworkUsageDescription</key>
-	<string>Passthrough finds your linked Mac on this iPhone's Personal Hotspot, or over peer-to-peer Wi-Fi, when the wireless link is on.</string>
+	<string>Passthrough finds your linked Mac on this iPhone's Personal Hotspot, or over peer-to-peer Wi-Fi, when the wireless link is on, and reaches your Mac's shell on the same network.</string>
 	<key>PassthroughID</key>
 	<string>$(PASSTHROUGH_ID)</string>
 	<key>UIApplicationSceneManifest</key>

@@ -42,7 +42,7 @@ struct SettingsView: View {
                     LabeledContent("Control port") {
                         TextField("", value: $model.controlPort, format: .number).keyboardType(.numberPad).multilineTextAlignment(.trailing)
                     }
-                    Button("Forget all paired Macs", role: .destructive) { model.registry.revokeAll() }
+                    Button("Forget all paired Macs", role: .destructive) { model.revokeAll() }
                 }
                 .disabled(model.state.isActive)
                 Section {
@@ -58,6 +58,19 @@ struct SettingsView: View {
                     Text("Wireless")
                 } footer: {
                     Text("Reach linked Macs without the cable. Join this iPhone's Personal Hotspot from the Mac's Wi-Fi menu: it stays up while the iPhone is locked, and the Mac's traffic still goes through Passthrough, not the hotspot's own internet. Peer-to-peer Wi-Fi needs no hotspot, but iOS switches it off for minutes at a time while the iPhone is locked. A Mac links the first time it connects over USB; the link is encrypted and only a paired Mac can use it.")
+                }
+                let shellMacs = model.pairedClients.filter { $0.shell != nil }
+                if !shellMacs.isEmpty {
+                    Section {
+                        ConnectModePicker(shell: model.shell)
+                        ForEach(shellMacs) { client in
+                            ManualShellAddressRow(shell: model.shell, macID: client.id, macName: client.shell?.macName ?? client.name)
+                        }
+                    } header: {
+                        Text("Remote shell")
+                    } footer: {
+                        Text("Automatic also reaches your Mac from anywhere through its built-in connection, when the Mac offers it. Local and Tailscale only never leaves the local network and Tailscale.\n\nAn address to try first when the Mac isn't found on the local network, such as its Tailscale name or IP. Leave empty to use the addresses the Mac sent.")
+                    }
                 }
                 Section("Diagnostics") {
                     DisclosureGroup("Log", isExpanded: $showLog) {
@@ -90,5 +103,37 @@ struct SettingsView: View {
             .navigationBarTitleDisplayMode(.inline)
             .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } } }
         }
+    }
+}
+
+/// "Connect using", for this iPhone only.
+private struct ConnectModePicker: View {
+    @ObservedObject var shell: ShellModel
+
+    var body: some View {
+        Picker("Connect using", selection: $shell.connectMode) {
+            Text("Automatic").tag(ShellConnectMode.automatic)
+            Text("Local and Tailscale only").tag(ShellConnectMode.localOnly)
+        }
+    }
+}
+
+/// One Mac's manual shell address, saved as it is typed.
+private struct ManualShellAddressRow: View {
+    let shell: ShellModel
+    let macID: String
+    let macName: String
+    @State private var text = ""
+
+    var body: some View {
+        LabeledContent(macName) {
+            TextField("Host or IP", text: $text)
+                .multilineTextAlignment(.trailing)
+                .keyboardType(.URL)
+                .textInputAutocapitalization(.never)
+                .autocorrectionDisabled()
+        }
+        .onAppear { text = shell.manualAddress(for: macID) ?? "" }
+        .onChange(of: text) { _, value in shell.setManualAddress(value, for: macID) }
     }
 }

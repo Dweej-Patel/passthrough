@@ -4,6 +4,7 @@ import PassthroughUI
 
 struct HomeView: View {
     @EnvironmentObject private var model: AppModel
+    @EnvironmentObject private var lock: AppLock
     @State private var showPairing = false
     @State private var showSettings = false
 
@@ -17,6 +18,7 @@ struct HomeView: View {
                     FlowCard()
                     ThroughputCard()
                     UsageCard()
+                    RemoteShellCard(shell: model.shell)
                     MacsCard(showPairing: $showPairing)
                     footer
                 }
@@ -30,6 +32,14 @@ struct HomeView: View {
         }
         .sheet(isPresented: $showSettings) {
             SettingsView().environmentObject(model)
+        }
+        .onChange(of: lock.isUnlocked) { _, unlocked in
+            // Tear presentations down deterministically when the app locks.
+            if !unlocked {
+                showPairing = false
+                showSettings = false
+                model.endPairing()
+            }
         }
         .onAppear {
             let env = ProcessInfo.processInfo.environment

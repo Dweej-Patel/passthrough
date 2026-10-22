@@ -22,6 +22,9 @@ final class AppModel: ObservableObject {
     static let groupDefaults = UserDefaults(suiteName: PassthroughProtocol.appGroup) ?? .standard
     let registry = PairingRegistry(defaults: AppModel.groupDefaults, secrets: KeychainSecrets(accessGroup: PassthroughProtocol.appGroup))
     let log = PassthroughLog.shared
+    let shell = ShellModel()
+    /// Set by the app scene; the shell reads its evaluated context after unlock.
+    weak var lock: AppLock?
 
     @Published private(set) var state: ServiceState = .stopped
     @Published private(set) var meter = TrafficMeter()
@@ -89,6 +92,13 @@ final class AppModel: ObservableObject {
         ticker = Timer.publish(every: 1, on: .main, in: .common).autoconnect().sink { [weak self] _ in
             Task { @MainActor in await self?.tick() }
         }
+        // A Mac granted (or re-granted) the shell while the app is open: adopt the key now.
+        $pairedClients
+            .map { Dictionary($0.compactMap { c in c.shell.map { (c.id, $0) } }, uniquingKeysWith: { a, _ in a }) }
+            .removeDuplicates()
+            .dropFirst()
+            .sink { [weak self] _ in Task { @MainActor in self?.refreshShell() } }
+            .store(in: &cancellables)
         NotificationCenter.default.publisher(for: UIApplication.willEnterForegroundNotification)
             .sink { [weak self] _ in Task { @MainActor in await self?.bootstrap() } }
             .store(in: &cancellables)
@@ -98,6 +108,7 @@ final class AppModel: ObservableObject {
 
     private func bootstrap() async {
         pairedClients = registry.clients
+        refreshShell()
         refreshDeviceFacts()
         #if targetEnvironment(simulator)
         extensionAvailable = false
@@ -231,7 +242,23 @@ final class AppModel: ObservableObject {
 
     func revoke(_ client: PairedClient) {
         registry.revoke(clientID: client.id)
+        shell.forget(macID: client.id)
         pairedClients = registry.clients
+    }
+
+    func revokeAll() {
+        registry.revokeAll()
+        shell.forgetAll()
+        pairedClients = registry.clients
+    }
+
+    // MARK: Remote shell
+
+    /// On every unlock, relock and return to the foreground. While locked
+    /// the shell drops its keys and connection.
+    func refreshShell() {
+        guard let lock else { return }
+        shell.refresh(lock: lock, registry: registry)
     }
 
     var connectedMacIDs: Set<String> { Set(stats.macs.map(\.id)) }
