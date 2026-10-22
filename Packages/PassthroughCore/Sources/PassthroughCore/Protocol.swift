@@ -63,6 +63,21 @@ public struct ControlEnvelope: Codable, Equatable, Sendable {
     /// "wireless". A phone can have a wireless link up while the Mac uses the
     /// cable, so only the Mac knows which carries its traffic.
     public var via: String?
+    // Granting remote shell access (see protocol/README.md, "Remote shell").
+    public var shellKey: String?
+    public var shellPort: Int?
+    /// shellGrant: addresses a phone can dial the Mac's shell listener on.
+    public var addresses: [String]?
+    public var macName: String?
+    /// shellGrant: the Mac's iroh endpoint id, home relay URL and the relay's token.
+    public var irohID: String?
+    public var irohRelay: String?
+    public var relayToken: String?
+    /// shellGrant: names this grant (at most 64 UTF-8 bytes); the phone echoes
+    /// it in `shellGranted` so the Mac knows which grant was stored.
+    public var grantID: String?
+    /// The longest `grantID` (UTF-8 bytes) a phone echoes.
+    public static let maxGrantIDLength = 64
 
     public init(t: String) { self.t = t }
 
@@ -76,6 +91,8 @@ public struct ControlEnvelope: Codable, Equatable, Sendable {
     public static let status = "status"
     public static let link = "link"
     public static let linked = "linked"
+    public static let shellGrant = "shellGrant"
+    public static let shellGranted = "shellGranted"
 
     public func encodedLine() throws -> Data {
         var data = try JSONEncoder().encode(self)

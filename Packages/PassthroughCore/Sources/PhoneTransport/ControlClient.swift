@@ -20,6 +20,9 @@ public final class ControlClient: @unchecked Sendable {
         /// The phone stored our wireless-link credentials. Android adds the
         /// Wi-Fi Direct network it hosts for us to join.
         case linked(phoneID: String, network: String?, passphrase: String?)
+        /// The phone stored a shell grant. `grantID` echoes the grant it
+        /// answers; nil from phones that predate it.
+        case shellGranted(phoneID: String, grantID: String?)
         case disconnected(Error?)
     }
 
@@ -93,6 +96,25 @@ public final class ControlClient: @unchecked Sendable {
         }
     }
 
+    /// Hands the phone a key to open shells on this Mac, and where to find it (after pairing).
+    /// `grantID` (at most 64 UTF-8 bytes) comes back in the phone's answer.
+    public func grantShell(shellKey: Data, certificateSHA256: String, port: UInt16, addresses: [String], macName: String,
+                           irohID: String? = nil, irohRelay: String? = nil, relayToken: String? = nil, grantID: String? = nil) {
+        queue.async {
+            var m = ControlEnvelope(t: ControlEnvelope.shellGrant)
+            m.grantID = grantID
+            m.shellKey = shellKey.base64EncodedString()
+            m.certSHA256 = certificateSHA256
+            m.shellPort = Int(port)
+            m.addresses = addresses
+            m.macName = macName
+            m.irohID = irohID
+            m.irohRelay = irohRelay
+            m.relayToken = relayToken
+            self.send(m)
+        }
+    }
+
     public func close() {
         queue.async { self.finish(nil, silent: true) }
     }
@@ -130,6 +152,10 @@ public final class ControlClient: @unchecked Sendable {
         case ControlEnvelope.linked:
             if let phoneID = m.phoneID, !phoneID.isEmpty, phoneID.count <= 64 {
                 handler(.linked(phoneID: phoneID, network: m.network, passphrase: m.passphrase))
+            }
+        case ControlEnvelope.shellGranted:
+            if let phoneID = m.phoneID, !phoneID.isEmpty, phoneID.count <= 64 {
+                handler(.shellGranted(phoneID: phoneID, grantID: m.grantID))
             }
         case ControlEnvelope.status:
             handler(.status(status, rx: m.rxBytes ?? 0, tx: m.txBytes ?? 0, active: m.activeConnections ?? 0))

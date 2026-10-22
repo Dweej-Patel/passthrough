@@ -1,0 +1,33 @@
+{
+  "originHash" : "1c858ef69a2d22c153c2187a091abab625ea1aeb2cb0c1ff6d6a591ebf6d61f3",
+  "pins" : [
+    {
+      "identity" : "iroh-ffi",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/n0-computer/iroh-ffi",
+      "state" : {
+        "revision" : "5e451092dba0c1a09ee83ff6e5be37b1152a5c58",
+        "version" : "1.1.0"
+      }
+    },
+    {
+      "identity" : "swift-argument-parser",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/apple/swift-argument-parser",
+      "state" : {
+        "revision" : "6a52f3251125d74daf04fcbd5e6f08a75d074382",
+        "version" : "1.8.2"
+      }
+    },
+    {
+      "identity" : "swiftterm",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/migueldeicaza/SwiftTerm",
+      "state" : {
+        "revision" : "7691f85b222a67a66b58499e1b2647443cf0dda7",
+        "version" : "1.18.0"
+      }
+    }
+  ],
+  "version" : 3
+}

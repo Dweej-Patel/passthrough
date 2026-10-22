@@ -3,33 +3,7 @@ import Network
 import CryptoKit
 @testable import PassthroughCore
 @testable import PhoneTransport
-
-/// Our certificate for an in-memory key, as an in-memory TLS identity: the
-/// system openssl packages key and certificate as PKCS#12 and Security imports
-/// it without a keychain (tests can't use the data-protection keychain).
-@available(macOS 15, *)
-func makeTestIdentity() throws -> MacIdentity {
-    let key = P256.Signing.PrivateKey()
-    let tbs = CertificateDER.tbs(publicKeyPoint: key.publicKey.x963Representation, commonName: "Passthrough Mac")
-    let der = CertificateDER.certificate(tbs: tbs, signature: try key.signature(for: tbs).derRepresentation)
-    let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
-    try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-    defer { try? FileManager.default.removeItem(at: dir) }
-    let pem = "-----BEGIN CERTIFICATE-----\n" + der.base64EncodedString(options: .lineLength64Characters) + "\n-----END CERTIFICATE-----\n"
-    try pem.write(to: dir.appendingPathComponent("c.pem"), atomically: true, encoding: .utf8)
-    try key.pemRepresentation.write(to: dir.appendingPathComponent("k.pem"), atomically: true, encoding: .utf8)
-    let openssl = Process()
-    openssl.executableURL = URL(fileURLWithPath: "/usr/bin/openssl")
-    openssl.currentDirectoryURL = dir
-    openssl.arguments = ["pkcs12", "-export", "-inkey", "k.pem", "-in", "c.pem", "-passout", "pass:test", "-out", "id.p12"]
-    try openssl.run(); openssl.waitUntilExit()
-    let p12 = try Data(contentsOf: dir.appendingPathComponent("id.p12"))
-    var items: CFArray?
-    let status = SecPKCS12Import(p12 as CFData, [kSecImportExportPassphrase: "test", kSecImportToMemoryOnly: true] as CFDictionary, &items)
-    guard status == errSecSuccess, let first = (items as? [[String: Any]])?.first,
-          let identity = first[kSecImportItemIdentity as String] else { throw MacIdentity.IdentityError.keychain(status, "p12 import") }
-    return MacIdentity(identity: identity as! SecIdentity, certificate: der)
-}
+import TestSupport
 
 /// The whole wireless link over loopback: TLS 1.3 with a pinned self-made
 /// certificate, the link-key challenge, and streams spliced to a local port.
@@ -87,6 +61,23 @@ final class WirelessLinkTests: XCTestCase {
         XCTAssertEqual(WirelessLink.carrier(interface: "en0", onPhoneHotspot: true), "Hotspot")
         XCTAssertEqual(WirelessLink.carrier(interface: "en0"), "Wi-Fi network")
         XCTAssertEqual(WirelessLink.carrier(interface: "anpi0"), "USB")
+    }
+
+    /// A dual-stack listener sees IPv4 peers as `::ffff:a.b.c.d`; the host is
+    /// reported as plain IPv4 so address checks treat both alike.
+    func testPeerAddressUnmapsIPv4MappedIPv6() {
+        func host(_ h: NWEndpoint.Host) -> String { PeerAddress.host(of: .hostPort(host: h, port: 1)) }
+        XCTAssertEqual(host(.ipv6(IPv6Address("::ffff:192.168.1.5")!)), "192.168.1.5")
+        XCTAssertEqual(host(.ipv6(IPv6Address("::ffff:127.0.0.1")!)), "127.0.0.1")
+        XCTAssertEqual(host(.ipv4(IPv4Address("10.0.0.2")!)), "10.0.0.2")
+        XCTAssertEqual(host(.ipv6(IPv6Address("fd00::1")!)), "fd00::1")
+        XCTAssertEqual(host(.ipv6(IPv6Address("::1")!)), "::1")
+        // IPv4-compatible (deprecated) and NAT64 forms are not IPv4-mapped.
+        XCTAssertEqual(host(.ipv6(IPv6Address("64:ff9b::c0a8:105")!)), "64:ff9b::c0a8:105")
+        XCTAssertTrue(ShellAddressPolicy.isAllowed(host(.ipv6(IPv6Address("::ffff:192.168.1.5")!))))
+        XCTAssertFalse(ShellAddressPolicy.isAllowed(host(.ipv6(IPv6Address("::ffff:8.8.8.8")!))))
+        let connection = NWConnection(to: .hostPort(host: .ipv6(IPv6Address("::ffff:10.1.2.3")!), port: 1), using: .tcp)
+        XCTAssertEqual(PeerAddress.host(of: connection), "10.1.2.3")
     }
 
     func testCertificateIsWellFormedAndKeychainIdentityIsStable() throws {
@@ -317,7 +308,7 @@ final class WirelessLinkTests: XCTestCase {
 @MainActor
 final class WirelessWatcherTests: XCTestCase {
     func testRelinkedPhoneIsReportedAsNew() async throws {
-        let identity = try makeTestIdentity()
+        let identity = try (try? makeTestIdentity()) ?? makeTestIdentity()   // the p12 import rarely fails; retry
         let key = WirelessLink.randomBytes(32)
         let phone = WirelessPhone(phoneID: "P", linkKey: key, isAndroid: false, label: "iPhone", pairingSlot: "token")
         let watcher = WirelessWatcher(macTag: { "t" }, identity: { identity }, phones: { [phone] })

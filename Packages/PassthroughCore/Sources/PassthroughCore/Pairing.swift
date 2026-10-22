@@ -27,6 +27,25 @@ public enum PairingToken {
     }
 }
 
+/// Where a Mac's shell listener is and which certificate it presents. The
+/// key itself is kept apart, in the secret store.
+public struct ShellGrant: Codable, Equatable, Sendable {
+    public var certSHA256: String
+    public var port: UInt16
+    public var addresses: [String]
+    public var macName: String
+    /// The Mac's iroh endpoint id and home relay, when it offers the shell over iroh.
+    /// The relay's token is kept apart, in the secret store.
+    public var irohID: String?
+    public var irohRelay: String?
+
+    public init(certSHA256: String, port: UInt16, addresses: [String], macName: String,
+                irohID: String? = nil, irohRelay: String? = nil) {
+        self.certSHA256 = certSHA256; self.port = port; self.addresses = addresses; self.macName = macName
+        self.irohID = irohID; self.irohRelay = irohRelay
+    }
+}
+
 /// A Mac that has been granted access to this iPhone's proxy.
 public struct PairedClient: Codable, Identifiable, Equatable, Sendable {
     public var id: String
@@ -36,6 +55,8 @@ public struct PairedClient: Codable, Identifiable, Equatable, Sendable {
     public var lastSeen: Date?
     /// SHA-256 of the Mac's wireless-link certificate, once linked over the cable.
     public var linkCertificate: String?
+    /// How to reach this Mac's shell listener, once it granted a shell key over the cable.
+    public var shell: ShellGrant?
 
     public init(id: String, name: String, tokenHash: String, pairedAt: Date, lastSeen: Date? = nil) {
         self.id = id; self.name = name; self.tokenHash = tokenHash; self.pairedAt = pairedAt; self.lastSeen = lastSeen
@@ -94,6 +115,68 @@ public final class PairingRegistry: @unchecked Sendable {
         lock.unlock()
         return true
     }
+
+    /// Records the shell key a paired Mac sent over the cable. The key waits
+    /// in the secret store until the app moves it to the shell client's own
+    /// keychain item. False if the Mac isn't paired or the key could not be stored.
+    @discardableResult
+    public func grantShell(clientID: String, grant: ShellGrant, shellKey: Data, relayToken: String? = nil) -> Bool {
+        lock.lock()
+        var list = loadClients()
+        guard let i = list.firstIndex(where: { $0.id == clientID }),
+              secrets.write(shellKey, account: Self.pendingShellAccount + clientID),
+              storeRelayToken(relayToken, clientID: clientID) else { lock.unlock(); return false }
+        list[i].shell = grant
+        save(list)
+        lock.unlock()
+        return true
+    }
+
+    /// Applies a `macInfo` from a Mac this phone has a shell grant for. Valid
+    /// addresses (capped at 16) always apply. The iroh details apply as a group
+    /// only when valid: a valid id sets them (an absent token clears the stored
+    /// one), an absent id clears them and the token (the Mac is the source of
+    /// truth), invalid details leave the stored ones alone. Never touches the
+    /// shell key or certificate. False if there is no grant.
+    @discardableResult
+    public func updateShellInfo(clientID: String, irohID: String?, irohRelay: String?, relayToken: String?, addresses: [String]?) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        var list = loadClients()
+        guard let i = list.firstIndex(where: { $0.id == clientID }), var grant = list[i].shell else { return false }
+        if let addresses { grant.addresses = Array(addresses.prefix(IrohInfo.maxAddresses)) }
+        if irohID == nil {
+            if storeRelayToken(nil, clientID: clientID) { grant.irohID = nil; grant.irohRelay = nil }
+        } else if IrohInfo.areValid(id: irohID, relay: irohRelay, token: relayToken),
+                  storeRelayToken(relayToken, clientID: clientID) {
+            grant.irohID = irohID
+            grant.irohRelay = irohRelay
+        }
+        list[i].shell = grant
+        save(list)
+        return true
+    }
+
+    /// The relay token a Mac's grant or `macInfo` carried.
+    public func relayToken(clientID: String) -> String? {
+        secrets.read(Self.relayTokenAccount + clientID).flatMap { String(data: $0, encoding: .utf8) }
+    }
+
+    private func storeRelayToken(_ token: String?, clientID: String) -> Bool {
+        guard let token, !token.isEmpty else { secrets.delete(Self.relayTokenAccount + clientID); return true }
+        return secrets.write(Data(token.utf8), account: Self.relayTokenAccount + clientID)
+    }
+
+    private static let relayTokenAccount = "shell.relayToken."
+
+    public func pendingShellKey(clientID: String) -> Data? {
+        secrets.read(Self.pendingShellAccount + clientID)
+    }
+
+    public func clearPendingShellKey(clientID: String) {
+        secrets.delete(Self.pendingShellAccount + clientID)
+    }
+
+    private static let pendingShellAccount = "shell.pending."
 
     /// Everything the wireless dialer needs, for every linked Mac.
     public func linkCredentials() -> [LinkCredential] {
@@ -210,12 +293,18 @@ public final class PairingRegistry: @unchecked Sendable {
     public func revoke(clientID: String) {
         lock.lock(); defer { lock.unlock() }
         secrets.delete("link." + clientID)
+        secrets.delete(Self.pendingShellAccount + clientID)
+        secrets.delete(Self.relayTokenAccount + clientID)
         save(loadClients().filter { $0.id != clientID })
     }
 
     public func revokeAll() {
         lock.lock(); defer { lock.unlock() }
-        loadClients().forEach { secrets.delete("link." + $0.id) }
+        loadClients().forEach {
+            secrets.delete("link." + $0.id)
+            secrets.delete(Self.pendingShellAccount + $0.id)
+            secrets.delete(Self.relayTokenAccount + $0.id)
+        }
         save([])
     }
 

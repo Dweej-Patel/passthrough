@@ -59,6 +59,18 @@
     },
     {
       "line": "{\"t\":\"welcome\",\"protocolVersion\":1,\"paired\":true,\"socksPort\":7890,\"deviceName\":\"Pixel 8\",\"hosting\":\"background\",\"ipv6\":true}"
+    },
+    {
+      "line": "{\"t\":\"shellGrant\",\"shellKey\":\"AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=\",\"certSHA256\":\"abababababababababababababababababababababababababababababababab\",\"shellPort\":7893,\"addresses\":[\"192.168.1.20\",\"100.101.102.103\"],\"macName\":\"MacBook Pro\"}"
+    },
+    {
+      "line": "{\"t\":\"shellGrant\",\"shellKey\":\"AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=\",\"certSHA256\":\"abababababababababababababababababababababababababababababababab\",\"shellPort\":7893,\"addresses\":[\"192.168.1.20\"],\"macName\":\"MacBook Pro\",\"irohID\":\"3f2a9c5e7b1d4a60c8e2f9b4d7a1035e6c8b2d4f9a1e3c5b7d0f2a4c6e8b1d3f\",\"irohRelay\":\"https://relay.example.com/\",\"relayToken\":\"relay-token-123\",\"grantID\":\"5B0E2C4A-7F31-4D8E-9A62-1C3B5D7E9F04\"}"
+    },
+    {
+      "line": "{\"t\":\"shellGranted\",\"phoneID\":\"p-7c1e9a40\"}"
+    },
+    {
+      "line": "{\"t\":\"shellGranted\",\"phoneID\":\"p-7c1e9a40\",\"grantID\":\"5B0E2C4A-7F31-4D8E-9A62-1C3B5D7E9F04\"}"
     }
   ],
   "rates": [
@@ -152,6 +164,139 @@
       {
         "system": [],
         "chosen": "1.1.1.1"
+      }
+    ]
+  },
+  "shell": {
+    "port": 7893,
+    "serviceType": "_passthrough-sh._tcp",
+    "proofLabel": "passthrough-shell-v1",
+    "maxSessions": 8,
+    "scrollbackBytes": 1048576,
+    "outputChunk": 16384,
+    "lineLimit": 262144,
+    "proofs": [
+      {
+        "shellKey": "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=",
+        "nonce": "ICEiIyQlJicoKSorLC0uLzAxMjM0NTY3ODk6Ozw9Pj8=",
+        "mac": "nElWNgnCJjzZ2TIJGYHmD1OjNqU7gfAP0KSTIqlGRcE="
+      }
+    ],
+    "messages": [
+      {
+        "line": "{\"t\":\"hello\"}"
+      },
+      {
+        "line": "{\"t\":\"macInfo\",\"irohID\":\"3f2a9c5e7b1d4a60c8e2f9b4d7a1035e6c8b2d4f9a1e3c5b7d0f2a4c6e8b1d3f\",\"irohRelay\":\"https://relay.example.com/\",\"relayToken\":\"relay-token-123\",\"addresses\":[\"192.168.1.20\",\"100.101.102.103\"]}"
+      },
+      {
+        "line": "{\"t\":\"challenge\",\"nonce\":\"ICEiIyQlJicoKSorLC0uLzAxMjM0NTY3ODk6Ozw9Pj8=\"}"
+      },
+      {
+        "line": "{\"t\":\"proof\",\"phoneID\":\"p-7c1e9a40\",\"mac\":\"nElWNgnCJjzZ2TIJGYHmD1OjNqU7gfAP0KSTIqlGRcE=\"}"
+      },
+      {
+        "line": "{\"t\":\"ready\"}"
+      },
+      {
+        "line": "{\"t\":\"list\"}"
+      },
+      {
+        "line": "{\"t\":\"sessions\",\"sessions\":[{\"id\":\"3F2B8C1A-7D4E-4A55-9C0B-1E6F2A9D8B34\",\"title\":\"zsh\",\"startedAt\":1758062400.5,\"lastOutputAt\":1758062461.25,\"running\":true}]}"
+      },
+      {
+        "line": "{\"t\":\"open\",\"cols\":80,\"rows\":24}"
+      },
+      {
+        "line": "{\"t\":\"opened\",\"session\":\"3F2B8C1A-7D4E-4A55-9C0B-1E6F2A9D8B34\",\"cols\":80,\"rows\":24}"
+      },
+      {
+        "line": "{\"t\":\"attach\",\"session\":\"3F2B8C1A-7D4E-4A55-9C0B-1E6F2A9D8B34\",\"cols\":100,\"rows\":30}"
+      },
+      {
+        "line": "{\"t\":\"attached\",\"session\":\"3F2B8C1A-7D4E-4A55-9C0B-1E6F2A9D8B34\"}"
+      },
+      {
+        "line": "{\"t\":\"input\",\"session\":\"3F2B8C1A-7D4E-4A55-9C0B-1E6F2A9D8B34\",\"data\":\"bHMgLWxhCg==\"}"
+      },
+      {
+        "line": "{\"t\":\"resize\",\"session\":\"3F2B8C1A-7D4E-4A55-9C0B-1E6F2A9D8B34\",\"cols\":120,\"rows\":40}"
+      },
+      {
+        "line": "{\"t\":\"output\",\"session\":\"3F2B8C1A-7D4E-4A55-9C0B-1E6F2A9D8B34\",\"data\":\"dG90YWwgOA0KZHJ3eHIteHIteCAgMiB1c2VyICBzdGFmZiAgNjQgT2N0IDIxIDA5OjAwIC4NCg==\"}"
+      },
+      {
+        "line": "{\"t\":\"close\",\"session\":\"3F2B8C1A-7D4E-4A55-9C0B-1E6F2A9D8B34\"}"
+      },
+      {
+        "line": "{\"t\":\"ended\",\"session\":\"3F2B8C1A-7D4E-4A55-9C0B-1E6F2A9D8B34\",\"exitStatus\":0}"
+      },
+      {
+        "line": "{\"t\":\"detached\",\"session\":\"3F2B8C1A-7D4E-4A55-9C0B-1E6F2A9D8B34\",\"reason\":\"taken_over\"}"
+      },
+      {
+        "line": "{\"t\":\"history\"}"
+      },
+      {
+        "line": "{\"t\":\"historyList\",\"history\":[{\"id\":\"3F2B8C1A-7D4E-4A55-9C0B-1E6F2A9D8B34\",\"title\":\"zsh\",\"phoneLabel\":\"Pixel 8\",\"startedAt\":1758062400.5,\"endedAt\":1758066000.0,\"exitStatus\":0,\"bytes\":48213}]}"
+      },
+      {
+        "line": "{\"t\":\"transcript\",\"session\":\"3F2B8C1A-7D4E-4A55-9C0B-1E6F2A9D8B34\"}"
+      },
+      {
+        "line": "{\"t\":\"transcriptData\",\"session\":\"3F2B8C1A-7D4E-4A55-9C0B-1E6F2A9D8B34\",\"data\":\"JCBscw0KZmlsZS50eHQNCg==\",\"done\":true}"
+      },
+      {
+        "line": "{\"t\":\"historyList\",\"history\":[{\"id\":\"3F2B8C1A-7D4E-4A55-9C0B-1E6F2A9D8B34\",\"title\":\"python --version\",\"phoneLabel\":\"iPhone\",\"startedAt\":1758062400.5,\"bytes\":48213,\"cols\":48,\"rows\":20}]}"
+      },
+      {
+        "line": "{\"t\":\"transcriptData\",\"session\":\"3F2B8C1A-7D4E-4A55-9C0B-1E6F2A9D8B34\",\"data\":\"JCBscw0K\",\"cols\":48,\"rows\":20}"
+      },
+      {
+        "line": "{\"t\":\"transcriptData\",\"session\":\"3F2B8C1A-7D4E-4A55-9C0B-1E6F2A9D8B34\",\"data\":\"\",\"cols\":100,\"rows\":30,\"done\":true}"
+      },
+      {
+        "line": "{\"t\":\"ping\"}"
+      },
+      {
+        "line": "{\"t\":\"pong\"}"
+      },
+      {
+        "line": "{\"t\":\"error\",\"reason\":\"no_such_session\"}"
+      }
+    ],
+    "addresses": [
+      {
+        "host": "192.168.1.20",
+        "allowed": true
+      },
+      {
+        "host": "100.101.102.103",
+        "allowed": true
+      },
+      {
+        "host": "fd7a:115c:a1e0::1",
+        "allowed": true
+      },
+      {
+        "host": "fe80::1%en0",
+        "allowed": true
+      },
+      {
+        "host": "8.8.8.8",
+        "allowed": false
+      },
+      {
+        "host": "2001:4860::1",
+        "allowed": false
+      },
+      {
+        "host": "100.63.255.255",
+        "allowed": false
+      },
+      {
+        "host": "172.32.0.1",
+        "allowed": false
       }
     ]
   }
