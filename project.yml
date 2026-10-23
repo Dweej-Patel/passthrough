@@ -47,6 +47,8 @@ targets:
       # Remote shell over iroh. App only: never link it into the tunnel extension.
       - package: PassthroughCore
         product: IrohTransport
+      - package: PassthroughCore
+        product: ScreenClient
       - package: SwiftTerm
         product: SwiftTerm
       - target: PassthroughTunnel

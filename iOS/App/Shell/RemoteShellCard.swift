@@ -11,6 +11,7 @@ struct RemoteShellCard: View {
     @EnvironmentObject private var model: AppModel
     @State private var terminal: TerminalIntent?
     @State private var showHistory = false
+    @State private var showScreen = false
 
     private var selectedMacName: String {
         shell.macs.first { $0.macID == shell.selectedMacID }?.macName ?? "your Mac"
@@ -45,11 +46,18 @@ struct RemoteShellCard: View {
         .sheet(isPresented: $showHistory) {
             ShellHistoryView(shell: shell)
         }
+        .fullScreenCover(isPresented: $showScreen) {
+            ScreenView(shell: shell).environmentObject(lock)
+        }
+        #if DEBUG
+        .task(id: shell.reach) { if ScreenModel.demoState != nil, shell.reach == .ready { showScreen = true } }
+        #endif
         .onChange(of: lock.isUnlocked) { _, unlocked in
             // The lock dismisses presentations; keep this state in step with it.
             if !unlocked {
                 terminal = nil
                 showHistory = false
+                showScreen = false
             }
         }
     }
@@ -150,6 +158,18 @@ struct RemoteShellCard: View {
                 notice(message, icon: "exclamationmark.triangle.fill", tint: PTTheme.warning)
             }
             Divider().opacity(0.5)
+            Button { showScreen = true } label: {
+                HStack(spacing: 10) {
+                    Image(systemName: "display").foregroundStyle(PTTheme.accentEnd)
+                    Text("See and control the screen").foregroundStyle(.primary)
+                    Spacer()
+                    Image(systemName: "chevron.right").font(.caption.weight(.semibold)).foregroundStyle(.tertiary)
+                }
+                .font(.subheadline.weight(.medium))
+                .frame(minHeight: 36)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
             Button { showHistory = true } label: {
                 HStack(spacing: 10) {
                     Image(systemName: "clock.arrow.circlepath").foregroundStyle(PTTheme.accentEnd)

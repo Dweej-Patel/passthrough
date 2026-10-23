@@ -20,6 +20,25 @@ final class ShellAccessStoreTests: XCTestCase {
         XCTAssertNil(store.key(forPhone: "nobody"))
     }
 
+    /// Screen access is off by default, set per phone, and survives the phone
+    /// being plugged in again (a re-grant renews the key only).
+    func testScreenAccess() {
+        let store = ShellAccessStore(secrets: InMemorySecrets())
+        store.record(phone("a"))
+        store.record(phone("b"))
+        XCTAssertFalse(store.screenAllowed(forPhone: "a"))
+        XCTAssertTrue(store.setScreenAllowed(true, forPhone: "a"))
+        XCTAssertTrue(store.screenAllowed(forPhone: "a"))
+        XCTAssertFalse(store.screenAllowed(forPhone: "b"))
+        store.record(phone("a"))
+        XCTAssertTrue(store.screenAllowed(forPhone: "a"), "kept across a re-grant")
+        XCTAssertFalse(store.setScreenAllowed(true, forPhone: "nobody"))
+        XCTAssertFalse(store.screenAllowed(forPhone: "nobody"))
+        store.revoke(phoneID: "a")
+        store.record(phone("a"))
+        XCTAssertFalse(store.screenAllowed(forPhone: "a"), "a phone granted again after a revoke starts without it")
+    }
+
     /// The phone ID in a grant answer is the phone's claim: a phone paired
     /// through one slot cannot replace the access of a phone from another.
     func testRecordRefusesAPhoneIDFromAnotherPairing() {

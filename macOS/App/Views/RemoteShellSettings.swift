@@ -39,6 +39,14 @@ struct RemoteShellSettings: View {
                 try? await Task.sleep(for: .seconds(2))
             }
         }
+        .task(id: session.remoteShellEnabled) {
+            // Less often: each check is a connection Screen Sharing sees.
+            guard session.remoteShellEnabled else { return }
+            while !Task.isCancelled {
+                await shell.refreshScreenSharing()
+                try? await Task.sleep(for: .seconds(5))
+            }
+        }
         .sheet(isPresented: $showFullDiskAccess) { FullDiskAccessSheet() }
         .sheet(isPresented: $session.fullDiskAccessPrompt) { FullDiskAccessSheet() }
     }
@@ -71,6 +79,7 @@ struct RemoteShellSettings: View {
                         : "\(shell.phones.count) phone\(shell.phones.count == 1 ? "" : "s") can open a shell. Plug in another paired phone to add it.") {
                 EmptyView()
             }
+            screenSharingStep
             SetupStep(status: keepAwake.isOn ? .done : .optional,
                       title: "Keep this Mac awake",
                       detail: keepAwake.isOn
@@ -80,6 +89,22 @@ struct RemoteShellSettings: View {
             }
         } header: {
             Text("Setup")
+        }
+    }
+
+    /// Only once checked, so it doesn't flash "off" while the first check runs.
+    @ViewBuilder private var screenSharingStep: some View {
+        if let on = shell.screenSharingOn {
+            let wanted = shell.phones.contains(where: \.screenAllowed)
+            SetupStep(status: on ? .done : (wanted ? .needed : .optional),
+                      title: "Screen Sharing",
+                      detail: on
+                        ? "Phones you allow below can see and control this screen after entering your Mac's name and password. Screen Sharing also answers on your local network, behind the same password."
+                        : wanted
+                            ? "A phone below is allowed to see this screen, but Screen Sharing is off. Turn it on in System Settings › General › Sharing."
+                            : "Optional. Turn on Screen Sharing in System Settings, then allow a phone below, to see and control this screen from it.") {
+                if !on { Button("Open Settings…") { ScreenSharing.openSettings() } }
+            }
         }
     }
 }
@@ -220,6 +245,17 @@ private struct PhonesSection: View {
                         Text(detail(for: phone)).font(.caption).foregroundStyle(.secondary)
                     }
                     Spacer()
+                    // Label beside the switch: a form spreads a toggle's own label across the row.
+                    HStack(spacing: 6) {
+                        Text("Screen").font(.callout).foregroundStyle(.secondary)
+                        Toggle("Screen", isOn: Binding(get: { phone.screenAllowed },
+                                                       set: { shell.setScreenAllowed($0, for: phone.phoneID) }))
+                            .toggleStyle(.switch)
+                            .controlSize(.small)
+                            .labelsHidden()
+                    }
+                    .fixedSize()
+                    .help("Also let \(phone.label) see and control this screen through Screen Sharing. It still asks for your Mac's password.")
                     Button("Revoke…") { revoking = phone }
                 }
                 .padding(.vertical, 1)
@@ -232,12 +268,13 @@ private struct PhonesSection: View {
                             presenting: revoking) { phone in
             Button("Revoke Access", role: .destructive) { shell.revoke(phone.phoneID) }
         } message: { _ in
-            Text("Its shells close and its key stops working. Plug it in again to give it a new one.")
+            Text("Its shells and any view of the screen close, and its key stops working. Plug it in again to give it a new one.")
         }
     }
 
     private func detail(for phone: ShellPhone) -> String {
         var parts = ["Added \(phone.grantedAt.formatted(date: .abbreviated, time: .omitted))"]
+        if shell.screenViewers.contains(where: { $0.phoneID == phone.phoneID }) { parts.append("viewing the screen") }
         switch shell.irohStatus.paths[phone.phoneID] {
         case .direct?: parts.append("connected from anywhere, directly")
         case .relay?: parts.append("connected from anywhere, through a relay")

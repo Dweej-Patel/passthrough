@@ -24,6 +24,27 @@ public struct LineBuffer: Sendable {
         if pending.count > limit { throw Overflow() }
         return lines
     }
+
+    /// As `append`, but stops after the first line `stop` accepts: the bytes
+    /// after it stay pending, however many, for `takePending`.
+    public mutating func append(_ data: Data, stoppingAfter stop: (Data) -> Bool) throws -> [Data] {
+        pending.append(data)
+        var lines: [Data] = []
+        while let newline = pending.firstIndex(of: 0x0A) {
+            let line = pending.subdata(in: pending.startIndex..<newline)
+            pending.removeSubrange(pending.startIndex...newline)
+            if !line.isEmpty { lines.append(line) }
+            if stop(line) { return lines }
+        }
+        if pending.count > limit { throw Overflow() }
+        return lines
+    }
+
+    /// The bytes after the last line returned, which are no longer lines.
+    public mutating func takePending() -> Data {
+        defer { pending = Data() }
+        return pending
+    }
 }
 
 /// One control-channel stream: newline-delimited JSON envelopes in both

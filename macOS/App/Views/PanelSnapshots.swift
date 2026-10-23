@@ -77,7 +77,7 @@ enum PanelSnapshots {
         session.remoteShellEnabled = state != .off
         let now = Date().timeIntervalSince1970
         let phones = state == .ready ? [
-            ShellPhone(phoneID: "p1", label: "My iPhone", pairingSlot: "token", key: Data(count: 32), grantedAt: Date().addingTimeInterval(-86_400 * 3)),
+            ShellPhone(phoneID: "p1", label: "My iPhone", pairingSlot: "token", key: Data(count: 32), grantedAt: Date().addingTimeInterval(-86_400 * 3), screen: true),
             ShellPhone(phoneID: "p2", label: "Pixel 9", pairingSlot: "token.android.x", key: Data(count: 32), grantedAt: Date().addingTimeInterval(-86_400 * 12)),
         ] : []
         let sessions = state == .ready ? [
@@ -92,7 +92,9 @@ enum PanelSnapshots {
         if state == .ready {
             iroh = .init(state: .running, endpointID: "k5x7q2m9a1b3c4d5", homeRelay: "https://use1-1.relay.n0.iroh.iroh.link./", paths: ["p1": .direct])
         }
-        session.shell.debugApply(phones: phones, sessions: sessions, history: history, iroh: iroh)
+        let viewers = state == .ready ? [RemoteShellController.ScreenViewer(phoneID: "p1", label: "My iPhone", connections: 1)] : []
+        session.shell.debugApply(phones: phones, sessions: sessions, history: history, iroh: iroh,
+                                 screenViewers: viewers, screenSharingOn: state == .off ? nil : state == .ready)
     }
 
     /// Draws `view` through AppKit (so real controls render, unlike `ImageRenderer`) to a PNG.

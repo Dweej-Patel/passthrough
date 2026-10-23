@@ -32,6 +32,18 @@ public final class IrohShellListener: @unchecked Sendable {
         set { gate.eventHandler.set(newValue) }
     }
 
+    /// As `ShellListener.screenAllowed`.
+    public var screenAllowed: (@Sendable (String) -> Bool)? {
+        get { gate.screenAccess.get() }
+        set { gate.screenAccess.set(newValue) }
+    }
+
+    /// As `ShellListener.onScreenViewer`.
+    public var onScreenViewer: (@Sendable (_ phoneID: String, _ label: String, _ viewing: Bool) -> Void)? {
+        get { gate.screenHandler.get() }
+        set { gate.screenHandler.set(newValue) }
+    }
+
     /// The endpoint stopped accepting (it was shut down underneath the
     /// listener); it will not accept again. On the listener's queue.
     public var onFailure: (@Sendable (Error) -> Void)? {
@@ -114,6 +126,11 @@ public final class IrohShellListener: @unchecked Sendable {
     /// its sessions keep running. Call after its keys are gone from `shellKeys`.
     public func disconnect(phoneID: String) {
         gate.disconnect(phoneID: phoneID)
+    }
+
+    /// Ends this phone's views of the screen; its shell connections stay.
+    public func disconnectScreen(phoneID: String) {
+        gate.disconnectScreen(phoneID: phoneID)
     }
 
     /// How each connected phone is carried right now, for status: direct if

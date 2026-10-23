@@ -16,11 +16,17 @@ public struct ShellPhone: Codable, Equatable, Sendable {
     /// too. Absent in lists stored before it existed.
     public var previousKey: Data?
     public var grantedAt: Date
+    /// The owner also let this phone see and control the screen (through
+    /// Screen Sharing). Off unless turned on; absent in older lists.
+    public var screen: Bool?
 
-    public init(phoneID: String, label: String, pairingSlot: String, key: Data, previousKey: Data? = nil, grantedAt: Date) {
+    public init(phoneID: String, label: String, pairingSlot: String, key: Data, previousKey: Data? = nil, grantedAt: Date,
+                screen: Bool? = nil) {
         self.phoneID = phoneID; self.label = label; self.pairingSlot = pairingSlot; self.key = key
-        self.previousKey = previousKey; self.grantedAt = grantedAt
+        self.previousKey = previousKey; self.grantedAt = grantedAt; self.screen = screen
     }
+
+    public var screenAllowed: Bool { screen ?? false }
 }
 
 /// The phones allowed a shell, with their keys, kept in the Mac's secret store.
@@ -106,6 +112,8 @@ public final class ShellAccessStore: @unchecked Sendable {
             // still hold only the key before it: keep that one.
             let kept = earlier.previousKey ?? earlier.key
             phone.previousKey = kept == phone.key ? nil : kept
+            // Plugging the phone in again renews its key, not what it may do.
+            phone.screen = earlier.screen
         }
         list.removeAll { $0.phoneID == phone.phoneID }
         list.append(phone)
@@ -114,6 +122,21 @@ public final class ShellAccessStore: @unchecked Sendable {
 
     public func key(forPhone phoneID: String) -> Data? {
         phones.first { $0.phoneID == phoneID }?.key
+    }
+
+    /// From memory, like `candidateKeys`: asked on every `screen` request.
+    public func screenAllowed(forPhone phoneID: String) -> Bool {
+        phones.first { $0.phoneID == phoneID }?.screenAllowed ?? false
+    }
+
+    /// Lets the phone see and control the screen, or stops it. False if it
+    /// could not be stored (nothing changes then), or the phone is unknown.
+    @discardableResult
+    public func setScreenAllowed(_ allowed: Bool, forPhone phoneID: String) -> Bool {
+        writeLock.lock(); defer { writeLock.unlock() }
+        guard var list = loadForWrite(), let index = list.firstIndex(where: { $0.phoneID == phoneID }) else { return false }
+        list[index].screen = allowed
+        return store(list)
     }
 
     /// The keys a proof from this phone may use: its current key, then the

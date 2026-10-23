@@ -15,6 +15,18 @@ final class RemoteShellController: ObservableObject {
     @Published private(set) var history: [ShellHistoryEntry] = []
     @Published private(set) var historyBytes: Int64 = 0
     @Published private(set) var listenerError: String?
+    /// Phones seeing the screen right now, through Screen Sharing.
+    @Published private(set) var screenViewers: [ScreenViewer] = []
+    /// Whether Screen Sharing answers; nil until checked.
+    @Published private(set) var screenSharingOn: Bool?
+
+    struct ScreenViewer: Equatable, Identifiable {
+        let phoneID: String
+        var label: String
+        /// A phone may have more than one view open.
+        var connections: Int
+        var id: String { phoneID }
+    }
 
     /// "Reach this Mac from anywhere (built-in)": an iroh endpoint beside the
     /// TLS listener while Remote shell is on. Turning it off closes iroh
@@ -114,6 +126,8 @@ final class RemoteShellController: ObservableObject {
             phoneLabel: { id in store.phones.first { $0.phoneID == id }?.label ?? "Phone" },
             macInfo: { reach.get().macInfo() })
         listener.onSessionEvent = { text in ptLog(.info, "shell: \(text)") }
+        listener.screenAllowed = { store.screenAllowed(forPhone: $0) }
+        listener.onScreenViewer = screenViewerHandler()
         listener.onFailure = { [weak self, weak listener] error in
             Task { @MainActor in
                 guard let self, let listener, self.listener === listener else { return }
@@ -166,6 +180,7 @@ final class RemoteShellController: ObservableObject {
         }
         lifecycle.async(execute: work)
         if wait { manager?.closeAll() }
+        screenViewers = []
     }
 
     // MARK: Reach from anywhere (iroh)
@@ -187,7 +202,7 @@ final class RemoteShellController: ObservableObject {
         let run = IrohRun()
         iroh = run
         irohStatus = IrohStatus(state: .starting)
-        let store = self.store, reach = self.reach, relay = self.relay
+        let store = self.store, reach = self.reach, relay = self.relay, onScreenViewer = screenViewerHandler()
         lifecycle.async { [weak self] in
             let host: IrohEndpointHost
             do {
@@ -220,6 +235,8 @@ final class RemoteShellController: ObservableObject {
                 phoneLabel: { id in store.phones.first { $0.phoneID == id }?.label ?? "Phone" },
                 macInfo: { reach.get().macInfo() })
             listener.onSessionEvent = { text in ptLog(.info, "shell: \(text)") }
+            listener.screenAllowed = { store.screenAllowed(forPhone: $0) }
+            listener.onScreenViewer = onScreenViewer
             listener.onFailure = { [weak self] error in
                 Task { @MainActor in
                     guard let self, self.iroh === run else { return }
@@ -411,6 +428,53 @@ final class RemoteShellController: ObservableObject {
         phones = store.phones.sorted { $0.grantedAt > $1.grantedAt }
     }
 
+    // MARK: Screen
+
+    /// Lets the phone see and control the screen, or stops it (ending any
+    /// view it has open).
+    func setScreenAllowed(_ allowed: Bool, for phoneID: String) {
+        let label = phones.first { $0.phoneID == phoneID }?.label ?? "a phone"
+        if store.setScreenAllowed(allowed, forPhone: phoneID) {
+            ptLog(.info, "shell: \(allowed ? "allowed" : "stopped allowing") \(label) to see the screen")
+        } else {
+            ptLog(.error, "shell: could not change \(label)'s screen access")
+            listenerError = "Could not change \(label)'s screen access."
+        }
+        if !allowed { endScreen(for: phoneID) }
+        refreshPhones()
+    }
+
+    /// Ends the phone's views of the screen; its shells stay.
+    func endScreen(for phoneID: String) {
+        listener?.disconnectScreen(phoneID: phoneID)
+        iroh?.listener?.disconnectScreen(phoneID: phoneID)
+    }
+
+    func refreshScreenSharing() async {
+        screenSharingOn = await ScreenSharing.isOn()
+    }
+
+    /// For both listeners: in order on the main queue (a stop must not
+    /// overtake its start), counted per phone.
+    private func screenViewerHandler() -> @Sendable (String, String, Bool) -> Void {
+        { [weak self] phoneID, label, viewing in
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated { self?.screenViewer(phoneID, label: label, viewing: viewing) }
+            }
+        }
+    }
+
+    private func screenViewer(_ phoneID: String, label: String, viewing: Bool) {
+        var viewers = screenViewers
+        if let index = viewers.firstIndex(where: { $0.phoneID == phoneID }) {
+            viewers[index].connections += viewing ? 1 : -1
+            if viewers[index].connections <= 0 { viewers.remove(at: index) }
+        } else if viewing {
+            viewers.append(ScreenViewer(phoneID: phoneID, label: label, connections: 1))
+        }
+        screenViewers = viewers
+    }
+
     // MARK: History
 
     /// The session is still running, so its transcript is still being written.
@@ -492,12 +556,15 @@ final class RemoteShellController: ObservableObject {
     }
 
     /// Puts the controller into a synthetic state for snapshots.
-    func debugApply(phones: [ShellPhone], sessions: [ShellSessionInfo], history: [ShellHistoryEntry], iroh: IrohStatus) {
+    func debugApply(phones: [ShellPhone], sessions: [ShellSessionInfo], history: [ShellHistoryEntry], iroh: IrohStatus,
+                    screenViewers: [ScreenViewer] = [], screenSharingOn: Bool? = nil) {
         self.phones = phones
         self.sessions = sessions
         self.history = history
         historyBytes = history.reduce(0) { $0 + $1.bytes }
         irohStatus = iroh
+        self.screenViewers = screenViewers
+        self.screenSharingOn = screenSharingOn
     }
 }
 

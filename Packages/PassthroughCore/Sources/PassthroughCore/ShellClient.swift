@@ -120,6 +120,11 @@ public final class ShellClient: @unchecked Sendable {
         case failed(ShellError, session: String?)
         /// The connection is gone (nil: `disconnect()` was called). Sent once per `connect`.
         case disconnected(Error?)
+        /// The Mac answered `requestScreen`: the stream is now Screen
+        /// Sharing's, starting with `initialBytes`. The client lets go of it
+        /// and sends nothing more (not even `disconnected`); over iroh the
+        /// stream lasts until the dialer passed to `init` is shut down.
+        case screen(any ByteStream, initialBytes: Data)
     }
 
     public enum ConnectError: Error, Sendable {
@@ -176,6 +181,8 @@ public final class ShellClient: @unchecked Sendable {
     private var queued: [ShellEnvelope] = []
     /// The session `input` and `resize` go to.
     private var current: String?
+    /// `requestScreen` was called: lines are read only up to `screenReady`.
+    private var screenRequested = false
 
     /// `iroh` dials the Mac from anywhere (nil: TLS only); `mode` is the
     /// phone's "Connect using" setting.
@@ -281,6 +288,17 @@ public final class ShellClient: @unchecked Sendable {
 
     public func requestHistory() { command(ShellEnvelope(t: ShellEnvelope.history)) }
 
+    /// Asks to see the screen (protocol/README.md, "Screen"): `.screen` when
+    /// the Mac hands the connection over, or `.failed` with the reason it
+    /// won't. Use a client of its own for the screen, never one with a session.
+    public func requestScreen() {
+        work.async { [self] in
+            guard active else { return }
+            screenRequested = true
+            enqueue(ShellEnvelope(t: ShellEnvelope.screen))
+        }
+    }
+
     public func requestTranscript(_ session: String) {
         var m = ShellEnvelope(t: ShellEnvelope.transcript)
         m.session = session
@@ -380,7 +398,11 @@ public final class ShellClient: @unchecked Sendable {
                 guard self.active, let attempt = self.attempts[id] else { return }
                 if let data, !data.isEmpty {
                     do {
-                        for line in try attempt.lines.append(data) {
+                        // Past `screenReady` the bytes are Screen Sharing's, not lines.
+                        let lines = self.screenRequested
+                            ? try attempt.lines.append(data) { (try? ShellEnvelope.decode($0))?.t == ShellEnvelope.screenReady }
+                            : try attempt.lines.append(data)
+                        for line in lines {
                             self.handle(line, from: id)
                             guard self.active, self.attempts[id] != nil else { return }
                         }
@@ -500,9 +522,25 @@ public final class ShellClient: @unchecked Sendable {
             emit(.failed(reason, session: message.session))
         case ShellEnvelope.ping:
             send(ShellEnvelope(t: ShellEnvelope.pong))
+        case ShellEnvelope.screenReady where screenRequested:
+            handOver(id)
         default:
             break
         }
+    }
+
+    /// Gives the winning stream to the screen viewer and steps aside: no
+    /// more reads, sends or events, and no `disconnected`.
+    private func handOver(_ id: Int) {
+        guard let attempt = attempts.removeValue(forKey: id), let stream = attempt.stream else { return }
+        stream.onTerminated = nil
+        let rest = attempt.lines.takePending()
+        active = false
+        generation += 1
+        winner = nil
+        ready = false
+        queued = []
+        emit(.screen(stream, initialBytes: rest))
     }
 
     private func send(_ message: ShellEnvelope) {

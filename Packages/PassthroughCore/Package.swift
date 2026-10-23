@@ -12,6 +12,7 @@ let package = Package(
         .library(name: "VPNConfig", targets: ["VPNConfig"]),
         .library(name: "ShellHost", targets: ["ShellHost"]),
         .library(name: "IrohTransport", targets: ["IrohTransport"]),
+        .library(name: "ScreenClient", targets: ["ScreenClient"]),
         .executable(name: "passthrough-devserver", targets: ["passthrough-devserver"]),
     ],
     dependencies: [
@@ -37,12 +38,17 @@ let package = Package(
             "PassthroughCore",
             .product(name: "IrohLib", package: "iroh-ffi"),
         ]),
+        // zlib's inflate/deflate, whose init macros Swift can't call.
+        .target(name: "CZlib", linkerSettings: [.linkedLibrary("z")]),
+        // The phone's viewer for macOS Screen Sharing (RFB) over the remote shell.
+        .target(name: "ScreenClient", dependencies: ["PassthroughCore", "CZlib"]),
         .executableTarget(name: "passthrough-devserver", dependencies: ["PassthroughCore"]),
         // Helpers shared by the test targets (not a product).
         .target(name: "TestSupport", dependencies: ["PhoneTransport"], path: "Tests/TestSupport"),
         .testTarget(name: "PassthroughCoreTests", dependencies: ["PassthroughCore", "PhoneTransport", "TestSupport"]),
-        .testTarget(name: "ShellHostTests", dependencies: ["ShellHost", "IrohTransport", "TestSupport"]),
+        .testTarget(name: "ShellHostTests", dependencies: ["ShellHost", "IrohTransport", "ScreenClient", "TestSupport"]),
         .testTarget(name: "VPNConfigTests", dependencies: ["VPNConfig"]),
+        .testTarget(name: "ScreenClientTests", dependencies: ["ScreenClient", "PassthroughCore"]),
         .testTarget(name: "IrohTransportTests", dependencies: [
             "IrohTransport",
             .product(name: "IrohLib", package: "iroh-ffi"),

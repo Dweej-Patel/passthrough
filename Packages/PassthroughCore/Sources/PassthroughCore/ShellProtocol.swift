@@ -15,6 +15,8 @@ public enum RemoteShell {
     public static let outputChunk = 16_384
     /// Longest line either side accepts.
     public static let lineLimit = 262_144
+    /// Where macOS Screen Sharing listens; a `screen` request is relayed to it on loopback.
+    public static let screenSharingPort: UInt16 = 5900
 
     /// HMAC-SHA256(shellKey, label ‖ nonce): the phone's answer to the Mac's challenge.
     public static func proof(shellKey: Data, nonce: Data) -> Data {
@@ -72,6 +74,8 @@ public struct ShellEnvelope: Codable, Equatable, Sendable {
     public static let historyList = "historyList"
     public static let transcript = "transcript"
     public static let transcriptData = "transcriptData"
+    public static let screen = "screen"
+    public static let screenReady = "screenReady"
     public static let ping = "ping"
     public static let pong = "pong"
     public static let error = "error"
@@ -157,6 +161,10 @@ public enum ShellError: String, Error, Sendable {
     case tooManySessions = "too_many_sessions"
     case noSuchSession = "no_such_session"
     case badRequest = "bad_request"
+    /// The phone has shell access but not screen access.
+    case screenNotAllowed = "screen_not_allowed"
+    /// Screen Sharing is off (nothing answers on its port).
+    case screenUnavailable = "screen_unavailable"
 }
 
 /// Which peers may reach the shell, and which of the Mac's addresses a phone
