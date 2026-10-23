@@ -76,7 +76,7 @@ final class AppLock: ObservableObject {
         failure = nil
 
         let ctx = LAContext()
-        ctx.touchIDAuthenticationAllowableReuseDuration = 60
+        // No reuse of the phone's own unlock: tapping Unlock always shows Face ID / Touch ID.
         var error: NSError?
         guard ctx.canEvaluatePolicy(.deviceOwnerAuthentication, error: &error) else {
             if let error, LAError.Code(rawValue: error.code) == .passcodeNotSet {

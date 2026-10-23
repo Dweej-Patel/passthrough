@@ -5,13 +5,18 @@ import Foundation
 /// privacy permissions, so without it a command touching Desktop, Documents
 /// and the like raises a prompt on the Mac and waits.
 enum FullDiskAccess {
-    /// The user's TCC database opens only with Full Disk Access.
+    /// Folders only Full Disk Access opens. Several, because which exist
+    /// varies: newer macOS has no per-user TCC folder at all, and a Mac may
+    /// never have run Mail or Messages.
+    static let protectedFolders = ["Library/Safari", "Library/Mail", "Library/Messages",
+                                   "Library/Containers/com.apple.stocks", "Library/Application Support/com.apple.TCC"]
+
+    /// Granted when any of `protectedFolders` can be listed.
     static var isGranted: Bool {
-        let path = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent("Library/Application Support/com.apple.TCC/TCC.db").path
-        guard let handle = FileHandle(forReadingAtPath: path) else { return false }
-        try? handle.close()
-        return true
+        let home = FileManager.default.homeDirectoryForCurrentUser
+        return protectedFolders.contains {
+            (try? FileManager.default.contentsOfDirectory(atPath: home.appendingPathComponent($0).path)) != nil
+        }
     }
 
     /// Privacy & Security › Full Disk Access in System Settings (the pre-Ventura
