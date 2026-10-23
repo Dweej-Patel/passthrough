@@ -238,7 +238,7 @@ final class TranscriptStoreTests: XCTestCase {
         // About 24 MiB of cast: 6000 events of 4 KiB.
         let filler = String(repeating: "x", count: 4086)
         for i in 0..<6000 {
-            writer.append(Data(String(format: "%08d", i).utf8 + Data(filler.utf8) + Data("\r\n".utf8)), at: Date(timeIntervalSince1970: 1_001))
+            writer.append(Data(String(format: "%08d", i).utf8) + Data(filler.utf8) + Data("\r\n".utf8), at: Date(timeIntervalSince1970: 1_001))
         }
         writer.finish(exitStatus: 0, at: Date(timeIntervalSince1970: 1_002))
         let cast = directory.appendingPathComponent("s1.cast")
