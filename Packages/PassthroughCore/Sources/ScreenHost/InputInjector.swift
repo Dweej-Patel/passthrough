@@ -62,13 +62,17 @@ final class InputInjector: InputSink {
 
     private func post(mouse type: CGEventType, button: CGMouseButton, clicks: Int = 0) {
         guard let event = CGEvent(mouseEventSource: source, mouseType: type, mouseCursorPosition: position, mouseButton: button) else { return }
+        // The source's flags would otherwise come along: a ⌃ still held there makes a click a right-click.
+        event.flags = []
         if clicks > 0 { event.setIntegerValueField(.mouseEventClickState, value: Int64(clicks)) }
         event.post(tap: .cghidEventTap)
     }
 
     func scroll(dx: Int16, dy: Int16) {
-        CGEvent(scrollWheelEvent2Source: source, units: .pixel, wheelCount: 2, wheel1: Int32(dy), wheel2: Int32(dx), wheel3: 0)?
-            .post(tap: .cghidEventTap)
+        guard let event = CGEvent(scrollWheelEvent2Source: source, units: .pixel, wheelCount: 2, wheel1: Int32(dy), wheel2: Int32(dx), wheel3: 0)
+        else { return }
+        event.flags = []
+        event.post(tap: .cghidEventTap)
     }
 
     func key(keysym: UInt32, modifiers: UInt8) {
@@ -91,6 +95,11 @@ final class InputInjector: InputSink {
             guard let event = CGEvent(keyboardEventSource: source, virtualKey: code, keyDown: down) else { continue }
             event.flags = flags
             event.post(tap: .cghidEventTap)
+        }
+        // A key's flags stay in the system's state (as if ⌃ were still down) until a key comes without them.
+        if !flags.isEmpty, let release = CGEvent(keyboardEventSource: source, virtualKey: 59, keyDown: false) {
+            release.flags = []
+            release.post(tap: .cghidEventTap)
         }
     }
 
