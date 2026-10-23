@@ -20,7 +20,6 @@ import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
@@ -32,7 +31,6 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.requiredSize
 import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.widthIn
@@ -303,22 +301,21 @@ private fun ErrorNote(text: String) {
     }
 }
 
-/** The launcher icon (adaptive: background and foreground layers), as a rounded tile. */
+/**
+ * The app icon as a rounded tile, from a full-resolution copy (`app_mark`, written by
+ * scripts/make_icons.swift): the launcher layers are sized for the launcher and blur larger.
+ */
 @Composable
 internal fun AppIcon(size: Dp) {
     val shape = RoundedCornerShape(size * 0.26f)
-    Box(
+    Image(
+        painterResource(R.drawable.app_mark), null,
         Modifier
             .shadow(24.dp, shape, ambientColor = PT.accentStart.copy(alpha = 0.5f), spotColor = PT.accentEnd.copy(alpha = 0.5f))
             .size(size)
             .clip(shape),
-        contentAlignment = Alignment.Center,
-    ) {
-        // Adaptive layers are 108 dp with the visible 72 dp in the middle.
-        val layer = Modifier.requiredSize(size * 1.5f)
-        Image(painterResource(R.mipmap.ic_launcher_background), null, layer, contentScale = ContentScale.FillBounds)
-        Image(painterResource(R.mipmap.ic_launcher_foreground), null, layer, contentScale = ContentScale.FillBounds)
-    }
+        contentScale = ContentScale.Crop,
+    )
 }
 
 private val LockReason.message: String

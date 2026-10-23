@@ -35,26 +35,17 @@ struct LockGate<Content: View>: View {
     }
 }
 
-/// The home screen icon, read from the bundle's icon list (asset-catalog app icons can't be
-/// loaded with `Image(_:)`).
-private let appIconImage: UIImage? = {
-    guard let icons = Bundle.main.infoDictionary?["CFBundleIcons"] as? [String: Any],
-          let primary = icons["CFBundlePrimaryIcon"] as? [String: Any],
-          let files = primary["CFBundleIconFiles"] as? [String],
-          let name = files.last else { return nil }
-    return UIImage(named: name)
-}()
-
+/// The app icon as a rounded tile, from a full-resolution copy (`AppMark`, written by
+/// scripts/make_icons.swift): the bundle's home-screen icon is at most 180 px and blurs when
+/// shown larger.
 struct AppIconView: View {
     var body: some View {
-        if let image = appIconImage {
-            Image(uiImage: image)
+        GeometryReader { geometry in
+            Image("AppMark")
                 .resizable()
-                .clipShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
-        } else {
-            Image(systemName: "lock.fill")
-                .resizable().scaledToFit().padding(24)
-                .foregroundStyle(PTTheme.accent)
+                .interpolation(.high)
+                .clipShape(RoundedRectangle(cornerRadius: geometry.size.width * 0.225, style: .continuous))
         }
+        .aspectRatio(1, contentMode: .fit)
     }
 }

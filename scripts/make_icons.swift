@@ -139,10 +139,17 @@ if let i = args.firstIndex(of: "--preview"), args.count > i + 1 {
         writePNG(render(size: px, rounded: false, layer: .background), to: "\(dir)/ic_launcher_background.png")
         writePNG(render(size: px, rounded: false, layer: .glyph, glyphScale: 0.74), to: "\(dir)/ic_launcher_foreground.png")
     }
+    // The whole icon at full resolution for drawing inside the app (the lock
+    // screen): the launcher layers are sized for the launcher and blur larger.
+    try? FileManager.default.createDirectory(atPath: "android/app/src/main/res/drawable-nodpi", withIntermediateDirectories: true)
+    writePNG(render(size: 512, rounded: false), to: "android/app/src/main/res/drawable-nodpi/app_mark.png", opaque: true)
     print("android icons written")
 } else {
     // iOS masks its own icon; the Mac's shape is baked in.
     writePNG(render(size: 1024, rounded: false), to: "iOS/App/Resources/Assets.xcassets/AppIcon.appiconset/icon-1024.png", opaque: true)
+    // A full-resolution copy for drawing inside the app (the lock screen): the
+    // bundle's home-screen icon is at most 180 px and blurs when shown larger.
+    writePNG(render(size: 1024, rounded: false), to: "iOS/App/Resources/Assets.xcassets/AppMark.imageset/app-mark.png", opaque: true)
     for s in [16, 32, 64, 128, 256, 512, 1024] {
         writePNG(render(size: s, rounded: true), to: "macOS/App/Resources/Assets.xcassets/AppIcon.appiconset/icon-\(s).png")
     }
