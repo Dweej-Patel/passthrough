@@ -32,7 +32,7 @@ import javax.crypto.spec.GCMParameterSpec
  * (with an authentication window the key is bound to the user's root SID,
  * not to the enrolled biometrics). The vault never
  * prompts; when the window has passed it reports [ShellKeyStatus.LOCKED] and
- * the app lock prompts on the next foreground. Mirrors iOS/App/Shell/ShellKeyVault.swift.
+ * the app lock asks for a fresh unlock (the user taps Unlock). Mirrors iOS/App/Shell/ShellKeyVault.swift.
  *
  * Blocking (Keystore and disk): call off the main thread. Keys are never logged.
  */

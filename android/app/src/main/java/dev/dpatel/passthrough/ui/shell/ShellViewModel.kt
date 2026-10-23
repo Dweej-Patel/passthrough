@@ -3,6 +3,7 @@ package dev.dpatel.passthrough.ui.shell
 import android.app.Application
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import dev.dpatel.passthrough.BuildConfig
 import dev.dpatel.passthrough.core.IrohInfo
 import dev.dpatel.passthrough.core.IrohShellDialer
 import dev.dpatel.passthrough.core.PairedClient
@@ -77,6 +78,9 @@ class ShellViewModel(app: Application) : AndroidViewModel(app) {
     val sessions: StateFlow<List<ShellSessionInfo>> = _sessions.asStateFlow()
     private val _history = MutableStateFlow<List<ShellHistoryEntry>>(emptyList())
     val history: StateFlow<List<ShellHistoryEntry>> = _history.asStateFlow()
+    /** A history request is on its way to the Mac. */
+    private val _historyLoading = MutableStateFlow(false)
+    val historyLoading: StateFlow<Boolean> = _historyLoading.asStateFlow()
     private val _openTabs = MutableStateFlow<List<String>>(emptyList())
     val openTabs: StateFlow<List<String>> = _openTabs.asStateFlow()
     private val _activeSession = MutableStateFlow<String?>(null)
@@ -120,6 +124,8 @@ class ShellViewModel(app: Application) : AndroidViewModel(app) {
     private var size = 80 to 24
     private var pendingTranscript: PendingTranscript? = null
     private val refreshes = Channel<Unit>(Channel.CONFLATED)
+    /** Debug builds only: the [ShellDemo] state shown instead of a real Mac (null normally). */
+    private var demo: String? = null
 
     private class PendingTranscript(val id: String, val result: CompletableDeferred<List<ShellReplayChunk>?>) {
         val replay = ShellReplay.Collector()
@@ -147,6 +153,13 @@ class ShellViewModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch {
             connectMode.drop(1).collect { if (_macs.value.isNotEmpty() && foreground) connect() }
         }
+    }
+
+    /** Debug builds only (see [ShellDemo]): shows sample state; never dials. */
+    fun startDemo(state: String) {
+        if (!BuildConfig.DEBUG) return
+        demo = state
+        refresh()
     }
 
     fun addListener(listener: ShellStreamListener) { listeners += listener }
@@ -198,6 +211,7 @@ class ShellViewModel(app: Application) : AndroidViewModel(app) {
     private suspend fun runRefresh() {
         val lock = lock ?: return
         if (!lock.unlocked.value) return
+        demo?.let { return seedDemo(it) }
         val known = keys
         val loaded = withContext(Dispatchers.IO) { load(known) }
         // The lock may have closed meanwhile; its own handler cleared state.
@@ -298,6 +312,7 @@ class ShellViewModel(app: Application) : AndroidViewModel(app) {
 
     /** Dials the selected Mac (replacing any connection); once ready, re-attaches (the Mac sends its sessions unasked). */
     fun connect() {
+        if (demo != null) return refresh()
         dropConnection()
         val credential = current()
         if (credential == null) {
@@ -356,6 +371,13 @@ class ShellViewModel(app: Application) : AndroidViewModel(app) {
     fun newSession(cols: Int, rows: Int) {
         size = cols to rows
         _lastError.value = null
+        if (demo != null) {
+            val id = "demo-new-${_openTabs.value.size}"
+            handle(ShellEvent.Sessions(ShellDemo.sessions(listOf(id))))
+            handle(ShellEvent.Opened(id))
+            handle(ShellEvent.Output(id, ShellDemo.output(id)))
+            return
+        }
         connection?.open(cols, rows)
     }
 
@@ -364,6 +386,7 @@ class ShellViewModel(app: Application) : AndroidViewModel(app) {
         if (id !in _openTabs.value) _openTabs.value = _openTabs.value + id
         _activeSession.value = id
         _detachedSession.value = null
+        if (demo != null) return demoAttach(id)
         // Not connected yet: Ready attaches the active session, so asking now would replay twice.
         val conn = connection ?: return
         if (_reach.value != ShellReach.READY) return
@@ -390,13 +413,19 @@ class ShellViewModel(app: Application) : AndroidViewModel(app) {
         if (_activeSession.value == id) _activeSession.value = null
     }
 
-    fun loadHistory() { connection?.requestHistory() }
+    fun loadHistory() {
+        if (demo != null) return handle(ShellEvent.History(ShellDemo.history()))
+        val conn = connection ?: return
+        _historyLoading.value = true
+        conn.requestHistory()
+    }
 
     /**
      * A session's saved transcript, with the terminal sizes it was drawn at (none
      * from an older Mac), or null without a connection, on refusal, or after 30 s.
      */
     suspend fun transcript(id: String): List<ShellReplayChunk>? {
+        if (demo != null) return ShellDemo.transcript(id)
         val conn = connection ?: return null
         finishTranscript(null)
         val pending = PendingTranscript(id, CompletableDeferred())
@@ -453,7 +482,10 @@ class ShellViewModel(app: Application) : AndroidViewModel(app) {
                     _detachedSession.value = event.session
                 }
             }
-            is ShellEvent.History -> _history.value = event.entries
+            is ShellEvent.History -> {
+                _history.value = event.entries
+                _historyLoading.value = false
+            }
             is ShellEvent.Transcript -> {
                 val pending = pendingTranscript ?: return
                 if (pending.id != event.session) return
@@ -470,6 +502,7 @@ class ShellViewModel(app: Application) : AndroidViewModel(app) {
             is ShellEvent.Disconnected -> {
                 connection = null
                 _path.value = null
+                _historyLoading.value = false
                 finishTranscript(null)
                 if (event.error != null && _reach.value != ShellReach.NO_ACCESS) _reach.value = ShellReach.UNREACHABLE
             }
@@ -508,6 +541,7 @@ class ShellViewModel(app: Application) : AndroidViewModel(app) {
         connection?.let(::closeQuietly)
         connection = null
         _path.value = null
+        _historyLoading.value = false
         finishTranscript(null)
     }
 
@@ -541,6 +575,28 @@ class ShellViewModel(app: Application) : AndroidViewModel(app) {
             resetSessions()
         }
         _reach.value = reach
+    }
+
+    private fun seedDemo(state: String) {
+        val reach = ShellDemo.reach(state)
+        if (reach != ShellReach.READY) {
+            _macs.value = if (reach == ShellReach.NO_ACCESS) emptyList() else ShellDemo.macs
+            _selectedMacID.value = _macs.value.firstOrNull()?.macID
+            _reach.value = reach
+            return
+        }
+        _macs.value = ShellDemo.macs
+        if (_selectedMacID.value == null) _selectedMacID.value = ShellDemo.macs.first().macID
+        handle(ShellEvent.Ready(ShellDemo.path))
+        handle(ShellEvent.Sessions(ShellDemo.sessions(_openTabs.value.filter { it.startsWith("demo-new") })))
+        handle(ShellEvent.History(ShellDemo.history()))
+    }
+
+    private fun demoAttach(id: String) {
+        listeners.toList().forEach { it.streamStarting(id, true) }
+        handle(ShellEvent.Output(id, ShellDemo.output(id)))
+        handle(ShellEvent.Attached(id))
+        ShellDemo.ended(id)?.let(::handle)
     }
 
     override fun onCleared() {

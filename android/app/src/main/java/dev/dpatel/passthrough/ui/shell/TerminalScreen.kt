@@ -7,12 +7,20 @@ import android.content.ContextWrapper
 import android.view.HapticFeedbackConstants
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.material3.minimumInteractiveComponentSize
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.role
+import dev.dpatel.passthrough.ui.PTCircleIconButton
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.RowScope
@@ -58,6 +66,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
@@ -113,7 +122,8 @@ class ShellTerminalController(context: Context, private val vm: ShellViewModel) 
             val active = vm.activeSession.value
             if (active != null && active == shown) vm.send(data)
         }
-        view.onResize = { cols, rows -> if (vm.activeSession.value != null) vm.resize(cols, rows) }
+        // A read-only log (ended session) has nothing on the Mac to resize.
+        view.onResize = { cols, rows -> if (vm.activeSession.value != null && !readOnly) vm.resize(cols, rows) }
         view.onCtrlChanged = { ctrl = it }
         view.onLongPress = { menu = true }
     }
@@ -166,9 +176,16 @@ fun TerminalScreen(vm: ShellViewModel, intent: String, onIntentStarted: () -> Un
     val context = LocalContext.current
     val controller = remember { ShellTerminalController(context, vm) }
     val startIntent = remember { intent }
+    val rootView = LocalView.current
     DisposableEffect(controller) {
         vm.addListener(controller)
-        onDispose { vm.removeListener(controller) }
+        onDispose {
+            vm.removeListener(controller)
+            // Leaving the terminal: don't leave its keyboard over Home. The terminal view may
+            // already be detached here; the window's root view is not.
+            context.getSystemService(android.view.inputmethod.InputMethodManager::class.java)
+                ?.hideSoftInputFromWindow(rootView.windowToken, 0)
+        }
     }
     LaunchedEffect(controller) { controller.start(startIntent, onIntentStarted) }
     LaunchedEffect(controller) {
@@ -196,32 +213,46 @@ fun TerminalScreen(vm: ShellViewModel, intent: String, onIntentStarted: () -> Un
 
     CompositionLocalProvider(LocalPT provides PTColors(dark = true)) {
         Box(Modifier.fillMaxSize().background(Color(ShellTerminalView.BACKGROUND))) {
-            Column(Modifier.fillMaxSize().windowInsetsPadding(WindowInsets.safeDrawing)) {
-                TabStrip(vm, controller, current, reach, ended, onClose, closeTab)
-                Box(Modifier.weight(1f).fillMaxWidth()) {
-                    AndroidView(factory = { controller.view }, modifier = Modifier.fillMaxSize().padding(horizontal = 4.dp))
-                    Column(Modifier.fillMaxWidth().padding(horizontal = 12.dp).padding(top = 8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                        detached?.takeIf { it == current }?.let { id ->
-                            DetachedBanner(enabled = reach == ShellReach.READY) { controller.attach(id) }
-                        }
-                        controller.shown?.let { id ->
-                            ended.banner(id)?.let { text ->
+            BoxWithConstraints(Modifier.fillMaxSize().windowInsetsPadding(WindowInsets.safeDrawing)) {
+                // Landscape with the keyboard up leaves little height: give it to the terminal
+                // (the tabs come back when the keyboard goes; back still closes the terminal).
+                val tight = maxHeight < 300.dp
+                val compactKeys = maxHeight < 480.dp
+                Column(Modifier.fillMaxSize()) {
+                    if (!tight) TabStrip(vm, controller, current, reach, ended, onClose, closeTab)
+                    // Above the log rather than over it: an ended session's output stays fully readable.
+                    controller.shown?.let { id ->
+                        ended.banner(id)?.let { text ->
+                            Box(Modifier.padding(horizontal = 12.dp).padding(bottom = 8.dp)) {
                                 EndedBanner(text, enabled = reach == ShellReach.READY, onNewSession = { controller.newSession() }, onCloseTab = { closeTab(id) })
                             }
                         }
-                        val status = when (reach) {
-                            ShellReach.READY -> null
-                            ShellReach.CONNECTING -> "Connecting…"
-                            else -> reach.message(fromAnywhere)
-                        }
-                        status?.let { StatusBanner(it, spinner = reach == ShellReach.CONNECTING) }
-                        lastError?.message()?.let { StatusBanner(it, warning = true) }
                     }
-                    TerminalMenu(controller)
-                }
-                if (!controller.readOnly) {
-                    val context = LocalContext.current
-                    ExtraKeyRow(controller.ctrl) { if (it == ExtraKey.PASTE) pasteClipboard(context, controller) else controller.view.press(it) }
+                    Box(Modifier.weight(1f).fillMaxWidth()) {
+                        AndroidView(factory = { controller.view }, modifier = Modifier.fillMaxSize().padding(horizontal = 4.dp).clipToBounds())
+                        Column(Modifier.fillMaxWidth().padding(horizontal = 12.dp).padding(top = 8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                            detached?.takeIf { it == current }?.let { id ->
+                                DetachedBanner(enabled = reach == ShellReach.READY) { controller.attach(id) }
+                            }
+                            val status = when (reach) {
+                                ShellReach.READY -> null
+                                ShellReach.CONNECTING -> "Connecting…"
+                                else -> reach.message(fromAnywhere)
+                            }
+                            status?.let {
+                                StatusBanner(
+                                    it, spinner = reach == ShellReach.CONNECTING, warning = reach == ShellReach.UNREACHABLE,
+                                    onRetry = if (reach == ShellReach.UNREACHABLE) vm::connect else null,
+                                )
+                            }
+                            lastError?.message()?.let { StatusBanner(it, warning = true) }
+                        }
+                        TerminalMenu(controller)
+                    }
+                    if (!controller.readOnly) {
+                        val context = LocalContext.current
+                        ExtraKeyRow(controller.ctrl, compactKeys) { if (it == ExtraKey.PASTE) pasteClipboard(context, controller) else controller.view.press(it) }
+                    }
                 }
             }
         }
@@ -272,22 +303,27 @@ private fun TabStrip(
         if (i >= 0) listState.animateScrollToItem(i)
     }
     Row(
-        Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp),
-        verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp),
+        Modifier.fillMaxWidth().padding(start = 6.dp, end = 12.dp, top = 2.dp, bottom = 2.dp),
+        verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp),
     ) {
-        Box(
-            Modifier.size(36.dp).background(c.card, CircleShape).clickable(onClick = onClose).semantics { contentDescription = "Close terminal" },
-            contentAlignment = Alignment.Center,
-        ) { Icon(Icons.Filled.KeyboardArrowDown, null, tint = c.secondary, modifier = Modifier.size(20.dp)) }
+        PTCircleIconButton(Icons.Filled.KeyboardArrowDown, "Close terminal", onClose, size = 38.dp, iconSize = 22.dp)
         LazyRow(Modifier.weight(1f), state = listState, horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
             items(tabs, key = { it }) { id ->
                 Tab(vm, controller, id, selected = id == current, enabled = reach == ShellReach.READY, isEnded = ended.isEnded(id), onCloseTab = onCloseTab)
             }
             item(key = "+") {
-                Box(Modifier.semantics { contentDescription = "New session" }) {
-                    ShellPillButton(onClick = { controller.newSession() }, enabled = reach == ShellReach.READY) {
-                        Icon(Icons.Filled.Add, null, modifier = Modifier.size(16.dp))
-                    }
+                val enabled = reach == ShellReach.READY
+                Box(
+                    Modifier
+                        .minimumInteractiveComponentSize()
+                        .size(36.dp)
+                        .clip(CircleShape)
+                        .background(PT.accentEnd.copy(alpha = if (enabled) 0.16f else 0.07f), CircleShape)
+                        .clickable(enabled = enabled, role = Role.Button) { controller.newSession() }
+                        .semantics { contentDescription = "New session" },
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Icon(Icons.Filled.Add, null, tint = PT.accentEnd.copy(alpha = if (enabled) 1f else 0.4f), modifier = Modifier.size(18.dp))
                 }
             }
         }
@@ -313,19 +349,23 @@ private fun Tab(
     Box {
         Row(
             Modifier
+                // 48 dp to touch, a slim chip to see.
+                .minimumInteractiveComponentSize()
+                .clip(CircleShape)
                 .background(if (selected) PT.accentEnd.copy(alpha = 0.18f) else c.fill, CircleShape)
+                .then(if (selected) Modifier.border(1.dp, PT.accentEnd.copy(alpha = 0.45f), CircleShape) else Modifier)
                 .combinedClickable(
                     enabled = enabled,
                     onClick = { if (id != vm.activeSession.value) controller.attach(id) },
                     onLongClick = { menu = true },
                 )
-                .padding(horizontal = 11.dp, vertical = 7.dp)
+                .padding(horizontal = 12.dp, vertical = 8.dp)
                 .alpha(if (isEnded) 0.55f else 1f)
                 .semantics { if (isEnded) stateDescription = "Ended" },
             verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp),
         ) {
             Box(Modifier.size(6.dp).background(if (running) PT.success else c.secondary.copy(alpha = 0.5f), CircleShape))
-            Text(info?.title ?: "Session", style = PT.display(12.sp, FontWeight.SemiBold), color = if (selected) PT.accentEnd else c.secondary,
+            Text(info?.title ?: "Session", style = PT.display(13.sp, FontWeight.SemiBold), color = if (selected) PT.accentEnd else c.secondary,
                 maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.widthIn(max = 160.dp))
         }
         DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
@@ -359,12 +399,23 @@ private fun Banner(content: @Composable RowScope.() -> Unit) {
 }
 
 @Composable
+private fun BannerColumn(content: @Composable androidx.compose.foundation.layout.ColumnScope.() -> Unit) {
+    val c = LocalPT.current
+    val shape = RoundedCornerShape(16.dp)
+    Column(
+        Modifier.fillMaxWidth().background(Color(0xF21C1F2B), shape).border(1.dp, c.cardBorder, shape)
+            .padding(start = 14.dp, end = 8.dp, top = 12.dp, bottom = 4.dp),
+        verticalArrangement = Arrangement.spacedBy(4.dp), content = content,
+    )
+}
+
+@Composable
 private fun DetachedBanner(enabled: Boolean, onTakeBack: () -> Unit) {
     val c = LocalPT.current
     Banner {
         Icon(Icons.AutoMirrored.Filled.Logout, null, tint = PT.warning, modifier = Modifier.size(18.dp))
-        Text("Opened on another device", style = PT.display(15.sp, FontWeight.SemiBold), color = c.primary, modifier = Modifier.weight(1f))
-        ShellPillButton(onClick = onTakeBack, enabled = enabled) { Text("Take back", style = PT.display(12.sp, FontWeight.Bold)) }
+        Text("Opened on another device", style = PT.display(14.sp, FontWeight.SemiBold), color = c.primary, modifier = Modifier.weight(1f))
+        ShellPillButton(onClick = onTakeBack, enabled = enabled) { Text("Take back", style = PT.display(13.sp, FontWeight.Bold)) }
     }
 }
 
@@ -372,21 +423,30 @@ private fun DetachedBanner(enabled: Boolean, onTakeBack: () -> Unit) {
 @Composable
 private fun EndedBanner(text: String, enabled: Boolean, onNewSession: () -> Unit, onCloseTab: () -> Unit) {
     val c = LocalPT.current
-    Banner {
-        Icon(Icons.Filled.Lock, null, tint = c.secondary, modifier = Modifier.size(16.dp))
-        Text(text, style = PT.display(13.sp, FontWeight.SemiBold), color = c.primary, modifier = Modifier.weight(1f))
-        ShellPillButton(onClick = onNewSession, enabled = enabled) { Text("New session", style = PT.display(12.sp, FontWeight.Bold)) }
-        ShellPillButton(onClick = onCloseTab) { Text("Close tab", style = PT.display(12.sp, FontWeight.Bold)) }
+    BannerColumn {
+        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+            Icon(Icons.Filled.Lock, null, tint = c.secondary, modifier = Modifier.size(16.dp))
+            Text(text, style = PT.display(14.sp, FontWeight.SemiBold), color = c.primary, modifier = Modifier.weight(1f))
+        }
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.End), modifier = Modifier.fillMaxWidth()) {
+            ShellPillButton(onClick = onCloseTab) { Text("Close tab", style = PT.display(13.sp, FontWeight.Bold)) }
+            ShellPillButton(onClick = onNewSession, enabled = enabled) {
+                Icon(Icons.Filled.Add, null, modifier = Modifier.size(16.dp))
+                Spacer(Modifier.size(4.dp))
+                Text("New session", style = PT.display(13.sp, FontWeight.Bold))
+            }
+        }
     }
 }
 
 @Composable
-private fun StatusBanner(text: String, spinner: Boolean = false, warning: Boolean = false) {
+private fun StatusBanner(text: String, spinner: Boolean = false, warning: Boolean = false, onRetry: (() -> Unit)? = null) {
     val c = LocalPT.current
     Banner {
-        if (spinner) CircularProgressIndicator(Modifier.size(14.dp), color = c.secondary, strokeWidth = 2.dp)
+        if (spinner) CircularProgressIndicator(Modifier.size(16.dp), color = PT.accentEnd, strokeWidth = 2.dp)
         if (warning) Icon(Icons.Filled.Warning, null, tint = PT.warning, modifier = Modifier.size(16.dp))
-        Text(text, style = PT.display(13.sp, FontWeight.Normal), color = c.secondary, modifier = Modifier.weight(1f))
+        Text(text, style = PT.display(14.sp, FontWeight.Normal), color = c.primary.copy(alpha = 0.85f), modifier = Modifier.weight(1f))
+        onRetry?.let { ShellPillButton(onClick = it) { Text("Try again", style = PT.display(13.sp, FontWeight.Bold)) } }
     }
 }
 
@@ -430,14 +490,16 @@ private fun pasteClipboard(context: Context, controller: ShellTerminalController
  * the app's tinted capsule buttons.
  */
 @Composable
-private fun ExtraKeyRow(ctrl: Boolean, onKey: (ExtraKey) -> Unit) {
-    Row(Modifier.fillMaxWidth().padding(horizontal = 6.dp, vertical = 6.dp), horizontalArrangement = Arrangement.spacedBy(5.dp)) {
-        ExtraKey.entries.forEach { key -> KeyButton(key, selected = key == ExtraKey.CTRL && ctrl, onKey) }
+private fun ExtraKeyRow(ctrl: Boolean, compact: Boolean, onKey: (ExtraKey) -> Unit) {
+    // Each key is 48 dp tall to touch (44 when space is short: landscape with the keyboard up)
+    // around a slimmer capsule, and the row spans the width, so keys stay wide on any screen.
+    Row(Modifier.fillMaxWidth().padding(horizontal = 4.dp), horizontalArrangement = Arrangement.spacedBy(3.dp)) {
+        ExtraKey.entries.forEach { key -> KeyButton(key, selected = key == ExtraKey.CTRL && ctrl, compact, onKey) }
     }
 }
 
 @Composable
-private fun RowScope.KeyButton(key: ExtraKey, selected: Boolean, onKey: (ExtraKey) -> Unit) {
+private fun RowScope.KeyButton(key: ExtraKey, selected: Boolean, compact: Boolean, onKey: (ExtraKey) -> Unit) {
     val view = LocalView.current
     val press = { k: ExtraKey ->
         view.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
@@ -446,9 +508,12 @@ private fun RowScope.KeyButton(key: ExtraKey, selected: Boolean, onKey: (ExtraKe
     Box(
         Modifier
             .weight(1f)
-            .height(34.dp)
-            .background(if (selected) PT.accentEnd else PT.accentEnd.copy(alpha = 0.14f), CircleShape)
-            .semantics { contentDescription = key.description }
+            .height(if (compact) 44.dp else 48.dp)
+            .semantics {
+                contentDescription = key.description
+                role = Role.Button
+                if (key == ExtraKey.CTRL) stateDescription = if (selected) "On" else "Off"
+            }
             .pointerInput(key) {
                 detectTapGestures(onPress = {
                     if (key.isArrow) {
@@ -471,6 +536,10 @@ private fun RowScope.KeyButton(key: ExtraKey, selected: Boolean, onKey: (ExtraKe
             },
         contentAlignment = Alignment.Center,
     ) {
+        Box(
+            Modifier.fillMaxWidth().height(if (compact) 34.dp else 38.dp)
+                .background(if (selected) PT.accentEnd else PT.accentEnd.copy(alpha = 0.14f), RoundedCornerShape(10.dp)),
+        )
         val tint = if (selected) Color.White else PT.accentEnd
         val icon: ImageVector? = when (key) {
             ExtraKey.LEFT -> Icons.Filled.West
@@ -481,9 +550,11 @@ private fun RowScope.KeyButton(key: ExtraKey, selected: Boolean, onKey: (ExtraKe
             else -> null
         }
         if (icon != null) {
-            Icon(icon, null, tint = tint, modifier = Modifier.size(15.dp))
+            Icon(icon, null, tint = tint, modifier = Modifier.size(17.dp))
         } else {
-            Text(key.label.orEmpty(), color = tint, fontFamily = FontFamily.Monospace, fontWeight = FontWeight.SemiBold, fontSize = 13.sp)
+            // Fixed size (not scaled with the font setting): the row must keep all ten keys on one line.
+            Text(key.label.orEmpty(), color = tint, fontFamily = FontFamily.Monospace, fontWeight = FontWeight.SemiBold,
+                fontSize = with(LocalDensity.current) { 14.dp.toSp() }, maxLines = 1)
         }
     }
 }

@@ -18,6 +18,7 @@ import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.animation.slideOutVertically
 import androidx.compose.animation.togetherWith
+import androidx.compose.foundation.ScrollState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -38,6 +39,7 @@ import dev.dpatel.passthrough.ui.PassthroughTheme
 import dev.dpatel.passthrough.ui.SettingsScreen
 import dev.dpatel.passthrough.ui.lock.LockGate
 import dev.dpatel.passthrough.ui.lock.LockModel
+import dev.dpatel.passthrough.ui.shell.ShellDemo
 import dev.dpatel.passthrough.ui.shell.ShellHistoryScreen
 import dev.dpatel.passthrough.ui.shell.ShellViewModel
 import dev.dpatel.passthrough.ui.shell.TerminalIntent
@@ -72,6 +74,8 @@ class MainActivity : FragmentActivity() {
         var screen by rememberSaveable { mutableStateOf(Screen.HOME) }
         var terminalIntent by rememberSaveable { mutableStateOf(TerminalIntent.RESUME) }
         var showPairing by rememberSaveable { mutableStateOf(false) }
+        // Hoisted so Home keeps its place after Settings, the terminal or history.
+        val homeScroll = rememberSaveable(saver = ScrollState.Saver) { ScrollState(0) }
         val prefs = Runtime.settings.prefs
         val permissions = rememberLauncherForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { vm.start() }
         val onPower = {
@@ -94,7 +98,11 @@ class MainActivity : FragmentActivity() {
         }
         // Runs right after each unlock (and again, harmlessly, on rotation): inside the shell key
         // vault's 60 s window, so pending keys are adopted and read now.
-        LaunchedEffect(Unit) { shell.onUnlocked(lockModel.lock) }
+        LaunchedEffect(Unit) {
+            shell.onUnlocked(lockModel.lock)
+            // Debug builds only: sample Remote shell state for UI work (see ShellDemo).
+            if (BuildConfig.DEBUG) intent?.getStringExtra(ShellDemo.EXTRA)?.let(shell::startDemo)
+        }
         val lifecycleOwner = LocalLifecycleOwner.current
         DisposableEffect(lifecycleOwner) {
             val observer = LifecycleEventObserver { _, event ->
@@ -135,6 +143,7 @@ class MainActivity : FragmentActivity() {
                         screen = Screen.TERMINAL
                     },
                     onShellHistory = { screen = Screen.HISTORY },
+                    scroll = homeScroll,
                 )
             }
         }

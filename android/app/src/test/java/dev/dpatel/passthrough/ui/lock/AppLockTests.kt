@@ -13,11 +13,10 @@ class AppLockTests {
         assertFalse(lock().unlocked.value)
     }
 
-    @Test fun relockLocksAndArmsThePrompt() {
-        val l = lock().also { it.onUnlocked(); it.takeAutoPrompt() }
+    @Test fun relockLocks() {
+        val l = lock().also { it.onUnlocked() }
         l.relock()
         assertFalse(l.unlocked.value)
-        assertTrue(l.takeAutoPrompt())
     }
 
     @Test fun staysUnlockedWithinGrace() {
@@ -79,33 +78,57 @@ class AppLockTests {
         assertTrue(l.unlocked.value)
     }
 
-    @Test fun autoPromptOncePerForegrounding() {
-        val l = lock()
-        assertTrue(l.takeAutoPrompt())
-        assertFalse(l.takeAutoPrompt())
-        l.onBackground()
-        assertTrue(l.takeAutoPrompt())
-        assertFalse(l.takeAutoPrompt())
+    @Test fun startsLockedForStartup() {
+        assertEquals(LockReason.STARTUP, lock().reason.value)
     }
 
-    @Test fun relockRearmsAutoPrompt() {
-        val l = lock().also { it.onUnlocked(); it.takeAutoPrompt() }
+    @Test fun expiryLocksAsAway() {
+        val l = lock().also { it.onUnlocked() }
         l.onBackground()
-        l.takeAutoPrompt()
         now += 61_000
         l.onForeground()
-        assertEquals(false, l.unlocked.value)
-        assertTrue(l.takeAutoPrompt())
+        assertFalse(l.unlocked.value)
+        assertEquals(LockReason.AWAY, l.reason.value)
     }
 
-    @Test fun stopStartWhilePromptInFlightDoesNotRearm() {
-        val l = lock()
-        assertTrue(l.takeAutoPrompt())
-        assertTrue(l.beginPrompt())
-        l.onBackground()   // credential screen stops the activity
+    @Test fun relockSaysWhy() {
+        val l = lock().also { it.onUnlocked() }
+        l.relock()
+        assertEquals(LockReason.SHELL_KEY, l.reason.value)
+    }
+
+    @Test fun relockWhileLockedKeepsTheFirstReason() {
+        val l = lock().also { it.onUnlocked() }
+        l.onBackground()
+        now += 61_000
         l.onForeground()
+        l.relock()
+        assertEquals(LockReason.AWAY, l.reason.value)
+    }
+
+    /** The lock never claims the prompt slot by itself: the lock screen shows until the user taps Unlock. */
+    @Test fun lockingNeverStartsAPrompt() {
+        val l = lock()
+        assertFalse(l.promptInFlight)
+        l.onUnlocked()
+        l.onBackground()
+        now += 61_000
+        l.onForeground()
+        assertFalse(l.unlocked.value)
+        assertFalse(l.promptInFlight)
+        l.onUnlocked()
+        l.relock()
+        assertFalse(l.promptInFlight)
+    }
+
+    @Test fun backgroundWhilePromptInFlightKeepsTheSlot() {
+        val l = lock()
+        assertTrue(l.beginPrompt())
+        l.onBackground()   // credential screen stops the activity (API < 29)
+        l.onForeground()
+        assertFalse(l.beginPrompt())
         l.endPrompt()      // user cancelled
-        assertFalse(l.takeAutoPrompt())
+        assertTrue(l.beginPrompt())
     }
 
     @Test fun onlyOnePromptAtATime() {
@@ -116,14 +139,6 @@ class AppLockTests {
         assertTrue(l.beginPrompt())
     }
 
-    @Test fun configChangeAfterCancelDoesNotRearm() {
-        val l = lock()
-        l.takeAutoPrompt()
-        l.onBackground(changingConfigurations = true)
-        l.onForeground()
-        assertFalse(l.takeAutoPrompt())
-    }
-
     @Test fun configChangeDoesNotStartRelockClock() {
         val l = lock().also { it.onUnlocked() }
         l.onBackground(changingConfigurations = true)
@@ -132,13 +147,12 @@ class AppLockTests {
         assertTrue(l.unlocked.value)
     }
 
-    @Test fun realBackgroundStillRelocksAndRearms() {
-        val l = lock().also { it.onUnlocked(); it.takeAutoPrompt() }
+    @Test fun realBackgroundStillRelocks() {
+        val l = lock().also { it.onUnlocked() }
         l.onBackground(changingConfigurations = false)
         now += 61_000
         l.onForeground()
         assertFalse(l.unlocked.value)
-        assertTrue(l.takeAutoPrompt())
     }
 
     @Test fun unlockClearsPromptInFlight() {

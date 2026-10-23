@@ -43,7 +43,7 @@ enum class ShellKeyStatus(val message: String?) {
     READY(null),
     /** No secure lock screen: the vault can't hold keys; pending ones wait. */
     NEEDS_PASSCODE("Set a device passcode to use Remote shell."),
-    /** The vault needs a recent unlock; the app lock prompts again on the next foreground. */
+    /** The vault needs a recent unlock; the app relocks so the user can unlock again. */
     LOCKED("Unlock Passthrough to use Remote shell."),
     /** The vault's key was invalidated (new biometrics, lock screen removed); its entries are gone. */
     KEY_UNAVAILABLE("Couldn't read the Remote shell key. Plug into the Mac again to renew access."),

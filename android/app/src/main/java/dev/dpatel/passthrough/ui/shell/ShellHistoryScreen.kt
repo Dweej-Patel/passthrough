@@ -2,6 +2,15 @@ package dev.dpatel.passthrough.ui.shell
 
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.semantics.LiveRegionMode
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.liveRegion
+import dev.dpatel.passthrough.ui.PTTopBar
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -21,7 +30,6 @@ import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.KeyboardArrowLeft
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.KeyboardArrowDown
@@ -40,6 +48,9 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.layout.wrapContentWidth
+import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.platform.LocalContext
@@ -89,24 +100,37 @@ fun ShellHistoryScreen(vm: ShellViewModel, onDone: () -> Unit) {
 private fun HistoryList(vm: ShellViewModel, history: List<ShellHistoryEntry>, onDone: () -> Unit, onOpen: (String) -> Unit) {
     val c = LocalPT.current
     val sessions by vm.sessions.collectAsStateWithLifecycle()
+    val reach by vm.reach.collectAsStateWithLifecycle()
+    val loading by vm.historyLoading.collectAsStateWithLifecycle()
     PTBackground(glow = 0.45f) {
         Column(Modifier.windowInsetsPadding(WindowInsets.safeDrawing)) {
-            Box(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 12.dp)) {
-                Text("History", style = PT.display(17.sp, FontWeight.SemiBold), color = c.primary, modifier = Modifier.align(Alignment.Center))
-                Text("Done", style = PT.display(17.sp, FontWeight.Bold), color = PT.accentEnd,
-                    modifier = Modifier.align(Alignment.CenterEnd).clickable(onClick = onDone).padding(4.dp))
-            }
-            Column(Modifier.verticalScroll(rememberScrollState()).padding(horizontal = 18.dp).padding(top = 8.dp, bottom = 32.dp)) {
+            PTTopBar("History", onDone = onDone)
+            Column(Modifier.verticalScroll(rememberScrollState()).fillMaxWidth().wrapContentWidth().widthIn(max = 640.dp).padding(horizontal = 18.dp).padding(top = 8.dp, bottom = 32.dp)) {
                 PTCard {
                     Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                        PTSectionTitle("Sessions", icon = Icons.Filled.History)
-                        if (history.isEmpty()) {
-                            Text("No sessions recorded yet.", style = PT.display(15.sp, FontWeight.Normal), color = c.secondary)
-                        } else {
-                            history.sortedByDescending { it.startedAt }.forEach { entry ->
-                                val running = entry.endedAt == null && sessions.any { it.id == entry.id && it.running }
-                                HistoryRow(entry, running) { onOpen(entry.id) }
+                        PTSectionTitle("Sessions on this Mac", icon = Icons.Filled.History)
+                        when {
+                            history.isNotEmpty() -> Column {
+                                history.sortedByDescending { it.startedAt }.forEach { entry ->
+                                    val running = entry.endedAt == null && sessions.any { it.id == entry.id && it.running }
+                                    HistoryRow(entry, running) { onOpen(entry.id) }
+                                }
                             }
+                            loading || reach == ShellReach.CONNECTING -> Row(
+                                Modifier.fillMaxWidth().padding(vertical = 8.dp),
+                                verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp),
+                            ) {
+                                CircularProgressIndicator(Modifier.size(18.dp), color = PT.accentEnd, strokeWidth = 2.dp)
+                                Text("Loading history…", style = PT.display(15.sp, FontWeight.Normal), color = c.secondary)
+                            }
+                            reach != ShellReach.READY -> Text(
+                                "Connect to your Mac to see its history. ${reach.message(fromAnywhere = false).orEmpty()}".trim(),
+                                style = PT.display(15.sp, FontWeight.Normal), color = c.secondary,
+                            )
+                            else -> Text(
+                                "No sessions yet. Sessions you open from any device are recorded on the Mac and show up here.",
+                                style = PT.display(15.sp, FontWeight.Normal), color = c.secondary,
+                            )
                         }
                     }
                 }
@@ -121,17 +145,18 @@ private fun HistoryRow(entry: ShellHistoryEntry, running: Boolean, onClick: () -
     val started = remember(entry.startedAt) {
         DateFormat.getDateTimeInstance(DateFormat.MEDIUM, DateFormat.SHORT).format(Date((entry.startedAt * 1000).toLong()))
     }
-    val detail = "$started · ${entry.phoneLabel} · ${ShellFormat.historyStatus(entry, running)}"
+    val detail = "${ShellFormat.historyStatus(entry, running)} · $started · ${entry.phoneLabel}"
     Row(
-        Modifier.fillMaxWidth().clickable(onClick = onClick).padding(vertical = 4.dp),
+        Modifier.fillMaxWidth().heightIn(min = 56.dp).clip(RoundedCornerShape(12.dp)).clickable(onClick = onClick, role = Role.Button)
+            .padding(vertical = 8.dp),
         verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp),
     ) {
         PTStatusDot(if (running) PT.success else c.secondary.copy(alpha = 0.5f), running)
         Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
             Text(entry.title, style = PT.display(15.sp, FontWeight.SemiBold), color = c.primary, maxLines = 1, overflow = TextOverflow.Ellipsis)
-            Text(detail, style = PT.display(12.sp, FontWeight.Normal), color = c.secondary, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            Text(detail, style = PT.display(12.sp, FontWeight.Normal), color = c.secondary, maxLines = 2, overflow = TextOverflow.Ellipsis)
         }
-        Icon(Icons.AutoMirrored.Filled.KeyboardArrowRight, null, tint = c.tertiary, modifier = Modifier.size(18.dp))
+        Icon(Icons.AutoMirrored.Filled.KeyboardArrowRight, null, tint = c.tertiary, modifier = Modifier.size(20.dp))
     }
 }
 
@@ -144,10 +169,13 @@ private fun TranscriptScreen(vm: ShellViewModel, id: String, entry: ShellHistory
     // Read-only: never answers queries in the recording, never touches the clipboard.
     val view = remember(id) { ShellTerminalView(context, readOnly = true, transcriptRows = 50_000) }
     var phase by remember(id) { mutableStateOf(Phase.LOADING) }
+    var attempt by remember(id) { mutableIntStateOf(0) }
     var query by rememberSaveable { mutableStateOf("") }
     var notFound by remember { mutableStateOf(false) }
 
-    LaunchedEffect(id) {
+    LaunchedEffect(id, attempt) {
+        phase = Phase.LOADING
+        view.reset()
         val replay = vm.transcript(id)?.let { ShellFormat.replayWithStartSize(it, entry) }
         if (replay == null) {
             phase = Phase.FAILED
@@ -186,24 +214,14 @@ private fun TranscriptScreen(vm: ShellViewModel, id: String, entry: ShellHistory
         val c = LocalPT.current
         Box(Modifier.fillMaxSize().background(Color(ShellTerminalView.BACKGROUND))) {
             Column(Modifier.fillMaxSize().windowInsetsPadding(WindowInsets.safeDrawing)) {
-                Box(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 12.dp)) {
-                    Row(
-                        Modifier.align(Alignment.CenterStart).clickable(onClick = onBack).padding(4.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        Icon(Icons.AutoMirrored.Filled.KeyboardArrowLeft, null, tint = PT.accentEnd, modifier = Modifier.size(22.dp))
-                        Text("History", style = PT.display(17.sp, FontWeight.Normal), color = PT.accentEnd)
-                    }
-                    Text(entry?.title ?: "Session", style = PT.display(17.sp, FontWeight.SemiBold), color = c.primary,
-                        maxLines = 1, overflow = TextOverflow.Ellipsis,
-                        modifier = Modifier.align(Alignment.Center).padding(horizontal = 96.dp))
-                }
+                PTTopBar(entry?.title ?: "Session", onBack = onBack, backLabel = "History")
                 Row(
                     Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp),
                     verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
                     Row(
-                        Modifier.weight(1f).background(c.card, CircleShape).padding(horizontal = 12.dp, vertical = 8.dp),
+                        Modifier.weight(1f).heightIn(min = 44.dp).background(c.card, CircleShape).border(1.dp, c.cardBorder, CircleShape)
+                            .padding(horizontal = 14.dp, vertical = 8.dp),
                         verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp),
                     ) {
                         Icon(Icons.Filled.Search, null, tint = c.secondary, modifier = Modifier.size(16.dp))
@@ -216,29 +234,36 @@ private fun TranscriptScreen(vm: ShellViewModel, id: String, entry: ShellHistory
                             keyboardActions = KeyboardActions(onSearch = { find(forward = true) }),
                             modifier = Modifier.weight(1f),
                             decorationBox = { inner ->
-                                if (query.isEmpty()) Text("Search", style = PT.display(15.sp, FontWeight.Normal), color = c.tertiary)
+                                if (query.isEmpty()) Text("Search this session", style = PT.display(15.sp, FontWeight.Normal), color = c.tertiary)
                                 inner()
                             },
                         )
-                        if (notFound) Text("Not found", style = PT.display(12.sp, FontWeight.Normal), color = c.secondary)
+                        if (notFound) Text("No matches", style = PT.display(12.sp, FontWeight.Normal), color = PT.warning,
+                            modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite })
                     }
                     Box(Modifier.semantics { contentDescription = "Previous match" }) {
                         ShellPillButton(onClick = { find(forward = false) }, enabled = phase == Phase.LOADED) {
-                            Icon(Icons.Filled.KeyboardArrowUp, null, modifier = Modifier.size(16.dp))
+                            Icon(Icons.Filled.KeyboardArrowUp, null, modifier = Modifier.size(20.dp))
                         }
                     }
                     Box(Modifier.semantics { contentDescription = "Next match" }) {
                         ShellPillButton(onClick = { find(forward = true) }, enabled = phase == Phase.LOADED) {
-                            Icon(Icons.Filled.KeyboardArrowDown, null, modifier = Modifier.size(16.dp))
+                            Icon(Icons.Filled.KeyboardArrowDown, null, modifier = Modifier.size(20.dp))
                         }
                     }
                 }
                 Box(Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) {
-                    AndroidView(factory = { view }, modifier = Modifier.fillMaxSize().padding(horizontal = 4.dp))
+                    AndroidView(factory = { view }, modifier = Modifier.fillMaxSize().padding(horizontal = 4.dp).clipToBounds())
                     when (phase) {
                         Phase.LOADING -> CircularProgressIndicator(Modifier.size(24.dp), color = c.secondary, strokeWidth = 2.dp)
-                        Phase.FAILED -> Text("This session's output could not be read.", style = PT.display(15.sp, FontWeight.Normal),
-                            color = c.secondary, textAlign = TextAlign.Center, modifier = Modifier.padding(24.dp))
+                        Phase.FAILED -> Column(
+                            Modifier.padding(24.dp), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(8.dp),
+                        ) {
+                            Text("Couldn't load this session", style = PT.display(17.sp, FontWeight.SemiBold), color = c.primary, textAlign = TextAlign.Center)
+                            Text("The Mac didn't send its output. Check the connection and try again.", style = PT.display(15.sp, FontWeight.Normal),
+                                color = c.secondary, textAlign = TextAlign.Center)
+                            ShellPillButton(onClick = { attempt++ }) { Text("Try again", style = PT.display(13.sp, FontWeight.Bold)) }
+                        }
                         Phase.LOADED -> Unit
                     }
                 }

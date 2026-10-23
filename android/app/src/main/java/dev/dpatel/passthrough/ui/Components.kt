@@ -10,6 +10,14 @@ import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.widthIn
+import androidx.compose.material.icons.automirrored.filled.KeyboardArrowLeft
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.heading
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.gestures.detectTapGestures
@@ -50,6 +58,7 @@ import androidx.compose.ui.draw.scale
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.StrokeJoin
@@ -234,7 +243,7 @@ fun UsageBar(down: Double, up: Double) {
  * Smoothed with Catmull-Rom curves; the peak value is the only label.
  */
 @Composable
-fun ThroughputChart(samples: List<ThroughputSample>, height: Dp = 110.dp, window: Int = 60) {
+fun ThroughputChart(samples: List<ThroughputSample>, height: Dp = 110.dp, window: Int = 60, idleLabel: String? = null) {
     val c = LocalPT.current
     val peak = maxOf(samples.maxOfOrNull { maxOf(it.down, it.up) } ?: 0.0, 1024.0)
     val hasTraffic = samples.any { it.down > 0 || it.up > 0 }
@@ -267,6 +276,10 @@ fun ThroughputChart(samples: List<ThroughputSample>, height: Dp = 110.dp, window
             draw(samples.map { it.down }, PT.down, 0.45f, 2.dp.toPx())
             draw(samples.map { it.up }, PT.up, 0.35f, 1.5.dp.toPx())
         }
+        if (!hasTraffic && idleLabel != null) {
+            Text(idleLabel, style = PT.display(13.sp, FontWeight.Normal), color = c.tertiary, textAlign = TextAlign.Center,
+                modifier = Modifier.align(Alignment.Center).padding(horizontal = 16.dp))
+        }
         if (hasTraffic) {
             val (v, u) = ByteFormat.rate(peak)
             Text("$v $u", style = PT.display(11.sp, FontWeight.Normal), color = c.tertiary, modifier = Modifier.align(Alignment.TopEnd).padding(end = 2.dp))
@@ -296,6 +309,110 @@ fun LogList(entries: List<PtLog.Entry>, showDebug: Boolean, modifier: Modifier =
                     })
                 }
             }
+        }
+    }
+}
+
+/**
+ * A screen's top bar: centred title and a trailing Done (or a leading back
+ * action), each with a 48 dp touch target.
+ */
+@Composable
+fun PTTopBar(title: String, onDone: (() -> Unit)? = null, doneLabel: String = "Done", onBack: (() -> Unit)? = null, backLabel: String = "Back") {
+    val c = LocalPT.current
+    Box(Modifier.fillMaxWidth().heightIn(min = 56.dp).padding(horizontal = 8.dp), contentAlignment = Alignment.Center) {
+        Text(
+            title, style = PT.display(17.sp, FontWeight.SemiBold), color = c.primary, maxLines = 1, overflow = TextOverflow.Ellipsis,
+            textAlign = TextAlign.Center,
+            modifier = Modifier.padding(horizontal = 96.dp).semantics { heading() },
+        )
+        if (onBack != null) {
+            Row(
+                Modifier.align(Alignment.CenterStart).heightIn(min = 48.dp).clip(CircleShape).clickable(onClick = onBack).padding(end = 12.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Icon(Icons.AutoMirrored.Filled.KeyboardArrowLeft, null, tint = PT.accentEnd, modifier = Modifier.size(28.dp))
+                Text(backLabel, style = PT.display(17.sp, FontWeight.Normal), color = PT.accentEnd, maxLines = 1)
+            }
+        }
+        if (onDone != null) {
+            Box(
+                Modifier.align(Alignment.CenterEnd).heightIn(min = 48.dp).widthIn(min = 48.dp).clip(CircleShape).clickable(onClick = onDone)
+                    .padding(horizontal = 12.dp),
+                contentAlignment = Alignment.Center,
+            ) {
+                Text(doneLabel, style = PT.display(17.sp, FontWeight.Bold), color = PT.accentEnd, maxLines = 1)
+            }
+        }
+    }
+}
+
+/** A round icon button on a card-coloured disc, with a 48 dp touch target. */
+@Composable
+fun PTCircleIconButton(icon: ImageVector, description: String, onClick: () -> Unit, size: Dp = 44.dp, iconSize: Dp = 22.dp) {
+    val c = LocalPT.current
+    Box(
+        Modifier
+            .size(maxOf(size, 48.dp))
+            .clip(CircleShape)
+            .clickable(onClick = onClick, role = Role.Button)
+            .semantics { contentDescription = description },
+        contentAlignment = Alignment.Center,
+    ) {
+        Box(Modifier.size(size).background(c.card, CircleShape).border(1.dp, c.cardBorder, CircleShape), contentAlignment = Alignment.Center) {
+            Icon(icon, null, tint = c.secondary, modifier = Modifier.size(iconSize))
+        }
+    }
+}
+
+/** Numbered setup steps, so what to do next is obvious. */
+@Composable
+fun PTSteps(steps: List<String>, modifier: Modifier = Modifier) {
+    val c = LocalPT.current
+    Column(modifier, verticalArrangement = Arrangement.spacedBy(10.dp)) {
+        steps.forEachIndexed { i, step ->
+            Row(horizontalArrangement = Arrangement.spacedBy(12.dp), verticalAlignment = Alignment.Top) {
+                Box(Modifier.size(22.dp).background(PT.accentEnd.copy(alpha = 0.16f), CircleShape), contentAlignment = Alignment.Center) {
+                    Text("${i + 1}", style = PT.mono(12.sp, FontWeight.Bold), color = PT.accentEnd)
+                }
+                Text(step, style = PT.display(15.sp, FontWeight.Normal), color = c.primary, modifier = Modifier.weight(1f).padding(top = 1.dp))
+            }
+        }
+    }
+}
+
+/**
+ * A tinted note inside a card: an icon, a title, optional detail and an
+ * optional action (e.g. the warning when USB debugging is off).
+ */
+@Composable
+fun PTNotice(
+    title: String,
+    tint: Color,
+    icon: ImageVector,
+    detail: String? = null,
+    action: String? = null,
+    onAction: (() -> Unit)? = null,
+) {
+    val c = LocalPT.current
+    // Amber and friends are too light to read on the light theme's pale cards: deepen them there.
+    val ink = if (c.dark) tint else lerp(tint, Color.Black, 0.38f)
+    Column(
+        Modifier.fillMaxWidth().background(tint.copy(alpha = if (c.dark) 0.12f else 0.16f), RoundedCornerShape(14.dp)).padding(start = 12.dp, end = 12.dp, top = 12.dp,
+            bottom = if (action != null) 2.dp else 12.dp),
+        verticalArrangement = Arrangement.spacedBy(6.dp),
+    ) {
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.Top) {
+            Icon(icon, null, tint = ink, modifier = Modifier.padding(top = 1.dp).size(18.dp))
+            Text(title, style = PT.display(15.sp, FontWeight.SemiBold), color = ink, modifier = Modifier.weight(1f))
+        }
+        if (detail != null) Text(detail, style = PT.display(13.sp, FontWeight.Normal), color = c.secondary)
+        if (action != null && onAction != null) {
+            Text(
+                action, style = PT.display(14.sp, FontWeight.Bold), color = ink,
+                modifier = Modifier.heightIn(min = 48.dp).clip(CircleShape).clickable(onClick = onAction, role = Role.Button)
+                    .padding(vertical = 14.dp),
+            )
         }
     }
 }

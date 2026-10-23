@@ -8,6 +8,15 @@ import androidx.compose.animation.AnimatedVisibility
 import androidx.core.content.ContextCompat
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.foundation.background
+import androidx.compose.foundation.selection.selectable
+import androidx.compose.foundation.selection.toggleable
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.text.style.TextOverflow
+import dev.dpatel.passthrough.ui.shell.SHELL_SETUP_STEPS
+import dev.dpatel.passthrough.ui.shell.ShellReach
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -44,6 +53,8 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.layout.wrapContentWidth
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.graphics.SolidColor
@@ -75,6 +86,7 @@ fun SettingsScreen(vm: AppViewModel, shell: ShellViewModel, onDone: () -> Unit) 
     val connectMode by s.shellConnectMode.collectAsStateWithLifecycle()
     val log by vm.log.collectAsStateWithLifecycle()
     val clients by vm.pairedClients.collectAsStateWithLifecycle()
+    val shellReach by shell.reach.collectAsStateWithLifecycle()
     val locked = state.isActive
     var showLog by rememberSaveable { mutableStateOf(false) }
     var showDebug by rememberSaveable { mutableStateOf(false) }
@@ -92,13 +104,9 @@ fun SettingsScreen(vm: AppViewModel, shell: ShellViewModel, onDone: () -> Unit) 
 
     Box(Modifier.fillMaxSize().background(c.background)) {
         Column(Modifier.windowInsetsPadding(WindowInsets.safeDrawing).imePadding()) {
-            Box(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 12.dp)) {
-                Text("Settings", style = PT.display(17.sp, FontWeight.SemiBold), color = c.primary, modifier = Modifier.align(Alignment.Center))
-                Text("Done", style = PT.display(17.sp, FontWeight.Bold), color = PT.accentEnd,
-                    modifier = Modifier.align(Alignment.CenterEnd).clickable(onClick = onDone).padding(4.dp))
-            }
+            PTTopBar("Settings", onDone = onDone)
             Column(
-                Modifier.verticalScroll(rememberScrollState()).padding(horizontal = 16.dp).padding(bottom = 32.dp),
+                Modifier.verticalScroll(rememberScrollState()).fillMaxWidth().wrapContentWidth().widthIn(max = 640.dp).padding(horizontal = 16.dp).padding(bottom = 32.dp),
                 verticalArrangement = Arrangement.spacedBy(22.dp),
             ) {
                 Section("This phone") {
@@ -125,7 +133,8 @@ fun SettingsScreen(vm: AppViewModel, shell: ShellViewModel, onDone: () -> Unit) 
                 }
                 Section(
                     "Network",
-                    footer = "On: the Mac always uses cellular data, even when this phone is on Wi-Fi. Off: the Mac rides whatever this phone is using. Changes apply the next time you start the proxy.",
+                    footer = "On: the Mac always uses cellular data, even when this phone is on Wi-Fi. Off: the Mac rides whatever this phone is using." +
+                        if (locked) " Stop the proxy to change these." else " Changes apply the next time you start the proxy.",
                 ) {
                     ToggleRow("Cellular only", cellularOnly, enabled = !locked) { s.setCellularOnly(it) }
                     Divider()
@@ -135,47 +144,63 @@ fun SettingsScreen(vm: AppViewModel, shell: ShellViewModel, onDone: () -> Unit) 
                     null,
                     footer = "Optional. Android files the network type (5G, LTE) under its phone permission, which it describes as making and managing calls. Passthrough only reads the network type; without it the label says Cellular.",
                 ) {
-                    Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 14.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Row(Modifier.fillMaxWidth().padding(start = 16.dp, end = 8.dp, top = 4.dp, bottom = 4.dp).heightIn(min = 48.dp),
+                        verticalAlignment = Alignment.CenterVertically) {
                         Text("Show 5G / LTE", style = PT.display(16.sp, FontWeight.Normal), color = c.primary, modifier = Modifier.weight(1f))
                         if (phoneGranted) {
-                            Text("On", style = PT.display(16.sp, FontWeight.Normal), color = c.secondary)
+                            Text("On", style = PT.display(16.sp, FontWeight.Normal), color = c.secondary, modifier = Modifier.padding(end = 8.dp))
                         } else {
                             Text("Allow", style = PT.display(16.sp, FontWeight.SemiBold), color = PT.accentEnd,
-                                modifier = Modifier.clickable { phonePermission.launch(Manifest.permission.READ_PHONE_STATE) }.padding(4.dp))
+                                modifier = Modifier.heightIn(min = 48.dp).clip(CircleShape)
+                                    .clickable(role = Role.Button) { phonePermission.launch(Manifest.permission.READ_PHONE_STATE) }
+                                    .padding(horizontal = 8.dp, vertical = 12.dp))
                         }
                     }
                 }
                 val shellMacs = clients.filter { it.shell != null }
-                if (shellMacs.isNotEmpty()) {
+                if (shellReach != ShellReach.UNSUPPORTED && shellMacs.isEmpty()) {
+                    Section("Remote shell", footer = "Connection options for each Mac appear here once it has shared its shell.") {
+                        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
+                            Text("Open your Mac's shell from this phone. To set it up:", style = PT.display(15.sp, FontWeight.Normal), color = c.secondary)
+                            PTSteps(SHELL_SETUP_STEPS)
+                        }
+                    }
+                } else if (shellMacs.isNotEmpty()) {
                     Section(
                         "Remote shell",
                         footer = "Automatic also reaches your Mac from anywhere through its built-in connection, when the Mac offers it. " +
-                            "Local and Tailscale only never leaves the local network and Tailscale.\n\n" +
-                            "An address to try first when the Mac isn't found on the local network, such as its Tailscale name or IP. Leave empty to use the addresses the Mac sent.",
+                            "Local and Tailscale only never leaves the local network and Tailscale.",
                     ) {
                         Text("Connect using", style = PT.display(13.sp, FontWeight.Normal), color = c.secondary,
-                            modifier = Modifier.padding(start = 16.dp, end = 16.dp, top = 12.dp))
+                            modifier = Modifier.padding(start = 16.dp, end = 16.dp, top = 12.dp, bottom = 2.dp))
                         ChoiceRow("Automatic", connectMode == ShellConnectMode.AUTOMATIC) { s.setShellConnectMode(ShellConnectMode.AUTOMATIC) }
                         Divider()
                         ChoiceRow("Local and Tailscale only", connectMode == ShellConnectMode.LOCAL_ONLY) { s.setShellConnectMode(ShellConnectMode.LOCAL_ONLY) }
-                        shellMacs.forEach { client ->
-                            Divider()
+                    }
+                    Section(
+                        "Address to try first",
+                        footer = "Used when the Mac isn't found on the local network: its Tailscale name or IP, for example. " +
+                            "Leave empty to use the addresses the Mac sent.",
+                    ) {
+                        shellMacs.forEachIndexed { i, client ->
+                            if (i > 0) Divider()
                             ManualShellAddressRow(shell, client.id, client.shell?.macName ?: client.name)
                         }
                     }
                 }
-                Section("Advanced") {
+                Section("Advanced", footer = if (locked) "Stop the proxy to change these." else null) {
                     PortRow("SOCKS port", socksPort, enabled = !locked) { s.setSocksPort(it) }
                     Divider()
                     PortRow("Control port", controlPort, enabled = !locked) { s.setControlPort(it) }
                     Divider()
                     Text("Forget all paired Macs", style = PT.display(16.sp, FontWeight.Normal), color = PT.danger,
                         modifier = Modifier.fillMaxWidth().alpha(if (locked) 0.4f else 1f)
-                            .clickable(enabled = !locked) { confirmForget = true }.padding(horizontal = 16.dp, vertical = 14.dp))
+                            .clickable(enabled = !locked, role = Role.Button) { confirmForget = true }.padding(horizontal = 16.dp, vertical = 14.dp))
                 }
                 Section("Diagnostics") {
                     val rot by animateFloatAsState(if (showLog) 90f else 0f, label = "chevron")
-                    Row(Modifier.fillMaxWidth().clickable { showLog = !showLog }.padding(horizontal = 16.dp, vertical = 14.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Row(Modifier.fillMaxWidth().clickable(role = Role.Button) { showLog = !showLog }.padding(horizontal = 16.dp, vertical = 14.dp),
+                        verticalAlignment = Alignment.CenterVertically) {
                         Text("Log", style = PT.display(16.sp, FontWeight.Normal), color = c.primary, modifier = Modifier.weight(1f))
                         Icon(Icons.Filled.ChevronRight, null, tint = c.tertiary, modifier = Modifier.rotate(rot))
                     }
@@ -187,19 +212,23 @@ fun SettingsScreen(vm: AppViewModel, shell: ShellViewModel, onDone: () -> Unit) 
                             } else {
                                 LogList(log, showDebug, Modifier.fillMaxWidth().height(260.dp))
                             }
-                            Row(verticalAlignment = Alignment.CenterVertically) {
+                            Row(
+                                Modifier.toggleable(showDebug, role = Role.Switch) { showDebug = it },
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
                                 Text("Show debug detail", style = PT.display(15.sp, FontWeight.Normal), color = c.primary, modifier = Modifier.weight(1f))
-                                PTSwitch(showDebug, true) { showDebug = it }
+                                PTSwitch(showDebug, true, onChange = null)
                             }
-                            Row {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
                                 val fmt = remember { SimpleDateFormat("HH:mm:ss", Locale.getDefault()) }
                                 Text("Copy log", style = PT.display(15.sp, FontWeight.SemiBold), color = PT.accentEnd,
-                                    modifier = Modifier.clickable {
+                                    modifier = Modifier.heightIn(min = 48.dp).clip(CircleShape).clickable(enabled = log.isNotEmpty(), role = Role.Button) {
                                         clipboard.setText(AnnotatedString(log.joinToString("\n") { "${fmt.format(Date(it.date))} ${it.level.name.lowercase()} ${it.message}" }))
-                                    }.padding(vertical = 4.dp))
+                                    }.padding(vertical = 14.dp, horizontal = 4.dp))
                                 Box(Modifier.weight(1f))
                                 Text("Clear", style = PT.display(15.sp, FontWeight.SemiBold), color = PT.danger,
-                                    modifier = Modifier.clickable { vm.clearLog() }.padding(vertical = 4.dp))
+                                    modifier = Modifier.heightIn(min = 48.dp).clip(CircleShape).clickable(enabled = log.isNotEmpty(), role = Role.Button) { vm.clearLog() }
+                                        .padding(vertical = 14.dp, horizontal = 4.dp))
                             }
                         }
                     }
@@ -240,7 +269,7 @@ private fun Section(header: String?, footer: String? = null, content: @Composabl
 private fun Divider() = HorizontalDivider(Modifier.padding(start = 16.dp), thickness = 0.5.dp, color = LocalPT.current.tertiary)
 
 @Composable
-private fun PTSwitch(checked: Boolean, enabled: Boolean, onChange: (Boolean) -> Unit) = Switch(
+private fun PTSwitch(checked: Boolean, enabled: Boolean, onChange: ((Boolean) -> Unit)?) = Switch(
     checked, onChange, enabled = enabled,
     colors = SwitchDefaults.colors(
         checkedTrackColor = PT.success, checkedThumbColor = androidx.compose.ui.graphics.Color.White, checkedBorderColor = PT.success,
@@ -252,9 +281,14 @@ private fun PTSwitch(checked: Boolean, enabled: Boolean, onChange: (Boolean) -> 
 @Composable
 private fun ToggleRow(title: String, value: Boolean, enabled: Boolean, onChange: (Boolean) -> Unit) {
     val c = LocalPT.current
-    Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 6.dp).alpha(if (enabled) 1f else 0.5f), verticalAlignment = Alignment.CenterVertically) {
-        Text(title, style = PT.display(16.sp, FontWeight.Normal), color = c.primary, modifier = Modifier.weight(1f))
-        PTSwitch(value, enabled, onChange)
+    // The whole row toggles (a bigger target, one TalkBack stop).
+    Row(
+        Modifier.fillMaxWidth().toggleable(value, enabled = enabled, role = Role.Switch, onValueChange = onChange)
+            .padding(horizontal = 16.dp, vertical = 6.dp).alpha(if (enabled) 1f else 0.5f),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(title, style = PT.display(16.sp, FontWeight.Normal), color = c.primary, modifier = Modifier.weight(1f).padding(end = 12.dp))
+        PTSwitch(value, enabled, onChange = null)
     }
 }
 
@@ -262,9 +296,12 @@ private fun ToggleRow(title: String, value: Boolean, enabled: Boolean, onChange:
 @Composable
 private fun ChoiceRow(title: String, selected: Boolean, onSelect: () -> Unit) {
     val c = LocalPT.current
-    Row(Modifier.fillMaxWidth().clickable(onClick = onSelect).padding(horizontal = 16.dp, vertical = 14.dp), verticalAlignment = Alignment.CenterVertically) {
+    Row(
+        Modifier.fillMaxWidth().selectable(selected, role = Role.RadioButton, onClick = onSelect).padding(horizontal = 16.dp, vertical = 14.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
         Text(title, style = PT.display(16.sp, FontWeight.Normal), color = c.primary, modifier = Modifier.weight(1f))
-        if (selected) Icon(Icons.Filled.Check, contentDescription = "Selected", tint = PT.accentEnd)
+        if (selected) Icon(Icons.Filled.Check, contentDescription = null, tint = PT.accentEnd)
     }
 }
 
@@ -293,7 +330,8 @@ private fun ManualShellAddressRow(shell: ShellViewModel, macID: String, macName:
     val c = LocalPT.current
     var text by remember(macID) { mutableStateOf(shell.manualAddress(macID).orEmpty()) }
     Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 14.dp), verticalAlignment = Alignment.CenterVertically) {
-        Text(macName, style = PT.display(16.sp, FontWeight.Normal), color = c.primary, maxLines = 1, modifier = Modifier.weight(1f))
+        Text(macName, style = PT.display(16.sp, FontWeight.Normal), color = c.primary, maxLines = 1, overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.weight(1f).padding(end = 12.dp))
         BasicTextField(
             value = text, singleLine = true,
             onValueChange = { v ->
@@ -302,7 +340,7 @@ private fun ManualShellAddressRow(shell: ShellViewModel, macID: String, macName:
             },
             keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri, autoCorrectEnabled = false),
             textStyle = PT.display(16.sp, FontWeight.Normal).copy(color = c.secondary, textAlign = TextAlign.End),
-            cursorBrush = SolidColor(PT.accentEnd), modifier = Modifier.width(180.dp),
+            cursorBrush = SolidColor(PT.accentEnd), modifier = Modifier.weight(1.3f),
             decorationBox = { inner ->
                 Box(contentAlignment = Alignment.CenterEnd) {
                     if (text.isEmpty()) Text("Host or IP", style = PT.display(16.sp, FontWeight.Normal), color = c.tertiary)

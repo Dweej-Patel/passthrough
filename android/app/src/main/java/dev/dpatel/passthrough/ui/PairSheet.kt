@@ -1,8 +1,10 @@
 package dev.dpatel.passthrough.ui
 
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.statusBarsPadding
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -27,6 +29,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.foundation.layout.Box
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.CompositingStrategy
@@ -59,14 +62,18 @@ fun PairSheet(vm: AppViewModel, onDismiss: () -> Unit) {
     ModalBottomSheet(onDismissRequest = onDismiss, sheetState = sheet, containerColor = c.background, dragHandle = null) {
         PTBackground(glow = 0.8f) {
             Column(
-                Modifier.fillMaxWidth().navigationBarsPadding().padding(bottom = 24.dp),
+                Modifier.fillMaxWidth().statusBarsPadding().navigationBarsPadding().padding(bottom = 24.dp),
                 horizontalAlignment = Alignment.CenterHorizontally,
                 verticalArrangement = Arrangement.spacedBy(26.dp),
             ) {
-                Spacer(Modifier.width(40.dp).height(5.dp).padding(top = 10.dp))
+                // A grab handle (the sheet opens full height, so there's no scrim to tap) and a way out.
+                Box(Modifier.fillMaxWidth().padding(top = 8.dp)) {
+                    Box(Modifier.align(Alignment.TopCenter).size(width = 40.dp, height = 5.dp).background(c.tertiary, CircleShape))
+                    PTTopBar("", onDone = onDismiss, doneLabel = "Close")
+                }
                 Icon(
                     Icons.Filled.Devices, null, tint = Color.White,
-                    modifier = Modifier.padding(top = 24.dp).size(58.dp)
+                    modifier = Modifier.size(58.dp)
                         .graphicsLayer(compositingStrategy = CompositingStrategy.Offscreen)
                         .drawWithContent { drawContent(); drawRect(PT.accent, blendMode = BlendMode.SrcIn) },
                 )
@@ -77,11 +84,8 @@ fun PairSheet(vm: AppViewModel, onDismiss: () -> Unit) {
                         modifier = Modifier.padding(horizontal = 24.dp))
                 }
                 if (state != ServiceState.Running) {
-                    PTCard(Modifier.padding(horizontal = 24.dp)) {
-                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
-                            Icon(Icons.Filled.Warning, null, tint = PT.warning, modifier = Modifier.size(16.dp))
-                            Text("Start the proxy first so the Mac can reach this phone.", style = PT.display(13.sp, FontWeight.Normal), color = PT.warning)
-                        }
+                    Box(Modifier.padding(horizontal = 24.dp)) {
+                        PTNotice("Start the proxy first", PT.warning, Icons.Filled.Warning, detail = "The Mac can only reach this phone while the proxy is on.")
                     }
                 }
                 val current = code

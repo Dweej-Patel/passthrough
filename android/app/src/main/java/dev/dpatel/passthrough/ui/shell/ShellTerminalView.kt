@@ -49,7 +49,7 @@ class ShellTerminalView(context: Context, readOnly: Boolean, private val transcr
     var readOnly = readOnly
         private set
     /** The cursor isn't drawn: the session ended, so nothing will be typed at it. */
-    private var cursorHidden = false
+    private var cursorHidden = readOnly
     /** Bytes for the shell: keystrokes, pastes and the emulator's replies. */
     var onInput: ((ByteArray) -> Unit)? = null
     /** The grid changed after its first layout. */
@@ -251,10 +251,12 @@ class ShellTerminalView(context: Context, readOnly: Boolean, private val transcr
         invalidate()
     }
 
-    fun showKeyboard() {
+    /** [byUser]: a tap, so an explicit request (an implicit one may be ignored once the user hid the keyboard). */
+    fun showKeyboard(byUser: Boolean = false) {
         if (readOnly) return
         requestFocus()
-        context.getSystemService(InputMethodManager::class.java)?.showSoftInput(this, InputMethodManager.SHOW_IMPLICIT)
+        context.getSystemService(InputMethodManager::class.java)
+            ?.showSoftInput(this, if (byUser) 0 else InputMethodManager.SHOW_IMPLICIT)
     }
 
     // Layout and drawing
@@ -299,7 +301,12 @@ class ShellTerminalView(context: Context, readOnly: Boolean, private val transcr
     }
 
     override fun onDraw(canvas: Canvas) {
-        canvas.drawColor(emulator.mColors.mCurrentColors[TextStyle.COLOR_INDEX_BACKGROUND])
+        // Fill only this view: drawColor fills the whole clip, which inside Compose can be the
+        // entire window and would paint over the tab strip and search bar above the terminal.
+        backgroundPaint.color = emulator.mColors.mCurrentColors[TextStyle.COLOR_INDEX_BACKGROUND]
+        canvas.drawRect(0f, 0f, width.toFloat(), height.toFloat(), backgroundPaint)
+        canvas.save()
+        canvas.clipRect(0, 0, width, height)
         if (cursorHidden) {
             // Termux draws the cursor only while its blink state is on.
             emulator.setCursorBlinkingEnabled(true)
@@ -315,7 +322,10 @@ class ShellTerminalView(context: Context, readOnly: Boolean, private val transcr
             renderer.render(emulator, canvas, topRow, row, row, col, min(columns - 1, col + len - 1))
         }
         canvas.restore()
+        canvas.restore()
     }
+
+    private val backgroundPaint = Paint()
 
     // Touch
 
@@ -327,7 +337,7 @@ class ShellTerminalView(context: Context, readOnly: Boolean, private val transcr
         }
 
         override fun onSingleTapUp(e: MotionEvent): Boolean {
-            showKeyboard()
+            showKeyboard(byUser = true)
             return true
         }
 

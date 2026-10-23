@@ -33,7 +33,8 @@ android {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
     }
-    buildFeatures { compose = true }
+    // buildConfig: BuildConfig.DEBUG gates the debug-only Remote shell demo (MainActivity), so R8 drops it from release.
+    buildFeatures { compose = true; buildConfig = true }
     testOptions { unitTests.isReturnDefaultValues = true }
     // terminal-emulator ships Termux's process-spawning JNI library; the shell runs on the Mac, never here.
     packaging {
