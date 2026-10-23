@@ -133,5 +133,38 @@ final class PTYProcessTests: XCTestCase {
         XCTAssertEqual(LoginShell.environment()["TERM"], "xterm-256color")
         XCTAssertNotNil(LoginShell.environment()["LANG"])
     }
+
+    func testLoginShellEnvironmentStartsClean() {
+        let launcher = [
+            "CLAUDE_CODE_CHILD_SESSION": "1", "CLAUDECODE": "1", "PASSTHROUGH_DIRECT_SOCKS": "x",
+            "PATH": "/opt/launcher/bin:/usr/bin", "HOME": "/elsewhere", "SHELL": "/bin/sh",
+            "TMPDIR": "/tmp/t/", "SSH_AUTH_SOCK": "/tmp/agent", "LANG": "fr_FR.UTF-8",
+        ]
+        let environment = LoginShell.environment(inheriting: launcher)
+        XCTAssertNil(environment["CLAUDE_CODE_CHILD_SESSION"])
+        XCTAssertNil(environment["CLAUDECODE"])
+        XCTAssertNil(environment["PASSTHROUGH_DIRECT_SOCKS"])
+        XCTAssertEqual(environment["PATH"], "/usr/bin:/bin:/usr/sbin:/sbin")
+        XCTAssertEqual(environment["HOME"], NSHomeDirectory(), "the account's, not the launcher's")
+        XCTAssertEqual(environment["SHELL"], LoginShell.command().executable)
+        XCTAssertEqual(environment["LOGNAME"], environment["USER"])
+        XCTAssertEqual(environment["TMPDIR"], "/tmp/t/")
+        XCTAssertEqual(environment["SSH_AUTH_SOCK"], "/tmp/agent")
+        XCTAssertEqual(environment["LANG"], "fr_FR.UTF-8")
+        XCTAssertEqual(environment["TERM_PROGRAM"], "Passthrough")
+        XCTAssertEqual(Set(environment.keys), ["HOME", "USER", "LOGNAME", "SHELL", "PATH", "TERM", "TERM_PROGRAM", "TMPDIR", "SSH_AUTH_SOCK", "LANG"])
+    }
+
+    func testShellGetsNoneOfTheLaunchersVariables() throws {
+        let environment = LoginShell.environment(inheriting: ["CLAUDE_CODE_CHILD_SESSION": "1", "TMPDIR": "/tmp/"])
+        let process = try PTYProcess(executable: "/bin/sh", arguments: ["-c", "echo marker=${CLAUDE_CODE_CHILD_SESSION:-none} term=$TERM_PROGRAM"],
+                                     directory: URL(fileURLWithPath: "/tmp"), environment: environment, cols: 80, rows: 24)
+        let probe = Probe()
+        probe.attach(to: process)
+        process.start()
+        wait("exit") { probe.exitStatus != nil }
+        withExtendedLifetime(process) {}
+        XCTAssertTrue(probe.text.contains("marker=none term=Passthrough"), probe.text)
+    }
 }
 #endif

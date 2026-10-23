@@ -136,10 +136,20 @@ final class TerminalDriver: NSObject, ObservableObject, TerminalViewDelegate {
 
 /// A `TerminalView` that reports its first real grid size, and can be made
 /// read-only (it never takes the keyboard).
+///
+/// A vertical drag always scrolls, as a trackpad does in Terminal.app: plain
+/// output scrolls the view's own scrollback; a program that asked for the
+/// mouse (Claude Code, vim, htop…) gets scroll-wheel events, and one on the
+/// alternate screen without the mouse (less, man) gets up/down arrows.
+/// SwiftTerm would send such a program the drag as a mouse drag, which it
+/// turns into a text selection. Selecting is press-and-hold, then Select.
 final class ShellTerminalView: TerminalView {
     var readOnly = false
     var onFirstLayout: ((Int, Int) -> Void)?
     private var reported = false
+    private lazy var programScroll = UIPanGestureRecognizer(target: self, action: #selector(programScrolled(_:)))
+    /// Drag not yet sent, short of a whole line.
+    private var scrollRemainder: CGFloat = 0
 
     override var canBecomeFirstResponder: Bool { !readOnly && super.canBecomeFirstResponder }
 
@@ -149,6 +159,75 @@ final class ShellTerminalView: TerminalView {
         reported = true
         let terminal = getTerminal()
         onFirstLayout?(terminal.cols, terminal.rows)
+    }
+
+    override func didMoveToWindow() {
+        super.didMoveToWindow()
+        if programScroll.view == nil { addGestureRecognizer(programScroll) }
+    }
+
+    /// Leaves out SwiftTerm's drag-as-mouse-drag; taps still reach the program as clicks.
+    override func mouseModeChanged(source: Terminal) {}
+
+    /// Whether a drag goes to the program rather than the scrollback.
+    private var programTakesScroll: Bool {
+        let terminal = getTerminal()
+        return !readOnly && (terminal.mouseMode != .off || terminal.isCurrentBufferAlternate)
+    }
+
+    override func gestureRecognizerShouldBegin(_ recognizer: UIGestureRecognizer) -> Bool {
+        if recognizer === programScroll {
+            // A drag with a selection showing moves its ends instead.
+            guard programTakesScroll, !hasActiveSelection else { return false }
+            let velocity = programScroll.velocity(in: self)
+            return abs(velocity.y) > abs(velocity.x)
+        }
+        if recognizer === panGestureRecognizer && programTakesScroll { return false }
+        return super.gestureRecognizerShouldBegin(recognizer)
+    }
+
+    @objc private func programScrolled(_ recognizer: UIPanGestureRecognizer) {
+        switch recognizer.state {
+        case .began:
+            scrollRemainder = 0
+        case .changed:
+            let cell = cellSize
+            scrollRemainder += recognizer.translation(in: self).y
+            recognizer.setTranslation(.zero, in: self)
+            let lines = Int(scrollRemainder / cell.height)
+            guard lines != 0 else { return }
+            scrollRemainder -= CGFloat(lines) * cell.height
+            sendScroll(lines: lines, at: recognizer.location(in: self), cell: cell)
+        default:
+            break
+        }
+    }
+
+    /// `lines` > 0: the finger moved down, bringing earlier output into view.
+    private func sendScroll(lines: Int, at point: CGPoint, cell: CGSize) {
+        let terminal = getTerminal()
+        let up = lines > 0
+        if terminal.mouseMode != .off {
+            let x = point.x, y = point.y - contentOffset.y
+            let col = min(max(Int(x / cell.width), 0), terminal.cols - 1)
+            let row = min(max(Int(y / cell.height), 0), terminal.rows - 1)
+            let flags = terminal.encodeButton(button: up ? 4 : 5, release: false, shift: false, meta: false, control: false)
+            for _ in 0..<abs(lines) {
+                terminal.sendEvent(buttonFlags: flags, x: col, y: row, pixelX: Int(x), pixelY: Int(y))
+            }
+        } else {
+            let app = terminal.applicationCursor
+            let key = up ? (app ? EscapeSequences.moveUpApp : EscapeSequences.moveUpNormal)
+                         : (app ? EscapeSequences.moveDownApp : EscapeSequences.moveDownNormal)
+            for _ in 0..<abs(lines) { send(key) }
+        }
+    }
+
+    /// One cell, sized as SwiftTerm sizes it (its own figure isn't public).
+    private var cellSize: CGSize {
+        let cols = max(getTerminal().cols, 1)
+        return CGSize(width: max(contentSize.width / CGFloat(cols), 1),
+                      height: max(ceil(font.ascender - font.descender + font.leading), 1))
     }
 }
 

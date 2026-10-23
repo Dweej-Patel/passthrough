@@ -4,18 +4,42 @@ import Darwin
 import Foundation
 import PassthroughCore
 
-/// The shell a session starts: the user's login shell, as a login shell.
+/// The shell a session starts: the user's login shell, as a login shell, set
+/// up as a new Terminal.app window is.
 public enum LoginShell {
     public static func command() -> (executable: String, arguments: [String]) {
-        let shell = ProcessInfo.processInfo.environment["SHELL"] ?? ""
-        return (shell.isEmpty ? "/bin/zsh" : shell, ["-l"])
+        (account().shell ?? "/bin/zsh", ["-l"])
     }
 
-    public static func environment() -> [String: String] {
-        var environment = ProcessInfo.processInfo.environment
+    /// What a new Terminal.app window starts from: the account's basics, a
+    /// plain PATH (the login profile, via path_helper and the user's own
+    /// files, builds the rest) and the terminal type. Nothing else in the
+    /// app's environment is passed on, so whatever launched the app (a
+    /// script, another Claude Code session…) doesn't reach the shell.
+    public static func environment(inheriting inherited: [String: String] = ProcessInfo.processInfo.environment) -> [String: String] {
+        var environment = inherited.filter { passedOn.contains($0.key) }
+        let account = account()
+        environment["HOME"] = account.home ?? inherited["HOME"] ?? NSHomeDirectory()
+        environment["USER"] = account.name ?? inherited["USER"] ?? NSUserName()
+        environment["LOGNAME"] = environment["USER"]
+        environment["SHELL"] = command().executable
+        environment["PATH"] = "/usr/bin:/bin:/usr/sbin:/sbin"
         environment["TERM"] = "xterm-256color"
+        environment["TERM_PROGRAM"] = "Passthrough"
         if environment["LANG"] == nil { environment["LANG"] = "en_US.UTF-8" }
         return environment
+    }
+
+    /// The per-login values launchd gives every app, Terminal.app included.
+    static let passedOn: Set<String> = ["TMPDIR", "SSH_AUTH_SOCK", "__CF_USER_TEXT_ENCODING", "LANG"]
+
+    private static func account() -> (name: String?, home: String?, shell: String?) {
+        guard let entry = getpwuid(getuid()) else { return (nil, nil, nil) }
+        func string(_ pointer: UnsafeMutablePointer<CChar>?) -> String? {
+            guard let pointer, pointer.pointee != 0 else { return nil }
+            return String(cString: pointer)
+        }
+        return (string(entry.pointee.pw_name), string(entry.pointee.pw_dir), string(entry.pointee.pw_shell))
     }
 }
 
