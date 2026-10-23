@@ -41,13 +41,16 @@ enum ShellKeyVault {
         return (rest, 0)
     }
 
-    /// Every stored account name, from attributes alone (needs no authentication).
-    /// Nil when the listing itself failed (distinct from an empty vault).
-    private static func accounts() -> [String]? {
+    /// Every stored account name. Nil when the listing itself failed (distinct
+    /// from an empty vault). Listing user-presence items needs an evaluated
+    /// context like reading them does (iOS refuses it with
+    /// `errSecInteractionNotAllowed` otherwise), so callers pass the app lock's;
+    /// without one this only works on a vault holding no such items.
+    private static func accounts(context: LAContext?) -> [String]? {
         var query = baseQuery(account: nil)
         query[kSecReturnAttributes] = true
         query[kSecMatchLimit] = kSecMatchLimitAll
-        let quiet = LAContext()
+        let quiet = context ?? LAContext()
         quiet.interactionNotAllowed = true
         query[kSecUseAuthenticationContext] = quiet
         var items: CFTypeRef?
@@ -57,9 +60,10 @@ enum ShellKeyVault {
         return list.compactMap { $0[kSecAttrAccount] as? String }
     }
 
-    /// The stored versions of `macID`'s key, newest first.
-    private static func versions(of macID: String) -> [Int] {
-        (accounts() ?? []).compactMap { name in parse(name).flatMap { $0.macID == macID ? $0.version : nil } }.sorted(by: >)
+    /// The stored versions of `macID`'s key, newest first; nil when they
+    /// can't be listed.
+    private static func versions(of macID: String, context: LAContext?) -> [Int]? {
+        accounts(context: context)?.compactMap { name in parse(name).flatMap { $0.macID == macID ? $0.version : nil } }.sorted(by: >)
     }
 
     /// False only when the device has no passcode: the vault's items can't exist then.
@@ -97,7 +101,8 @@ enum ShellKeyVault {
     /// rather than prompt when `context` can't vouch for the user.
     static func read(macID: String, context: LAContext) -> Read {
         // The newest version present wins; an unreadable (locked) newest one is not skipped.
-        guard let newest = versions(of: macID).first else { return .missing }
+        guard let versions = versions(of: macID, context: context) else { return .locked }
+        guard let newest = versions.first else { return .missing }
         context.interactionNotAllowed = true
         let query: [CFString: Any] = [
             kSecClass: kSecClassGenericPassword,
@@ -124,10 +129,11 @@ enum ShellKeyVault {
         }
     }
 
-    static func delete(macID: String) {
+    /// `context` is the app lock's, so the keys can be listed.
+    static func delete(macID: String, context: LAContext?) {
         // The bare (legacy) account always goes, whatever the listing says.
         delete(macID: macID, version: 0)
-        guard let names = accounts() else {
+        guard let names = accounts(context: context) else {
             // The listing failed: forgetting must not silently do nothing, so
             // fail closed and clear every shell key (a Mac re-grants on its
             // next pairing) rather than leave this Mac's key behind.
@@ -148,12 +154,12 @@ enum ShellKeyVault {
     }
 
     /// Deletes the keys of Macs no longer paired (revoked while the app wasn't
-    /// looking). Lists attributes only, which needs no authentication. Skipped
+    /// looking), listing with the lock's `context`. Skipped
     /// when `macIDs` is empty, so a failed registry read can't wipe the vault
     /// (forgetting every Mac uses `deleteAll`).
-    static func prune(keeping macIDs: Set<String>) {
+    static func prune(keeping macIDs: Set<String>, context: LAContext) {
         guard !macIDs.isEmpty else { return }
-        for name in accounts() ?? [] {
+        for name in accounts(context: context) ?? [] {
             // An account this build doesn't recognise as a shell key is left alone.
             guard let parsed = parse(name), !macIDs.contains(parsed.macID) else { continue }
             SecItemDelete(baseQuery(account: name) as CFDictionary)
@@ -178,7 +184,11 @@ enum ShellKeyVault {
             log.error("Shell key access control unavailable")
             return false
         }
-        let older = versions(of: macID)
+        // Unlisted, a new version could collide with one already there.
+        guard let older = versions(of: macID, context: context) else {
+            log.error("Shell key not stored: the vault could not be listed")
+            return false
+        }
         context.interactionNotAllowed = true
         var add = baseQuery(account: account(macID, version: (older.first ?? 0) + 1))
         add[kSecAttrAccessControl] = access
