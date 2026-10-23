@@ -247,6 +247,17 @@ final class ShellModel: ObservableObject {
         client.connect(discovered: discovered)
     }
 
+    /// A connection of its own for the screen, to the selected Mac and dialled
+    /// as `connect` dials the shell. The caller shuts the dialer down when done.
+    func screenConnection(onEvent: @escaping (ShellClient.Event) -> Void) -> (client: ShellClient, dialer: IrohShellDialer?, mac: ShellCredential)? {
+        guard let credential = macs.first(where: { $0.macID == selectedMacID }) else { return nil }
+        let triesIroh = connectMode == .automatic && credential.irohID.map(IrohInfo.isValidID) == true
+        let dialer = triesIroh ? IrohShellDialer() : nil
+        let client = ShellClient(credential: credential, queue: .main, iroh: dialer, mode: connectMode, onEvent: onEvent)
+        client.connect(discovered: ShellCredentials.discovered(among: browseResults, macName: credential.macName, shellMacCount: macs.count))
+        return (client, dialer, credential)
+    }
+
     func newSession(cols: Int, rows: Int) {
         #if DEBUG
         if Self.demoState != nil { return demoOpen() }
@@ -382,6 +393,9 @@ final class ShellModel: ObservableObject {
             path = nil
             finishTranscript(nil)
             if error != nil, reach != .noAccess { reach = .unreachable }
+        case let .screen(stream, _):
+            // The screen has its own client (`ScreenModel`); this one never asks.
+            stream.cancel()
         }
     }
 
@@ -490,6 +504,10 @@ extension ShellError {
         case .tooManySessions: "Your Mac already has \(RemoteShell.maxSessions) sessions open. End one to start another."
         case .noSuchSession: "That session is no longer open on your Mac."
         case .badRequest: "Your Mac couldn't do that. Try again."
+        case .screenNotAllowed: "This iPhone isn't allowed to see your Mac's screen. Turn on Screen for it in Passthrough's Remote Shell settings on your Mac."
+        // Asked for only after the Mac said it can't stream its screen itself.
+        case .screenUnavailable: "Your Mac can't show its screen yet. In Passthrough's Remote Shell settings on your Mac, allow Screen Recording and Accessibility, or turn on Screen Sharing."
+        case .screenVideoUnavailable: "Your Mac can't stream its screen itself yet. In Passthrough's Remote Shell settings on your Mac, allow Screen Recording and Accessibility."
         case .notAuthorized: nil
         }
     }

@@ -2,6 +2,7 @@ import SwiftUI
 import IrohTransport
 import PassthroughCore
 import PassthroughUI
+import ScreenHost
 import ShellHost
 
 /// Remote Shell tab: turn it on, finish setting it up, and see who can
@@ -36,7 +37,16 @@ struct RemoteShellSettings: View {
             // Granted in System Settings while this is open: notice it.
             while !Task.isCancelled {
                 fullDiskAccess = FullDiskAccess.isGranted
+                shell.refreshScreenVideo()
                 try? await Task.sleep(for: .seconds(2))
+            }
+        }
+        .task(id: session.remoteShellEnabled) {
+            // Less often: each check is a connection Screen Sharing sees.
+            guard session.remoteShellEnabled else { return }
+            while !Task.isCancelled {
+                await shell.refreshScreenSharing()
+                try? await Task.sleep(for: .seconds(5))
             }
         }
         .sheet(isPresented: $showFullDiskAccess) { FullDiskAccessSheet() }
@@ -71,6 +81,8 @@ struct RemoteShellSettings: View {
                         : "\(shell.phones.count) phone\(shell.phones.count == 1 ? "" : "s") can open a shell. Plug in another paired phone to add it.") {
                 EmptyView()
             }
+            screenVideoStep
+            screenSharingStep
             SetupStep(status: keepAwake.isOn ? .done : .optional,
                       title: "Keep this Mac awake",
                       detail: keepAwake.isOn
@@ -80,6 +92,49 @@ struct RemoteShellSettings: View {
             }
         } header: {
             Text("Setup")
+        }
+    }
+
+    /// Passthrough streaming the screen itself: smooth video, no password.
+    private var screenVideoStep: some View {
+        let access = shell.screenVideo
+        let wanted = shell.phones.contains(where: \.screenAllowed)
+        return SetupStep(status: access.ready ? .done : (wanted ? .needed : .optional),
+                         title: "Screen Recording and Accessibility",
+                         detail: access.ready
+                            ? "Phones you allow below see this screen as smooth video and control it."
+                            : (wanted ? "A phone below may see this screen. " : "Optional. ")
+                                + "Allow Passthrough under Privacy & Security › Screen Recording (to stream this screen) and › Accessibility (to take a phone's clicks and keys). macOS may want Passthrough reopened after Screen Recording.") {
+            HStack(spacing: 6) {
+                if !access.capture {
+                    Button("Screen Recording…") {
+                        ScreenVideoPermissions.requestCapture()
+                        ScreenVideoPermissions.openSettings(capture: true)
+                    }
+                }
+                if !access.control {
+                    Button("Accessibility…") {
+                        ScreenVideoPermissions.requestControl()
+                        ScreenVideoPermissions.openSettings(capture: false)
+                    }
+                }
+            }
+        }
+    }
+
+    /// Only once checked, so it doesn't flash "off" while the first check runs.
+    @ViewBuilder private var screenSharingStep: some View {
+        if let on = shell.screenSharingOn {
+            let needed = shell.phones.contains(where: \.screenAllowed) && !shell.screenVideo.ready
+            SetupStep(status: on ? .done : (needed ? .needed : .optional),
+                      title: "Screen Sharing",
+                      detail: on
+                        ? "The fallback: when Passthrough can't stream this screen itself, phones use Screen Sharing, after entering your Mac's name and password. It also answers on your local network, behind the same password."
+                        : needed
+                            ? "Until Passthrough may stream this screen itself, phones need Screen Sharing. Turn it on in System Settings › General › Sharing."
+                            : "Optional fallback, slower, for when Passthrough can't stream this screen itself.") {
+                if !on { Button("Open Settings…") { ScreenSharing.openSettings() } }
+            }
         }
     }
 }
@@ -220,6 +275,17 @@ private struct PhonesSection: View {
                         Text(detail(for: phone)).font(.caption).foregroundStyle(.secondary)
                     }
                     Spacer()
+                    // Label beside the switch: a form spreads a toggle's own label across the row.
+                    HStack(spacing: 6) {
+                        Text("Screen").font(.callout).foregroundStyle(.secondary)
+                        Toggle("Screen", isOn: Binding(get: { phone.screenAllowed },
+                                                       set: { shell.setScreenAllowed($0, for: phone.phoneID) }))
+                            .toggleStyle(.switch)
+                            .controlSize(.small)
+                            .labelsHidden()
+                    }
+                    .fixedSize()
+                    .help("Also let \(phone.label) see and control this screen.")
                     Button("Revoke…") { revoking = phone }
                 }
                 .padding(.vertical, 1)
@@ -232,12 +298,13 @@ private struct PhonesSection: View {
                             presenting: revoking) { phone in
             Button("Revoke Access", role: .destructive) { shell.revoke(phone.phoneID) }
         } message: { _ in
-            Text("Its shells close and its key stops working. Plug it in again to give it a new one.")
+            Text("Its shells and any view of the screen close, and its key stops working. Plug it in again to give it a new one.")
         }
     }
 
     private func detail(for phone: ShellPhone) -> String {
         var parts = ["Added \(phone.grantedAt.formatted(date: .abbreviated, time: .omitted))"]
+        if shell.screenViewers.contains(where: { $0.phoneID == phone.phoneID }) { parts.append("viewing the screen") }
         switch shell.irohStatus.paths[phone.phoneID] {
         case .direct?: parts.append("connected from anywhere, directly")
         case .relay?: parts.append("connected from anywhere, through a relay")

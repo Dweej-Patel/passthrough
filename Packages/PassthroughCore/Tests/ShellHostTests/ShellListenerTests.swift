@@ -4,6 +4,7 @@ import Network
 import XCTest
 import PassthroughCore
 import PhoneTransport
+import ScreenClient
 import TestSupport
 @testable import ShellHost
 
@@ -612,6 +613,290 @@ final class ShellListenerTests: XCTestCase {
         XCTAssertFalse(probe.disconnected)
     }
 
+    // MARK: Screen
+
+    /// Reads from `stream` until `done` holds for everything read so far
+    /// (or, with `orEnd`, until the stream ends).
+    private func read(_ stream: ConnectionStream, _ description: String, orEnd: Bool = false,
+                      until done: @escaping @Sendable (Data) -> Bool) -> Data {
+        let got = expectation(description: description)
+        let buffer = Locked(Data())
+        @Sendable func next() {
+            stream.receive(maximumLength: 65536) { data, complete, error in
+                if let data { buffer.set(buffer.get() + data) }
+                if done(buffer.get()) { got.fulfill(); return }
+                if complete || error != nil { if orEnd { got.fulfill() }; return }
+                next()
+            }
+        }
+        next()
+        wait(for: [got], timeout: 5)
+        return buffer.get()
+    }
+
+    private static func lines(_ data: Data) -> [ShellEnvelope] {
+        data.split(separator: 0x0A).compactMap { try? ShellEnvelope.decode(Data($0)) }
+    }
+
+    /// A stand-in for Screen Sharing on loopback: says the RFB banner, then
+    /// records what it is sent.
+    private final class FakeScreenSharing: @unchecked Sendable {
+        let listener: NWListener
+        let received = Locked(Data())
+        let connection = Locked<NWConnection?>(nil)
+        var port: UInt16 { listener.port!.rawValue }
+
+        init(_ test: XCTestCase) throws {
+            let params = NWParameters.tcp
+            params.requiredLocalEndpoint = .hostPort(host: "127.0.0.1", port: .any)
+            listener = try NWListener(using: params)
+            let ready = test.expectation(description: "fake Screen Sharing listening")
+            listener.stateUpdateHandler = { if case .ready = $0 { ready.fulfill() } }
+            listener.newConnectionHandler = { [self] connection in
+                self.connection.set(connection)
+                connection.start(queue: .global())
+                connection.send(content: Data("RFB 003.889\n".utf8), completion: .idempotent)
+                read(connection)
+            }
+            listener.start(queue: .global())
+            test.wait(for: [ready], timeout: 5)
+        }
+
+        private func read(_ connection: NWConnection) {
+            connection.receive(minimumIncompleteLength: 1, maximumLength: 65536) { [self] data, _, complete, error in
+                if let data { received.set(received.get() + data) }
+                if !complete && error == nil { read(connection) }
+            }
+        }
+
+        func stop() { connection.get()?.cancel(); listener.cancel() }
+    }
+
+    /// A port nothing listens on.
+    private func closedPort() throws -> UInt16 {
+        let probe = try FakeScreenSharing(self)
+        let port = probe.port
+        probe.stop()
+        return port
+    }
+
+    func testScreenNeedsScreenAccess() {
+        let listener = startListener()
+        let (stream, _) = rawAuthorized(listener)
+        stream.send(Data("{\"t\":\"screen\"}\n{\"t\":\"ping\"}\n".utf8), isComplete: false) { _ in }
+        let replies = Self.lines(read(stream, "replies") { Self.lines($0).contains { $0.t == "pong" } })
+        XCTAssertEqual(replies.filter { $0.t == "error" }.map(\.reason), ["screen_not_allowed"])
+        XCTAssertFalse(replies.contains { $0.t == ShellEnvelope.screenReady })
+    }
+
+    func testScreenSharingOffIsReportedAndTheConnectionCarriesOn() throws {
+        let listener = startListener()
+        listener.screenAllowed = { $0 == "phone-1" }
+        listener.gate.screenPort.set(try closedPort())
+        let (stream, _) = rawAuthorized(listener)
+        stream.send(Data("{\"t\":\"screen\"}\n{\"t\":\"ping\"}\n".utf8), isComplete: false) { _ in }
+        let replies = Self.lines(read(stream, "replies") { Self.lines($0).contains { $0.t == "pong" } })
+        XCTAssertEqual(replies.filter { $0.t == "error" }.map(\.reason), ["screen_unavailable"])
+    }
+
+    /// After `screenReady` the connection is Screen Sharing's, both ways,
+    /// until either end closes; the owner hears who started and stopped.
+    func testScreenIsRelayedBothWays() throws {
+        let fake = try FakeScreenSharing(self)
+        addTeardownBlock { fake.stop() }
+        let events = Locked<[String]>([])
+        let viewers = Locked<[Bool]>([])
+        let listener = startListener(events: events)
+        listener.screenAllowed = { _ in true }
+        listener.onScreenViewer = { phoneID, label, viewing in
+            XCTAssertEqual(phoneID, "phone-1"); XCTAssertEqual(label, "Test iPhone")
+            viewers.set(viewers.get() + [viewing])
+        }
+        listener.gate.screenPort.set(fake.port)
+        let (stream, _) = rawAuthorized(listener)
+        stream.send(try ShellEnvelope(t: ShellEnvelope.screen).encodedLine(), isComplete: false) { _ in }
+        let banner = Data("RFB 003.889\n".utf8)
+        let got = read(stream, "screenReady and the banner") { data in
+            guard let ready = data.firstRange(of: Data("{\"t\":\"screenReady\"}\n".utf8)) else { return false }
+            return data[ready.upperBound...].count >= banner.count
+        }
+        let afterReady = got[got.firstRange(of: Data("{\"t\":\"screenReady\"}\n".utf8))!.upperBound...]
+        XCTAssertEqual(Data(afterReady), banner, "nothing between screenReady and Screen Sharing's bytes")
+        XCTAssertEqual(viewers.get(), [true])
+
+        stream.send(Data("RFB 003.008\n".utf8), isComplete: false) { _ in }
+        waitUntil("Screen Sharing got the phone's bytes") { fake.received.get() == Data("RFB 003.008\n".utf8) }
+
+        // Screen Sharing hangs up: so does the phone's connection.
+        fake.connection.get()?.cancel()
+        _ = read(stream, "closed", orEnd: true) { _ in false }
+        waitUntil("the owner heard the viewer leave") { viewers.get() == [true, false] }
+        XCTAssertEqual(events.get().filter { $0.contains("screen") },
+                       ["Test iPhone started viewing the screen", "Test iPhone stopped viewing the screen"])
+    }
+
+    func testScreenVideoUnavailableIsReportedAndTheConnectionCarriesOn() {
+        let listener = startListener()
+        listener.screenAllowed = { _ in true }
+        listener.screenVideo = { _ in nil }
+        let (stream, _) = rawAuthorized(listener)
+        stream.send(Data("{\"t\":\"screenVideo\"}\n{\"t\":\"ping\"}\n".utf8), isComplete: false) { _ in }
+        let replies = Self.lines(read(stream, "replies") { Self.lines($0).contains { $0.t == "pong" } })
+        XCTAssertEqual(replies.filter { $0.t == "error" }.map(\.reason), ["screen_video_unavailable"])
+    }
+
+    func testScreenVideoNeedsScreenAccess() {
+        let made = Locked(false)
+        let listener = startListener()
+        listener.screenVideo = { _ in made.set(true); return FakeVideoSource() }
+        let (stream, _) = rawAuthorized(listener)
+        stream.send(Data("{\"t\":\"screenVideo\"}\n{\"t\":\"ping\"}\n".utf8), isComplete: false) { _ in }
+        let replies = Self.lines(read(stream, "replies") { Self.lines($0).contains { $0.t == "pong" } })
+        XCTAssertEqual(replies.filter { $0.t == "error" }.map(\.reason), ["screen_not_allowed"])
+        XCTAssertFalse(made.get())
+    }
+
+    /// After `screenVideoReady` the connection is the source's, both ways;
+    /// the source ending closes it, and the owner hears who came and went.
+    func testScreenVideoHandsTheConnectionToTheSource() throws {
+        let source = FakeVideoSource()
+        let viewers = Locked<[Bool]>([])
+        let listener = startListener()
+        listener.screenAllowed = { _ in true }
+        listener.screenVideo = { phoneID in XCTAssertEqual(phoneID, "phone-1"); return source }
+        listener.onScreenViewer = { _, _, viewing in viewers.set(viewers.get() + [viewing]) }
+        let (stream, _) = rawAuthorized(listener)
+        stream.send(try ShellEnvelope(t: ShellEnvelope.screenVideo).encodedLine(), isComplete: false) { _ in }
+        _ = read(stream, "screenVideoReady") { $0.firstRange(of: Data("{\"t\":\"screenVideoReady\"}\n".utf8)) != nil }
+        waitUntil("the source started") { source.stream.get() != nil }
+        XCTAssertEqual(viewers.get(), [true])
+
+        stream.send(Data([1, 2, 3]), isComplete: false) { _ in }
+        let received = Locked(Data())
+        source.stream.get()?.receive(maximumLength: 100) { data, _, _ in received.set(data ?? Data()) }
+        waitUntil("the source reads the phone's bytes") { received.get() == Data([1, 2, 3]) }
+        source.stream.get()?.send(Data([9, 9]), isComplete: false) { _ in }
+        _ = read(stream, "the source's bytes") { $0.firstRange(of: Data([9, 9])) != nil }
+
+        source.ended.get()?()
+        _ = read(stream, "closed", orEnd: true) { _ in false }
+        waitUntil("the owner heard the viewer leave") { viewers.get() == [true, false] }
+        XCTAssertTrue(source.stopped.get(), "closing the connection stops the source")
+    }
+
+    /// Turning screen access off ends a view of the screen at once; the same
+    /// phone's shell connection stays.
+    func testDisconnectScreenLeavesShellConnections() throws {
+        let fake = try FakeScreenSharing(self)
+        addTeardownBlock { fake.stop() }
+        let listener = startListener()
+        listener.screenAllowed = { _ in true }
+        listener.gate.screenPort.set(fake.port)
+        let (shell, _) = rawAuthorized(listener)
+        let (screen, _) = rawAuthorized(listener)
+        screen.send(try ShellEnvelope(t: ShellEnvelope.screen).encodedLine(), isComplete: false) { _ in }
+        _ = read(screen, "screenReady") { $0.firstRange(of: Data("RFB".utf8)) != nil }
+        listener.disconnectScreen(phoneID: "phone-1")
+        let ended = expectation(description: "screen connection closed")
+        @Sendable func drain() {
+            screen.receive(maximumLength: 65536) { _, complete, error in
+                if complete || error != nil { ended.fulfill() } else { drain() }
+            }
+        }
+        drain()
+        wait(for: [ended], timeout: 5)
+        shell.send(Data("{\"t\":\"ping\"}\n".utf8), isComplete: false) { _ in }
+        _ = read(shell, "pong") { Self.lines($0).contains { $0.t == "pong" } }
+    }
+
+    /// The phone's client end to end: it asks, gets the stream handed over,
+    /// and reads Screen Sharing's banner from it (some of it may have come
+    /// with `screenReady`).
+    func testClientHandsOverTheScreenStream() throws {
+        let fake = try FakeScreenSharing(self)
+        addTeardownBlock { fake.stop() }
+        let listener = startListener()
+        listener.screenAllowed = { _ in true }
+        listener.gate.screenPort.set(fake.port)
+        let (client, probe) = readyClient(listener)
+        client.requestScreen()
+        wait(for: [probe.expect(self, "handed over") { $0.contains { if case .screen = $0 { true } else { false } } }], timeout: 5)
+        guard case let .screen(stream, initial)? = probe.events.get().last else { return XCTFail("no screen") }
+        addTeardownBlock { stream.cancel() }
+        let banner = Data("RFB 003.889\n".utf8)
+        let got = Locked(initial)
+        let done = expectation(description: "banner")
+        @Sendable func next() {
+            if got.get().count >= banner.count { return done.fulfill() }
+            stream.receive(maximumLength: 65536) { data, complete, error in
+                if let data { got.set(got.get() + data) }
+                if complete || error != nil { return }
+                next()
+            }
+        }
+        next()
+        wait(for: [done], timeout: 5)
+        XCTAssertEqual(got.get(), banner)
+        XCTAssertFalse(probe.disconnected, "a hand-over is not a disconnect")
+    }
+
+    func testClientIsToldWhenTheScreenIsNotAllowed() {
+        let listener = startListener()
+        let (client, probe) = readyClient(listener)
+        client.requestScreen()
+        wait(for: [probe.expect(self, "refused") { $0.contains { if case .failed(.screenNotAllowed, _) = $0 { true } else { false } } }],
+             timeout: 5)
+    }
+
+    /// Against this Mac's real Screen Sharing, when asked for
+    /// (`PASSTHROUGH_LIVE_SCREEN=1`) and it is on: Apple's banner comes
+    /// through the relay.
+    func testLiveScreenSharingBanner() throws {
+        try XCTSkipUnless(ProcessInfo.processInfo.environment["PASSTHROUGH_LIVE_SCREEN"] == "1",
+                          "set PASSTHROUGH_LIVE_SCREEN=1 with Screen Sharing on")
+        let listener = startListener()
+        listener.screenAllowed = { _ in true }
+        let (stream, _) = rawAuthorized(listener)
+        stream.send(try ShellEnvelope(t: ShellEnvelope.screen).encodedLine(), isComplete: false) { _ in }
+        let got = read(stream, "banner", orEnd: true) { $0.firstRange(of: Data("RFB 003.".utf8)) != nil || Self.lines($0).contains { $0.t == "error" } }
+        XCTAssertNotNil(got.firstRange(of: Data("{\"t\":\"screenReady\"}\nRFB 003.".utf8)), String(decoding: got, as: UTF8.self))
+    }
+
+    /// The whole path against this Mac's real Screen Sharing: the phone's
+    /// client asks, the relay hands over, and the viewer logs in with
+    /// Apple's method and gets a frame. Needs Screen Sharing on and
+    /// `PASSTHROUGH_LIVE_SCREEN=1`, `PASSTHROUGH_SCREEN_USER` and
+    /// `PASSTHROUGH_SCREEN_PASSWORD` (this Mac's account).
+    func testLiveScreenSharingLogin() throws {
+        let env = ProcessInfo.processInfo.environment
+        guard env["PASSTHROUGH_LIVE_SCREEN"] == "1", let user = env["PASSTHROUGH_SCREEN_USER"],
+              let password = env["PASSTHROUGH_SCREEN_PASSWORD"] else {
+            throw XCTSkip("set PASSTHROUGH_LIVE_SCREEN=1, PASSTHROUGH_SCREEN_USER and PASSTHROUGH_SCREEN_PASSWORD with Screen Sharing on")
+        }
+        let listener = startListener()
+        listener.screenAllowed = { _ in true }
+        let (client, probe) = readyClient(listener)
+        client.requestScreen()
+        wait(for: [probe.expect(self, "handed over") { $0.contains { if case .screen = $0 { true } else { false } } }], timeout: 10)
+        guard case let .screen(stream, initial)? = probe.events.get().last else { return XCTFail("no screen") }
+        let events = Locked<[RFBClient.Event]>([])
+        let framed = expectation(description: "a frame")
+        let rfb = RFBClient(stream: stream, initialBytes: initial, login: .init(username: user, password: password), queue: .global()) { event in
+            events.set(events.get() + [event])
+            switch event {
+            case .frame: framed.fulfill()
+            case let .closed(failure): XCTFail("closed: \(String(describing: failure))"); framed.fulfill()
+            default: break
+            }
+        }
+        rfb.start()
+        wait(for: [framed], timeout: 20)
+        rfb.close()
+        guard case let .connected(width, height, name)? = events.get().first else { return XCTFail("\(events.get())") }
+        print("Screen Sharing: \(name), \(width)×\(height)")
+        XCTAssertGreaterThan(width, 0)
+    }
+
     func testCandidatesOrder() {
         let credential = ShellCredential(macID: "m", macName: "Mac", certSHA256: "x", shellKey: Data(), phoneID: "p",
                                          port: 7893, addresses: ["192.168.1.2", "fd00::2", "100.100.1.1"])
@@ -625,5 +910,18 @@ final class ShellListenerTests: XCTestCase {
         ])
         XCTAssertEqual(ShellClient.candidates(for: credential, discovered: nil).count, 3)
     }
+}
+
+private final class FakeVideoSource: ScreenVideoSource, @unchecked Sendable {
+    let stream = Locked<(any ByteStream)?>(nil)
+    let ended = Locked<(@Sendable () -> Void)?>(nil)
+    let stopped = Locked(false)
+
+    func start(stream: any ByteStream, initialBytes: Data, ended: @escaping @Sendable () -> Void) {
+        self.ended.set(ended)
+        self.stream.set(stream)
+    }
+
+    func stop() { stopped.set(true) }
 }
 #endif

@@ -20,6 +20,14 @@ Internet for your Mac over a USB cable, served by your phone's own network stack
 
 Both phone apps look the same and speak the same protocol, so the Mac app treats them the same way.
 
+What else it does, built on the same pairing:
+
+* **[VPN layer](#vpn-layer):** WireGuard or OpenVPN (NordVPN built in) on top of the passthrough, or over any other network.
+* **[Keep Mac awake](#keep-mac-awake):** lid closed or not, with battery and heat limits, so long jobs survive while you are away.
+* **[Remote shell](#remote-shell):** a real terminal on your Mac from the phone, over the local network, Tailscale, or from anywhere through a built-in encrypted connection. Sessions survive disconnects and are recorded.
+* **[Screen](#screen):** see and control the Mac's screen from the iPhone, as smooth hardware-encoded video.
+* **[Flow map](#flow-map) and [top apps](#top-apps):** where the traffic goes, live.
+
 ## How it works
 
 * **Phone app.** A SOCKS5 server listens on the phone's loopback address only, next to a small control channel for pairing and live status. On an iPhone it is hosted inside a packet tunnel extension so it keeps running with the screen off (the "tunnel" carries a single unreachable /32, so none of the phone's own traffic is touched), with foreground hosting as a fallback. On Android it runs in a foreground service with a notification, which likewise routes none of the phone's own traffic.
@@ -43,6 +51,7 @@ Because the phone opens every connection with its own stack, the carrier sees th
 * Remote shell is off by default. While it is off the Mac has no shell listener at all. Turning it on starts a TLS 1.3 listener on port 7893 that accepts peers only from private or Tailscale address ranges (RFC 1918, link-local, loopback, IPv6 ULA, 100.64.0.0/10 and `fd7a:115c:a1e0::/48`). Unless you turn off *Reach this Mac from anywhere (built-in)*, the Mac also runs a built-in [iroh](https://www.iroh.computer) endpoint that is reachable from the internet by design: anyone who can reach its UDP port directly (the same LAN, or public IPv6) or who knows its endpoint id and comes through a relay can start a handshake, which the limits below bound and the shell-key proof gates; see [Reaching the Mac](#remote-shell) and [SECURITY.md](SECURITY.md) for what gates it. With that option off, a Mac with a public address takes no shell connections from the internet.
 * A phone gets shell access only over the cable, while the setting is on: the Mac hands it a per-phone 256-bit key and its certificate fingerprint on the control channel. On the local and Tailscale path the phone pins that certificate (TLS 1.3); on the built-in path the transport is iroh's QUIC (TLS 1.3, the Mac authenticated by its endpoint id), with no further TLS inside. Either way the phone proves the key with an HMAC-SHA256 challenge before anything it sends is read; before that, there are at most 16 unproven connections in total, 2 per remote address on direct paths and 8 arriving through relays, each with 10 seconds from when it arrives and a hard 4096-byte limit on its handshake lines. Revoking a phone in the Mac's settings, or **Forget pairing**, deletes its key and drops its live connection at once. iPhones share one pairing on the Mac, so **Forget pairing** for the iPhone revokes every iPhone granted through it.
 * On the phone the key sits in a user-presence Keychain item (iPhone, this device only) or a Keystore key bound to a strong biometric or the device credential (Android). The whole phone app is behind Face ID / Touch ID / fingerprint / face with passcode fallback and relocks after 60 seconds in the background; a phone with no passcode cannot use Remote shell (an Android phone without a screen lock cannot hold a shell key at all). Someone who has your passcode and your unlocked phone can still open a shell: revoke the phone on the Mac, or remove it from your tailnet.
+* Screen is off for every phone until you turn on its **Screen** switch in the Mac's Remote shell settings; a phone needs shell access as well. It asks for the screen on its authorized shell connection, so the same transport, key proof and limits apply. Passthrough's own screen stream asks for no Mac password: the switch is your consent, and a phone allowed Screen controls the Mac as you, as it already can through a shell. Streaming needs **Screen Recording** and **Accessibility** granted to Passthrough, so while they are granted, a network-reachable app holds them. Turning a phone's Screen off ends its views at once. The Screen Sharing fallback is relayed to macOS Screen Sharing on loopback only, and Screen Sharing checks the Mac account's name and password itself; the iPhone can remember that login in a user-presence Keychain item (this device only).
 * Shells run as your Mac user, inside the Passthrough app, so they inherit its privacy permissions. Turning Remote shell on asks for **Full Disk Access** so unattended scripts do not hang on prompts; while that is granted, a network-reachable app holds it.
 * Every shell session is recorded as output only (typed passwords at no-echo prompts are not captured) in `~/Library/Application Support/<identifier>/ShellHistory/`, readable only by you (folder `0700`, files `0600`). Transcripts are plain text on disk, protected by those permissions and FileVault, and can contain secrets a script printed. They never leave the Mac except when a paired phone fetches one.
 * A fatal VPN failure (rejected credentials, bad profile) keeps the kill switch engaged until you turn the layer off, so no peer can "fail" you into the clear. Kill-switch reject routes sit one step more specific than the VPN's routes, so engaging or lifting them never leaves a gap.
@@ -121,7 +130,9 @@ The phone learns the Mac's details (endpoint id, relay, addresses) over the cabl
 * **App lock.** The phone app opens with Face ID / Touch ID (iPhone) or fingerprint / face (Android), with passcode fallback, and relocks after 60 seconds in the background. A phone with no passcode opens without a lock but cannot use Remote shell. The lock covers the UI only; serving continues while it is locked.
 * **Key storage.** The shell key lives in a Keychain item that requires user presence (iPhone) or in an Android Keystore key bound to a strong biometric or the device credential. An Android phone without a screen lock cannot hold the key, so it cannot use Remote shell. The Android shell needs Android 10 or later.
 
-**Sessions.** Each is your login shell (`$SHELL -l`) as your Mac user, up to 8 at once, hosted by the Mac app. They keep running when the phone disconnects, locks or loses signal; coming back reattaches and replays what was printed meanwhile. One device is attached to a session at a time: attaching from another takes it over, and the first shows that it was opened elsewhere. Quitting Passthrough ends all sessions.
+**Sessions.** Each is your login shell (`$SHELL -l`) as your Mac user, up to 8 at once, hosted by the Mac app. It starts from what a new Terminal.app window gets (your `HOME`, `USER`, `LOGNAME` and `SHELL`, a plain `PATH`, `TERM`, `LANG`, `TMPDIR`, `SSH_AUTH_SOCK`, and `TERM_PROGRAM=Passthrough`), not from Passthrough's own environment, so whatever launched the app (a script, another Claude Code session) does not leak into your shells. They keep running when the phone disconnects, locks or loses signal; coming back reattaches and replays what was printed meanwhile. One device is attached to a session at a time: attaching from another takes it over, and the first shows that it was opened elsewhere. Quitting Passthrough ends all sessions.
+
+**The iPhone's terminal.** A swipe scrolls: through the scrollback for plain output, as scroll-wheel events for programs that take the mouse (Claude Code, vim, htop), and as arrow keys on the alternate screen (less, man). To select, press and hold until the haptic tap, then drag: a program that takes the mouse gets a real mouse drag, so it selects and copies its own way, and plain output gets a selection with Copy when you lift. Holding without moving shows Paste and Select. The key row above the keyboard has esc, ctrl (for the next key), tab, arrows that repeat while held, `|`, `~` and paste.
 
 **History.** Every session is recorded, output only (so passwords typed at a no-echo prompt are not captured), as an [asciicast v2](https://docs.asciinema.org/manual/asciicast/v2/) file in `~/Library/Application Support/<identifier>/ShellHistory/`, in a `0700` folder with `0600` files. It never leaves the Mac except when a paired phone fetches it. View it in the Mac's History window (Remote shell section) or from the phone's Remote shell card. Whatever a script prints, secrets included, is in the transcript; it is protected by file permissions and FileVault, not encrypted by Passthrough. A session's recording stops at 64 MiB (marked `[transcript truncated]`), and viewing or fetching one shows at most its last 8 MiB. Delete one session or clear everything from the Mac; sessions still running cannot be deleted.
 
@@ -145,6 +156,25 @@ contact = "you@example.org"
 ```
 
 Open TCP 80 and 443 (Let's Encrypt and the relay protocol) and UDP 7842 (QUIC address discovery, on by default and requires TLS). Then enter `https://relay.example.org` (and the token, if you set `shared_token`) under *Relay* in the Mac's settings. Phones pick it up at their next connection. Without a token or allowlist anyone can use your relay, so set one if it is public. The config above is a sketch: check the options for the exact version you run in the [iroh relay documentation](https://docs.iroh.computer/concepts/relays) and the [`iroh-relay` source](https://github.com/n0-computer/iroh/tree/main/iroh-relay).
+
+## Screen
+
+See and control your Mac's screen from the iPhone (Android: not yet). It rides Remote shell: with Remote shell on and the phone granted, turn on that phone's **Screen** switch in Settings ▸ General ▸ Remote shell, then tap *See and control the screen* on the phone's Remote shell card. It reaches the Mac the same ways the shell does (local network, Tailscale, or the built-in connection from anywhere). While a phone is watching, the Mac's menu panel says so, with **Stop**.
+
+**How the Mac serves it.** Two ways; the phone picks for itself.
+
+* **Passthrough's own stream** (the default). The Mac captures its main display with ScreenCaptureKit at the display's size in points (1728×1117 on a 16-inch MacBook Pro), up to 60 frames a second and only when something changes, and compresses it to H.264 with the hardware encoder in its low-latency mode, at about 8 Mb/s for that size. The iPhone decodes it in hardware. The phone acknowledges each frame it shows, and the Mac sends a new frame only while fewer than two are unacknowledged, always the newest picture (older ones are dropped before encoding). On a slow path you get fewer frames a second, never a picture from the past. When the screen goes still, its last frame is sent twice more so text sharpens. Your touches and keys become the Mac's own input events. It needs **Screen Recording** (to see the screen) and **Accessibility** (to click and type) for Passthrough: grant them from the *Screen Recording and Accessibility* step in the Mac's Remote shell settings. macOS may want Passthrough reopened after Screen Recording; quitting it drops the passthrough, so do it while you aren't using it. No Mac password is involved.
+* **Screen Sharing** (the fallback). When the Mac can't stream (those permissions are missing, or it runs an older Passthrough), the phone asks for macOS Screen Sharing instead, on the same connection; the Mac relays it from loopback port 5900. Turn it on in System Settings ▸ General ▸ Sharing. Screen Sharing asks for your Mac account's name and password, which the iPhone can remember behind Face ID. It is much slower, because Apple's server is only fast with Apple's own viewer, and the phone's top bar says when it is in this mode and why.
+
+**Controls on the phone.**
+
+* *Trackpad* mode (the default): drag to move the pointer, tap to click where it is. *Direct* mode: tap where you want to click, drag to pan a zoomed-in screen. The button in the top bar switches.
+* Two-finger tap right-clicks; two-finger drag scrolls (smoothly, by pixels, on the stream); press and hold, then drag, drags; pinch zooms in, up to one Mac pixel per phone pixel.
+* Three-finger swipes do what they do on a Mac trackpad: left and right move between desktops, up opens Mission Control, down shows the app's windows. The *Desktops* menu in the top bar does the same, plus *Show desktop*. They send the Mac's default shortcuts (⌃← ⌃→ ⌃↑ ⌃↓, F11), so they don't work if you've changed or turned those off under Keyboard Shortcuts ▸ Mission Control.
+* The keyboard button brings up the keyboard with a row of esc, tab, ⌃ ⌥ ⌘ (held for the next key), arrows, and paste, which puts the iPhone's clipboard on the Mac's and presses ⌘V. A hardware keyboard's shortcuts go through as they are.
+* Turn the phone and the screen view goes landscape, with its controls in a column at the side; the rest of the app stays portrait.
+
+The wire protocol for both ways is in [protocol/README.md](protocol/README.md#screen) ("Screen" and "Screen video").
 
 ## VPN layer
 
@@ -181,6 +211,11 @@ Packages/PassthroughCore   Swift package:
   PhoneTransport             phone links (usbmuxd, adb, wireless), device watchers, local forwarder, control client (the Mac side)
   PassthroughUI              shared SwiftUI design layer
   VPNConfig                  OpenVPN allowlist, WireGuard .conf parser, NordVPN pinning (linked by the root helper)
+  ShellHost                  Mac: login shells on a PTY, the shell listener (TLS and iroh), access keys, transcripts, the screen hand-over
+  IrohTransport              iroh endpoints and streams (the built-in connection), for the Mac and iPhone apps only
+  ScreenClient               iPhone: the screen stream's client (H.264 to sample buffers) and the Screen Sharing (RFB) viewer
+  ScreenHost                 Mac: screen capture, the H.264 encoder, input events, and the flow control between them
+  CPTY, CZlib, CResolv       small C shims (PTY spawn, zlib, resolver)
 iOS/App                    SwiftUI iPhone app
 iOS/Tunnel                 Packet tunnel extension hosting the servers
 macOS/App                  SwiftUI menu bar app: Session/, VPN/, Power/, Views/
@@ -204,6 +239,9 @@ The code is built around a few small interfaces, so a new phone, link or host pl
 | `ControlConnection` / `LineBuffer` (Swift), `LineReader` (Kotlin) | shared by both ends | Control-channel framing |
 | `ProxyHost` (iOS) | `ExtensionHost`, `InProcessHost` | Whether the proxy runs in the VPN extension or the app |
 | `Egress` / `EgressProvider` (Kotlin) | `DefaultEgress`, `CellularEgressProvider` | Which network outbound connections leave on |
+| `ByteStream` (Swift) | `ConnectionStream` (TCP/TLS), `IrohByteStream` | What carries a shell or screen connection |
+| `ScreenVideoSource` (Swift) | `ScreenVideoStreamer` | What answers a phone's screen-stream request (the app supplies it: it holds the permissions) |
+| `FrameCapturing` / `InputSink` (Swift) | `ScreenCapturer`, `InputInjector` | Where the stream's frames come from and where a phone's input goes (tests fake both) |
 
 On the Mac, `SessionCoordinator` runs the passthrough link and owns two independent parts, `VPNLayer` and `KeepAwakeController`, which the views observe directly.
 
@@ -264,6 +302,8 @@ With an Android phone or emulator running Passthrough (proxy started, *Pair* she
 PASSTHROUGH_ADB_SERIAL=emulator-5554 PASSTHROUGH_ADB_CODE=123456 swift test --filter AndroidEndToEndTests
 ```
 
+`swift test` also covers the remote shell (listener, handshakes, sessions, iroh) and the screen: the stream's wire format, the hand-over, and a run of the real hardware H.264 encoder fed synthetic frames whose output is decoded and held to the two-frame limit (skipped on Macs without the hardware encoder, such as CI's). Against your own Screen Sharing, opt in with `PASSTHROUGH_LIVE_SCREEN=1 PASSTHROUGH_SCREEN_USER=… PASSTHROUGH_SCREEN_PASSWORD=… swift test --filter testLiveScreenSharing`.
+
 Panel previews: `Passthrough.app/Contents/MacOS/Passthrough --snapshot /tmp/panels` renders the menu bar panel in every state, light and dark. On the simulator the iOS app honours `PASSTHROUGH_AUTOSTART=1`, `PASSTHROUGH_SHOW_PAIRING=1` and `PASSTHROUGH_SHOW_SETTINGS=1`.
 
 ## Troubleshooting
@@ -279,6 +319,8 @@ Panel previews: `Passthrough.app/Contents/MacOS/Passthrough --snapshot /tmp/pane
 * **Stuck on "Helper needs approval"**: approve it in Login Items, then *Try again*. After rebuilding the helper, the app restarts the stale daemon automatically (version check over XPC).
 * **Mac shows online but DNS fails**: check the helper's log with `log stream --predicate 'process == "PassthroughHelper"'`; the DNS servers are configurable in Settings ▸ Network.
 * **iOS "VPN extension is not available"**: the tunnel provisioning profile is missing the Network Extension entitlement, or you are on the simulator. Foreground hosting still works (keep the app open).
+* **The phone's screen view says "Slower…"**: it is on Screen Sharing because the Mac can't stream. Grant Screen Recording and Accessibility in the Mac's Remote shell settings, then reopen Passthrough on the Mac (with passthrough off: quitting drops it).
+* **Three-finger swipes don't switch desktops**: the Mac's Mission Control shortcuts were changed or turned off (System Settings ▸ Keyboard ▸ Keyboard Shortcuts ▸ Mission Control).
 * Diagnostics logs are in both apps' Settings.
 
 ## Known limits
@@ -288,6 +330,7 @@ Panel previews: `Passthrough.app/Contents/MacOS/Passthrough --snapshot /tmp/pane
 * SOCKS5 `UDP ASSOCIATE` (the standard UDP mode) is not offered because usbmuxd, adb and the wireless link carry TCP only; the UDP-in-TCP extension covers it.
 * Android needs USB debugging left on while you use Passthrough, which also lets any Mac the phone has authorised run adb commands on it.
 * The Android app has been tested on an Android 15 emulator, not yet across physical phones and manufacturers.
+* Screen is iPhone only for now, and the stream shows the Mac's main display only. While the Mac is locked the stream may not show the login window; Screen Sharing can.
 * The phone's app deliberately does not expose the proxy on Wi-Fi. If you ever want that, it is one flag (`loopbackOnly`), but then do it behind TLS.
 
 ## Contributing

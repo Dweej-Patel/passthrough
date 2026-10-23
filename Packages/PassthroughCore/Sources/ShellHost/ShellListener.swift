@@ -42,6 +42,29 @@ public final class ShellListener: @unchecked Sendable {
         set { gate.eventHandler.set(newValue) }
     }
 
+    /// Whether a phone may also see the screen (a `screen` request). Asked on
+    /// the listener's queue for every request, so it must not block. Until
+    /// it is set no phone may.
+    public var screenAllowed: (@Sendable (String) -> Bool)? {
+        get { gate.screenAccess.get() }
+        set { gate.screenAccess.set(newValue) }
+    }
+
+    /// Makes the Mac's own screen stream for a phone's `screenVideo` request
+    /// (protocol/README.md, "Screen video"), or nil when it can't: then the
+    /// phone is told `screen_video_unavailable`. Asked on the listener's
+    /// queue after `screenAllowed`, so it must not block. Unset: never.
+    public var screenVideo: (@Sendable (_ phoneID: String) -> (any ScreenVideoSource)?)? {
+        get { gate.screenVideoFactory.get() }
+        set { gate.screenVideoFactory.set(newValue) }
+    }
+
+    /// A phone started (`viewing`) or stopped seeing the screen. On the listener's queue.
+    public var onScreenViewer: (@Sendable (_ phoneID: String, _ label: String, _ viewing: Bool) -> Void)? {
+        get { gate.screenHandler.get() }
+        set { gate.screenHandler.set(newValue) }
+    }
+
     /// The listener stopped for good (the port is taken, say); it will not
     /// accept again, so make a new one. On the listener's queue.
     public var onFailure: (@Sendable (Error) -> Void)? {
@@ -147,6 +170,11 @@ public final class ShellListener: @unchecked Sendable {
         gate.disconnect(phoneID: phoneID)
     }
 
+    /// Ends this phone's views of the screen; its shell connections stay.
+    public func disconnectScreen(phoneID: String) {
+        gate.disconnectScreen(phoneID: phoneID)
+    }
+
     /// On `queue`: policy and a handshake slot before TLS, then the shared handshake.
     private func accept(_ connection: NWConnection) {
         let host = PeerAddress.host(of: connection)
@@ -181,6 +209,11 @@ final class ShellGate: @unchecked Sendable {
     let manager: ShellSessionManager
     let transcripts: TranscriptStore
     let eventHandler = Locked<(@Sendable (String) -> Void)?>(nil)
+    let screenAccess = Locked<(@Sendable (String) -> Bool)?>(nil)
+    let screenHandler = Locked<(@Sendable (_ phoneID: String, _ label: String, _ viewing: Bool) -> Void)?>(nil)
+    let screenVideoFactory = Locked<(@Sendable (String) -> (any ScreenVideoSource)?)?>(nil)
+    /// Where `screen` requests are relayed; another port in tests.
+    let screenPort = Locked(RemoteShell.screenSharingPort)
     private let shellKeys: @Sendable (String) -> [Data]
     private let keyConfirmed: @Sendable (_ phoneID: String, _ key: Data) -> Void
     private let phoneLabel: @Sendable (String) -> String
@@ -377,7 +410,20 @@ final class ShellGate: @unchecked Sendable {
         }
     }
 
+    func disconnectScreen(phoneID: String) {
+        queue.async { [self] in
+            connections.values.filter { $0.phoneID == phoneID && $0.isScreen }.forEach { $0.close() }
+        }
+    }
+
     func event(_ text: String) { eventHandler.get()?(text) }
+
+    func screenAllowed(_ phoneID: String) -> Bool { screenAccess.get()?(phoneID) ?? false }
+
+    func screenViewer(_ phoneID: String, _ label: String, viewing: Bool) {
+        event(viewing ? "\(label) started viewing the screen" : "\(label) stopped viewing the screen")
+        screenHandler.get()?(phoneID, label, viewing)
+    }
 
     static func send(_ message: ShellEnvelope, on stream: any ByteStream, then: (@Sendable () -> Void)? = nil) {
         guard let line = try? message.encodedLine() else { return }
@@ -414,6 +460,12 @@ final class ShellConnection: ShellAttachment, @unchecked Sendable {
     private var busy = false
     /// Reading stopped while `busy`, so a phone cannot pile up requests meanwhile.
     private var readPaused = false
+    /// Screen Sharing being dialled for a `screen` request.
+    private var screenDial: NWConnection?
+    /// The connection is now a byte relay to Screen Sharing; no more lines.
+    private var screenRelay: Splice?
+    /// The connection now carries the Mac's own screen stream; no more lines.
+    private var screenVideo: (any ScreenVideoSource)?
     var onClose: (() -> Void)?
 
     init(gate: ShellGate, stream: any ByteStream, phoneID: String, label: String) {
@@ -438,6 +490,9 @@ final class ShellConnection: ShellAttachment, @unchecked Sendable {
         if busy { readPaused = true } else { receive() }
     }
 
+    /// Asked for the screen: being relayed to Screen Sharing, or about to be.
+    var isScreen: Bool { screenDial != nil || screenRelay != nil || screenVideo != nil }
+
     /// Ends the connection and stops the manager sending to it. Idempotent.
     func close() {
         guard !closed else { return }
@@ -446,6 +501,18 @@ final class ShellConnection: ShellAttachment, @unchecked Sendable {
         inbox.removeAll()
         manager.detach(client: self)
         attached = nil
+        screenDial?.cancel()
+        screenDial = nil
+        if let screenRelay {
+            screenRelay.close()
+            gate?.screenViewer(phoneID, label, viewing: false)
+        }
+        screenRelay = nil
+        if let screenVideo {
+            screenVideo.stop()
+            gate?.screenViewer(phoneID, label, viewing: false)
+        }
+        screenVideo = nil
         stream.onTerminated = nil
         stream.cancel()
         let onClose = self.onClose
@@ -531,6 +598,13 @@ final class ShellConnection: ShellAttachment, @unchecked Sendable {
         case ShellEnvelope.transcript:
             guard let id = message.session else { return fail(.badRequest) }
             sendTranscript(id)
+        case ShellEnvelope.screen:
+            guard gate?.screenAllowed(phoneID) == true else { return fail(.screenNotAllowed) }
+            screen()
+        case ShellEnvelope.screenVideo:
+            guard gate?.screenAllowed(phoneID) == true else { return fail(.screenNotAllowed) }
+            guard let source = gate?.screenVideoFactory.get()?(phoneID) else { return fail(.screenVideoUnavailable) }
+            streamScreen(source)
         case ShellEnvelope.ping:
             send(ShellEnvelope(t: ShellEnvelope.pong))
         case ShellEnvelope.pong:
@@ -648,6 +722,83 @@ final class ShellConnection: ShellAttachment, @unchecked Sendable {
     private func sendTranscript(_ lines: ArraySlice<ShellEnvelope>) {
         guard !closed, let line = lines.first else { return }
         send(line) { [weak self] in self?.sendTranscript(lines.dropFirst()) }
+    }
+
+    /// Dials Screen Sharing on loopback, then replies `screenReady` and from
+    /// there on relays raw bytes both ways until either side closes. The
+    /// connection leaves its session first, and handles no more lines: the
+    /// phone sends nothing after `screen` until `screenReady` (Screen Sharing
+    /// speaks first), so anything already waiting is a protocol error.
+    private func screen() {
+        guard let gate, let port = NWEndpoint.Port(rawValue: gate.screenPort.get()) else { return fail(.screenUnavailable) }
+        busy = true
+        manager.detach(client: self)
+        attached = nil
+        let dial = NWConnection(host: .ipv4(.loopback), port: port, using: .tcp)
+        screenDial = dial
+        var settled = false
+        let settle: (Bool) -> Void = { [weak self] ready in
+            guard let self, !settled, !self.closed, self.screenDial === dial else { return }
+            settled = true
+            self.screenDial = nil
+            if ready { return self.relayScreen(dial) }
+            dial.cancel()
+            ptLog(.info, "shell: Screen Sharing is not answering; a phone asked for the screen")
+            self.fail(.screenUnavailable)
+            self.resume()
+        }
+        dial.stateUpdateHandler = { state in
+            switch state {
+            case .ready: settle(true)
+            // Refused (nothing listening) shows up as waiting, not failed.
+            case .waiting, .failed: settle(false)
+            default: break
+            }
+        }
+        dial.start(queue: queue)
+        queue.asyncAfter(deadline: .now() + Self.screenDialTimeout) { settle(false) }
+    }
+
+    /// How long Screen Sharing has to accept on loopback.
+    static let screenDialTimeout: TimeInterval = 5
+
+    private func relayScreen(_ dial: NWConnection) {
+        guard inbox.isEmpty else {
+            ptLog(.warning, "shell: a phone sent more after asking for the screen; disconnected")
+            dial.cancel()
+            return close()
+        }
+        let local = ConnectionStream(dial, queue: queue)
+        let relay = Splice(stream, local, queue: queue, endTogether: true) { [weak self] in self?.close() }
+        screenRelay = relay
+        gate?.screenViewer(phoneID, label, viewing: true)
+        send(ShellEnvelope(t: ShellEnvelope.screenReady)) { [weak self] in
+            guard let self, !self.closed, self.screenRelay === relay else { return }
+            relay.start()
+        }
+    }
+
+    /// Hands the connection to the Mac's own screen stream after
+    /// `screenVideoReady`, as `relayScreen` does to Screen Sharing: the phone
+    /// sends nothing after `screenVideo` until then, so a line already
+    /// waiting is a protocol error. `busy` stops the line reader for good.
+    private func streamScreen(_ source: any ScreenVideoSource) {
+        busy = true
+        manager.detach(client: self)
+        attached = nil
+        guard inbox.isEmpty else {
+            ptLog(.warning, "shell: a phone sent more after asking for the screen; disconnected")
+            return close()
+        }
+        screenVideo = source
+        gate?.screenViewer(phoneID, label, viewing: true)
+        send(ShellEnvelope(t: ShellEnvelope.screenVideoReady)) { [weak self] in
+            guard let self, !self.closed, self.screenVideo === source else { return }
+            let rest = self.lines.takePending()
+            source.start(stream: self.stream, initialBytes: rest) { [weak self] in
+                self?.queue.async { self?.close() }
+            }
+        }
     }
 
     /// Manager errors keep their reason; anything else (a shell that could not

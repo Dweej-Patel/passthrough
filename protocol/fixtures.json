@@ -256,6 +256,24 @@
         "line": "{\"t\":\"transcriptData\",\"session\":\"3F2B8C1A-7D4E-4A55-9C0B-1E6F2A9D8B34\",\"data\":\"\",\"cols\":100,\"rows\":30,\"done\":true}"
       },
       {
+        "line": "{\"t\":\"screen\"}"
+      },
+      {
+        "line": "{\"t\":\"screenReady\"}"
+      },
+      {
+        "line": "{\"t\":\"screenVideo\"}"
+      },
+      {
+        "line": "{\"t\":\"screenVideoReady\"}"
+      },
+      {
+        "line": "{\"t\":\"error\",\"reason\":\"screen_video_unavailable\"}"
+      },
+      {
+        "line": "{\"t\":\"error\",\"reason\":\"screen_not_allowed\"}"
+      },
+      {
         "line": "{\"t\":\"ping\"}"
       },
       {

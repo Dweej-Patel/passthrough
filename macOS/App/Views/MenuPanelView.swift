@@ -36,6 +36,7 @@ struct MenuPanelView: View {
                 VPNRow()
                 KeepAwakeRow()
                 ShellSessionsRow()
+                ScreenViewersRow()
                 ThroughputPanel()
                 TopAppsPanel(usage: session.appUsage)
                 footer
@@ -320,6 +321,33 @@ struct ShellSessionsRow: View {
         if shell.phones.isEmpty { return ("Plug in a paired phone to give it access", true) }
         if !fullDiskAccess { return ("Ready · Full Disk Access recommended", true) }
         return ("Ready for \(shell.phones.count) phone\(shell.phones.count == 1 ? "" : "s")", false)
+    }
+}
+
+/// Shown only while a phone sees the screen: who, and a way to end it at once.
+struct ScreenViewersRow: View {
+    @EnvironmentObject private var shell: RemoteShellController
+
+    var body: some View {
+        ForEach(shell.screenViewers) { viewer in
+            HStack(spacing: 10) {
+                Image(systemName: "eye.fill")
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(PTTheme.warning)
+                    .frame(width: 20)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text("\(viewer.label) is viewing this screen").font(.subheadline.weight(.medium))
+                    Text("Through Screen Sharing").font(.caption2).foregroundStyle(.secondary)
+                }
+                Spacer()
+                Button("Stop") { shell.endScreen(for: viewer.phoneID) }
+                    .controlSize(.small)
+                    .help("Disconnect \(viewer.label) from the screen. Its shells stay open.")
+            }
+            .padding(.horizontal, 12).padding(.vertical, 9)
+            .background(PTTheme.warning.opacity(0.10), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+            .accessibilityElement(children: .contain)
+        }
     }
 }
 

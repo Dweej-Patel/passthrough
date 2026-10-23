@@ -14,13 +14,16 @@ public final class Splice: @unchecked Sendable {
     private let queue: DispatchQueue
     private let onBytes: ((_ aToB: Bool, _ count: Int) -> Void)?
     private let onClose: () -> Void
+    private let endTogether: Bool
     private var closed = false
     private var halfClosures = 0
 
     /// `onBytes` counts traffic as it moves; `onClose` fires once, on `queue`.
-    public init(_ a: ByteStream, _ b: ByteStream, queue: DispatchQueue,
+    /// With `endTogether` either side ending (once its end has been passed
+    /// on) tears both down, for protocols that never half-close.
+    public init(_ a: ByteStream, _ b: ByteStream, queue: DispatchQueue, endTogether: Bool = false,
                 onBytes: ((_ aToB: Bool, _ count: Int) -> Void)? = nil, onClose: @escaping () -> Void) {
-        self.a = a; self.b = b; self.queue = queue; self.onBytes = onBytes; self.onClose = onClose
+        self.a = a; self.b = b; self.queue = queue; self.endTogether = endTogether; self.onBytes = onBytes; self.onClose = onClose
     }
 
     public func start() {
@@ -72,7 +75,7 @@ public final class Splice: @unchecked Sendable {
             guard let self else { return }
             self.queue.async {
                 self.halfClosures += 1
-                if self.halfClosures >= 2 { self.close() }
+                if self.endTogether || self.halfClosures >= 2 { self.close() }
             }
         }
     }

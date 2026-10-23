@@ -233,8 +233,10 @@ disconnected; it can attach again and gets the scrollback.
 | `historyList` | Mac | `history` | `ShellHistoryEntry` objects `id`, `title`, `phoneLabel`, `startedAt`, `endedAt`?, `exitStatus`?, `bytes`, `cols`?, `rows`? (the terminal's size when the session started; absent from older Macs); newest first. At most the newest 500, and fewer (the oldest dropped) if the line would otherwise exceed 262144 bytes. |
 | `transcript` | phone | `session` | Ask for a past session's recorded output: at most its last 8 MiB. |
 | `transcriptData` | Mac | `session`, `data`, `cols`?, `rows`?, `done`? | A piece of the transcript (same chunk size); `done: true` on the last. `cols`/`rows`, when present, are the size the recorded terminal had from this piece on: set it before feeding `data` (which may be empty when a size change ends the transcript). The first piece always carries the size its first byte was drawn at; older Macs send none. |
+| `screen` | phone | none | See and control the screen: the connection becomes a relay to Screen Sharing (below). |
+| `screenReady` | Mac | none | Reply to `screen`; every later byte, both ways, is Screen Sharing's. |
 | `ping` / `pong` | either | none | Liveness. |
-| `error` | Mac | `reason`, `session`? | `not_authorized`, `too_many_sessions` (8 at once), `no_such_session` or `bad_request`. |
+| `error` | Mac | `reason`, `session`? | `not_authorized`, `too_many_sessions` (8 at once), `no_such_session`, `bad_request`, `screen_not_allowed` or `screen_unavailable`. |
 
 The Mac keeps 1 MiB of scrollback per session.
 
@@ -248,6 +250,68 @@ once the font is as small as it goes). The Mac records sizes in the cast file
 as asciicast v2 resize events (`[t, "r", "COLSxROWS"]`) whenever the phone
 resizes the session, and restates the size every 1 MiB of cast so a tail read
 finds the size its start was drawn at; the header keeps the initial size.
+
+### Screen
+
+A phone the owner has also given screen access (a per-phone setting on the
+Mac, off by default, kept when the phone is granted shell access again)
+sends `screen` on an authorized connection. The connection leaves any
+session it was attached to, and the Mac dials macOS Screen Sharing on
+loopback (TCP 5900, `RemoteShell.screenSharingPort`). If it answers within 5
+seconds the Mac replies `screenReady`, and from the byte after that line the
+connection carries RFB (VNC) unchanged in both directions: Screen Sharing
+speaks first (its `RFB 003.889` banner), then asks for the Mac account's
+name and password itself. When either end closes, both are closed. Without
+screen access the reply is `error` `screen_not_allowed`; if Screen Sharing
+does not answer it is `screen_unavailable`. In both cases the connection
+stays a shell connection. The phone sends nothing after `screen` until
+`screenReady`; a line that does arrive meanwhile closes the connection. A
+phone uses its own connection for the screen, beside any shell connection.
+Turning a phone's screen access off ends its screen connections at once.
+
+### Screen video
+
+The fast way to see the screen, asked for first: `screenVideo` instead of
+`screen`, with the same screen access check. The Mac streams its main
+display itself, as H.264 from its hardware encoder in low-latency mode, at
+most at the display's size in points; no Mac password is involved (screen
+access is the owner's consent). If it can't (Passthrough lacks Screen
+Recording or Accessibility) the reply is `error` `screen_video_unavailable`
+and the connection stays a shell connection, so the phone can ask for
+`screen` next; a Mac too old to know `screenVideo` answers `bad_request`,
+read the same way. Otherwise the Mac replies `screenVideoReady`, and from
+the byte after that line both directions carry binary messages: a type
+byte, a 4-byte big-endian payload length (at most 16 MiB), the payload.
+Unknown types are skipped. Numbers are big-endian.
+
+Mac → phone:
+- `1` format: width u16, height u16, SPS length u16, SPS, PPS length u16,
+  PPS. Sent before every keyframe.
+- `2` frame: number u32 (from 1), flags u8 (bit 0: keyframe), then the
+  frame's NAL units, each after a 4-byte length (AVCC).
+
+Phone → Mac:
+- `16` hello: max width u16, max height u16, the phone's largest useful
+  size in pixels. Sent first; the Mac fits the stream inside it (and
+  starts anyway after a second without it).
+- `17` ack: frame number u32, once that frame is on screen. The Mac sends
+  a new frame only while fewer than 2 are unacked, encoding only the newest
+  capture (older ones are dropped before encoding), so nothing queues
+  anywhere and the picture stays current on a slow path. A frame the phone
+  can't show (one before the keyframe it is waiting for) is acked anyway.
+- `18` pointer: x u16, y u16 (each 0…65535 across the screen), buttons u8
+  (1 left, 2 middle, 4 right, as RFB).
+- `19` scroll: dx i16, dy i16 in the Mac's points; positive dy brings
+  earlier content into view.
+- `20` key: X keysym u32 (as RFB), modifiers u8 (1 command, 2 shift, 4
+  option, 8 control), pressed and released.
+- `21` text: UTF-8, typed as is whatever the Mac's keyboard layout.
+- `22` clipboard: UTF-8, put on the Mac's clipboard.
+- `23` keyframe request: the phone lost its place (its display failed, or
+  it was in the background).
+
+When the screen goes still the Mac sends its last frame again, twice, a
+quarter of a second apart, so the encoder sharpens it.
 
 ### Address policy
 
