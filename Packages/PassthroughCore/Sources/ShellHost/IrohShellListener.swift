@@ -38,6 +38,12 @@ public final class IrohShellListener: @unchecked Sendable {
         set { gate.screenAccess.set(newValue) }
     }
 
+    /// As `ShellListener.screenVideo`.
+    public var screenVideo: (@Sendable (_ phoneID: String) -> (any ScreenVideoSource)?)? {
+        get { gate.screenVideoFactory.get() }
+        set { gate.screenVideoFactory.set(newValue) }
+    }
+
     /// As `ShellListener.onScreenViewer`.
     public var onScreenViewer: (@Sendable (_ phoneID: String, _ label: String, _ viewing: Bool) -> Void)? {
         get { gate.screenHandler.get() }

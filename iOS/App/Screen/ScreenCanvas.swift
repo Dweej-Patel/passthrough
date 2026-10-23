@@ -1,5 +1,7 @@
+import AVFoundation
 import SwiftUI
 import UIKit
+import PassthroughCore
 import PassthroughUI
 import ScreenClient
 
@@ -13,16 +15,23 @@ enum ScreenTouchMode: String, CaseIterable {
 
 /// The Mac's screen on the phone: pinch to zoom, and touches turned into
 /// pointer events in screen pixels. Tap clicks, two-finger tap right-clicks,
-/// two-finger drag scrolls, press-and-hold then drag drags. It is also the
+/// two-finger drag scrolls, press-and-hold then drag drags, and three-finger
+/// swipes move between desktops (left and right) or open Mission Control
+/// (up) and the app's windows (down), as on a Mac's trackpad. It is also the
 /// keyboard's text input while the keyboard is up.
 final class ScreenCanvasView: UIView, UIScrollViewDelegate, UIKeyInput {
     var onPointer: ((CGPoint, RFBClient.Buttons) -> Void)?
     var onClick: ((CGPoint, RFBClient.Buttons) -> Void)?
-    /// Wheel notches: negative up, positive down.
-    var onScroll: ((CGPoint, Int) -> Void)?
+    /// Two fingers moved by a delta (screen pixels) with the pointer at a point; then the
+    /// screen pixels a wheel notch is worth, for Screen Sharing.
+    var onScroll: ((CGPoint, CGPoint, CGFloat) -> Void)?
+    var onScrollEnded: (() -> Void)?
+    /// The video display needs a keyframe to carry on (it was in the background).
+    var onNeedsKeyframe: (() -> Void)?
     var onKey: ((UInt32, [UInt32]) -> Void)?
     var onText: ((String, [UInt32]) -> Void)?
     var onPaste: (() -> Void)?
+    var onSpace: ((ScreenModel.SpaceAction) -> Void)?
 
     var mode = ScreenTouchMode.trackpad {
         didSet { applyMode() }
@@ -31,11 +40,12 @@ final class ScreenCanvasView: UIView, UIScrollViewDelegate, UIKeyInput {
     private let scroll = UIScrollView()
     private let content = UIView()
     private let cursor = UIView()
+    /// The Mac's own stream, decoded in hardware; Screen Sharing's frames are `content`'s image instead.
+    private let video = AVSampleBufferDisplayLayer()
     private var screenSize = CGSize.zero
     /// Where the Mac's pointer is, in screen pixels.
     private var cursorPoint = CGPoint.zero
     private var lastDragLocation = CGPoint.zero
-    private var wheelRemainder: CGFloat = 0
     private lazy var keyRow = ScreenKeyRow(canvas: self)
     /// Modifiers the key row holds for the next key.
     var heldModifiers: [UInt32] = []
@@ -54,6 +64,14 @@ final class ScreenCanvasView: UIView, UIScrollViewDelegate, UIKeyInput {
         scroll.addSubview(content)
         content.layer.magnificationFilter = .trilinear
         content.layer.minificationFilter = .trilinear
+        video.videoGravity = .resize
+        content.layer.addSublayer(video)
+        foregroundObserver = NotificationCenter.default.addObserver(forName: UIApplication.willEnterForegroundNotification, object: nil, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated {
+                self?.video.sampleBufferRenderer.flush(removingDisplayedImage: false, completionHandler: nil)
+                self?.onNeedsKeyframe?()
+            }
+        }
 
         cursor.isUserInteractionEnabled = false
         cursor.bounds = CGRect(x: 0, y: 0, width: 22, height: 22)
@@ -75,13 +93,24 @@ final class ScreenCanvasView: UIView, UIScrollViewDelegate, UIKeyInput {
         hold.minimumPressDuration = 0.35
         move.require(toFail: hold)
         for recognizer in [tap, twoFingerTap, move, wheel, hold] { addGestureRecognizer(recognizer) }
+        for direction: UISwipeGestureRecognizer.Direction in [.left, .right, .up, .down] {
+            let swipe = UISwipeGestureRecognizer(target: self, action: #selector(swiped(_:)))
+            swipe.numberOfTouchesRequired = 3
+            swipe.direction = direction
+            addGestureRecognizer(swipe)
+        }
         self.move = move
         applyMode()
     }
 
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
+    deinit {
+        if let foregroundObserver { NotificationCenter.default.removeObserver(foregroundObserver) }
+    }
+
     private weak var move: UIPanGestureRecognizer?
+    private var foregroundObserver: NSObjectProtocol?
 
     private func applyMode() {
         // Trackpad: one finger moves the pointer, and a zoomed view follows it.
@@ -103,6 +132,17 @@ final class ScreenCanvasView: UIView, UIScrollViewDelegate, UIKeyInput {
         content.layer.contents = image
     }
 
+    /// One frame of the Mac's stream; false if the display couldn't take it (it needs a keyframe).
+    func enqueue(_ sample: CMSampleBuffer) -> Bool {
+        let renderer = video.sampleBufferRenderer
+        if renderer.status == .failed {
+            renderer.flush()
+            return false
+        }
+        renderer.enqueue(sample)
+        return true
+    }
+
     override func layoutSubviews() {
         super.layoutSubviews()
         if scroll.frame != bounds {
@@ -118,6 +158,10 @@ final class ScreenCanvasView: UIView, UIScrollViewDelegate, UIKeyInput {
         let fit = min(bounds.width / screenSize.width, bounds.height / screenSize.height)
         content.frame = CGRect(origin: .zero, size: CGSize(width: screenSize.width * fit, height: screenSize.height * fit))
         scroll.contentSize = content.frame.size
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        video.frame = content.bounds
+        CATransaction.commit()
         let onePixel = 1 / (fit * max(window?.screen.scale ?? 3, 1))
         scroll.maximumZoomScale = max(3, onePixel)
         centerContent()
@@ -218,28 +262,40 @@ final class ScreenCanvasView: UIView, UIScrollViewDelegate, UIKeyInput {
         }
     }
 
-    /// Two fingers: the Mac's scroll wheel, content following the fingers.
+    /// Two fingers: the Mac's scroll, content following the fingers.
     @objc private func wheeled(_ recognizer: UIPanGestureRecognizer) {
         switch recognizer.state {
-        case .began:
-            wheelRemainder = 0
         case .changed:
-            wheelRemainder += recognizer.translation(in: self).y
+            guard content.frame.width > 0 else { return }
+            let translation = recognizer.translation(in: self)
             recognizer.setTranslation(.zero, in: self)
-            let step: CGFloat = 16
-            let notches = Int(wheelRemainder / step)
-            guard notches != 0 else { return }
-            wheelRemainder -= CGFloat(notches) * step
+            let pixelsPerPoint = screenSize.width / content.frame.width
             let at = mode == .direct ? screenPoint(recognizer.location(in: self)) : cursorPoint
-            onScroll?(at, -notches)
+            // A notch per 16 of the phone's points, as before.
+            onScroll?(at, CGPoint(x: translation.x * pixelsPerPoint, y: translation.y * pixelsPerPoint), 16 * pixelsPerPoint)
+        case .ended, .cancelled, .failed:
+            onScrollEnded?()
         default:
             break
+        }
+    }
+
+    /// Three fingers, as on the Mac: swiping left brings in the desktop on the right.
+    @objc private func swiped(_ recognizer: UISwipeGestureRecognizer) {
+        switch recognizer.direction {
+        case .left: onSpace?(.nextDesktop)
+        case .right: onSpace?(.previousDesktop)
+        case .up: onSpace?(.missionControl)
+        case .down: onSpace?(.appWindows)
+        default: break
         }
     }
 
     // MARK: Keyboard
 
     override var canBecomeFirstResponder: Bool { true }
+    /// No three-finger undo, redo or copy while typing: those swipes are the Mac's.
+    override var editingInteractionConfiguration: UIEditingInteractionConfiguration { .none }
     override var inputAccessoryView: UIView? { keyRow }
 
     var hasText: Bool { true }
@@ -430,10 +486,17 @@ struct ScreenCanvas: UIViewRepresentable {
         let view = ScreenCanvasView(frame: .zero)
         view.onPointer = { [weak model] point, buttons in model?.pointer(at: point, buttons: buttons) }
         view.onClick = { [weak model] point, button in model?.click(at: point, button: button) }
-        view.onScroll = { [weak model] point, notches in model?.scroll(at: point, steps: notches) }
+        view.onScroll = { [weak model] point, delta, notch in model?.scroll(at: point, by: delta, notch: notch) }
+        view.onScrollEnded = { [weak model] in model?.scrollEnded() }
+        view.onNeedsKeyframe = { [weak model] in model?.videoNeedsKeyframe() }
+        model.onVideoFrame = { [weak view] sample in view?.enqueue(sample) ?? false }
+        // A new display (first, or remade) can't use the frames in between: start it from a keyframe.
+        model.videoNeedsKeyframe()
         view.onKey = { [weak model] keysym, modifiers in model?.key(keysym, modifiers: modifiers) }
         view.onText = { [weak model] text, modifiers in model?.type(text, modifiers: modifiers) }
         view.onPaste = { [weak model] in model?.pastePhoneClipboard() }
+        view.onSpace = { [weak model] action in model?.perform(action) }
+        model.onFrame = { [weak view] image in view?.show(image, size: CGSize(width: image.width, height: image.height)) }
         return view
     }
 

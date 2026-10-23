@@ -1,4 +1,5 @@
 import CoreGraphics
+import CoreMedia
 import Foundation
 import IrohTransport
 import LocalAuthentication
@@ -7,8 +8,13 @@ import PassthroughCore
 import ScreenClient
 
 /// One view of the selected Mac's screen: its own shell connection, which asks
-/// for the screen and is handed over to an `RFBClient` (protocol/README.md,
-/// "Screen"). Publishes the latest frame; takes pointer and key input.
+/// for the screen. First the Mac's own H.264 stream (`ScreenVideoClient`,
+/// protocol/README.md "Screen video"): smooth, and no password. A Mac that
+/// can't stream (it lacks Screen Recording or Accessibility, or predates it)
+/// says so, and the same connection asks for Screen Sharing instead, handed
+/// to an `RFBClient` with the Mac's login ("Screen"). Frames go straight to
+/// the canvas (`onFrame`, `onVideoFrame`; not published: a frame must not
+/// re-render the SwiftUI screen around it); takes pointer and key input.
 @MainActor
 final class ScreenModel: ObservableObject {
     enum Phase: Equatable {
@@ -20,10 +26,17 @@ final class ScreenModel: ObservableObject {
     }
 
     @Published private(set) var phase = Phase.connecting
-    @Published private(set) var image: CGImage?
+    /// The latest frame.
+    private(set) var image: CGImage?
+    /// The canvas, which draws each frame as it arrives.
+    var onFrame: ((CGImage) -> Void)?
+    /// The canvas's video display; false (or unset) when it couldn't take the frame, and a keyframe is asked for.
+    var onVideoFrame: ((CMSampleBuffer) -> Bool)?
     /// The Mac's screen in pixels.
     @Published private(set) var screenSize = CGSize.zero
     @Published private(set) var macName = "your Mac"
+    /// Why the view is on Screen Sharing rather than the Mac's own stream; nil when it isn't.
+    @Published private(set) var slowReason: String?
 
     private var shell: ShellModel?
     private var context: LAContext?
@@ -31,6 +44,15 @@ final class ScreenModel: ObservableObject {
     private var client: ShellClient?
     private var dialer: IrohShellDialer?
     private var rfb: RFBClient?
+    private var video: ScreenVideoClient?
+    /// The connection is asking for the Mac's own stream (not Screen Sharing).
+    private var wantsVideo = false
+    /// Scroll not yet sent: a fraction of a point (stream) or of a wheel notch (Screen Sharing).
+    private var scrollRemainder = CGPoint.zero
+    /// Where the Mac last heard the pointer was, in screen pixels.
+    private var lastPointer: CGPoint?
+    /// The stream has shown its size: a stream ending before that never worked, so Screen Sharing is tried.
+    private var videoStarted = false
     /// Bumped by every start and stop, so a stale connection's events are dropped.
     private var generation = 0
     private var pendingLogin: (login: RFBClient.Login, remember: Bool)?
@@ -48,22 +70,29 @@ final class ScreenModel: ObservableObject {
         }
         macID = mac.macID
         macName = mac.macName
-        if let saved = ScreenLoginStore.read(macID: mac.macID, context: context) {
-            connect(saved, remember: false)
-        } else {
-            phase = .login(error: nil)
-        }
+        slowReason = nil
+        open(video: true)
     }
 
+    /// Screen Sharing, with the Mac account's login.
     func connect(_ login: RFBClient.Login, remember: Bool) {
         #if DEBUG
         if Self.demoState != nil { return applyDemo("live") }
         #endif
+        pendingLogin = (login, remember)
+        open(video: false)
+    }
+
+    private func open(video: Bool) {
+        let login = pendingLogin
         stop()
+        pendingLogin = login
         guard let shell else { return }
         generation += 1
         let gen = generation
-        pendingLogin = (login, remember)
+        wantsVideo = video
+        videoStarted = false
+        lastPointer = nil
         phase = .connecting
         guard let connection = shell.screenConnection(onEvent: { [weak self] event in
             MainActor.assumeIsolated { self?.handle(event, generation: gen) }
@@ -75,11 +104,29 @@ final class ScreenModel: ObservableObject {
         dialer = connection.dialer
     }
 
+    /// The Mac can't stream its screen itself: Screen Sharing on the same connection, if a login is saved.
+    private func fallBackToScreenSharing() {
+        wantsVideo = false
+        slowReason = "Slower: allow Passthrough Screen Recording and Accessibility on \(macName) for the smooth view."
+        if pendingLogin == nil, let macID, let context, let saved = ScreenLoginStore.read(macID: macID, context: context) {
+            pendingLogin = (saved, false)
+        }
+        if pendingLogin != nil {
+            client?.requestScreen(video: false)
+        } else {
+            stop()
+            phase = .login(error: nil)
+        }
+    }
+
     /// Ends the view; the shell sessions are untouched.
     func stop() {
         generation += 1
         rfb?.close()
         rfb = nil
+        video?.close()
+        video = nil
+        pendingLogin = nil
         client?.disconnect()
         client = nil
         dialer?.shutdown()
@@ -93,7 +140,17 @@ final class ScreenModel: ObservableObject {
         }
         switch event {
         case .ready:
-            client?.requestScreen()
+            client?.requestScreen(video: wantsVideo)
+        case let .screen(stream, initialBytes) where wantsVideo:
+            client = nil   // it let go of the stream; the dialer stays up for it
+            let native = UIScreen.main.nativeBounds.size
+            let video = ScreenVideoClient(stream: stream, initialBytes: initialBytes, maxSide: Int(max(native.width, native.height))) { [weak self] event in
+                MainActor.assumeIsolated { self?.handle(event, generation: gen) }
+            }
+            self.video = video
+            video.start()
+        case .failed(.screenVideoUnavailable, _) where wantsVideo, .failed(.badRequest, _) where wantsVideo:
+            fallBackToScreenSharing()
         case let .screen(stream, initialBytes):
             client = nil   // it let go of the stream; the dialer stays up for it
             guard let login = pendingLogin?.login else { return stream.cancel() }
@@ -113,6 +170,33 @@ final class ScreenModel: ObservableObject {
         }
     }
 
+    private func handle(_ event: ScreenVideoClient.Event, generation gen: Int) {
+        guard gen == generation else { return }
+        switch event {
+        case let .size(width, height):
+            screenSize = CGSize(width: width, height: height)
+            videoStarted = true
+            phase = .live
+        case let .frame(sample, number):
+            // Not shown (no canvas yet, or its display failed): what follows needs a new keyframe.
+            if onVideoFrame?(sample) != true { video?.requestKeyframe() }
+            video?.shown(number)
+        case .closed:
+            let worked = videoStarted
+            stop()
+            guard worked else {
+                // The Mac said yes but couldn't capture or encode after all.
+                slowReason = "Slower: \(macName) couldn't stream its screen. Reopening Passthrough on it may help."
+                if let macID, let context, let saved = ScreenLoginStore.read(macID: macID, context: context) {
+                    return connect(saved, remember: false)
+                }
+                phase = .login(error: nil)
+                return
+            }
+            phase = .failed("The connection to \(macName) was lost.")
+        }
+    }
+
     private func handle(_ event: RFBClient.Event, generation gen: Int) {
         guard gen == generation else { return }
         switch event {
@@ -125,7 +209,9 @@ final class ScreenModel: ObservableObject {
             pendingLogin = nil
         case let .frame(image):
             self.image = image
-            screenSize = CGSize(width: image.width, height: image.height)
+            let size = CGSize(width: image.width, height: image.height)
+            if size != screenSize { screenSize = size }
+            onFrame?(image)
         case let .clipboard(text):
             if !text.isEmpty { UIPasteboard.general.string = text }
         case .bell:
@@ -151,8 +237,14 @@ final class ScreenModel: ObservableObject {
 
     // MARK: Input
 
+    /// `point` in screen pixels.
     func pointer(at point: CGPoint, buttons: RFBClient.Buttons) {
-        rfb?.pointer(x: Int(point.x), y: Int(point.y), buttons: buttons)
+        lastPointer = point
+        if let video, screenSize.width > 0 {
+            video.pointer(x: point.x / max(screenSize.width - 1, 1), y: point.y / max(screenSize.height - 1, 1), buttons: buttons)
+        } else {
+            rfb?.pointer(x: Int(point.x), y: Int(point.y), buttons: buttons)
+        }
     }
 
     func click(at point: CGPoint, button: RFBClient.Buttons = .left) {
@@ -160,14 +252,34 @@ final class ScreenModel: ObservableObject {
         pointer(at: point, buttons: [])
     }
 
-    /// One wheel notch up (negative) or down (positive) per step.
-    func scroll(at point: CGPoint, steps: Int) {
-        let notch: RFBClient.Buttons = steps < 0 ? .wheelUp : .wheelDown
-        for _ in 0..<abs(steps) { click(at: point, button: notch) }
+    /// Fingers moved `delta` (screen pixels) with the pointer at `point`: content follows them.
+    /// The stream scrolls by as much (its pixels are about the Mac's points); Screen Sharing
+    /// only knows wheel notches, one per `notch` pixels.
+    func scroll(at point: CGPoint, by delta: CGPoint, notch: CGFloat) {
+        scrollRemainder.x += delta.x
+        scrollRemainder.y += delta.y
+        if let video {
+            // Scrolling goes where the pointer is: there first (a direct-mode scroll is under the fingers).
+            if lastPointer != point { pointer(at: point, buttons: []) }
+            let dx = Int(scrollRemainder.x), dy = Int(scrollRemainder.y)
+            scrollRemainder.x -= CGFloat(dx)
+            scrollRemainder.y -= CGFloat(dy)
+            video.scroll(dx: dx, dy: dy)
+        } else {
+            let notches = Int(scrollRemainder.y / notch)
+            guard notches != 0 else { return }
+            scrollRemainder = CGPoint(x: 0, y: scrollRemainder.y - CGFloat(notches) * notch)
+            // Fingers down (positive) bring earlier content in: the wheel turns up.
+            let button: RFBClient.Buttons = notches > 0 ? .wheelUp : .wheelDown
+            for _ in 0..<abs(notches) { click(at: point, button: button) }
+        }
     }
+
+    func scrollEnded() { scrollRemainder = .zero }
 
     /// A key with modifiers held around it.
     func key(_ keysym: UInt32, modifiers: [UInt32] = []) {
+        if let video { return video.key(keysym, modifiers: Self.mask(modifiers)) }
         modifiers.forEach { rfb?.key($0, down: true) }
         rfb?.key(keysym, down: true)
         rfb?.key(keysym, down: false)
@@ -175,16 +287,62 @@ final class ScreenModel: ObservableObject {
     }
 
     func type(_ text: String, modifiers: [UInt32] = []) {
+        if let video, modifiers.isEmpty {
+            // Return and Tab are keys, not characters, to the apps on the Mac.
+            var run = ""
+            for character in text {
+                if character == "\n" || character == "\r" || character == "\t", let keysym = RFBKeys.keysym(for: character) {
+                    if !run.isEmpty { video.text(run); run = "" }
+                    video.key(keysym, modifiers: [])
+                } else {
+                    run.append(character)
+                }
+            }
+            if !run.isEmpty { video.text(run) }
+            return
+        }
         for character in text {
             if let keysym = RFBKeys.keysym(for: character) { key(keysym, modifiers: modifiers) }
         }
     }
 
+    /// Mission Control's shortcuts, as macOS sets them by default (System
+    /// Settings › Keyboard › Keyboard Shortcuts › Mission Control).
+    enum SpaceAction {
+        case previousDesktop, nextDesktop, missionControl, appWindows, showDesktop
+    }
+
+    func perform(_ action: SpaceAction) {
+        switch action {
+        case .previousDesktop: key(RFBKeys.left, modifiers: [RFBKeys.control])
+        case .nextDesktop: key(RFBKeys.right, modifiers: [RFBKeys.control])
+        case .missionControl: key(RFBKeys.up, modifiers: [RFBKeys.control])
+        case .appWindows: key(RFBKeys.down, modifiers: [RFBKeys.control])
+        case .showDesktop: key(RFBKeys.function(11))
+        }
+        UIImpactFeedbackGenerator(style: .light).impactOccurred()
+    }
+
     /// Puts the phone's clipboard on the Mac's and pastes it there.
     func pastePhoneClipboard() {
         guard let text = UIPasteboard.general.string, !text.isEmpty else { return }
-        rfb?.clipboard(text)
+        if let video { video.clipboard(text) } else { rfb?.clipboard(text) }
         key(0x76, modifiers: [RFBKeys.command])   // ⌘V
+    }
+
+    /// The display lost its place (it was in the background, say): ask for a keyframe.
+    func videoNeedsKeyframe() { video?.requestKeyframe() }
+
+    private static func mask(_ modifiers: [UInt32]) -> ScreenVideoWire.Modifiers {
+        modifiers.reduce(into: []) { mask, keysym in
+            switch keysym {
+            case RFBKeys.command: mask.insert(.command)
+            case RFBKeys.shift: mask.insert(.shift)
+            case RFBKeys.option: mask.insert(.option)
+            case RFBKeys.control: mask.insert(.control)
+            default: break
+            }
+        }
     }
 }
 

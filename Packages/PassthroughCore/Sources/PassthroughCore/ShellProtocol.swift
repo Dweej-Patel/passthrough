@@ -76,6 +76,9 @@ public struct ShellEnvelope: Codable, Equatable, Sendable {
     public static let transcriptData = "transcriptData"
     public static let screen = "screen"
     public static let screenReady = "screenReady"
+    /// The Mac's own H.264 stream of its screen (`ScreenVideoWire`), rather than Screen Sharing.
+    public static let screenVideo = "screenVideo"
+    public static let screenVideoReady = "screenVideoReady"
     public static let ping = "ping"
     public static let pong = "pong"
     public static let error = "error"
@@ -165,6 +168,9 @@ public enum ShellError: String, Error, Sendable {
     case screenNotAllowed = "screen_not_allowed"
     /// Screen Sharing is off (nothing answers on its port).
     case screenUnavailable = "screen_unavailable"
+    /// The Mac can't stream its screen itself (it lacks Screen Recording or
+    /// Accessibility); Screen Sharing may still work.
+    case screenVideoUnavailable = "screen_video_unavailable"
 }
 
 /// Which peers may reach the shell, and which of the Mac's addresses a phone

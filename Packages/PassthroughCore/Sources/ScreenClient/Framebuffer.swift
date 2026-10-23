@@ -59,23 +59,30 @@ final class Framebuffer {
     }
 
     /// ZRLE (RFC 6143 §7.7.6): 64×64 tiles of the inflated `data`, with
-    /// 3-byte pixels (B, G, R).
+    /// 3-byte pixels (B, G, R). Written a row or a run at a time through
+    /// pointers: this runs for every pixel of every update.
     func zrle(x: Int, y: Int, w: Int, h: Int, _ data: Data) throws {
         try check(x, y, w, h)
+        guard w > 0, h > 0 else { return }
         let width = self.width
+        let palette = UnsafeMutablePointer<UInt32>.allocate(capacity: 127)
+        defer { palette.deallocate() }
         try data.withUnsafeBytes { (source: UnsafeRawBufferPointer) in
-            let src = source.bindMemory(to: UInt8.self)
+            guard let src = source.baseAddress?.assumingMemoryBound(to: UInt8.self) else { throw Failure.corrupt }
+            let end = source.count
             var p = 0
-            func need(_ count: Int) throws { if p + count > src.count { throw Failure.corrupt } }
-            func cpixel() throws -> UInt32 {
-                try need(3)
-                defer { p += 3 }
-                return UInt32(src[p]) | UInt32(src[p + 1]) << 8 | UInt32(src[p + 2]) << 16
+            func cpixel(_ at: Int) -> UInt32 {
+                UInt32(src[at]) | UInt32(src[at + 1]) << 8 | UInt32(src[at + 2]) << 16
+            }
+            func readPalette(_ size: Int) throws {
+                guard p + 3 * size <= end else { throw Failure.corrupt }
+                for i in 0..<size { palette[i] = cpixel(p + 3 * i) }
+                p += 3 * size
             }
             func runLength() throws -> Int {
                 var length = 1
                 while true {
-                    try need(1)
+                    guard p < end else { throw Failure.corrupt }
                     let byte = Int(src[p]); p += 1
                     length += byte
                     if byte != 255 { return length }
@@ -87,55 +94,68 @@ final class Framebuffer {
                     let th = min(64, h - ty)
                     for tx in stride(from: 0, to: w, by: 64) {
                         let tw = min(64, w - tx)
-                        let count = tw * th
-                        func put(_ index: Int, _ value: UInt32) {
-                            base[(y + ty + index / tw) * width + x + tx + index % tw] = value
+                        let origin = base + (y + ty) * width + x + tx
+                        // Runs fill the tile left to right, wrapping rows.
+                        var row = 0, column = 0
+                        func fill(_ value: UInt32, _ run: Int) throws {
+                            var left = run
+                            while left > 0 {
+                                guard row < th else { throw Failure.corrupt }
+                                let n = min(left, tw - column)
+                                (origin + row * width + column).update(repeating: value, count: n)
+                                column += n
+                                left -= n
+                                if column == tw { column = 0; row += 1 }
+                            }
                         }
-                        try need(1)
+                        guard p < end else { throw Failure.corrupt }
                         let sub = Int(src[p]); p += 1
                         switch sub {
                         case 0:
-                            for index in 0..<count { put(index, try cpixel()) }
+                            guard p + 3 * tw * th <= end else { throw Failure.corrupt }
+                            for r in 0..<th {
+                                let line = origin + r * width
+                                var q = p + 3 * tw * r
+                                for c in 0..<tw {
+                                    line[c] = UInt32(src[q]) | UInt32(src[q + 1]) << 8 | UInt32(src[q + 2]) << 16
+                                    q += 3
+                                }
+                            }
+                            p += 3 * tw * th
                         case 1:
-                            let value = try cpixel()
-                            for index in 0..<count { put(index, value) }
+                            try readPalette(1)
+                            for r in 0..<th { (origin + r * width).update(repeating: palette[0], count: tw) }
                         case 2...16:
-                            let palette = try (0..<sub).map { _ in try cpixel() }
+                            try readPalette(sub)
                             let bits = sub == 2 ? 1 : sub <= 4 ? 2 : 4
                             let rowBytes = (tw * bits + 7) / 8
-                            try need(rowBytes * th)
+                            guard p + rowBytes * th <= end else { throw Failure.corrupt }
                             let mask = (1 << bits) - 1
-                            for row in 0..<th {
-                                let rowStart = p + row * rowBytes
-                                for column in 0..<tw {
-                                    let bit = column * bits
-                                    let byte = Int(src[rowStart + bit / 8])
-                                    let index = byte >> (8 - bits - bit % 8) & mask
-                                    guard index < palette.count else { throw Failure.corrupt }
-                                    put(row * tw + column, palette[index])
+                            for r in 0..<th {
+                                let line = origin + r * width
+                                let rowStart = src + p + r * rowBytes
+                                for c in 0..<tw {
+                                    let bit = c * bits
+                                    let index = Int(rowStart[bit >> 3]) >> (8 - bits - bit & 7) & mask
+                                    guard index < sub else { throw Failure.corrupt }
+                                    line[c] = palette[index]
                                 }
                             }
                             p += rowBytes * th
                         case 128:
-                            var index = 0
-                            while index < count {
-                                let value = try cpixel()
-                                let run = try runLength()
-                                guard index + run <= count else { throw Failure.corrupt }
-                                for i in index..<(index + run) { put(i, value) }
-                                index += run
+                            while row < th {
+                                guard p + 3 <= end else { throw Failure.corrupt }
+                                let value = cpixel(p); p += 3
+                                try fill(value, try runLength())
                             }
                         case 130...255:
-                            let palette = try (0..<(sub - 128)).map { _ in try cpixel() }
-                            var index = 0
-                            while index < count {
-                                try need(1)
+                            let size = sub - 128
+                            try readPalette(size)
+                            while row < th {
+                                guard p < end else { throw Failure.corrupt }
                                 let code = Int(src[p]); p += 1
-                                guard code & 127 < palette.count else { throw Failure.corrupt }
-                                let run = code & 128 != 0 ? try runLength() : 1
-                                guard index + run <= count else { throw Failure.corrupt }
-                                for i in index..<(index + run) { put(i, palette[code & 127]) }
-                                index += run
+                                guard code & 127 < size else { throw Failure.corrupt }
+                                try fill(palette[code & 127], code & 128 != 0 ? try runLength() : 1)
                             }
                         default:
                             throw Failure.corrupt

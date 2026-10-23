@@ -2,6 +2,7 @@ import SwiftUI
 import IrohTransport
 import PassthroughCore
 import PassthroughUI
+import ScreenHost
 import ShellHost
 
 /// Remote Shell tab: turn it on, finish setting it up, and see who can
@@ -36,6 +37,7 @@ struct RemoteShellSettings: View {
             // Granted in System Settings while this is open: notice it.
             while !Task.isCancelled {
                 fullDiskAccess = FullDiskAccess.isGranted
+                shell.refreshScreenVideo()
                 try? await Task.sleep(for: .seconds(2))
             }
         }
@@ -79,6 +81,7 @@ struct RemoteShellSettings: View {
                         : "\(shell.phones.count) phone\(shell.phones.count == 1 ? "" : "s") can open a shell. Plug in another paired phone to add it.") {
                 EmptyView()
             }
+            screenVideoStep
             screenSharingStep
             SetupStep(status: keepAwake.isOn ? .done : .optional,
                       title: "Keep this Mac awake",
@@ -92,17 +95,44 @@ struct RemoteShellSettings: View {
         }
     }
 
+    /// Passthrough streaming the screen itself: smooth video, no password.
+    private var screenVideoStep: some View {
+        let access = shell.screenVideo
+        let wanted = shell.phones.contains(where: \.screenAllowed)
+        return SetupStep(status: access.ready ? .done : (wanted ? .needed : .optional),
+                         title: "Screen Recording and Accessibility",
+                         detail: access.ready
+                            ? "Phones you allow below see this screen as smooth video and control it."
+                            : (wanted ? "A phone below may see this screen. " : "Optional. ")
+                                + "Allow Passthrough under Privacy & Security › Screen Recording (to stream this screen) and › Accessibility (to take a phone's clicks and keys). macOS may want Passthrough reopened after Screen Recording.") {
+            HStack(spacing: 6) {
+                if !access.capture {
+                    Button("Screen Recording…") {
+                        ScreenVideoPermissions.requestCapture()
+                        ScreenVideoPermissions.openSettings(capture: true)
+                    }
+                }
+                if !access.control {
+                    Button("Accessibility…") {
+                        ScreenVideoPermissions.requestControl()
+                        ScreenVideoPermissions.openSettings(capture: false)
+                    }
+                }
+            }
+        }
+    }
+
     /// Only once checked, so it doesn't flash "off" while the first check runs.
     @ViewBuilder private var screenSharingStep: some View {
         if let on = shell.screenSharingOn {
-            let wanted = shell.phones.contains(where: \.screenAllowed)
-            SetupStep(status: on ? .done : (wanted ? .needed : .optional),
+            let needed = shell.phones.contains(where: \.screenAllowed) && !shell.screenVideo.ready
+            SetupStep(status: on ? .done : (needed ? .needed : .optional),
                       title: "Screen Sharing",
                       detail: on
-                        ? "Phones you allow below can see and control this screen after entering your Mac's name and password. Screen Sharing also answers on your local network, behind the same password."
-                        : wanted
-                            ? "A phone below is allowed to see this screen, but Screen Sharing is off. Turn it on in System Settings › General › Sharing."
-                            : "Optional. Turn on Screen Sharing in System Settings, then allow a phone below, to see and control this screen from it.") {
+                        ? "The fallback: when Passthrough can't stream this screen itself, phones use Screen Sharing, after entering your Mac's name and password. It also answers on your local network, behind the same password."
+                        : needed
+                            ? "Until Passthrough may stream this screen itself, phones need Screen Sharing. Turn it on in System Settings › General › Sharing."
+                            : "Optional fallback, slower, for when Passthrough can't stream this screen itself.") {
                 if !on { Button("Open Settings…") { ScreenSharing.openSettings() } }
             }
         }
@@ -255,7 +285,7 @@ private struct PhonesSection: View {
                             .labelsHidden()
                     }
                     .fixedSize()
-                    .help("Also let \(phone.label) see and control this screen through Screen Sharing. It still asks for your Mac's password.")
+                    .help("Also let \(phone.label) see and control this screen.")
                     Button("Revoke…") { revoking = phone }
                 }
                 .padding(.vertical, 1)

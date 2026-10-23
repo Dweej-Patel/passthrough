@@ -6,8 +6,10 @@ import PassthroughCore
 /// the remote shell handed over after `screenReady` (protocol/README.md,
 /// "Screen"). It logs in with Apple's method (account name and password),
 /// asks for 32-bit pixels in ZRLE, Zlib, CopyRect or Raw, and keeps one
-/// incremental update request outstanding. Everything runs on its own queue;
-/// events arrive on the queue given to `init`.
+/// incremental update request outstanding, sent as each update starts so the
+/// Mac prepares the next one while this one decodes. Everything runs on its
+/// own queue; events arrive on the queue given to `init`, at most one frame
+/// at a time (a frame that is still waiting there is replaced, not queued).
 public final class RFBClient: @unchecked Sendable {
     public struct Login: Sendable {
         public var username: String
@@ -68,6 +70,9 @@ public final class RFBClient: @unchecked Sendable {
     private let zrle = Inflater()
     private var rectsLeft = 0
     private var closed = false
+    /// The frame waiting on the callback queue, if one is; guarded by `frameLock`.
+    private var pendingFrame: CGImage?
+    private let frameLock = NSLock()
 
     /// `initialBytes`: what arrived after `screenReady` with it.
     public init(stream: any ByteStream, initialBytes: Data = Data(), login: Login, queue: DispatchQueue = .main,
@@ -252,6 +257,7 @@ public final class RFBClient: @unchecked Sendable {
             guard available >= 4 else { return false }
             rectsLeft = u16(2)
             head += 4
+            requestUpdate(incremental: true)
             if rectsLeft == 0 { updateDone() }
         case 1:   // SetColourMapEntries: not used with true colour; skipped
             guard available >= 6 else { return false }
@@ -308,6 +314,7 @@ public final class RFBClient: @unchecked Sendable {
         case -223:   // DesktopSize: the screen changed size
             head += 12
             framebuffer.resize(width: w, height: h)
+            requestUpdate(incremental: false)   // the request sent with this update had the old size
         default:
             throw Failure.protocolError("encoding \(encoding)")
         }
@@ -317,8 +324,20 @@ public final class RFBClient: @unchecked Sendable {
     }
 
     private func updateDone() {
-        if let image = framebuffer.image() { emit(.frame(image)) }
-        requestUpdate(incremental: true)
+        guard let image = framebuffer.image() else { return }
+        frameLock.lock()
+        let waiting = pendingFrame != nil
+        pendingFrame = image
+        frameLock.unlock()
+        guard !waiting else { return }   // the delivery already queued takes this one
+        let onEvent = self.onEvent
+        callbackQueue.async { [self] in
+            frameLock.lock()
+            let image = pendingFrame
+            pendingFrame = nil
+            frameLock.unlock()
+            if let image { onEvent(.frame(image)) }
+        }
     }
 
     private func requestUpdate(incremental: Bool) {

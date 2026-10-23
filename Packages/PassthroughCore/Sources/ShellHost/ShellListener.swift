@@ -50,6 +50,15 @@ public final class ShellListener: @unchecked Sendable {
         set { gate.screenAccess.set(newValue) }
     }
 
+    /// Makes the Mac's own screen stream for a phone's `screenVideo` request
+    /// (protocol/README.md, "Screen video"), or nil when it can't: then the
+    /// phone is told `screen_video_unavailable`. Asked on the listener's
+    /// queue after `screenAllowed`, so it must not block. Unset: never.
+    public var screenVideo: (@Sendable (_ phoneID: String) -> (any ScreenVideoSource)?)? {
+        get { gate.screenVideoFactory.get() }
+        set { gate.screenVideoFactory.set(newValue) }
+    }
+
     /// A phone started (`viewing`) or stopped seeing the screen. On the listener's queue.
     public var onScreenViewer: (@Sendable (_ phoneID: String, _ label: String, _ viewing: Bool) -> Void)? {
         get { gate.screenHandler.get() }
@@ -202,6 +211,7 @@ final class ShellGate: @unchecked Sendable {
     let eventHandler = Locked<(@Sendable (String) -> Void)?>(nil)
     let screenAccess = Locked<(@Sendable (String) -> Bool)?>(nil)
     let screenHandler = Locked<(@Sendable (_ phoneID: String, _ label: String, _ viewing: Bool) -> Void)?>(nil)
+    let screenVideoFactory = Locked<(@Sendable (String) -> (any ScreenVideoSource)?)?>(nil)
     /// Where `screen` requests are relayed; another port in tests.
     let screenPort = Locked(RemoteShell.screenSharingPort)
     private let shellKeys: @Sendable (String) -> [Data]
@@ -454,6 +464,8 @@ final class ShellConnection: ShellAttachment, @unchecked Sendable {
     private var screenDial: NWConnection?
     /// The connection is now a byte relay to Screen Sharing; no more lines.
     private var screenRelay: Splice?
+    /// The connection now carries the Mac's own screen stream; no more lines.
+    private var screenVideo: (any ScreenVideoSource)?
     var onClose: (() -> Void)?
 
     init(gate: ShellGate, stream: any ByteStream, phoneID: String, label: String) {
@@ -479,7 +491,7 @@ final class ShellConnection: ShellAttachment, @unchecked Sendable {
     }
 
     /// Asked for the screen: being relayed to Screen Sharing, or about to be.
-    var isScreen: Bool { screenDial != nil || screenRelay != nil }
+    var isScreen: Bool { screenDial != nil || screenRelay != nil || screenVideo != nil }
 
     /// Ends the connection and stops the manager sending to it. Idempotent.
     func close() {
@@ -496,6 +508,11 @@ final class ShellConnection: ShellAttachment, @unchecked Sendable {
             gate?.screenViewer(phoneID, label, viewing: false)
         }
         screenRelay = nil
+        if let screenVideo {
+            screenVideo.stop()
+            gate?.screenViewer(phoneID, label, viewing: false)
+        }
+        screenVideo = nil
         stream.onTerminated = nil
         stream.cancel()
         let onClose = self.onClose
@@ -584,6 +601,10 @@ final class ShellConnection: ShellAttachment, @unchecked Sendable {
         case ShellEnvelope.screen:
             guard gate?.screenAllowed(phoneID) == true else { return fail(.screenNotAllowed) }
             screen()
+        case ShellEnvelope.screenVideo:
+            guard gate?.screenAllowed(phoneID) == true else { return fail(.screenNotAllowed) }
+            guard let source = gate?.screenVideoFactory.get()?(phoneID) else { return fail(.screenVideoUnavailable) }
+            streamScreen(source)
         case ShellEnvelope.ping:
             send(ShellEnvelope(t: ShellEnvelope.pong))
         case ShellEnvelope.pong:
@@ -754,6 +775,29 @@ final class ShellConnection: ShellAttachment, @unchecked Sendable {
         send(ShellEnvelope(t: ShellEnvelope.screenReady)) { [weak self] in
             guard let self, !self.closed, self.screenRelay === relay else { return }
             relay.start()
+        }
+    }
+
+    /// Hands the connection to the Mac's own screen stream after
+    /// `screenVideoReady`, as `relayScreen` does to Screen Sharing: the phone
+    /// sends nothing after `screenVideo` until then, so a line already
+    /// waiting is a protocol error. `busy` stops the line reader for good.
+    private func streamScreen(_ source: any ScreenVideoSource) {
+        busy = true
+        manager.detach(client: self)
+        attached = nil
+        guard inbox.isEmpty else {
+            ptLog(.warning, "shell: a phone sent more after asking for the screen; disconnected")
+            return close()
+        }
+        screenVideo = source
+        gate?.screenViewer(phoneID, label, viewing: true)
+        send(ShellEnvelope(t: ShellEnvelope.screenVideoReady)) { [weak self] in
+            guard let self, !self.closed, self.screenVideo === source else { return }
+            let rest = self.lines.takePending()
+            source.start(stream: self.stream, initialBytes: rest) { [weak self] in
+                self?.queue.async { self?.close() }
+            }
         }
     }
 

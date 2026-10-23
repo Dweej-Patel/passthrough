@@ -3,6 +3,7 @@ import Combine
 import IrohTransport
 import PassthroughCore
 import PhoneTransport
+import ScreenHost
 import ShellHost
 
 /// The Mac's remote shell, for the app: a listener while the setting is on,
@@ -19,6 +20,14 @@ final class RemoteShellController: ObservableObject {
     @Published private(set) var screenViewers: [ScreenViewer] = []
     /// Whether Screen Sharing answers; nil until checked.
     @Published private(set) var screenSharingOn: Bool?
+    /// What streaming the screen itself needs (Screen Recording, Accessibility); without both, phones fall back to Screen Sharing.
+    @Published private(set) var screenVideo = ScreenVideoAccess(capture: false, control: false)
+
+    struct ScreenVideoAccess: Equatable {
+        var capture: Bool
+        var control: Bool
+        var ready: Bool { capture && control }
+    }
 
     struct ScreenViewer: Equatable, Identifiable {
         let phoneID: String
@@ -127,6 +136,7 @@ final class RemoteShellController: ObservableObject {
             macInfo: { reach.get().macInfo() })
         listener.onSessionEvent = { text in ptLog(.info, "shell: \(text)") }
         listener.screenAllowed = { store.screenAllowed(forPhone: $0) }
+        listener.screenVideo = Self.screenVideoSource
         listener.onScreenViewer = screenViewerHandler()
         listener.onFailure = { [weak self, weak listener] error in
             Task { @MainActor in
@@ -236,6 +246,7 @@ final class RemoteShellController: ObservableObject {
                 macInfo: { reach.get().macInfo() })
             listener.onSessionEvent = { text in ptLog(.info, "shell: \(text)") }
             listener.screenAllowed = { store.screenAllowed(forPhone: $0) }
+            listener.screenVideo = Self.screenVideoSource
             listener.onScreenViewer = onScreenViewer
             listener.onFailure = { [weak self] error in
                 Task { @MainActor in
@@ -452,6 +463,16 @@ final class RemoteShellController: ObservableObject {
 
     func refreshScreenSharing() async {
         screenSharingOn = await ScreenSharing.isOn()
+        refreshScreenVideo()
+    }
+
+    func refreshScreenVideo() {
+        screenVideo = ScreenVideoAccess(capture: ScreenVideoPermissions.canCapture, control: ScreenVideoPermissions.canControl)
+    }
+
+    /// For both listeners: the Mac's own H.264 stream when it may capture and post input, else nil (the phone then uses Screen Sharing).
+    private static let screenVideoSource: @Sendable (String) -> (any ScreenVideoSource)? = { _ in
+        ScreenVideoPermissions.isReady ? ScreenVideoStreamer() : nil
     }
 
     /// For both listeners: in order on the main queue (a stop must not

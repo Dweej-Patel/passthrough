@@ -262,6 +262,15 @@
         "line": "{\"t\":\"screenReady\"}"
       },
       {
+        "line": "{\"t\":\"screenVideo\"}"
+      },
+      {
+        "line": "{\"t\":\"screenVideoReady\"}"
+      },
+      {
+        "line": "{\"t\":\"error\",\"reason\":\"screen_video_unavailable\"}"
+      },
+      {
         "line": "{\"t\":\"error\",\"reason\":\"screen_not_allowed\"}"
       },
       {

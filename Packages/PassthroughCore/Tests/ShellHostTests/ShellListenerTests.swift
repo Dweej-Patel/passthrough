@@ -735,6 +735,55 @@ final class ShellListenerTests: XCTestCase {
                        ["Test iPhone started viewing the screen", "Test iPhone stopped viewing the screen"])
     }
 
+    func testScreenVideoUnavailableIsReportedAndTheConnectionCarriesOn() {
+        let listener = startListener()
+        listener.screenAllowed = { _ in true }
+        listener.screenVideo = { _ in nil }
+        let (stream, _) = rawAuthorized(listener)
+        stream.send(Data("{\"t\":\"screenVideo\"}\n{\"t\":\"ping\"}\n".utf8), isComplete: false) { _ in }
+        let replies = Self.lines(read(stream, "replies") { Self.lines($0).contains { $0.t == "pong" } })
+        XCTAssertEqual(replies.filter { $0.t == "error" }.map(\.reason), ["screen_video_unavailable"])
+    }
+
+    func testScreenVideoNeedsScreenAccess() {
+        let made = Locked(false)
+        let listener = startListener()
+        listener.screenVideo = { _ in made.set(true); return FakeVideoSource() }
+        let (stream, _) = rawAuthorized(listener)
+        stream.send(Data("{\"t\":\"screenVideo\"}\n{\"t\":\"ping\"}\n".utf8), isComplete: false) { _ in }
+        let replies = Self.lines(read(stream, "replies") { Self.lines($0).contains { $0.t == "pong" } })
+        XCTAssertEqual(replies.filter { $0.t == "error" }.map(\.reason), ["screen_not_allowed"])
+        XCTAssertFalse(made.get())
+    }
+
+    /// After `screenVideoReady` the connection is the source's, both ways;
+    /// the source ending closes it, and the owner hears who came and went.
+    func testScreenVideoHandsTheConnectionToTheSource() throws {
+        let source = FakeVideoSource()
+        let viewers = Locked<[Bool]>([])
+        let listener = startListener()
+        listener.screenAllowed = { _ in true }
+        listener.screenVideo = { phoneID in XCTAssertEqual(phoneID, "phone-1"); return source }
+        listener.onScreenViewer = { _, _, viewing in viewers.set(viewers.get() + [viewing]) }
+        let (stream, _) = rawAuthorized(listener)
+        stream.send(try ShellEnvelope(t: ShellEnvelope.screenVideo).encodedLine(), isComplete: false) { _ in }
+        _ = read(stream, "screenVideoReady") { $0.firstRange(of: Data("{\"t\":\"screenVideoReady\"}\n".utf8)) != nil }
+        waitUntil("the source started") { source.stream.get() != nil }
+        XCTAssertEqual(viewers.get(), [true])
+
+        stream.send(Data([1, 2, 3]), isComplete: false) { _ in }
+        let received = Locked(Data())
+        source.stream.get()?.receive(maximumLength: 100) { data, _, _ in received.set(data ?? Data()) }
+        waitUntil("the source reads the phone's bytes") { received.get() == Data([1, 2, 3]) }
+        source.stream.get()?.send(Data([9, 9]), isComplete: false) { _ in }
+        _ = read(stream, "the source's bytes") { $0.firstRange(of: Data([9, 9])) != nil }
+
+        source.ended.get()?()
+        _ = read(stream, "closed", orEnd: true) { _ in false }
+        waitUntil("the owner heard the viewer leave") { viewers.get() == [true, false] }
+        XCTAssertTrue(source.stopped.get(), "closing the connection stops the source")
+    }
+
     /// Turning screen access off ends a view of the screen at once; the same
     /// phone's shell connection stays.
     func testDisconnectScreenLeavesShellConnections() throws {
@@ -861,5 +910,18 @@ final class ShellListenerTests: XCTestCase {
         ])
         XCTAssertEqual(ShellClient.candidates(for: credential, discovered: nil).count, 3)
     }
+}
+
+private final class FakeVideoSource: ScreenVideoSource, @unchecked Sendable {
+    let stream = Locked<(any ByteStream)?>(nil)
+    let ended = Locked<(@Sendable () -> Void)?>(nil)
+    let stopped = Locked(false)
+
+    func start(stream: any ByteStream, initialBytes: Data, ended: @escaping @Sendable () -> Void) {
+        self.ended.set(ended)
+        self.stream.set(stream)
+    }
+
+    func stop() { stopped.set(true) }
 }
 #endif

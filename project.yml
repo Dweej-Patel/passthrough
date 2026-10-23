@@ -58,7 +58,8 @@ targets:
         PassthroughID: $(PASSTHROUGH_ID)
         CFBundleDisplayName: Passthrough
         UILaunchScreen: {}
-        UISupportedInterfaceOrientations: [UIInterfaceOrientationPortrait]
+        # Landscape is for the Mac's screen only: AppOrientation keeps the rest portrait.
+        UISupportedInterfaceOrientations: [UIInterfaceOrientationPortrait, UIInterfaceOrientationLandscapeLeft, UIInterfaceOrientationLandscapeRight]
         UIUserInterfaceStyle: Automatic
         ITSAppUsesNonExemptEncryption: false
         UIApplicationSceneManifest:
@@ -140,6 +141,8 @@ targets:
         product: VPNConfig
       - package: PassthroughCore
         product: ShellHost
+      - package: PassthroughCore
+        product: ScreenHost
       - package: PassthroughCore
         product: IrohTransport
       - package: SwiftTerm

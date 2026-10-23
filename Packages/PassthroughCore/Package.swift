@@ -13,6 +13,7 @@ let package = Package(
         .library(name: "ShellHost", targets: ["ShellHost"]),
         .library(name: "IrohTransport", targets: ["IrohTransport"]),
         .library(name: "ScreenClient", targets: ["ScreenClient"]),
+        .library(name: "ScreenHost", targets: ["ScreenHost"]),
         .executable(name: "passthrough-devserver", targets: ["passthrough-devserver"]),
     ],
     dependencies: [
@@ -41,7 +42,12 @@ let package = Package(
         // zlib's inflate/deflate, whose init macros Swift can't call.
         .target(name: "CZlib", linkerSettings: [.linkedLibrary("z")]),
         // The phone's viewer for macOS Screen Sharing (RFB) over the remote shell.
-        .target(name: "ScreenClient", dependencies: ["PassthroughCore", "CZlib"]),
+        // Decodes every pixel of every update, so it is optimized in Debug
+        // builds too: unoptimized, a full Retina screen takes ~130 ms, optimized ~1 ms.
+        .target(name: "ScreenClient", dependencies: ["PassthroughCore", "CZlib"],
+                swiftSettings: [.unsafeFlags(["-O"], .when(configuration: .debug))]),
+        // Mac-only: streams the Mac's screen to a phone as H.264 and posts its input.
+        .target(name: "ScreenHost", dependencies: ["PassthroughCore", "ShellHost"]),
         .executableTarget(name: "passthrough-devserver", dependencies: ["PassthroughCore"]),
         // Helpers shared by the test targets (not a product).
         .target(name: "TestSupport", dependencies: ["PhoneTransport"], path: "Tests/TestSupport"),
@@ -49,6 +55,7 @@ let package = Package(
         .testTarget(name: "ShellHostTests", dependencies: ["ShellHost", "IrohTransport", "ScreenClient", "TestSupport"]),
         .testTarget(name: "VPNConfigTests", dependencies: ["VPNConfig"]),
         .testTarget(name: "ScreenClientTests", dependencies: ["ScreenClient", "PassthroughCore"]),
+        .testTarget(name: "ScreenHostTests", dependencies: ["ScreenHost", "ScreenClient", "ShellHost", "PassthroughCore"]),
         .testTarget(name: "IrohTransportTests", dependencies: [
             "IrohTransport",
             .product(name: "IrohLib", package: "iroh-ffi"),

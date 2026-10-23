@@ -505,7 +505,9 @@ extension ShellError {
         case .noSuchSession: "That session is no longer open on your Mac."
         case .badRequest: "Your Mac couldn't do that. Try again."
         case .screenNotAllowed: "This iPhone isn't allowed to see your Mac's screen. Turn on Screen for it in Passthrough's Remote Shell settings on your Mac."
-        case .screenUnavailable: "Screen Sharing is off on your Mac. Turn it on in System Settings › General › Sharing."
+        // Asked for only after the Mac said it can't stream its screen itself.
+        case .screenUnavailable: "Your Mac can't show its screen yet. In Passthrough's Remote Shell settings on your Mac, allow Screen Recording and Accessibility, or turn on Screen Sharing."
+        case .screenVideoUnavailable: "Your Mac can't stream its screen itself yet. In Passthrough's Remote Shell settings on your Mac, allow Screen Recording and Accessibility."
         case .notAuthorized: nil
         }
     }

@@ -269,6 +269,50 @@ stays a shell connection. The phone sends nothing after `screen` until
 phone uses its own connection for the screen, beside any shell connection.
 Turning a phone's screen access off ends its screen connections at once.
 
+### Screen video
+
+The fast way to see the screen, asked for first: `screenVideo` instead of
+`screen`, with the same screen access check. The Mac streams its main
+display itself, as H.264 from its hardware encoder in low-latency mode, at
+most at the display's size in points; no Mac password is involved (screen
+access is the owner's consent). If it can't (Passthrough lacks Screen
+Recording or Accessibility) the reply is `error` `screen_video_unavailable`
+and the connection stays a shell connection, so the phone can ask for
+`screen` next; a Mac too old to know `screenVideo` answers `bad_request`,
+read the same way. Otherwise the Mac replies `screenVideoReady`, and from
+the byte after that line both directions carry binary messages: a type
+byte, a 4-byte big-endian payload length (at most 16 MiB), the payload.
+Unknown types are skipped. Numbers are big-endian.
+
+Mac → phone:
+- `1` format: width u16, height u16, SPS length u16, SPS, PPS length u16,
+  PPS. Sent before every keyframe.
+- `2` frame: number u32 (from 1), flags u8 (bit 0: keyframe), then the
+  frame's NAL units, each after a 4-byte length (AVCC).
+
+Phone → Mac:
+- `16` hello: max width u16, max height u16, the phone's largest useful
+  size in pixels. Sent first; the Mac fits the stream inside it (and
+  starts anyway after a second without it).
+- `17` ack: frame number u32, once that frame is on screen. The Mac sends
+  a new frame only while fewer than 2 are unacked, encoding only the newest
+  capture (older ones are dropped before encoding), so nothing queues
+  anywhere and the picture stays current on a slow path. A frame the phone
+  can't show (one before the keyframe it is waiting for) is acked anyway.
+- `18` pointer: x u16, y u16 (each 0…65535 across the screen), buttons u8
+  (1 left, 2 middle, 4 right, as RFB).
+- `19` scroll: dx i16, dy i16 in the Mac's points; positive dy brings
+  earlier content into view.
+- `20` key: X keysym u32 (as RFB), modifiers u8 (1 command, 2 shift, 4
+  option, 8 control), pressed and released.
+- `21` text: UTF-8, typed as is whatever the Mac's keyboard layout.
+- `22` clipboard: UTF-8, put on the Mac's clipboard.
+- `23` keyframe request: the phone lost its place (its display failed, or
+  it was in the background).
+
+When the screen goes still the Mac sends its last frame again, twice, a
+quarter of a second apart, so the encoder sharpens it.
+
 ### Address policy
 
 The Mac closes a connection from any peer outside these ranges before the TLS

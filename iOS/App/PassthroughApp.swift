@@ -2,6 +2,7 @@ import SwiftUI
 
 @main
 struct PassthroughApp: App {
+    @UIApplicationDelegateAdaptor(AppOrientation.self) private var orientation
     @StateObject private var model = AppModel()
     @StateObject private var lock = AppLock()
     @Environment(\.scenePhase) private var scenePhase
