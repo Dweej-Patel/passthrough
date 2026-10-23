@@ -84,6 +84,8 @@ final class ShellModel: ObservableObject {
     private var clientTriesIroh = false
     /// Where a Mac's `macInfo` is kept; set by `refresh`.
     private weak var registry: PairingRegistry?
+    /// Whose evaluated context lists and deletes vault keys; set by `refresh`.
+    private weak var lock: AppLock?
     /// Bumped per `ShellClient`, so a replaced client's late events are dropped.
     private var generation = 0
     private var applyingRefresh = false
@@ -116,6 +118,7 @@ final class ShellModel: ObservableObject {
     /// keys, rebuilds `macs`, and (re)connects, re-attaching `activeSession`.
     func refresh(lock: AppLock, registry: PairingRegistry) {
         self.registry = registry
+        self.lock = lock
         let clients = registry.clients
         let granting = clients.filter { $0.shell != nil }
         #if DEBUG
@@ -127,7 +130,7 @@ final class ShellModel: ObservableObject {
         // Read at call time: the lock replaces its context on every relock.
         let context = lock.context
         ShellKeyVault.adoptPending(from: registry, context: context)
-        ShellKeyVault.prune(keeping: Set(clients.map(\.id)))
+        ShellKeyVault.prune(keeping: Set(clients.map(\.id)), context: context)
         var anyLocked = false
         let built = ShellCredentials.build(clients: granting, phoneID: registry.phoneID, key: { id in
             switch ShellKeyVault.read(macID: id, context: context) {
@@ -157,7 +160,8 @@ final class ShellModel: ObservableObject {
         applyingRefresh = false
 
         guard let current = built.first(where: { $0.macID == selectedMacID }) else {
-            return clear(anyLocked ? .keyUnavailable : .noAccess)
+            // A Mac granted access but its key isn't here: plugging in renews it.
+            return clear(anyLocked || !granting.isEmpty ? .keyUnavailable : .noAccess)
         }
         startBrowsing()
         // Keep a live connection to the same Mac with the same key: a `macInfo`
@@ -194,7 +198,7 @@ final class ShellModel: ObservableObject {
 
     /// The phone forgot this Mac: drop its key, address and any connection to it.
     func forget(macID: String) {
-        ShellKeyVault.delete(macID: macID)
+        ShellKeyVault.delete(macID: macID, context: lock?.isUnlocked == true ? lock?.context : nil)
         UserDefaults.standard.removeObject(forKey: Self.manualAddressPrefix + macID)
         granted[macID] = nil
         if clientMacID == macID { dropConnection(); resetSessions() }
