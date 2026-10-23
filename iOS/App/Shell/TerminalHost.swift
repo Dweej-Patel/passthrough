@@ -243,12 +243,12 @@ final class TerminalKeyRow: UIInputView {
         let stack = UIStackView()
         stack.axis = .horizontal
         stack.distribution = .fillEqually
-        stack.spacing = 5
+        stack.spacing = 4
         stack.translatesAutoresizingMaskIntoConstraints = false
         addSubview(stack)
         NSLayoutConstraint.activate([
-            stack.leadingAnchor.constraint(equalTo: safeAreaLayoutGuide.leadingAnchor, constant: 6),
-            stack.trailingAnchor.constraint(equalTo: safeAreaLayoutGuide.trailingAnchor, constant: -6),
+            stack.leadingAnchor.constraint(equalTo: safeAreaLayoutGuide.leadingAnchor, constant: 4),
+            stack.trailingAnchor.constraint(equalTo: safeAreaLayoutGuide.trailingAnchor, constant: -4),
             stack.topAnchor.constraint(equalTo: topAnchor, constant: 6),
             stack.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -6),
         ])
@@ -280,10 +280,12 @@ final class TerminalKeyRow: UIInputView {
         config.cornerStyle = .capsule
         config.baseBackgroundColor = selected ? tint : tint.withAlphaComponent(0.14)
         config.baseForegroundColor = selected ? .white : tint
-        config.contentInsets = NSDirectionalEdgeInsets(top: 4, leading: 2, bottom: 4, trailing: 2)
+        config.contentInsets = NSDirectionalEdgeInsets(top: 4, leading: 0, bottom: 4, trailing: 0)
+        // Ten keys share the width: keep each title on one line (it never wraps to "ctr/l").
+        config.titleLineBreakMode = .byClipping
         if let title = key.title {
             var text = AttributedString(title)
-            text.font = UIFont.monospacedSystemFont(ofSize: 13, weight: .semibold)
+            text.font = UIFont.monospacedSystemFont(ofSize: 12, weight: .semibold)
             config.attributedTitle = text
         }
         if let symbol = key.symbol {

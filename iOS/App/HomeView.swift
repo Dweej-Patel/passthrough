@@ -26,12 +26,13 @@ struct HomeView: View {
                 .padding(.top, 8)
                 .padding(.bottom, 32)
             }
+            .softTopEdge()
         }
         .sheet(isPresented: $showPairing, onDismiss: { model.endPairing() }) {
             PairSheet().environmentObject(model)
         }
         .sheet(isPresented: $showSettings) {
-            SettingsView().environmentObject(model)
+            SettingsView().environmentObject(model).environmentObject(lock)
         }
         .onChange(of: lock.isUnlocked) { _, unlocked in
             // Tear presentations down deterministically when the app locks.
@@ -61,7 +62,7 @@ struct HomeView: View {
                 Image(systemName: "gearshape.fill")
                     .font(.title3.weight(.semibold))
                     .foregroundStyle(.secondary)
-                    .frame(width: 42, height: 42)
+                    .frame(width: 44, height: 44)
                     .background(.regularMaterial, in: Circle())
             }
             .accessibilityLabel("Settings")
@@ -90,6 +91,24 @@ struct HomeView: View {
                 .multilineTextAlignment(.center)
         }
         .padding(.horizontal, 12)
+    }
+}
+
+private extension View {
+    /// Frosts content scrolling under the status bar so the clock stays readable.
+    func softTopEdge() -> some View {
+        overlay(alignment: .top) {
+            GeometryReader { geo in
+                Rectangle()
+                    .fill(.ultraThinMaterial)
+                    .mask(LinearGradient(stops: [.init(color: .black, location: 0), .init(color: .black, location: 0.6),
+                                                 .init(color: .clear, location: 1)], startPoint: .top, endPoint: .bottom))
+                    .frame(height: geo.safeAreaInsets.top + 10)
+                    .ignoresSafeArea(edges: .top)
+            }
+            .allowsHitTesting(false)
+            .accessibilityHidden(true)
+        }
     }
 }
 
@@ -281,6 +300,9 @@ struct UsageCard: View {
                         .font(.caption.weight(.semibold))
                         .buttonStyle(.plain)
                         .foregroundStyle(.secondary)
+                        .frame(minHeight: 44)
+                        .contentShape(Rectangle())
+                        .padding(.vertical, -15)
                 }
                 HStack(alignment: .firstTextBaseline) {
                     VStack(alignment: .leading, spacing: 2) {
@@ -357,10 +379,14 @@ struct MacsCard: View {
                             Menu {
                                 Button(role: .destructive) { model.revoke(client) } label: { Label("Forget this Mac", systemImage: "trash") }
                             } label: {
-                                Image(systemName: "ellipsis.circle").foregroundStyle(.secondary)
+                                Image(systemName: "ellipsis.circle")
+                                    .foregroundStyle(.secondary)
+                                    .frame(width: 44, height: 44)
+                                    .contentShape(Rectangle())
                             }
+                            .accessibilityLabel("More for \(client.name)")
                         }
-                        .padding(.vertical, 4)
+                        .frame(minHeight: 44)
                     }
                 }
             }

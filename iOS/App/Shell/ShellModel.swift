@@ -45,6 +45,8 @@ final class ShellModel: ObservableObject {
     @Published private(set) var reach: Reach = .noAccess
     @Published private(set) var sessions: [ShellSessionInfo] = []
     @Published private(set) var history: [ShellHistoryEntry] = []
+    /// The Mac has answered a history request since this Mac was selected.
+    @Published private(set) var historyLoaded = false
     @Published var openTabs: [String] = []
     @Published var activeSession: String?
     /// Sessions that have ended: their tabs show a read-only log of their output.
@@ -116,6 +118,9 @@ final class ShellModel: ObservableObject {
         self.registry = registry
         let clients = registry.clients
         let granting = clients.filter { $0.shell != nil }
+        #if DEBUG
+        if let demo = Self.demoState { return lock.isUnlocked ? applyDemo(demo) : clear(.locked) }
+        #endif
         guard lock.isUnlocked else { return clear(granting.isEmpty ? .noAccess : .locked) }
         guard ShellKeyVault.passcodeSet else { return clear(granting.isEmpty ? .noAccess : .needsPasscode) }
 
@@ -212,6 +217,9 @@ final class ShellModel: ObservableObject {
     /// Dials the selected Mac (replacing any connection) and, once ready,
     /// re-attaches `activeSession` (the Mac sends its sessions unasked).
     func connect() {
+        #if DEBUG
+        if let demo = Self.demoState { return applyDemo(demo) }
+        #endif
         dropConnection()
         guard let credential = macs.first(where: { $0.macID == selectedMacID }) else {
             reach = macs.isEmpty ? .noAccess : reach
@@ -236,6 +244,9 @@ final class ShellModel: ObservableObject {
     }
 
     func newSession(cols: Int, rows: Int) {
+        #if DEBUG
+        if Self.demoState != nil { return demoOpen() }
+        #endif
         size = (cols, rows)
         lastError = nil
         client?.open(cols: cols, rows: rows)
@@ -247,6 +258,9 @@ final class ShellModel: ObservableObject {
         activeSession = id
         detachedSession = nil
         lastError = nil
+        #if DEBUG
+        if Self.demoState != nil { return demoReplay(id) }
+        #endif
         // Not connected yet: `.ready` attaches `activeSession`, so asking now would replay twice.
         guard reach == .ready, let client else { return }
         streamStarting.send((id, true))
@@ -255,6 +269,9 @@ final class ShellModel: ObservableObject {
 
     func send(_ data: Data) {
         guard let active = activeSession, ended.isWritable(active) else { return }
+        #if DEBUG
+        if Self.demoState != nil { return output.send((active, data == Data([13]) ? Data("\r\n".utf8) : data)) }
+        #endif
         client?.input(data)
     }
 
@@ -278,6 +295,9 @@ final class ShellModel: ObservableObject {
     /// at (none from an older Mac), or nil when there's no connection, the Mac
     /// refused, or nothing arrived within 30 seconds.
     func transcript(_ id: String) async -> [ShellReplayChunk]? {
+        #if DEBUG
+        if Self.demoState != nil { return [.resize(cols: 64, rows: 20), .output(Self.demoOutput)] }
+        #endif
         guard let client else { return nil }
         finishTranscript(nil)
         let token = UUID()
@@ -340,6 +360,7 @@ final class ShellModel: ObservableObject {
             }
         case let .history(entries):
             history = entries
+            historyLoaded = true
         case let .transcriptResize(session, cols, rows):
             guard pendingTranscript?.id == session else { return }
             pendingTranscript?.replay.add(Data(), cols: cols, rows: rows)
@@ -396,6 +417,7 @@ final class ShellModel: ObservableObject {
     private func resetSessions() {
         sessions = []
         history = []
+        historyLoaded = false
         openTabs = []
         activeSession = nil
         detachedSession = nil
@@ -468,3 +490,83 @@ extension ShellError {
         }
     }
 }
+
+#if DEBUG
+// MARK: - Demo data (DEBUG builds only)
+
+/// Sample sessions and output for looking at the shell screens without a Mac:
+/// launch a Debug build with `-PTDemoShell ready` (or `empty`, `connecting`,
+/// `unreachable`, `keyUnavailable`). Compiled out of Release; without the
+/// argument nothing here runs. No network, no Keychain.
+extension ShellModel {
+    static var demoState: String? { UserDefaults.standard.string(forKey: "PTDemoShell") }
+
+    fileprivate static let demoOutput: Data = {
+        let esc = "\u{1b}["
+        let prompt = "\(esc)1;36mme\(esc)0m@\(esc)1;35mmacbook\(esc)0m \(esc)34m~/dev/passthrough\(esc)0m % "
+        let lines = [
+            prompt + "git status -sb",
+            "## remote-shell...origin/remote-shell",
+            " \(esc)31mM\(esc)0m iOS/App/Lock/LockOverlay.swift",
+            " \(esc)31mM\(esc)0m iOS/App/Shell/RemoteShellCard.swift",
+            prompt + "ls",
+            "\(esc)1;34mPackages\(esc)0m  \(esc)1;34mandroid\(esc)0m  \(esc)1;34miOS\(esc)0m  \(esc)1;34mmacOS\(esc)0m  README.md  project.yml",
+            prompt + "uptime",
+            "11:52  up 3 days,  4:10, 2 users, load averages: 1.42 1.37 1.30",
+            prompt,
+        ]
+        return Data(lines.joined(separator: "\r\n").utf8)
+    }()
+
+    fileprivate func applyDemo(_ state: String) {
+        let now = Date().timeIntervalSince1970
+        guard state != "noAccess" else { return clear(.noAccess) }
+        applyingRefresh = true
+        macs = [ShellCredential(macID: "demo-mac", macName: "My MacBook Pro", certSHA256: "", shellKey: Data(),
+                                phoneID: "demo", port: 0, addresses: [])]
+        selectedMacID = "demo-mac"
+        applyingRefresh = false
+        clientMacID = "demo-mac"
+        switch state {
+        case "connecting": reach = .connecting
+        case "unreachable": reach = .unreachable
+        case "keyUnavailable": reach = .keyUnavailable
+        default:
+            reach = .ready
+            path = .relay
+        }
+        if state == "ready", sessions.isEmpty {
+            sessions = [
+                ShellSessionInfo(id: "demo-1", title: "zsh — ~/dev/passthrough", startedAt: now - 760, lastOutputAt: now - 20, running: true),
+                ShellSessionInfo(id: "demo-2", title: "npm run build", startedAt: now - 5400, lastOutputAt: now - 3600, running: false, exitStatus: 0),
+            ]
+            ended.apply(sessions)
+        }
+        if state == "ready" || state == "empty" {
+            history = [
+                ShellHistoryEntry(id: "demo-1", title: "zsh — ~/dev/passthrough", phoneLabel: "iPhone", startedAt: now - 760, bytes: 18_000),
+                ShellHistoryEntry(id: "demo-2", title: "npm run build", phoneLabel: "iPhone", startedAt: now - 5400, endedAt: now - 3600, exitStatus: 0, bytes: 92_000),
+                ShellHistoryEntry(id: "demo-3", title: "top", phoneLabel: "Pixel 9", startedAt: now - 90_000, endedAt: now - 89_000, exitStatus: 130, bytes: 400_000),
+                ShellHistoryEntry(id: "demo-4", title: "ssh build-box", phoneLabel: "iPhone", startedAt: now - 260_000, bytes: 3_000),
+            ]
+            historyLoaded = true
+        }
+    }
+
+    fileprivate func demoOpen() {
+        let id = "demo-\(sessions.count + 1)"
+        sessions.append(ShellSessionInfo(id: id, title: "zsh — ~", startedAt: Date().timeIntervalSince1970,
+                                         lastOutputAt: Date().timeIntervalSince1970, running: true))
+        if !openTabs.contains(id) { openTabs.append(id) }
+        streamStarting.send((id, false))
+        activeSession = id
+        output.send((id, Self.demoOutput))
+    }
+
+    fileprivate func demoReplay(_ id: String) {
+        streamStarting.send((id, true))
+        output.send((id, Self.demoOutput))
+        replayFinished.send(id)
+    }
+}
+#endif

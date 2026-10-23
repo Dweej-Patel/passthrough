@@ -116,6 +116,9 @@ struct TerminalScreen: View {
                         if let detached = shell.detachedSession, detached == current { detachedBanner(detached) }
                         if let id = controller.shown, let text = shell.ended.banner(id) { endedBanner(id, text: text) }
                         if let status = statusText { statusBanner(status) }
+                        if shell.reach == .ready, controller.shown == nil, shell.detachedSession == nil, shell.lastError == nil {
+                            statusBanner("Opening a session…", busy: true)
+                        }
                         if let message = shell.lastError?.message { errorBanner(message) }
                     }
                     .padding(.horizontal, 12)
@@ -135,9 +138,12 @@ struct TerminalScreen: View {
                 Image(systemName: "chevron.down")
                     .font(.subheadline.weight(.semibold))
                     .foregroundStyle(.secondary)
-                    .frame(width: 36, height: 36)
+                    .frame(width: 38, height: 38)
                     .background(.regularMaterial, in: Circle())
+                    .frame(width: 44, height: 44)
+                    .contentShape(Rectangle())
             }
+            .buttonStyle(.plain)
             .accessibilityLabel("Close terminal")
 
             ScrollViewReader { proxy in
@@ -147,24 +153,28 @@ struct TerminalScreen: View {
                             tab(id).id(id)
                         }
                         Button { controller.newSession() } label: {
-                            Image(systemName: "plus").font(.caption.weight(.bold))
+                            Image(systemName: "plus")
+                                .font(.caption.weight(.bold))
+                                .foregroundStyle(PTTheme.accentEnd)
+                                .frame(width: 34, height: 32)
+                                .background(PTTheme.accentEnd.opacity(0.16), in: Capsule())
+                                .frame(minWidth: 44, minHeight: 44)
+                                .contentShape(Rectangle())
                         }
-                        .buttonStyle(.bordered)
-                        .buttonBorderShape(.capsule)
-                        .tint(PTTheme.accentEnd)
-                        .controlSize(.small)
+                        .buttonStyle(.plain)
                         .disabled(shell.reach != .ready)
+                        .opacity(shell.reach == .ready ? 1 : 0.4)
                         .accessibilityLabel("New session")
                     }
-                    .padding(.vertical, 2)
                 }
                 .onChange(of: current) { _, id in
                     if let id { withAnimation { proxy.scrollTo(id) } }
                 }
             }
         }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 8)
+        .padding(.leading, 6)
+        .padding(.trailing, 12)
+        .padding(.vertical, 2)
     }
 
     private func tab(_ id: String) -> some View {
@@ -183,14 +193,17 @@ struct TerminalScreen: View {
                     .font(.caption.weight(.semibold))
                     .lineLimit(1)
             }
-            .padding(.horizontal, 11).padding(.vertical, 7)
+            .padding(.horizontal, 12).padding(.vertical, 8)
             .opacity(isEnded ? 0.55 : 1)
             .foregroundStyle(selected ? PTTheme.accentEnd : .secondary)
             .background(selected ? PTTheme.accentEnd.opacity(0.18) : Color.primary.opacity(0.06), in: Capsule())
+            .frame(minHeight: 44)
+            .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
         .disabled(shell.reach != .ready)
-        .accessibilityValue(isEnded ? "Ended" : "")
+        .accessibilityValue(isEnded ? "Ended" : (selected ? "Selected" : ""))
+        .accessibilityHint("Touch and hold for more")
         .contextMenu {
             if isEnded {
                 Button { closeTab(id) } label: { Label("Close tab", systemImage: "xmark") }
@@ -220,24 +233,29 @@ struct TerminalScreen: View {
 
     private func endedBanner(_ id: String, text: String) -> some View {
         banner {
-            Image(systemName: "lock.fill").foregroundStyle(.secondary)
-            Text(text).font(.caption.weight(.semibold)).lineLimit(2)
-            Spacer(minLength: 8)
-            Button { controller.newSession() } label: {
-                Text("New session").font(.caption.weight(.bold))
+            VStack(alignment: .leading, spacing: 10) {
+                Label {
+                    Text(text).font(.caption.weight(.semibold))
+                } icon: {
+                    Image(systemName: "lock.fill").foregroundStyle(.secondary)
+                }
+                HStack(spacing: 8) {
+                    Button { controller.newSession() } label: {
+                        Label("New session", systemImage: "plus").font(.caption.weight(.bold))
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .tint(PTTheme.accentEnd)
+                    .disabled(shell.reach != .ready)
+                    Button { closeTab(id) } label: {
+                        Text("Close tab").font(.caption.weight(.bold))
+                    }
+                    .buttonStyle(.bordered)
+                    .tint(.secondary)
+                }
+                .buttonBorderShape(.capsule)
+                .controlSize(.small)
             }
-            .buttonStyle(.bordered)
-            .buttonBorderShape(.capsule)
-            .tint(PTTheme.accentEnd)
-            .controlSize(.small)
-            .disabled(shell.reach != .ready)
-            Button { closeTab(id) } label: {
-                Text("Close tab").font(.caption.weight(.bold))
-            }
-            .buttonStyle(.bordered)
-            .buttonBorderShape(.capsule)
-            .tint(.secondary)
-            .controlSize(.small)
+            Spacer(minLength: 0)
         }
     }
 
@@ -261,9 +279,9 @@ struct TerminalScreen: View {
         }
     }
 
-    private func statusBanner(_ text: String) -> some View {
+    private func statusBanner(_ text: String, busy: Bool = false) -> some View {
         banner {
-            if shell.reach == .connecting { ProgressView().controlSize(.small) }
+            if busy || shell.reach == .connecting { ProgressView().controlSize(.small) }
             Text(text).font(.caption).foregroundStyle(.secondary)
             Spacer(minLength: 0)
         }

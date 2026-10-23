@@ -4,6 +4,7 @@ import PassthroughUI
 /// Builds `content` only after the first unlock. Once built it stays alive (so its sheets can be
 /// torn down on relock) but is non-interactive and hidden from accessibility while locked; the
 /// `LockOverlay` window covers everything, including sheets, whenever locked or not active.
+/// Nothing here starts authentication: the overlay's lock screen asks when the user taps it.
 struct LockGate<Content: View>: View {
     @EnvironmentObject private var lock: AppLock
     @Environment(\.scenePhase) private var scenePhase
@@ -23,19 +24,14 @@ struct LockGate<Content: View>: View {
         .onAppear {
             if overlay == nil { overlay = LockOverlay(lock: lock) }
             built = built || lock.isUnlocked
-            promptIfNeeded()
+            if scenePhase == .active { lock.unlockIfNothingToCheck() }
         }
         .onChange(of: scenePhase) { _, phase in
-            if phase == .active { promptIfNeeded() }
+            if phase == .active { lock.unlockIfNothingToCheck() }
         }
         .onChange(of: lock.isUnlocked) { _, unlocked in
-            if unlocked { built = true } else { promptIfNeeded() }
+            if unlocked { built = true }
         }
-    }
-
-    private func promptIfNeeded() {
-        guard scenePhase == .active, !lock.isUnlocked, lock.takeAutoPrompt() else { return }
-        Task { await lock.unlock() }
     }
 }
 

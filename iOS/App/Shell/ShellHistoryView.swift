@@ -14,16 +14,27 @@ struct ShellHistoryView: View {
                 PTBackground(glow: 0.45)
                 ScrollView {
                     PTCard {
-                        VStack(alignment: .leading, spacing: 12) {
+                        VStack(alignment: .leading, spacing: 8) {
                             PTSectionTitle("Sessions", icon: "clock.arrow.circlepath")
-                            if shell.history.isEmpty {
-                                Text("No sessions recorded yet.")
-                                    .font(.subheadline).foregroundStyle(.secondary)
-                            } else {
-                                ForEach(shell.history.sorted { $0.startedAt > $1.startedAt }, id: \.id) { entry in
+                                .padding(.bottom, 4)
+                            if !shell.history.isEmpty {
+                                let sorted = shell.history.sorted { $0.startedAt > $1.startedAt }
+                                ForEach(sorted, id: \.id) { entry in
                                     NavigationLink(value: entry.id) { HistoryRow(entry: entry, running: isRunning(entry)) }
                                         .buttonStyle(.plain)
+                                    if entry.id != sorted.last?.id { Divider().opacity(0.5) }
                                 }
+                            } else if shell.reach != .ready {
+                                emptyState("Connect to your Mac to see its session history.", icon: "wifi.slash")
+                            } else if !shell.historyLoaded {
+                                HStack(spacing: 10) {
+                                    ProgressView()
+                                    Text("Loading history…").font(.subheadline).foregroundStyle(.secondary)
+                                }
+                                .frame(maxWidth: .infinity)
+                                .padding(.vertical, 20)
+                            } else {
+                                emptyState("No sessions yet. Every session opened on this Mac is recorded here, newest first.", icon: "terminal")
                             }
                         }
                         .frame(maxWidth: .infinity, alignment: .leading)
@@ -45,6 +56,15 @@ struct ShellHistoryView: View {
         .onAppear { shell.loadHistory() }
     }
 
+    private func emptyState(_ text: String, icon: String) -> some View {
+        VStack(spacing: 10) {
+            Image(systemName: icon).font(.title2).foregroundStyle(.tertiary)
+            Text(text).font(.subheadline).foregroundStyle(.secondary).multilineTextAlignment(.center)
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.vertical, 20)
+    }
+
     private func isRunning(_ entry: ShellHistoryEntry) -> Bool {
         entry.endedAt == nil && shell.sessions.contains { $0.id == entry.id && $0.running }
     }
@@ -56,30 +76,38 @@ private struct HistoryRow: View {
 
     private var started: Date { Date(timeIntervalSince1970: entry.startedAt) }
 
-    private var detail: String {
-        let status: String
-        if running {
-            status = "running"
-        } else if entry.endedAt != nil {
-            status = entry.exitStatus.map { "exited \($0)" } ?? "ended"
-        } else {
-            status = "interrupted"
+    private var status: (text: String, tint: SwiftUI.Color) {
+        if running { return ("Running", PTTheme.success) }
+        if entry.endedAt != nil {
+            guard let code = entry.exitStatus else { return ("Ended", SwiftUI.Color.secondary) }
+            return ("Exited \(code)", code == 0 ? SwiftUI.Color.secondary : PTTheme.warning)
         }
-        return "\(started.formatted(date: .abbreviated, time: .shortened)) · \(entry.phoneLabel) · \(status)"
+        return ("Interrupted", PTTheme.warning)
+    }
+
+    private var detail: String {
+        "\(started.formatted(date: .abbreviated, time: .shortened)) · from \(entry.phoneLabel)"
     }
 
     var body: some View {
         HStack(spacing: 12) {
             PTStatusDot(color: running ? PTTheme.success : .secondary.opacity(0.5), live: running)
-            VStack(alignment: .leading, spacing: 2) {
-                Text(entry.title).font(.subheadline.weight(.semibold)).lineLimit(1)
-                Text(detail).font(.caption).foregroundStyle(.secondary).lineLimit(1)
+            VStack(alignment: .leading, spacing: 3) {
+                HStack(alignment: .firstTextBaseline, spacing: 8) {
+                    Text(entry.title).font(.subheadline.weight(.semibold)).lineLimit(1)
+                    Spacer(minLength: 4)
+                    Text(status.text).font(.caption.weight(.semibold)).foregroundStyle(status.tint)
+                        .fixedSize()
+                }
+                Text(detail).font(.caption).foregroundStyle(.secondary).lineLimit(2)
             }
-            Spacer()
             Image(systemName: "chevron.right").font(.caption.weight(.semibold)).foregroundStyle(.tertiary)
         }
-        .padding(.vertical, 4)
+        .padding(.vertical, 6)
+        .frame(minHeight: 44)
         .contentShape(Rectangle())
+        .accessibilityElement(children: .combine)
+        .accessibilityHint("Opens the recorded output")
     }
 }
 
@@ -107,15 +135,30 @@ private struct TranscriptScreen: View {
                     switch phase {
                     case .loading: ProgressView()
                     case .failed:
-                        Text("This session's output could not be read.")
-                            .font(.subheadline).foregroundStyle(.secondary)
-                            .multilineTextAlignment(.center).padding(24)
+                        VStack(spacing: 14) {
+                            Image(systemName: "exclamationmark.triangle").font(.title2).foregroundStyle(PTTheme.warning)
+                            Text("Couldn't load this session's output. Check that your Mac is reachable, then try again.")
+                                .font(.subheadline).foregroundStyle(.secondary)
+                                .multilineTextAlignment(.center)
+                            Button("Try again") {
+                                phase = .loading
+                                Task { await load() }
+                            }
+                            .buttonStyle(.bordered)
+                            .buttonBorderShape(.capsule)
+                            .tint(PTTheme.accentEnd)
+                        }
+                        .padding(24)
                     case .loaded: EmptyView()
                     }
                 }
             }
         }
         .environment(\.colorScheme, .dark)
+        // The bar belongs to the light/dark sheet: match it to the terminal so its title stays legible.
+        .toolbarColorScheme(.dark, for: .navigationBar)
+        .toolbarBackground(SwiftUI.Color(TerminalStyle.background), for: .navigationBar)
+        .toolbarBackground(.visible, for: .navigationBar)
         .navigationTitle(entry?.title ?? "Session")
         .navigationBarTitleDisplayMode(.inline)
         .task { await load() }
@@ -136,15 +179,14 @@ private struct TranscriptScreen: View {
             .font(.subheadline)
             .padding(.horizontal, 12).padding(.vertical, 8)
             .background(.regularMaterial, in: Capsule())
-            Button { find(forward: false) } label: { Image(systemName: "chevron.up").font(.caption.weight(.bold)) }
+            Button { find(forward: false) } label: { Image(systemName: "chevron.up").font(.subheadline.weight(.bold)).frame(height: 22) }
                 .accessibilityLabel("Previous match")
-            Button { find(forward: true) } label: { Image(systemName: "chevron.down").font(.caption.weight(.bold)) }
+            Button { find(forward: true) } label: { Image(systemName: "chevron.down").font(.subheadline.weight(.bold)).frame(height: 22) }
                 .accessibilityLabel("Next match")
         }
         .buttonStyle(.bordered)
-        .buttonBorderShape(.capsule)
+        .buttonBorderShape(.circle)
         .tint(PTTheme.accentEnd)
-        .controlSize(.small)
         .disabled(phase != .loaded)
         .padding(.horizontal, 12)
         .padding(.vertical, 8)

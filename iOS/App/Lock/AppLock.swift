@@ -4,9 +4,43 @@ import SwiftUI
 
 /// Gate for the whole app UI. Face ID / Touch ID with passcode fallback (passcode alone when no
 /// biometrics are enrolled). It locks the UI only; the packet tunnel keeps serving.
+///
+/// Authentication never starts by itself: the lock screen shows first and `unlock()` runs when
+/// the user taps its button. The one exception is a device with no passcode at all, where there
+/// is nothing to check (`unlockIfNothingToCheck()`).
 @MainActor
 final class AppLock: ObservableObject {
+    /// How this device can unlock, for the lock screen's button and Settings.
+    enum Method: Equatable {
+        case faceID, touchID, opticID, passcode
+        /// No passcode is set: there is nothing to check.
+        case none
+
+        var title: String {
+            switch self {
+            case .faceID: "Face ID"
+            case .touchID: "Touch ID"
+            case .opticID: "Optic ID"
+            case .passcode, .none: "Passcode"
+            }
+        }
+
+        var symbol: String {
+            switch self {
+            case .faceID: "faceid"
+            case .touchID: "touchid"
+            case .opticID: "opticid"
+            case .passcode, .none: "lock.fill"
+            }
+        }
+    }
+
     @Published private(set) var isUnlocked = false
+    @Published private(set) var isEvaluating = false
+    /// Why the last attempt didn't unlock, shown under the button; nil after a plain cancel.
+    @Published private(set) var failure: String?
+    /// Why the app locked itself while in use (not a timeout), shown on the lock screen.
+    @Published private(set) var notice: String?
     /// The last successfully evaluated context. The shell key vault reuses it to read a
     /// `.userPresence` Keychain item without a second prompt.
     private(set) var context = LAContext()
@@ -14,16 +48,32 @@ final class AppLock: ObservableObject {
     static let relockAfter: TimeInterval = 60
 
     private static let log = Logger(subsystem: "app.passthrough", category: "AppLock")
-    private var evaluating = false
     private var backgroundedAt: Date?
-    /// True on cold launch and after each trip to the background; the gate consumes it to prompt
-    /// once per activation, so cancelling the sheet does not re-prompt in a loop.
-    private var autoPromptPending = true
 
+    /// Reads the device's enrolled biometry without prompting.
+    var method: Method {
+        let ctx = LAContext()
+        var error: NSError?
+        if ctx.canEvaluatePolicy(.deviceOwnerAuthenticationWithBiometrics, error: &error) {
+            switch ctx.biometryType {
+            case .faceID: return .faceID
+            case .touchID: return .touchID
+            case .opticID: return .opticID
+            default: return .passcode
+            }
+        }
+        var policyError: NSError?
+        if ctx.canEvaluatePolicy(.deviceOwnerAuthentication, error: &policyError) { return .passcode }
+        if let policyError, LAError.Code(rawValue: policyError.code) == .passcodeNotSet { return .none }
+        return .passcode
+    }
+
+    /// Asks for Face ID / Touch ID / the passcode. Only ever called from a user's tap.
     func unlock() async {
-        guard !isUnlocked, !evaluating else { return }
-        evaluating = true
-        defer { evaluating = false }
+        guard !isUnlocked, !isEvaluating else { return }
+        isEvaluating = true
+        defer { isEvaluating = false }
+        failure = nil
 
         let ctx = LAContext()
         ctx.touchIDAuthenticationAllowableReuseDuration = 60
@@ -32,19 +82,49 @@ final class AppLock: ObservableObject {
             if let error, LAError.Code(rawValue: error.code) == .passcodeNotSet {
                 // No passcode at all: there is nothing to check, so don't strand the user.
                 Self.log.notice("No device passcode set; unlocking without authentication")
-                context = ctx
-                isUnlocked = true
+                open(with: ctx)
             } else {
                 Self.log.error("Lock policy unavailable: \(error?.localizedDescription ?? "unknown", privacy: .public)")
+                failure = "This iPhone can't check it's you right now. Try again in a moment."
             }
             return
         }
         do {
             try await ctx.evaluatePolicy(.deviceOwnerAuthentication, localizedReason: "Unlock Passthrough")
-            context = ctx
-            isUnlocked = true
+            open(with: ctx)
         } catch {
             Self.log.notice("Unlock not completed: \(error.localizedDescription, privacy: .public)")
+            failure = Self.message(for: error, method: method)
+        }
+    }
+
+    /// Unlocks without a prompt only when the device has no passcode (nothing to check).
+    func unlockIfNothingToCheck() {
+        guard !isUnlocked, method == .none else { return }
+        Task { await unlock() }
+    }
+
+    private func open(with ctx: LAContext) {
+        context = ctx
+        failure = nil
+        notice = nil
+        isUnlocked = true
+    }
+
+    /// Copy for a failed evaluation; nil when the user (or the system) just cancelled.
+    private static func message(for error: Error, method: Method) -> String? {
+        guard let code = (error as? LAError)?.code else { return "Couldn't unlock. Try again." }
+        switch code {
+        case .userCancel, .appCancel, .systemCancel, .userFallback:
+            return nil
+        case .authenticationFailed:
+            return "\(method.title) didn't recognise you. Try again."
+        case .biometryLockout:
+            return "\(method.title) is locked. Unlock with your passcode."
+        case .passcodeNotSet:
+            return "Set a passcode in the Settings app to lock Passthrough."
+        default:
+            return "Couldn't unlock. Try again."
         }
     }
 
@@ -76,7 +156,8 @@ final class AppLock: ObservableObject {
 
     private func markBackground() {
         if backgroundedAt == nil { backgroundedAt = Date() }
-        autoPromptPending = true
+        // A message from before the trip away is stale by the time anyone sees the lock again.
+        failure = nil
     }
 
     private func expireIfNeeded() {
@@ -87,21 +168,20 @@ final class AppLock: ObservableObject {
         if away >= Self.relockAfter || away < 0 { lock() }
     }
 
-    /// True once per activation; the gate uses it to decide whether to auto-prompt.
-    func takeAutoPrompt() -> Bool {
-        defer { autoPromptPending = false }
-        return autoPromptPending
+    /// Ends the unlocked session so the lock screen asks again: the one prompt comes from the
+    /// lock, when the user taps it. The shell model calls this when the vault can't read a key
+    /// with `context`.
+    func invalidateSession() {
+        guard isUnlocked else { return }
+        notice = "Unlock again to use Remote shell."
+        lock()
     }
-
-    /// Ends the unlocked session so the gate prompts again: the one prompt comes from the lock.
-    /// The shell model calls this when the vault can't read a key with `context`.
-    func invalidateSession() { lock() }
 
     private func lock() {
         guard isUnlocked else { return }
         context.invalidate()
         context = LAContext()
+        failure = nil
         isUnlocked = false
-        autoPromptPending = true
     }
 }
