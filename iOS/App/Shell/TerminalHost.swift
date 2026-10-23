@@ -141,8 +141,12 @@ final class TerminalDriver: NSObject, ObservableObject, TerminalViewDelegate {
 /// output scrolls the view's own scrollback; a program that asked for the
 /// mouse (Claude Code, vim, htop…) gets scroll-wheel events, and one on the
 /// alternate screen without the mouse (less, man) gets up/down arrows.
-/// SwiftTerm would send such a program the drag as a mouse drag, which it
-/// turns into a text selection. Selecting is press-and-hold, then Select.
+/// SwiftTerm would send such a program the drag as a mouse drag.
+///
+/// Selecting is press-and-hold, then drag, as in the Mac's screen viewer: a
+/// program that asked for the mouse gets that drag as a real mouse drag, so
+/// it selects (and copies) its own way; plain output gets a selection here,
+/// with Copy when the finger lifts. Holding without dragging shows the menu.
 final class ShellTerminalView: TerminalView {
     var readOnly = false
     var onFirstLayout: ((Int, Int) -> Void)?
@@ -150,6 +154,16 @@ final class ShellTerminalView: TerminalView {
     private lazy var programScroll = UIPanGestureRecognizer(target: self, action: #selector(programScrolled(_:)))
     /// Drag not yet sent, short of a whole line.
     private var scrollRemainder: CGFloat = 0
+    private lazy var hold: UILongPressGestureRecognizer = {
+        let hold = UILongPressGestureRecognizer(target: self, action: #selector(held(_:)))
+        hold.minimumPressDuration = 0.3
+        return hold
+    }()
+    /// Where the hold began; once the finger moves from it, whether the drag goes to the program.
+    private var holdStart = CGPoint.zero
+    private var holdDragToProgram: Bool?
+    /// The cell the program last heard the pointer at.
+    private var mouseCell: (col: Int, row: Int)?
 
     override var canBecomeFirstResponder: Bool { !readOnly && super.canBecomeFirstResponder }
 
@@ -164,6 +178,11 @@ final class ShellTerminalView: TerminalView {
     override func didMoveToWindow() {
         super.didMoveToWindow()
         if programScroll.view == nil { addGestureRecognizer(programScroll) }
+        if hold.view == nil {
+            // SwiftTerm's own hold (0.7 s, menu only) gives way to this one.
+            for case let press as UILongPressGestureRecognizer in gestureRecognizers ?? [] { press.isEnabled = false }
+            addGestureRecognizer(hold)
+        }
     }
 
     /// Leaves out SwiftTerm's drag-as-mouse-drag; taps still reach the program as clicks.
@@ -176,6 +195,8 @@ final class ShellTerminalView: TerminalView {
     }
 
     override func gestureRecognizerShouldBegin(_ recognizer: UIGestureRecognizer) -> Bool {
+        // A held finger is selecting, not scrolling.
+        if recognizer is UIPanGestureRecognizer, hold.state == .began || hold.state == .changed { return false }
         if recognizer === programScroll {
             // A drag with a selection showing moves its ends instead.
             guard programTakesScroll, !hasActiveSelection else { return false }
@@ -221,6 +242,76 @@ final class ShellTerminalView: TerminalView {
                          : (app ? EscapeSequences.moveDownApp : EscapeSequences.moveDownNormal)
             for _ in 0..<abs(lines) { send(key) }
         }
+    }
+
+    // MARK: Hold to select
+
+    @objc private func held(_ recognizer: UILongPressGestureRecognizer) {
+        let point = recognizer.location(in: self)
+        switch recognizer.state {
+        case .began:
+            holdStart = point
+            holdDragToProgram = nil
+            UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+        case .changed:
+            if holdDragToProgram == nil {
+                guard hypot(point.x - holdStart.x, point.y - holdStart.y) > 8 else { return }
+                let toProgram = !readOnly && getTerminal().mouseMode != .off
+                holdDragToProgram = toProgram
+                if toProgram {
+                    mouseCell = nil
+                    sendMouse(at: holdStart, motion: false, release: false)
+                } else {
+                    clearSelection()
+                }
+            }
+            if holdDragToProgram == true {
+                sendMouse(at: point, motion: true, release: false)
+            } else {
+                select(from: holdStart, to: point)
+            }
+        case .ended, .cancelled, .failed:
+            if holdDragToProgram == true {
+                sendMouse(at: point, motion: false, release: true)
+            } else if recognizer.state == .ended {
+                showStandardContextMenu(at: point)   // Copy for a selection, Paste and Select otherwise
+            }
+            holdDragToProgram = nil
+        default:
+            break
+        }
+    }
+
+    /// The left button, as the program's mouse mode reports it: press, drag (only a new cell), release.
+    private func sendMouse(at point: CGPoint, motion: Bool, release: Bool) {
+        let terminal = getTerminal()
+        let mode = terminal.mouseMode
+        let cell = cellSize
+        let x = point.x, y = point.y - contentOffset.y
+        let col = min(max(Int(x / cell.width), 0), terminal.cols - 1)
+        let row = min(max(Int(y / cell.height), 0), terminal.rows - 1)
+        if motion {
+            guard mode == .buttonEventTracking || mode == .anyEvent, mouseCell.map({ $0 != (col, row) }) ?? true else { return }
+            let flags = terminal.encodeButton(button: 0, release: false, shift: false, meta: false, control: false)
+            terminal.sendMotion(buttonFlags: flags, x: col, y: row, pixelX: Int(x), pixelY: Int(y))
+        } else {
+            guard mode != .off else { return }
+            let flags = terminal.encodeButton(button: 0, release: release, shift: false, meta: false, control: false)
+            terminal.sendEvent(buttonFlags: flags, x: col, y: row, pixelX: Int(x), pixelY: Int(y))
+        }
+        mouseCell = (col, row)
+    }
+
+    /// Plain output: the cells from where the hold began to the finger, in reading order.
+    private func select(from start: CGPoint, to end: CGPoint) {
+        let cols = getTerminal().cols
+        let cell = cellSize
+        func position(_ point: CGPoint) -> Position {
+            Position(col: min(max(Int(point.x / cell.width), 0), cols - 1), row: max(Int(point.y / cell.height), 0))
+        }
+        var a = position(start), b = position(end)
+        if (b.row, b.col) < (a.row, a.col) { swap(&a, &b) }
+        setSelectionRange(start: a, end: b)
     }
 
     /// One cell, sized as SwiftTerm sizes it (its own figure isn't public).
