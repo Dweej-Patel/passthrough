@@ -2,6 +2,7 @@ import SwiftUI
 import AppKit
 import SwiftTerm
 import PassthroughCore
+import PassthroughUI
 import ShellHost
 
 /// Every recorded shell session, newest first, beside a read-only replay of
@@ -18,7 +19,7 @@ struct ShellHistoryWindow: View {
     @StateObject private var terminal = TerminalHandle()
 
     var body: some View {
-        HSplitView {
+        NavigationSplitView {
             List(selection: $selection) {
                 ForEach(shell.history, id: \.id) { entry in
                     let recording = shell.isRecording(entry.id)
@@ -34,41 +35,32 @@ struct ShellHistoryWindow: View {
             }
             .onDeleteCommand { if let selection, !shell.isRecording(selection) { delete(selection) } }
             .overlay {
-                if shell.history.isEmpty { Text("No sessions recorded").foregroundStyle(.secondary) }
-            }
-            .frame(minWidth: 260, idealWidth: 300, maxWidth: 420)
-
-            VStack(spacing: 0) {
-                HStack {
-                    TextField("Search", text: $query)
-                        .textFieldStyle(.roundedBorder)
-                        .onSubmit(findNext)
-                        .onChange(of: query) { _, _ in notFound = false }
-                    if notFound { Text("Not found").font(.caption).foregroundStyle(.secondary) }
-                    Button("Find Next", action: findNext).disabled(query.isEmpty || selection == nil)
-                    Button("Delete", role: .destructive) { if let selection { delete(selection) } }
-                        .disabled(selection.map(shell.isRecording) ?? true)
-                        .help("A running session's history can be deleted once it ends.")
-                }
-                .padding(8)
-                Divider()
-                if let selection, case .ready(selection, let replay) = loaded {
-                    TranscriptView(replay: replay, handle: terminal)
-                        .id(selection)   // a fresh terminal per session
-                } else if let selection, case .failed(selection) = loaded {
-                    Text("This session's output could not be read").foregroundStyle(.secondary)
-                        .frame(maxWidth: .infinity, maxHeight: .infinity)
-                } else if selection != nil {
-                    ProgressView().controlSize(.small)
-                        .frame(maxWidth: .infinity, maxHeight: .infinity)
-                } else {
-                    Text("Select a session").foregroundStyle(.secondary)
-                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                if shell.history.isEmpty {
+                    ContentUnavailableView("No Sessions Yet", systemImage: "apple.terminal",
+                                           description: Text("Shells opened from your phone are recorded here."))
                 }
             }
-            .frame(minWidth: 480)
+            .navigationSplitViewColumnWidth(min: 240, ideal: 290, max: 420)
+        } detail: {
+            detail
+                .navigationTitle(selectedEntry?.title ?? "Shell History")
+                .navigationSubtitle(selectedEntry.map { "\($0.phoneLabel) · \(Date(timeIntervalSince1970: $0.startedAt).formatted(date: .abbreviated, time: .shortened))" } ?? "")
         }
-        .frame(minWidth: 760, minHeight: 420)
+        .searchable(text: $query, placement: .toolbar, prompt: "Find in session")
+        .onSubmit(of: .search, findNext)
+        .onChange(of: query) { _, _ in notFound = false }
+        .toolbar {
+            ToolbarItemGroup(placement: .primaryAction) {
+                if notFound { Text("Not found").font(.callout).foregroundStyle(.secondary) }
+                Button(action: findNext) { Label("Find Next", systemImage: "arrow.down.circle") }
+                    .disabled(query.isEmpty || selection == nil)
+                    .help("Find the next match in this session (Return in the search field)")
+                Button(role: .destructive) { if let selection { delete(selection) } } label: { Label("Delete", systemImage: "trash") }
+                    .disabled(selection.map(shell.isRecording) ?? true)
+                    .help(selection.map(shell.isRecording) == true ? "A running session can be deleted once it ends" : "Delete this session's recording")
+            }
+        }
+        .frame(minWidth: 780, minHeight: 460)
         .onAppear { shell.refreshHistory() }
         // Cancelled and restarted whenever the selection changes.
         .task(id: selection) {
@@ -79,6 +71,26 @@ struct ShellHistoryWindow: View {
             let output = await shell.transcript(id)
             guard !Task.isCancelled, selection == id else { return }
             loaded = output.map { .ready(id, $0) } ?? .failed(id)
+        }
+    }
+
+    private var selectedEntry: ShellHistoryEntry? {
+        selection.flatMap { id in shell.history.first { $0.id == id } }
+    }
+
+    @ViewBuilder private var detail: some View {
+        if let selection, case .ready(selection, let replay) = loaded {
+            TranscriptView(replay: replay, handle: terminal)
+                .id(selection)   // a fresh terminal per session
+        } else if let selection, case .failed(selection) = loaded {
+            ContentUnavailableView("Can't Read This Session", systemImage: "exclamationmark.triangle",
+                                   description: Text("Its recording is missing or damaged."))
+        } else if selection != nil {
+            ProgressView().controlSize(.small)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+        } else {
+            ContentUnavailableView("Select a Session", systemImage: "sidebar.left",
+                                   description: Text("Its output appears here as the phone's terminal showed it."))
         }
     }
 
@@ -119,15 +131,32 @@ private struct HistoryRow: View {
         return entry.exitStatus.map { "exit \($0)" } ?? "ended"
     }
 
+    /// A non-zero exit or a session cut short stands out; a clean one doesn't.
+    private var statusColor: SwiftUI.Color {
+        if recording { return PTTheme.success }
+        guard entry.endedAt != nil else { return PTTheme.warning }
+        return (entry.exitStatus ?? 0) == 0 ? .secondary : PTTheme.warning
+    }
+
     var body: some View {
-        VStack(alignment: .leading, spacing: 2) {
-            Text(entry.title).lineLimit(1)
-            Text("\(started.formatted(date: .abbreviated, time: .shortened)) · \(entry.phoneLabel)")
+        VStack(alignment: .leading, spacing: 3) {
+            HStack(spacing: 6) {
+                Text(entry.title).fontWeight(.medium).lineLimit(1).truncationMode(.middle)
+                Spacer(minLength: 4)
+                if recording {
+                    Text("LIVE")
+                        .font(.system(size: 9, weight: .bold)).tracking(0.5)
+                        .foregroundStyle(.white)
+                        .padding(.horizontal, 5).padding(.vertical, 1.5)
+                        .background(PTTheme.success, in: Capsule())
+                }
+            }
+            Text("\(entry.phoneLabel) · \(started.formatted(date: .abbreviated, time: .shortened))")
                 .font(.caption).foregroundStyle(.secondary).lineLimit(1)
             Text([duration, status].compactMap { $0 }.joined(separator: " · "))
-                .font(.caption).foregroundStyle(.secondary)
+                .font(.caption).foregroundStyle(statusColor)
         }
-        .padding(.vertical, 2)
+        .padding(.vertical, 3)
     }
 }
 

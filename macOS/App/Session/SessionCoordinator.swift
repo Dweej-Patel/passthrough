@@ -112,7 +112,8 @@ final class SessionCoordinator: ObservableObject {
     /// Let paired phones open a shell on this Mac. Off by default.
     @Published var remoteShellEnabled: Bool = UserDefaults.standard.object(forKey: "remoteShellEnabled") as? Bool ?? false {
         didSet {
-            guard remoteShellEnabled != oldValue else { return }
+            // A snapshot run only shows the setting: nothing is saved or started.
+            guard remoteShellEnabled != oldValue, !Self.isSnapshotRun else { return }
             UserDefaults.standard.set(remoteShellEnabled, forKey: "remoteShellEnabled")
             if remoteShellEnabled {
                 startShell()
@@ -228,6 +229,9 @@ final class SessionCoordinator: ObservableObject {
             phones: { links.phones })
         directory = DeviceDirectory(watchers: [USBMuxWatcher(), androidWatcher, wirelessWatcher])
         suppressAutoConnect = env["PASSTHROUGH_NO_AUTOCONNECT"] != nil || env["PASSTHROUGH_VPN_TEST"] != nil
+        // A snapshot run only draws views: no devices, helper, shell or network,
+        // so it can't disturb the copy of the app that is routing traffic.
+        guard !Self.isSnapshotRun else { return }
 
         logEntries = PassthroughLog.shared.snapshot()
         PassthroughLog.shared.onAppend = { [weak self] entry in
@@ -1024,6 +1028,9 @@ final class SessionCoordinator: ObservableObject {
             ptLog(.error, "DIAG: \(error.localizedDescription)")
         }
     }
+
+    /// Launched with `--snapshot` (`PanelSnapshots`).
+    static let isSnapshotRun = CommandLine.arguments.contains("--snapshot")
 
     /// Puts the coordinator into a synthetic state for previews and snapshots.
     func debugApply(phase: Phase, device: Bool = false, status: DeviceStatus? = nil, traffic: Bool = false, vpn vpnState: String? = nil, underlay: String = "iPhone") {

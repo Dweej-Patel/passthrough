@@ -271,34 +271,55 @@ struct KeepAwakeRow: View {
     }
 }
 
-/// Shown while phones have shells open on this Mac, so the owner knows someone is in.
+/// Remote shell at a glance while it is on (or a shell is still open): who is
+/// in, or what setup is left. Opens the Remote Shell settings.
 struct ShellSessionsRow: View {
+    @EnvironmentObject private var session: SessionCoordinator
     @EnvironmentObject private var shell: RemoteShellController
     @Environment(\.openSettings) private var openSettings
+    @State private var fullDiskAccess = true
 
     var body: some View {
         let open = shell.sessions.filter(\.running).count
-        if open > 0 {
-            Button { SettingsWindow.show(openSettings) } label: {
+        if session.remoteShellEnabled || open > 0 {
+            let (subtitle, attention) = status(open: open)
+            Button { SettingsWindow.show(openSettings, tab: .remoteShell) } label: {
                 HStack(spacing: 10) {
-                    Image(systemName: "terminal")
+                    Image(systemName: open > 0 ? "apple.terminal.fill" : "apple.terminal")
                         .font(.system(size: 14, weight: .semibold))
-                        .foregroundStyle(PTTheme.accent)
+                        .foregroundStyle(open > 0 ? AnyShapeStyle(PTTheme.accent) : AnyShapeStyle(Color.secondary))
                         .frame(width: 20)
                     VStack(alignment: .leading, spacing: 1) {
                         Text("Remote shell").font(.subheadline.weight(.medium))
-                        Text("\(open) session\(open == 1 ? "" : "s") open")
-                            .font(.caption2).foregroundStyle(.secondary)
+                        Text(subtitle)
+                            .font(.caption2).foregroundStyle(attention ? PTTheme.warning : .secondary)
                     }
                     Spacer()
+                    if open > 0 {
+                        Text("\(open)")
+                            .font(.caption2.weight(.bold)).monospacedDigit()
+                            .foregroundStyle(.white)
+                            .padding(.horizontal, 7).padding(.vertical, 2)
+                            .background(PTTheme.accent, in: Capsule())
+                    }
                     Image(systemName: "chevron.right").font(.caption2.weight(.semibold)).foregroundStyle(.secondary)
                 }
                 .padding(.horizontal, 12).padding(.vertical, 9)
                 .background(Color.primary.opacity(0.04), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+                .contentShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
             }
             .buttonStyle(.plain)
-            .help("Phones have shells open on this Mac. Click to see them in Settings.")
+            .help("Open Remote Shell settings")
+            .task { fullDiskAccess = FullDiskAccess.isGranted }
         }
+    }
+
+    private func status(open: Int) -> (String, Bool) {
+        if open > 0 { return ("\(open) session\(open == 1 ? "" : "s") open from your phone", false) }
+        if shell.listenerError != nil { return ("Not running. Open settings to see why.", true) }
+        if shell.phones.isEmpty { return ("Plug in a paired phone to give it access", true) }
+        if !fullDiskAccess { return ("Ready · Full Disk Access recommended", true) }
+        return ("Ready for \(shell.phones.count) phone\(shell.phones.count == 1 ? "" : "s")", false)
     }
 }
 
@@ -379,7 +400,7 @@ struct VPNRow: View {
     var body: some View {
         VStack(spacing: 0) {
             Button {
-                if hasProfile { vpnLayer.set(!isOn) } else { SettingsWindow.show(openSettings) }
+                if hasProfile { vpnLayer.set(!isOn) } else { SettingsWindow.show(openSettings, tab: .vpn) }
             } label: {
                 HStack(spacing: 10) {
                     Group {

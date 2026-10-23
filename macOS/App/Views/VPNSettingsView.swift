@@ -29,17 +29,21 @@ struct VPNSettings: View {
                     }
                     .disabled(vpnLayer.isWanted)
                 }
+                LabeledContent("Status") {
+                    HStack(spacing: 6) {
+                        Circle().fill(statusColor).frame(width: 7, height: 7)
+                        Text(statusText)
+                    }
+                }
                 HStack {
                     Button("Add NordVPN…") { showNordSheet = true }
-                    Button("Import file…") { importFile() }
-                    Spacer()
-                    Text(statusText).font(.caption).foregroundStyle(.secondary)
+                    Button("Import File…") { importFile() }
                 }
                 if let importError { Label(importError, systemImage: "exclamationmark.triangle.fill").font(.caption).foregroundStyle(PTTheme.warning) }
             } header: {
                 Text("VPN layer")
             } footer: {
-                Text("The VPN runs on the Mac, on top of the passthrough when it is on: the iPhone and the carrier then see a single encrypted flow to the VPN server. WireGuard and OpenVPN engines are built in; nothing else needs installing.")
+                Text("Runs on this Mac, on top of passthrough, so the phone and the carrier see one encrypted flow. WireGuard and OpenVPN are built in.")
             }
 
             if let profile = vpnLayer.activeProfile {
@@ -47,15 +51,24 @@ struct VPNSettings: View {
             }
 
             Section {
-                Toggle("Kill switch: block all traffic if the VPN drops", isOn: $vpnLayer.killSwitch)
-                    .disabled(vpnLayer.isWanted)
-                Toggle("Block IPv6 while the VPN is on", isOn: $vpnLayer.blockIPv6)
-                    .disabled(vpnLayer.isWanted)
-                Toggle("Turn the VPN layer on whenever passthrough connects", isOn: $vpnLayer.autoStart)
+                Toggle(isOn: $vpnLayer.killSwitch) {
+                    Text("Kill switch")
+                    Text("Nothing leaves the Mac while the VPN reconnects. Off, traffic falls back to passthrough or Wi-Fi meanwhile.")
+                }
+                .disabled(vpnLayer.isWanted)
+                Toggle(isOn: $vpnLayer.blockIPv6) {
+                    Text("Block IPv6 while the VPN is on")
+                    Text("Most VPN servers, NordVPN included, carry no IPv6, so it would go around the VPN. Apps fall back to IPv4.")
+                }
+                .disabled(vpnLayer.isWanted)
+                Toggle(isOn: $vpnLayer.autoStart) {
+                    Text("Start with passthrough")
+                    Text("Turns the VPN on whenever passthrough connects.")
+                }
             } header: {
                 Text("Behaviour")
             } footer: {
-                Text("Kill switch: nothing leaves the Mac while the VPN is reconnecting; off, traffic falls back to the passthrough or Wi-Fi meanwhile. Block IPv6: most VPN servers (NordVPN included) carry no IPv6, so without this IPv6 traffic would bypass the VPN and reach the carrier directly; apps fall back to IPv4 instantly. Turn it off only if you need IPv6 and accept that. Both apply on the next VPN start.")
+                Text(vpnLayer.isWanted ? "Turn the VPN off to change the kill switch or IPv6." : "Kill switch and IPv6 changes apply the next time the VPN starts.")
             }
 
             if !vpnLayer.profiles.isEmpty {
@@ -80,6 +93,15 @@ struct VPNSettings: View {
         }
         .formStyle(.grouped)
         .sheet(isPresented: $showNordSheet) { NordSetupSheet().environmentObject(vpnLayer) }
+    }
+
+    private var statusColor: Color {
+        guard vpnLayer.isWanted else { return .secondary }
+        switch vpnLayer.status.state {
+        case "connected": return PTTheme.success
+        case "blocked": return PTTheme.danger
+        default: return PTTheme.warning
+        }
     }
 
     private var statusText: String {
@@ -151,7 +173,7 @@ private struct ProfileDetail: View {
                 }
                 if let server = profile.server { LabeledContent("Current server") { Text("\(server)\(profile.location.map { " · \($0)" } ?? "")").textSelection(.enabled) } }
                 HStack {
-                    Button(refreshing ? "Working…" : (nordEdited ? "Apply and pick server" : "Pick a fresh server")) {
+                    Button(refreshing ? "Working…" : (nordEdited ? "Apply and Pick Server" : "Pick a Fresh Server")) {
                         refreshing = true; refreshError = nil
                         let country = countries.first { $0.id == countryID }
                         let city = country?.cities.first { $0.id == cityID }
@@ -178,7 +200,7 @@ private struct ProfileDetail: View {
                     .textContentType(.username)
                 SecureField("Password", text: $password)
                 HStack {
-                    Button("Save credentials") {
+                    Button("Save Credentials") {
                         saveFailed = !vpnLayer.setCredentials(username: username, password: password, for: profile)
                         saved = !saveFailed
                     }
@@ -191,7 +213,7 @@ private struct ProfileDetail: View {
             Text("Edit profile")
         } footer: {
             if profile.source == .nordvpn {
-                Text("Change the area or protocol and apply: Nord's least-loaded matching server is fetched and, if this profile is running, the VPN reconnects to it. Service credentials come from your Nord account ▸ Manual setup; they are stored in the Keychain and handed to the engine over a pipe.")
+                Text("Applying picks Nord's least-loaded server for that area and reconnects if this profile is running. Service credentials are in your Nord account under Manual setup, and are kept in the Keychain.")
             }
         }
         .onAppear(perform: load)
@@ -261,7 +283,7 @@ struct NordSetupSheet: View {
             HStack {
                 Spacer()
                 Button("Cancel") { dismiss() }.keyboardShortcut(.cancelAction)
-                Button(working ? "Adding…" : "Add profile") { add() }
+                Button(working ? "Adding…" : "Add Profile") { add() }
                     .keyboardShortcut(.defaultAction)
                     .buttonStyle(.borderedProminent).tint(PTTheme.accentEnd)
                     .disabled(working || username.isEmpty || password.isEmpty)

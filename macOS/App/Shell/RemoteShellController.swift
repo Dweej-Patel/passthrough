@@ -490,6 +490,15 @@ final class RemoteShellController: ObservableObject {
     nonisolated static func localAddresses() -> [String] {
         LocalAddresses.advertisable()
     }
+
+    /// Puts the controller into a synthetic state for snapshots.
+    func debugApply(phones: [ShellPhone], sessions: [ShellSessionInfo], history: [ShellHistoryEntry], iroh: IrohStatus) {
+        self.phones = phones
+        self.sessions = sessions
+        self.history = history
+        historyBytes = history.reduce(0) { $0 + $1.bytes }
+        irohStatus = iroh
+    }
 }
 
 enum IrohSetupError: LocalizedError {

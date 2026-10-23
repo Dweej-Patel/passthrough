@@ -14,8 +14,18 @@ enum FullDiskAccess {
         return true
     }
 
+    /// Privacy & Security › Full Disk Access in System Settings (the pre-Ventura
+    /// address as a fallback).
     static func openSettings() {
-        guard let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles") else { return }
-        NSWorkspace.shared.open(url)
+        for address in ["x-apple.systempreferences:com.apple.settings.PrivacySecurity.extension?Privacy_AllFiles",
+                        "x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles"] {
+            if let url = URL(string: address), NSWorkspace.shared.open(url) { return }
+        }
+    }
+
+    /// A Finder window with Passthrough selected, to drag into the list: macOS
+    /// shows an app there only once it has been added.
+    static func revealApp() {
+        NSWorkspace.shared.activateFileViewerSelecting([Bundle.main.bundleURL])
     }
 }
