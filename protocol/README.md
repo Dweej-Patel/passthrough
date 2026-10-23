@@ -36,6 +36,8 @@ absent (never `null`). Unknown fields are ignored.
 | `error` | phone | `reason` | `bad_code`, `expired`, `not_authenticated` or `unsupported_version`. |
 | `ping` / `pong` | Mac / phone | none | Heartbeat every 5 s; the Mac gives up after 20 s of silence. |
 | `status` | phone | device facts, `activeConnections`, `rxBytes`, `txBytes`, `timestamp` | Once a second to authenticated Macs. |
+| `shellGrant` | Mac | `shellKey`, `certSHA256`, `shellPort`, `addresses`, `macName`, `irohID`?, `irohRelay`?, `relayToken`?, `grantID`? | Over the cable, on every paired connection while Remote shell is on: gives the phone access to the Mac's remote shell (below). `shellKey` is 32 random bytes, base64; `addresses` are where to dial the Mac. Each grant is a fresh key; the Mac also accepts the key the phone last proved until the phone first proves the new one, since a phone adopts a grant only once its app is unlocked. The optional `irohID` (the Mac's iroh endpoint id: 64 lowercase hex), `irohRelay` (its home relay: an `https` URL, at most 256 characters) and `relayToken` (at most 512 characters; kept in the phone's secret store, never in the grant record) let the phone dial the Mac over iroh (below). If the iroh fields are not valid as a group (a valid `irohID` is required; lengths count UTF-8 bytes), the phone drops all three and still stores the rest of the grant. The optional `grantID` (at most 64 UTF-8 bytes) names this grant for the answer. The Mac keeps one grant per phone in flight; one unanswered within 15 s counts as lost. The Mac then grants again after a wait counted from the end of those 15 s: 15, 30, 60 and 120 s for consecutive lost grants, then every 10 minutes. The next control channel, a new pairing, a change in what grants carry, or an answer starts the waits over. |
+| `shellGranted` | phone | `phoneID`, `grantID`? | The phone stored the grant. Echoes the grant's `grantID` when it had a valid one (1 to 64 UTF-8 bytes), so the Mac records the key of the grant answered and ignores a late answer to an earlier one. An answer without `grantID` (from phones that predate it) counts for the grant in flight. |
 
 Device facts are `deviceName`, `radio`, `carrier`, `battery` (0 to 1),
 `hosting` (`background` or `foreground`) and `ipv6`: whether the network the
@@ -150,3 +152,113 @@ of each stream has 128 KiB of credit: a sender may be at most that far ahead
 of what the receiver reported consumed, and the receiver sends WINDOW after
 each 64 KiB it consumes. Either side pings every 10 s and drops the connection
 after 30 s without any frame; the phone then redials.
+
+## Remote shell
+
+A phone opens terminal sessions on the Mac. The Mac hosts them as PTYs, so a
+session outlives the phone's connection and can be attached again.
+
+### Transport and discovery
+
+The Mac listens on TCP port 7893 (`RemoteShell.defaultPort`) with TLS 1.3
+and the same self-made certificate as the wireless link; the phone accepts
+only the certificate whose SHA-256 it got in `shellGrant`. The Mac advertises
+Bonjour service `_passthrough-sh._tcp`. The phone first receives a
+`shellGrant` over the cable (control channel, above): a per-phone `shellKey`,
+the certificate pin, the port, the Mac's `addresses` and `macName`. It answers
+`shellGranted` with its `phoneID`. The same shell protocol also runs over iroh
+(ALPN `passthrough/shell/1`, one bidirectional stream per connection); the
+iroh details come in the grant and are refreshed by `macInfo` (below). The
+phone dials the relay exactly as last given; if the Mac's home relay moves,
+a phone that is away picks up the new one at its next connection on any path.
+
+Newline-delimited JSON like the control channel, lines up to 262144 bytes.
+Binary fields (`data`, `nonce`, `mac`) are base64.
+
+### Handshake
+
+1. `{"t":"challenge","nonce":"<32 bytes, base64>"}` from the Mac.
+2. `{"t":"proof","phoneID":"…","mac":"<base64>"}` from the phone, where `mac` =
+   HMAC-SHA256(shellKey, "passthrough-shell-v1" ‖ nonce).
+   Over iroh the Mac's accept only fires once the phone writes, so the phone
+   first sends `{"t":"hello"}` right after opening the stream; the Mac reads it
+   and then sends the challenge. Over iroh the 10-second timeout starts when
+   the connection attempt arrives, before the QUIC handshake, so the QUIC
+   handshake, `hello` and proof must all fit in it. Over TLS there is no
+   `hello`.
+3. `{"t":"ready"}` followed by `sessions` from the Mac, or
+   `{"t":"error","reason":"not_authorized"}` and the connection closes.
+
+Nothing the phone sends is acted on before a valid proof. The Mac closes a
+connection whose `hello` or proof line exceeds 4096 bytes (a hard limit: a
+newline-terminated line over it is refused too) or that has not proved itself
+within 10 seconds, and holds at most 2 unproven connections per address (16 in
+total; over iroh, 8 of them for connections arriving through relays).
+After `ready` a line over the 262144-byte limit closes the connection.
+
+A connection is attached to at most one session: `open` attaches it to the
+new session, `attach` to another session leaves the previous one first.
+After an `attach` the Mac sends the scrollback as `output`, then `attached`,
+then live output. A phone's terminal should not answer terminal queries
+(device attributes, cursor position, color reports…) found in the replay:
+the program that asked is long gone, and the answer would arrive as input.
+`input` and `resize` must name the attached session, else `bad_request`. A
+line that is not valid JSON or has an unknown `t` gets `bad_request`; the
+connection stays open.
+A phone that stops reading while 8 MiB of output waits to be sent is
+disconnected; it can attach again and gets the scrollback.
+
+### Messages
+
+| `t` | From | Fields | Meaning |
+|-----|------|--------|---------|
+| `challenge` | Mac | `nonce` | Starts the handshake. |
+| `proof` | phone | `phoneID`, `mac` | Answer to the challenge. |
+| `ready` | Mac | none | Authorized; the commands below are accepted. |
+| `hello` | phone | none | iroh only: the first line the phone writes, so the Mac sees the stream. Ignored elsewhere. |
+| `macInfo` | Mac | `irohID`, `irohRelay`?, `relayToken`?, `addresses` | Sent right after `ready` on every path, except while the Mac's iroh endpoint is on but not ready to hand out (still starting, or on the default relays with no home relay yet): then it is not sent at all, so phones keep what they have (the grant likewise leaves the iroh fields out). The phone updates the stored grant's iroh details and addresses (`addresses` at most 16; validation as in `shellGrant`; absent `relayToken` clears the stored one). Valid `addresses` always apply. The iroh fields apply as a group only when valid; no `irohID` clears the stored iroh details and token, and a token without an `irohID` is never stored. It never changes the shell key or certificate pin. |
+| `list` | phone | none | Ask for the live sessions. |
+| `sessions` | Mac | `sessions` | Reply to `list`: `ShellSessionInfo` objects `id`, `title`, `startedAt`, `lastOutputAt` (Unix seconds), `running`, `exitStatus`?. |
+| `open` | phone | `cols`, `rows` | Start a new session. |
+| `opened` | Mac | `session`, `cols`, `rows` | The session exists and this connection is attached to it. |
+| `attach` | phone | `session`, `cols`, `rows` | Attach to a live session; the Mac replays its scrollback as `output` first. |
+| `attached` | Mac | `session` | The replay for an `attach` is complete: every later `output` is live. Sent before `ended` for a session that already exited. |
+| `input` | phone | `session`, `data` | Keystrokes for the PTY. |
+| `resize` | phone | `session`, `cols`, `rows` | The terminal changed size. |
+| `output` | Mac | `session`, `data` | PTY output, at most 16384 bytes before base64 per line. |
+| `close` | phone | `session` | End the session (the shell is hung up). |
+| `ended` | Mac | `session`, `exitStatus`? | The shell exited. |
+| `detached` | Mac | `session`, `reason`? | Another connection took the session over. |
+| `history` | phone | none | Ask for past sessions. |
+| `historyList` | Mac | `history` | `ShellHistoryEntry` objects `id`, `title`, `phoneLabel`, `startedAt`, `endedAt`?, `exitStatus`?, `bytes`, `cols`?, `rows`? (the terminal's size when the session started; absent from older Macs); newest first. At most the newest 500, and fewer (the oldest dropped) if the line would otherwise exceed 262144 bytes. |
+| `transcript` | phone | `session` | Ask for a past session's recorded output: at most its last 8 MiB. |
+| `transcriptData` | Mac | `session`, `data`, `cols`?, `rows`?, `done`? | A piece of the transcript (same chunk size); `done: true` on the last. `cols`/`rows`, when present, are the size the recorded terminal had from this piece on: set it before feeding `data` (which may be empty when a size change ends the transcript). The first piece always carries the size its first byte was drawn at; older Macs send none. |
+| `ping` / `pong` | either | none | Liveness. |
+| `error` | Mac | `reason`, `session`? | `not_authorized`, `too_many_sessions` (8 at once), `no_such_session` or `bad_request`. |
+
+The Mac keeps 1 MiB of scrollback per session.
+
+A transcript must be replayed at the sizes it was recorded at, never at the
+viewer's own: shells draw for their terminal's width (zsh relies on autowrap
+at the right margin and then clears the wrapped line with `\r\e[K`), so the
+same bytes at another width draw something else. Viewers set their read-only
+terminal to each size in order; a size narrower than the screen is drawn at
+the left, a larger one with a smaller font (and, on phones, panned sideways
+once the font is as small as it goes). The Mac records sizes in the cast file
+as asciicast v2 resize events (`[t, "r", "COLSxROWS"]`) whenever the phone
+resizes the session, and restates the size every 1 MiB of cast so a tail read
+finds the size its start was drawn at; the header keeps the initial size.
+
+### Address policy
+
+The Mac closes a connection from any peer outside these ranges before the TLS
+handshake completes: 10/8, 172.16/12, 192.168/16, 169.254/16, 127/8,
+100.64/10, `fc00::/7`, `fe80::/10`, `::1` and `fd7a:115c:a1e0::/48`
+(Tailscale). Hosts may carry a `%zone` suffix, which is ignored. A global
+IPv6 peer (`2000::/3`) is also let in when it shares a /64 with one of the
+Mac's own global addresses, so an IPv6-only LAN works; any other global
+address is refused. Only the Mac listens, so this check has no Kotlin
+counterpart and no fixtures.
+`addresses` in a `shellGrant` omit loopback and link-local, list Tailscale
+addresses last, and never include anything outside those ranges
+(`ShellAddressPolicy`).

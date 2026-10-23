@@ -14,7 +14,6 @@ import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.long
 import org.junit.Assert.assertEquals
 import org.junit.Test
-import java.io.File
 import java.io.StringReader
 
 /**
@@ -22,12 +21,7 @@ import java.io.StringReader
  * tests read, so the phone and Mac sides can't drift apart.
  */
 class ProtocolFixtureTests {
-    private val fixtures: JsonObject by lazy {
-        var dir: File? = File("").absoluteFile
-        while (dir != null && !File(dir, "protocol/fixtures.json").exists()) dir = dir.parentFile
-        val file = File(requireNotNull(dir) { "protocol/fixtures.json not found above ${File("").absolutePath}" }, "protocol/fixtures.json")
-        Json.parseToJsonElement(file.readText()).jsonObject
-    }
+    private val fixtures: JsonObject get() = Fixtures.root
 
     @Test fun constantsMatch() {
         assertEquals(fixtures["protocolVersion"]!!.jsonPrimitive.int, PassthroughProtocol.VERSION)
@@ -90,10 +84,5 @@ class ProtocolFixtureTests {
         }
     }
 
-    /** Numbers compare by value (1.0 == 1, 1.7580624E9 == 1758062400.0); strings and booleans by content. */
-    private fun normalize(e: JsonElement): Any? = when (e) {
-        is JsonObject -> e.mapValues { normalize(it.value) }
-        is JsonArray -> e.map { normalize(it) }
-        is JsonPrimitive -> if (e.isString) e.content else e.content.toBooleanStrictOrNull() ?: e.content.toDoubleOrNull()
-    }
+    private fun normalize(e: JsonElement): Any? = Fixtures.normalize(e)
 }

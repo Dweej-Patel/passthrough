@@ -45,7 +45,12 @@ jobs:
           persist-credentials: false
       - name: Select Xcode
         run: sudo xcode-select -s "$XCODE_APP"
+      - name: Install Metal Toolchain
+        # SwiftTerm (Mac and iOS apps) compiles a Metal shader; newer Xcodes ship the toolchain separately.
+        run: xcodebuild -downloadComponent MetalToolchain
       - name: Generate project
+        # Also copies Config/Package.resolved into the project (project.yml's
+        # postGenCommand); the builds below use only the versions pinned there.
         run: |
           brew install xcodegen
           # No Team ID in CI; the builds below are unsigned.
@@ -55,12 +60,14 @@ jobs:
         run: >
           xcodebuild -project Passthrough.xcodeproj -scheme PassthroughMac
           -configuration Debug -destination 'generic/platform=macOS'
-          -derivedDataPath build/dd CODE_SIGNING_ALLOWED=NO build
+          -derivedDataPath build/dd -onlyUsePackageVersionsFromResolvedFile
+          CODE_SIGNING_ALLOWED=NO build
       - name: Build Passthrough (iOS)
         run: >
           xcodebuild -project Passthrough.xcodeproj -scheme Passthrough
           -configuration Debug -destination 'generic/platform=iOS'
-          -derivedDataPath build/dd-ios CODE_SIGNING_ALLOWED=NO build
+          -derivedDataPath build/dd-ios -onlyUsePackageVersionsFromResolvedFile
+          CODE_SIGNING_ALLOWED=NO build
 
   android:
     name: Android tests, lint and build
@@ -76,6 +83,35 @@ jobs:
       - uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6.0.1
         with:
           distribution: temurin
-          java-version: 17
+          java-version: 25
       - uses: gradle/actions/setup-gradle@3f5f9adaf7d9fecd50b5935e54106014257a94e6 # v6.4.0
       - run: ./gradlew testDebugUnitTest lintDebug assembleDebug
+      - name: Report 16 KB page alignment of native libraries (warning only)
+        # Google Play requires 16 KB-aligned native libraries for apps targeting Android 15+.
+        # iroh 1.1.0's libiroh_ffi.so predates upstream's fix (expected in 1.1.1), so this
+        # step reports and warns instead of failing the build.
+        continue-on-error: true
+        run: |
+          apk=app/build/outputs/apk/debug/app-debug.apk
+          dir="$(mktemp -d)"
+          zipalign="$(ls -d "$ANDROID_HOME"/build-tools/*/ | sort -V | tail -1)zipalign"
+          if "$zipalign" -c -P 16 -v 4 "$apk" > "$dir/zipalign.txt"; then
+            echo "zipalign: native libraries are 16 KB aligned in the APK"
+          else
+            echo "::warning::zipalign: native libraries are not 16 KB aligned in the APK"
+          fi
+          grep -E '\.so ' "$dir/zipalign.txt" || true
+          unzip -q -o "$apk" 'lib/*' -d "$dir"
+          for so in "$dir"/lib/*/*.so; do
+            name="${so#"$dir"/}"
+            # Every LOAD segment's alignment must be at least 16 KB (0x4000).
+            smallest=""
+            for align in $(readelf -lW "$so" | awk '$1 == "LOAD" { print $NF }'); do
+              if [ -z "$smallest" ] || [ $((align)) -lt "$smallest" ]; then smallest=$((align)); fi
+            done
+            if [ -n "$smallest" ] && [ "$smallest" -ge 16384 ]; then
+              echo "$name: 16 KB aligned"
+            else
+              echo "::warning::$name: LOAD segments aligned to ${smallest:-?} bytes, not 16 KB"
+            fi
+          done

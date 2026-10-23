@@ -10,6 +10,7 @@ import dev.dpatel.passthrough.core.TrafficMeter
 import dev.dpatel.passthrough.service.PassthroughService
 import dev.dpatel.passthrough.service.Runtime
 import dev.dpatel.passthrough.service.ServiceState
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -80,8 +81,22 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
 
     fun beginPairing() { Runtime.registry.issueCode() }
     fun endPairing() { Runtime.registry.clearCode() }
-    fun revoke(client: PairedClient) = Runtime.registry.revoke(client.id)
-    fun revokeAll() = Runtime.registry.revokeAll()
+    /**
+     * Forget this Mac: its pairing, its shell key and the address typed for it.
+     * The shell view model hears the pairing go and hangs up. The vault writes
+     * to disk synchronously: off the main thread.
+     */
+    fun revoke(client: PairedClient) {
+        Runtime.registry.revoke(client.id)
+        settings.clearShellManualAddress(client.id)
+        viewModelScope.launch(Dispatchers.IO) { Runtime.shellVault.delete(client.id) }
+    }
+
+    fun revokeAll() {
+        Runtime.registry.revokeAll()
+        settings.clearShellManualAddresses()
+        viewModelScope.launch(Dispatchers.IO) { Runtime.shellVault.deleteAll() }
+    }
     fun resetMonth() = Runtime.usage.resetMonth()
     fun clearLog() { PtLog.clear(); _log.value = emptyList() }
     fun phonePermissionGranted() = Runtime.facts.registerDisplayInfo()

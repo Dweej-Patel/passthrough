@@ -24,9 +24,12 @@ class LineReader(input: InputStream, private val limit: Int = DEFAULT_LIMIT) {
                 return line.toString(Charsets.UTF_8.name())
             }
             line.write(b)
-            if (line.size() > limit) throw IOException("control line too long")
+            if (line.size() > limit) throw LineTooLongException()
         }
     }
 
     companion object { const val DEFAULT_LIMIT = 256 * 1024 }
 }
+
+/** A peer sent a line over the reader's limit. */
+class LineTooLongException : IOException("control line too long")

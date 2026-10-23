@@ -3,15 +3,24 @@ import ServiceManagement
 import PassthroughCore
 import PassthroughUI
 
+/// The Settings tabs; `SettingsWindow.show(_:tab:)` opens one directly.
+enum SettingsTab: String {
+    case general, remoteShell, vpn, network, diagnostics
+    static let storageKey = "settingsTab"
+}
+
 struct SettingsView: View {
+    @AppStorage(SettingsTab.storageKey) private var tab = SettingsTab.general
+
     var body: some View {
-        TabView {
-            GeneralSettings().tabItem { Label("General", systemImage: "gearshape") }
-            VPNSettings().tabItem { Label("VPN", systemImage: "lock.shield") }
-            NetworkSettings().tabItem { Label("Network", systemImage: "network") }
-            DiagnosticsSettings().tabItem { Label("Diagnostics", systemImage: "stethoscope") }
+        TabView(selection: $tab) {
+            GeneralSettings().tabItem { Label("General", systemImage: "gearshape") }.tag(SettingsTab.general)
+            RemoteShellSettings().tabItem { Label("Remote Shell", systemImage: "terminal") }.tag(SettingsTab.remoteShell)
+            VPNSettings().tabItem { Label("VPN", systemImage: "lock.shield") }.tag(SettingsTab.vpn)
+            NetworkSettings().tabItem { Label("Network", systemImage: "network") }.tag(SettingsTab.network)
+            DiagnosticsSettings().tabItem { Label("Diagnostics", systemImage: "stethoscope") }.tag(SettingsTab.diagnostics)
         }
-        .frame(width: 500, height: 520)
+        .frame(width: 540, height: 600)
     }
 }
 
@@ -20,15 +29,11 @@ struct GeneralSettings: View {
     @EnvironmentObject private var keepAwake: KeepAwakeController
     @State private var launchAtLogin = SMAppService.mainApp.status == .enabled
     @State private var loginError: String?
+    @State private var confirmForget = false
 
-    private var batteryFooter: String {
-        let now: String
-        if keepAwake.battery.hasBattery, keepAwake.battery.percent >= 0 {
-            now = " Currently \(keepAwake.battery.percent)%\(keepAwake.battery.isOnAC ? " (on power)" : " (on battery)")."
-        } else {
-            now = ""
-        }
-        return "When on battery power and keep awake is on, it switches off automatically at this level so a closed laptop can sleep instead of draining.\(now)"
+    private var batteryText: String {
+        guard keepAwake.battery.hasBattery, keepAwake.battery.percent >= 0 else { return "No battery" }
+        return "\(keepAwake.battery.percent)% · \(keepAwake.battery.isOnAC ? "on power" : "on battery")"
     }
 
     private var wirelessText: String {
@@ -52,63 +57,84 @@ struct GeneralSettings: View {
     var body: some View {
         Form {
             Section {
-                Toggle("Connect automatically when a phone is plugged in", isOn: $session.autoConnect)
-                Toggle("Keep this Mac awake (even with the lid closed)", isOn: Binding(
-                    get: { keepAwake.isOn },
-                    set: { keepAwake.set($0) }))
+                Toggle(isOn: $session.autoConnect) {
+                    Text("Connect automatically")
+                    Text("Starts passthrough when a phone is plugged in.")
+                }
+                Toggle(isOn: $launchAtLogin) {
+                    Text("Open Passthrough at login")
+                }
+                .onChange(of: launchAtLogin) { _, on in
+                    do { on ? try SMAppService.mainApp.register() : try SMAppService.mainApp.unregister(); loginError = nil }
+                    catch { loginError = error.localizedDescription; launchAtLogin = !on }
+                }
+                if let loginError { Text(loginError).font(.caption).foregroundStyle(PTTheme.danger) }
+            }
+            Section {
+                Toggle(isOn: Binding(get: { keepAwake.isOn }, set: { keepAwake.set($0) })) {
+                    Text("Keep this Mac awake")
+                    Text("Even with the lid closed, so long sessions survive. The screen still turns off and locks.")
+                }
                 if let reason = keepAwake.blockedReason {
                     Label(reason, systemImage: "exclamationmark.triangle.fill")
                         .font(.caption).foregroundStyle(PTTheme.warning)
                 }
-                Toggle("Open Passthrough at login", isOn: $launchAtLogin)
-                    .onChange(of: launchAtLogin) { _, on in
-                        do { on ? try SMAppService.mainApp.register() : try SMAppService.mainApp.unregister(); loginError = nil }
-                        catch { loginError = error.localizedDescription; launchAtLogin = !on }
-                    }
-                if let loginError { Text(loginError).font(.caption).foregroundStyle(PTTheme.danger) }
-            } footer: {
-                Text("Keep awake stops the Mac from sleeping so long sessions survive when you step away, including with the lid closed (via the root helper). The screen still turns off and locks; apps and tools like Claude Code keep running either way. It reverts automatically when you turn it off or quit Passthrough, and switches itself off at low battery or when the Mac runs hot (below). Still, a closed, running Mac in a bag can overheat, so use lid-closed on power or in open air.")
-            }
-            Section {
-                Toggle("Turn off keep awake at low battery", isOn: $keepAwake.batteryAutoOff)
+                Toggle(isOn: $keepAwake.batteryAutoOff) {
+                    Text("Turn off at low battery")
+                    Text("So a closed laptop sleeps instead of draining.")
+                }
                 if keepAwake.batteryAutoOff {
                     Stepper(value: $keepAwake.batteryAutoOffThreshold, in: 5...80, step: 5) {
                         HStack {
-                            Text("Threshold")
+                            Text("Battery level")
                             Spacer()
                             Text("\(keepAwake.batteryAutoOffThreshold)%").foregroundStyle(.secondary).monospacedDigit()
                         }
                     }
                 }
+                Toggle(isOn: $keepAwake.thermalAutoOff) {
+                    Text("Turn off when the Mac runs hot")
+                    Text("When macOS starts slowing the Mac down to cool it.")
+                }
+                LabeledContent("Right now") {
+                    Text("\(batteryText) · \(KeepAwakeController.describe(keepAwake.thermal))")
+                }
             } header: {
-                Text("Battery")
+                Text("Keep awake")
             } footer: {
-                Text(batteryFooter)
+                Text("Turns itself off when you quit Passthrough. A closed, running Mac in a bag can overheat: keep it on power or in open air.")
             }
             Section {
-                Toggle("Turn off keep awake when the Mac runs hot", isOn: $keepAwake.thermalAutoOff)
-            } header: {
-                Text("Heat")
-            } footer: {
-                Text("macOS reports how hard it is working to stay cool. When it reaches “serious”, where it starts slowing the Mac down, keep awake switches off so a closed laptop can sleep and cool. Right now the Mac is \(KeepAwakeController.describe(keepAwake.thermal)).")
-            }
-            Section {
-                Picker("Connect over", selection: $session.connectionMode) {
+                Picker(selection: $session.connectionMode) {
                     ForEach(SessionCoordinator.ConnectionMode.allCases) { Text($0.title).tag($0) }
+                } label: {
+                    Text("Connect over")
+                    Text("Automatic prefers the cable.")
                 }
                 if session.connectionMode != .cable {
                     LabeledContent("Wireless") { Text(wirelessText) }
                     LabeledContent("Linked phones") { Text("\(session.linkedPhoneCount)") }
-                    Toggle("Don't use the hotspot's own data", isOn: $session.hotspotGuard)
-                    Toggle("Use peer-to-peer Wi-Fi", isOn: $session.peerToPeer)
+                    Toggle(isOn: $session.hotspotGuard) {
+                        Text("Don't use the hotspot's own data")
+                        Text("While passthrough is down, the Mac reaches only the phone.")
+                    }
+                    Toggle(isOn: $session.peerToPeer) {
+                        Text("Use peer-to-peer Wi-Fi")
+                        Text("No hotspot needed, but it drops for minutes while an iPhone is locked.")
+                    }
                 }
             } header: {
                 Text("Connection")
             } footer: {
-                Text("Wireless: join the iPhone's Personal Hotspot from the Wi-Fi menu (it stays up while the iPhone is locked) and turn on Wireless link in Passthrough on the phone. Traffic still goes through Passthrough; with \"Don't use the hotspot's own data\" the Mac reaches nothing but the phone while passthrough is down, so the hotspot allowance isn't touched. Peer-to-peer Wi-Fi needs no hotspot but drops for minutes while an iPhone is locked. A phone links the first time it connects over USB. Automatic prefers the cable.")
+                if session.connectionMode != .cable {
+                    Text("To go wireless, join the iPhone's Personal Hotspot from the Wi-Fi menu and turn on Wireless link in Passthrough on the phone. A phone links the first time it connects over USB.")
+                }
             }
             Section {
-                Toggle("Android phones (via adb)", isOn: $session.androidEnabled)
+                Toggle(isOn: $session.androidEnabled) {
+                    Text("Android phones")
+                    Text("Connect through adb, Android's USB debugging bridge.")
+                }
                 if session.androidEnabled { LabeledContent("adb") { Text(adbText) } }
                 if let hint = session.androidHint {
                     Label(hint, systemImage: "exclamationmark.triangle.fill").font(.caption).foregroundStyle(PTTheme.warning)
@@ -116,22 +142,49 @@ struct GeneralSettings: View {
             } header: {
                 Text("Android")
             } footer: {
-                Text("Android phones connect through adb, Android's USB debugging bridge. Install platform-tools (brew install android-platform-tools), turn on USB debugging on the phone, and allow this Mac when it asks.")
+                if session.androidEnabled {
+                    Text("Needs platform-tools (brew install android-platform-tools) and USB debugging turned on in the phone's Developer options. Allow this Mac when the phone asks.")
+                }
             }
             Section("Pairing") {
                 LabeledContent("This Mac") { Text(session.macName) }
                 LabeledContent("Paired") { Text(session.hasToken ? "Yes" : "Not yet") }
-                Button("Forget pairing", role: .destructive) { session.forgetPairing() }.disabled(!session.hasToken)
+                Button("Forget Pairing…", role: .destructive) { confirmForget = true }.disabled(!session.hasToken)
             }
-            Section("Helper") {
-                LabeledContent("Status") { Text(helperText) }
+            Section {
+                LabeledContent("Status") {
+                    HStack(spacing: 6) {
+                        Circle().fill(helperColor).frame(width: 7, height: 7)
+                        Text(helperText)
+                    }
+                }
+                if let note = session.helperNote {
+                    Text(note).font(.caption).foregroundStyle(.secondary)
+                }
                 HStack {
                     Button("Open Login Items") { session.openLoginItems() }
-                    Button("Register again") { session.retryHelper() }
+                    Button("Register Again") { session.retryHelper() }
                 }
+            } header: {
+                Text("Helper")
+            } footer: {
+                Text("The helper routes the Mac's traffic. Approve it once in System Settings › General › Login Items.")
             }
         }
         .formStyle(.grouped)
+        .confirmationDialog("Forget this Mac's pairing?", isPresented: $confirmForget) {
+            Button("Forget Pairing", role: .destructive) { session.forgetPairing() }
+        } message: {
+            Text("The phone needs a new pairing code before it can connect again, and loses its remote shell access.")
+        }
+    }
+
+    private var helperColor: Color {
+        switch session.helperAvailability {
+        case .ready: return PTTheme.success
+        case .needsApproval: return PTTheme.warning
+        case .notRegistered, .failed: return PTTheme.danger
+        }
     }
 
     private var helperText: String {

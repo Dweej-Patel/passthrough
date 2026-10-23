@@ -7,7 +7,8 @@ import SwiftUI
 /// window once SwiftUI has created or reused it.
 @MainActor
 enum SettingsWindow {
-    static func show(_ openSettings: OpenSettingsAction) {
+    static func show(_ openSettings: OpenSettingsAction, tab: SettingsTab? = nil) {
+        if let tab { UserDefaults.standard.set(tab.rawValue, forKey: SettingsTab.storageKey) }
         NSApp.activate()
         openSettings()
         // The window appears on the next run-loop turn; raise it then, and once

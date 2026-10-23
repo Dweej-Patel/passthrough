@@ -22,12 +22,8 @@ public final class WirelessListener: @unchecked Sendable {
     private let queue = DispatchQueue(label: "\(PassthroughProtocol.identifier).wireless-listener")
     private var listener: NWListener?
     private var stopped = false
-    private var pending = 0
-    private var pendingByHost: [String: Int] = [:]
-    /// Handshakes at once, in all and from one address: anyone on the same
-    /// network can connect, so a stranger may hold a couple, never all.
-    static let maxHandshakes = 16
-    static let maxHandshakesPerHost = 2
+    /// Unproven connections, few at once and from one address (`HandshakeLimiter`).
+    private lazy var handshakes = HandshakeLimiter(queue: queue)
     /// A phone's first line (its proof, plus its streams when resuming). Read
     /// before it has proved anything, so far below the general line limit.
     static let proofLineLimit = 128 * 1024
@@ -51,17 +47,7 @@ public final class WirelessListener: @unchecked Sendable {
     }
 
     public func start(onReady: (@Sendable (UInt16) -> Void)? = nil) throws {
-        let tls = NWProtocolTLS.Options()
-        sec_protocol_options_set_min_tls_protocol_version(tls.securityProtocolOptions, .TLSv13)
-        guard let secIdentity = sec_identity_create(identity.identity) else {
-            throw MuxError.protocolViolation("could not use the Mac's identity")
-        }
-        sec_protocol_options_set_local_identity(tls.securityProtocolOptions, secIdentity)
-        let tcp = NWProtocolTCP.Options()
-        tcp.noDelay = true
-        tcp.enableKeepalive = true
-        tcp.keepaliveIdle = 10
-        let params = NWParameters(tls: tls, tcp: tcp)
+        let params = try identity.tlsListenerParameters()
         params.includePeerToPeer = peerToPeer
         let listener = try NWListener(using: params)
         if advertise {
@@ -93,34 +79,20 @@ public final class WirelessListener: @unchecked Sendable {
     }
 
     private func accept(_ connection: NWConnection) {
-        let host = Self.host(of: connection)
-        guard pending < Self.maxHandshakes, pendingByHost[host, default: 0] < Self.maxHandshakesPerHost else {
+        guard let slot = handshakes.acquire(host: PeerAddress.host(of: connection), onTimeout: { connection.cancel() }) else {
             connection.cancel(); return
         }
-        pending += 1
-        pendingByHost[host, default: 0] += 1
         let stream = ConnectionStream(connection, queue: queue)
         let nonce = WirelessLink.randomBytes(32)
-        var done = false
-        /// Frees this handshake's slot, once; false if it was already freed.
-        let release: () -> Bool = { [weak self] in
-            guard !done, let self else { return false }
-            done = true
-            self.pending -= 1
-            let left = (self.pendingByHost[host] ?? 1) - 1
-            self.pendingByHost[host] = left > 0 ? left : nil
-            return true
-        }
         let finish: (Link?) -> Void = { [weak self] link in
-            guard let self, release() else { return }
+            guard let self, slot.release() else { return }
             if let link, !self.stopped { self.onLink?(link) } else { link?.mux.close(); stream.cancel() }
         }
-        queue.asyncAfter(deadline: .now() + WirelessLink.handshakeTimeout) { finish(nil) }
         WirelessLink.sendLine(.init(t: "challenge", nonce: nonce.base64EncodedString()), on: stream)
         WirelessLink.readLine(stream, limit: Self.proofLineLimit) { [weak self] result in
             guard let self else { return }
             self.queue.async {
-                guard !done, !self.stopped else { finish(nil); return }   // timed out or stopped meanwhile
+                guard !slot.isReleased, !self.stopped else { finish(nil); return }   // timed out or stopped meanwhile
                 guard case .success(let (line, rest)) = result,
                       let message = try? JSONDecoder().decode(WirelessLink.Handshake.self, from: line),
                       message.t == "proof", let phoneID = message.phoneID,
@@ -137,7 +109,7 @@ public final class WirelessListener: @unchecked Sendable {
                         WirelessLink.sendLine(.init(t: "resume", streams: states), on: stream)
                     }
                     self.onResume?(phoneID, WirelessLink.carrier(of: stream))
-                    _ = release()
+                    slot.release()
                     return
                 }
                 let id = UUID().uuidString
@@ -151,10 +123,42 @@ public final class WirelessListener: @unchecked Sendable {
     }
 }
 
-extension WirelessListener {
-    static func host(of connection: NWConnection) -> String {
-        if case .hostPort(let host, _) = connection.endpoint { return "\(host)" }
-        return "\(connection.endpoint)"
+public extension MacIdentity {
+    /// TLS 1.3 server parameters presenting this identity, over TCP with
+    /// keepalive and no Nagle delay.
+    func tlsListenerParameters() throws -> NWParameters {
+        let tls = NWProtocolTLS.Options()
+        sec_protocol_options_set_min_tls_protocol_version(tls.securityProtocolOptions, .TLSv13)
+        guard let secIdentity = sec_identity_create(identity) else {
+            throw MuxError.protocolViolation("could not use the Mac's identity")
+        }
+        sec_protocol_options_set_local_identity(tls.securityProtocolOptions, secIdentity)
+        let tcp = NWProtocolTCP.Options()
+        tcp.noDelay = true
+        tcp.enableKeepalive = true
+        tcp.keepaliveIdle = 10
+        return NWParameters(tls: tls, tcp: tcp)
+    }
+}
+
+/// Who is on the other end of an accepted connection, as a bare address.
+public enum PeerAddress {
+    /// The peer's host. An IPv4 peer of a dual-stack listener shows up as
+    /// `::ffff:a.b.c.d`; it is returned as `a.b.c.d`.
+    public static func host(of connection: NWConnection) -> String {
+        host(of: connection.endpoint)
+    }
+
+    public static func host(of endpoint: NWEndpoint) -> String {
+        guard case .hostPort(let host, _) = endpoint else { return "\(endpoint)" }
+        if case .ipv6(let v6) = host {
+            let b = [UInt8](v6.rawValue)
+            if b.count == 16, b[0..<10].allSatisfy({ $0 == 0 }), b[10] == 0xFF, b[11] == 0xFF,
+               let v4 = IPv4Address(Data(b[12..<16])) {
+                return "\(v4)"
+            }
+        }
+        return "\(host)"
     }
 }
 

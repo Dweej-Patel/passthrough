@@ -161,6 +161,31 @@ public final class ControlServer: @unchecked Sendable {
             reply.phoneID = registry.phoneID
             ptLog(.info, "Linked \(mac.name) for the wireless link")
             return [reply]
+        case ControlEnvelope.shellGrant:
+            // Only a Mac that already proved its pairing token may be granted a shell.
+            guard let mac = peer.mac, let cert = message.certSHA256, cert.utf8.count == 64,
+                  cert.utf8.allSatisfy({ (0x30...0x39).contains($0) || (0x41...0x46).contains($0) || (0x61...0x66).contains($0) }),
+                  let key = message.shellKey.flatMap({ Data(base64Encoded: $0) }), key.count == 32,
+                  let port = message.shellPort.flatMap({ UInt16(exactly: $0) }), port > 0 else { return [] }
+            // The iroh details are all or nothing; bad ones never cost the LAN grant.
+            var iroh = (id: message.irohID, relay: message.irohRelay, token: message.relayToken)
+            if !IrohInfo.areValid(id: iroh.id, relay: iroh.relay, token: iroh.token) {
+                if iroh.id != nil || iroh.relay != nil || iroh.token != nil { ptLog(.info, "shell: ignoring invalid iroh info in grant") }
+                iroh = (nil, nil, nil)
+            }
+            let grant = ShellGrant(certSHA256: cert.lowercased(), port: port, addresses: Array((message.addresses ?? []).prefix(IrohInfo.maxAddresses)),
+                                   macName: String((message.macName ?? mac.name).prefix(64)),
+                                   irohID: iroh.id, irohRelay: iroh.relay)
+            guard registry.grantShell(clientID: mac.id, grant: grant, shellKey: key, relayToken: iroh.token) else {
+                ptLog(.error, "Could not store the shell key from \(mac.name)")
+                return []
+            }
+            var reply = ControlEnvelope(t: ControlEnvelope.shellGranted)
+            reply.phoneID = registry.phoneID
+            // Echo the grant's name so the Mac records the key this answer is for.
+            reply.grantID = message.grantID.flatMap { $0.isEmpty || $0.utf8.count > ControlEnvelope.maxGrantIDLength ? nil : $0 }
+            ptLog(.info, "Granted \(mac.name) a shell")
+            return [reply]
         case ControlEnvelope.ping:
             return [ControlEnvelope(t: ControlEnvelope.pong)]
         default:

@@ -13,6 +13,7 @@ struct PassthroughMacApp: App {
                 .environmentObject(session)
                 .environmentObject(session.vpnLayer)
                 .environmentObject(session.keepAwake)
+                .environmentObject(session.shell)
         } label: {
             MenuBarLabel(session: session, vpnLayer: session.vpnLayer, keepAwake: session.keepAwake)
         }
@@ -23,6 +24,12 @@ struct PassthroughMacApp: App {
                 .environmentObject(session)
                 .environmentObject(session.vpnLayer)
                 .environmentObject(session.keepAwake)
+                .environmentObject(session.shell)
+        }
+
+        Window("Shell History", id: ShellHistoryWindow.id) {
+            ShellHistoryWindow()
+                .environmentObject(session.shell)
         }
     }
 }
