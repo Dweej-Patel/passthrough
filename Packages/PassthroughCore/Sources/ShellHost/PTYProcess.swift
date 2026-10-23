@@ -65,8 +65,16 @@ public final class PTYProcess: @unchecked Sendable {
         guard !exited else { return }
         let pid = pid
         killpg(pid, SIGHUP)
-        DispatchQueue.global().asyncAfter(deadline: .now() + 2) { killpg(pid, SIGKILL) }   // no-op once reaped
-        DispatchQueue.global().async { var status: Int32 = 0; waitpid(pid, &status, 0) }
+        // SIGKILL only while the child is unreaped: until then neither its pid
+        // nor its process group can be reused by another process.
+        DispatchQueue.global().async {
+            var status: Int32 = 0
+            let deadline = Date() + 2
+            while waitpid(pid, &status, WNOHANG) == 0 {
+                guard Date() < deadline else { killpg(pid, SIGKILL); waitpid(pid, &status, 0); return }
+                usleep(50_000)
+            }
+        }
     }
 
     /// Begins delivering output and watching for exit.
@@ -92,18 +100,18 @@ public final class PTYProcess: @unchecked Sendable {
         }
     }
 
+    /// Writes all of `data` in order, waiting for as long as the shell isn't
+    /// reading (as a terminal does); only closing the master ends the wait.
     public func write(_ data: Data) {
         writeQueue.async { [self] in
             var offset = 0
-            var stalls = 0
             while offset < data.count {
                 state.lock.lock()
                 let n = state.closed ? -1 : data.withUnsafeBytes { Darwin.write(master, $0.baseAddress! + offset, data.count - offset) }
-                let error = errno
+                let error = state.closed ? EBADF : errno
                 state.lock.unlock()
-                if n > 0 { offset += n; stalls = 0; continue }
-                guard n < 0, error == EAGAIN || error == EINTR, stalls < 50 else { return }   // closed, or the shell isn't reading
-                stalls += 1
+                if n > 0 { offset += n; continue }
+                guard n < 0, error == EAGAIN || error == EINTR else { return }   // closed
                 var p = pollfd(fd: master, events: Int16(POLLOUT), revents: 0)
                 poll(&p, 1, 100)
             }
@@ -129,6 +137,9 @@ public final class PTYProcess: @unchecked Sendable {
     // MARK: Queue-confined
 
     private func drain() {
+        // Cancelling the read source closes the master (in its cancel handler,
+        // on this queue), after which the number may belong to another file.
+        guard readSource != nil else { return }
         var buffer = [UInt8](repeating: 0, count: 16384)
         while true {
             let n = read(master, &buffer, buffer.count)

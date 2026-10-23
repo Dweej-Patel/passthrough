@@ -34,16 +34,21 @@ public final class HandshakeLimiter {
     private let timeout: TimeInterval
     private let maxTotal: Int
     private let maxPerHost: Int
+    private let onLinkPrefixes: () -> Set<Data>
     private var pending = 0
     private var pendingByHost: [String: Int] = [:]
 
-    /// `queue` is the listener's; the timeout fires on it.
+    /// `queue` is the listener's; the timeout fires on it. `onLinkPrefixes`
+    /// are the /64s the Mac is on itself (first 8 bytes), whose peers are
+    /// neighbours and are counted one address each.
     public init(queue: DispatchQueue, timeout: TimeInterval = WirelessLink.handshakeTimeout,
-                maxTotal: Int = HandshakeLimiter.maxHandshakes, maxPerHost: Int = HandshakeLimiter.maxHandshakesPerHost) {
+                maxTotal: Int = HandshakeLimiter.maxHandshakes, maxPerHost: Int = HandshakeLimiter.maxHandshakesPerHost,
+                onLinkPrefixes: @escaping () -> Set<Data> = { [] }) {
         self.queue = queue
         self.timeout = timeout
         self.maxTotal = maxTotal
         self.maxPerHost = maxPerHost
+        self.onLinkPrefixes = onLinkPrefixes
     }
 
     /// A slot for a handshake from `host`, or nil when it must be refused.
@@ -52,7 +57,7 @@ public final class HandshakeLimiter {
     /// released it within the timeout, the slot is freed and `onTimeout` runs
     /// (to drop the connection).
     public func acquire(host: String, maxForHost: Int? = nil, onTimeout: @escaping () -> Void) -> Slot? {
-        let host = Self.bucket(host)
+        let host = Self.bucket(host, onLinkPrefixes: onLinkPrefixes)
         guard pending < maxTotal, pendingByHost[host, default: 0] < (maxForHost ?? maxPerHost) else { return nil }
         pending += 1
         pendingByHost[host, default: 0] += 1
@@ -63,14 +68,20 @@ public final class HandshakeLimiter {
         return slot
     }
 
-    /// What a peer is counted under: its address, except that an IPv6 peer is
-    /// counted by its /64, so rotating source addresses within one cannot
-    /// multiply its share. (A `%scope` suffix is ignored.)
-    static func bucket(_ host: String) -> String {
+    /// What a peer is counted under: its address, except that a global IPv6
+    /// peer from beyond the Mac's own links is counted by its /64, so rotating
+    /// source addresses within one cannot multiply its share. Link-local, ULA
+    /// and on-link peers are neighbours that share a /64 with every other
+    /// phone (AWDL is all fe80::/64), so they keep one share per address.
+    /// (A `%scope` suffix is ignored.)
+    static func bucket(_ host: String, onLinkPrefixes: () -> Set<Data> = { [] }) -> String {
         let bare = host.split(separator: "%", maxSplits: 1, omittingEmptySubsequences: false).first.map(String.init) ?? host
         guard let v6 = IPv6Address(bare) else { return host }
         let raw = v6.rawValue
-        return "v6/" + raw.prefix(8).map { String(format: "%02x", $0) }.joined()
+        let isGlobal = raw[raw.startIndex] & 0xE0 == 0x20
+        let prefix = Data(raw.prefix(8))
+        let bytes = isGlobal && !onLinkPrefixes().contains(prefix) ? prefix : raw
+        return "v6/" + bytes.map { String(format: "%02x", $0) }.joined()
     }
 
     /// Handshakes holding a slot now.

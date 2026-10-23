@@ -141,7 +141,9 @@ final class RemoteShellController: ObservableObject {
 
     /// Ends every session, then stops listening, then ends any session a phone
     /// opened meanwhile: no shell outlives the setting. Returns at once; `wait`
-    /// blocks until done instead (quitting, so transcripts get their end time).
+    /// (quitting) also ends the sessions before returning, so transcripts get
+    /// their end time, without queueing behind an iroh bind or waiting for the
+    /// teardown (the process exiting closes the sockets).
     func stop(wait: Bool = false) {
         guard let listener else { return }
         self.listener = nil
@@ -162,7 +164,8 @@ final class RemoteShellController: ObservableObject {
             manager?.closeAll()
             ptLog(.info, "shell: listener stopped")
         }
-        wait ? lifecycle.sync(execute: work) : lifecycle.async(execute: work)
+        lifecycle.async(execute: work)
+        if wait { manager?.closeAll() }
     }
 
     // MARK: Reach from anywhere (iroh)

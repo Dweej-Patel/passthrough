@@ -35,6 +35,25 @@ final class HandshakeLimiterTests: XCTestCase {
         }
     }
 
+    /// Neighbours share a /64 with every other phone on the link, so each
+    /// address keeps its own share: link-local (AWDL), ULA, and global
+    /// addresses in a /64 the Mac is on itself.
+    func testNeighboursAreCountedPerAddress() {
+        queue.sync {
+            let onLink: Set<Data> = [Data([0x20, 0x01, 0x0d, 0xb8, 0, 1, 0, 2])]
+            let limiter = HandshakeLimiter(queue: queue, timeout: 60, maxTotal: 16, maxPerHost: 2, onLinkPrefixes: { onLink })
+            for host in ["fe80::1%awdl0", "fe80::2%awdl0", "fe80::3%en0", "fd00:1:2:3::1", "fd00:1:2:3::2",
+                         "2001:db8:1:2::1", "2001:db8:1:2::2", "2001:db8:1:2::3"] {
+                XCTAssertNotNil(limiter.acquire(host: host) {}, host)
+            }
+            XCTAssertNotNil(limiter.acquire(host: "fe80::1%awdl0") {})
+            XCTAssertNil(limiter.acquire(host: "fe80::1%en0") {}, "one address still gets only its share")
+            XCTAssertNotNil(limiter.acquire(host: "2001:db8:9:9::1") {})
+            XCTAssertNotNil(limiter.acquire(host: "2001:db8:9:9::2") {})
+            XCTAssertNil(limiter.acquire(host: "2001:db8:9:9::3") {}, "a /64 beyond the Mac's links is still counted as one")
+        }
+    }
+
     func testTimeoutFreesTheSlotOnce() {
         let limiter = queue.sync { HandshakeLimiter(queue: queue, timeout: 0.1, maxTotal: 1, maxPerHost: 1) }
         let timedOut = expectation(description: "timed out")

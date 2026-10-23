@@ -272,10 +272,14 @@ final class SessionCoordinator: ObservableObject {
         shell.onAccessRevoked = { [weak self] slots in self?.shellAccessRevoked(pairingSlots: slots) }
         // What grants carry changed (endpoint up or down, relay, reach from
         // anywhere, identity reset): tell the phone on the cable. The ledger
-        // only sends when the contents differ from what the phone holds.
+        // only sends when the contents differ from what the phone holds; the
+        // status also changes on every path refresh, which grants don't carry,
+        // so those don't each load the identity from the Keychain.
         Publishers.Merge3(shell.$irohStatus.map { _ in () }, shell.$relay.map { _ in () }, shell.$reachAnywhere.map { _ in () })
             .receive(on: DispatchQueue.main)
-            .sink { [weak self] in self?.sendShellGrant() }
+            .map { [weak self] in self?.shell.irohGrant }   // nil too: the endpoint went down
+            .removeDuplicates()
+            .sink { [weak self] _ in self?.sendShellGrant() }
             .store(in: &cancellables)
 
         ticker = Timer.publish(every: 1, on: .main, in: .common).autoconnect().sink { [weak self] _ in self?.tick() }

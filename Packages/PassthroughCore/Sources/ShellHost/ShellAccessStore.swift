@@ -86,6 +86,9 @@ public final class ShellAccessStore: @unchecked Sendable {
     /// key that phone last proved stays accepted as `previousKey` until the
     /// new one is first used (`confirmCurrentKey`). False if it could not be stored (or the stored list is unreadable and
     /// must not be overwritten): the phone then has no key, so grant none.
+    /// Also false when that phone ID was granted through another pairing: the
+    /// ID is the phone's own claim, so one paired phone must not take over
+    /// (or lock out) another's access by naming it.
     @discardableResult
     public func record(_ phone: ShellPhone) -> Bool {
         writeLock.lock(); defer { writeLock.unlock() }
@@ -95,6 +98,10 @@ public final class ShellAccessStore: @unchecked Sendable {
         }
         var phone = phone
         if let earlier = list.first(where: { $0.phoneID == phone.phoneID }) {
+            guard earlier.pairingSlot == phone.pairingSlot else {
+                ptLog(.error, "A phone claimed the shell access of a phone granted through another pairing; not recording it")
+                return false
+            }
             // An unconfirmed earlier grant was never used, so the phone may
             // still hold only the key before it: keep that one.
             let kept = earlier.previousKey ?? earlier.key

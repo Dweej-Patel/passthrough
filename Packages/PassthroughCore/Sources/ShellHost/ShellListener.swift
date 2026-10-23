@@ -225,7 +225,7 @@ final class ShellGate: @unchecked Sendable {
          handshakeTimeout: TimeInterval = WirelessLink.handshakeTimeout) {
         queue = DispatchQueue(label: "\(PassthroughProtocol.identifier).\(label)")
         work = DispatchQueue(label: "\(PassthroughProtocol.identifier).\(label)-work")
-        limiter = HandshakeLimiter(queue: queue, timeout: handshakeTimeout)
+        limiter = HandshakeLimiter(queue: queue, timeout: handshakeTimeout, onLinkPrefixes: LocalAddresses.onLinkPrefixes)
         self.manager = manager
         self.transcripts = transcripts
         self.shellKeys = shellKeys

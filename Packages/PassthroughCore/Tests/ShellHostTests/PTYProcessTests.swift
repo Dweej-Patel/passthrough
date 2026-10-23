@@ -112,6 +112,20 @@ final class PTYProcessTests: XCTestCase {
         XCTAssertEqual(buffer.contents, Data((16..<25).map { UInt8($0) } + [99]))
     }
 
+    /// Until anything is cut off the replay is everything; after, it starts
+    /// at a line, or failing that at a whole UTF-8 character.
+    func testScrollbackReplayStartsAtALineOnceTrimmed() {
+        var buffer = ScrollbackBuffer(capacity: 8)
+        buffer.append(Data("ab\ncd".utf8))
+        XCTAssertEqual(buffer.replay, Data("ab\ncd".utf8))
+        buffer.append(Data("\u{1b}[31mxy\nz".utf8))
+        XCTAssertEqual(buffer.contents, Data("[31mxy\nz".utf8))
+        XCTAssertEqual(buffer.replay, Data("z".utf8), "not from inside the escape sequence")
+        var wide = ScrollbackBuffer(capacity: 3)
+        wide.append(Data("éé".utf8))   // four bytes, two per character
+        XCTAssertEqual(wide.replay, Data("é".utf8), "not from the middle of a character")
+    }
+
     func testLoginShellCommandAndEnvironment() {
         let command = LoginShell.command()
         XCTAssertEqual(command.arguments, ["-l"])

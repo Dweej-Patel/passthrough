@@ -20,6 +20,19 @@ final class ShellAccessStoreTests: XCTestCase {
         XCTAssertNil(store.key(forPhone: "nobody"))
     }
 
+    /// The phone ID in a grant answer is the phone's claim: a phone paired
+    /// through one slot cannot replace the access of a phone from another.
+    func testRecordRefusesAPhoneIDFromAnotherPairing() {
+        let store = ShellAccessStore(secrets: InMemorySecrets())
+        let key = Data(repeating: 1, count: 32)
+        XCTAssertTrue(store.record(phone("b", slot: "android-1", key: key)))
+        XCTAssertFalse(store.record(phone("b", slot: "token")))
+        XCTAssertEqual(store.candidateKeys(forPhone: "b"), [key])
+        XCTAssertEqual(store.phones.map(\.pairingSlot), ["android-1"])
+        store.revoke(pairingSlot: "android-1")
+        XCTAssertTrue(store.record(phone("b", slot: "token")), "once that pairing is gone the ID is free")
+    }
+
     /// A re-grant keeps the key the phone holds working until it uses the new one.
     func testRegrantKeepsThePreviousKeyUntilTheNewOneIsUsed() {
         let store = ShellAccessStore(secrets: InMemorySecrets())

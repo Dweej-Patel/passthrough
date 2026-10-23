@@ -173,7 +173,7 @@ public final class ShellSessionManager: @unchecked Sendable {
                 callouts.async { previous.shellDetached(session: id, generation: old) }
             }
             if session.running { resize(session, cols: cols, rows: rows) }
-            let replay = session.scrollback.contents
+            let replay = session.scrollback.replay
             var offset = 0
             while offset < replay.count {
                 let chunk = Data(replay[(replay.startIndex + offset)..<(replay.startIndex + min(offset + RemoteShell.outputChunk, replay.count))])
