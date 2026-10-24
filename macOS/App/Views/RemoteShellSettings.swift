@@ -102,9 +102,9 @@ struct RemoteShellSettings: View {
         return SetupStep(status: access.ready ? .done : (wanted ? .needed : .optional),
                          title: "Screen Recording and Accessibility",
                          detail: access.ready
-                            ? "Phones you allow below see this screen as smooth video and control it."
+                            ? "Phones you allow below see this screen as smooth video and control it. Shells inherit these permissions too, so any phone with shell access can also capture the screen and post input from a shell."
                             : (wanted ? "A phone below may see this screen. " : "Optional. ")
-                                + "Allow Passthrough under Privacy & Security › Screen Recording (to stream this screen) and › Accessibility (to take a phone's clicks and keys). macOS may want Passthrough reopened after Screen Recording.") {
+                                + "Allow Passthrough under Privacy & Security › Screen Recording (to stream this screen) and › Accessibility (to take a phone's clicks and keys). Shells inherit them too, so any phone with shell access could then capture the screen and post input from a shell. macOS may want Passthrough reopened after Screen Recording.") {
             HStack(spacing: 6) {
                 if !access.capture {
                     Button("Screen Recording…") {
