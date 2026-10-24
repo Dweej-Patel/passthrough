@@ -401,6 +401,13 @@ final class RemoteShellController: ObservableObject {
         refreshPhones()
     }
 
+    /// The phone's pairing moved to another slot; its access follows (see `ShellAccessStore.move`).
+    func movePairing(phoneID: String, fromSlot: String, toSlot: String) {
+        guard store.move(phoneID: phoneID, fromSlot: fromSlot, toSlot: toSlot) else { return }
+        ptLog(.info, "shell: moved a phone's access to its own pairing")
+        refreshPhones()
+    }
+
     /// The key goes first, so the phone cannot prove itself again, then its connections.
     func revoke(_ phoneID: String) {
         let label = phones.first { $0.phoneID == phoneID }?.label ?? "a phone"

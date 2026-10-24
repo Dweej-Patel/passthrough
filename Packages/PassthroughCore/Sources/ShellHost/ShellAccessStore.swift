@@ -159,6 +159,19 @@ public final class ShellAccessStore: @unchecked Sendable {
         if !store(list) { ptLog(.warning, "Could not drop a phone's previous shell key") }
     }
 
+    /// The phone's pairing moved from `fromSlot` to `toSlot` (an iPhone's,
+    /// out of the slot every iPhone once shared): so does its access, which
+    /// `record` would otherwise refuse to renew. False if the phone has no
+    /// access through `fromSlot`, or the move could not be stored.
+    @discardableResult
+    public func move(phoneID: String, fromSlot: String, toSlot: String) -> Bool {
+        writeLock.lock(); defer { writeLock.unlock() }
+        guard var list = loadForWrite(),
+              let index = list.firstIndex(where: { $0.phoneID == phoneID && $0.pairingSlot == fromSlot }) else { return false }
+        list[index].pairingSlot = toSlot
+        return store(list)
+    }
+
     /// False only if the key may still be usable afterwards.
     @discardableResult
     public func revoke(phoneID: String) -> Bool {

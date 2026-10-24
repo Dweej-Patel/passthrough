@@ -25,15 +25,16 @@ On the Mac, `LocalForwarder` exposes the phone's SOCKS port on
 
 Newline-delimited JSON, one object per line, lines up to 256 KB. Every
 message has a type tag `t`; every other field is optional and omitted when
-absent (never `null`). Unknown fields are ignored.
+absent (never `null`). Unknown fields are ignored. Protocol version 2.
 
 | `t` | From | Fields | Meaning |
 |-----|------|--------|---------|
-| `hello` | Mac | `protocolVersion`, `clientID`, `name`, `token`?, `via`? | First message. With a valid token the Mac is authenticated. `via` is `usb` or `wireless`: how this connection reaches the phone (a phone may have a wireless link up while the Mac uses the cable). |
-| `welcome` | phone | `protocolVersion`, `paired`, `socksPort`, device facts | Reply to `hello`. `paired: false` means pair first. |
-| `pair` | Mac | `clientID`, `name`, `code` | The six digits shown on the phone. |
-| `paired` | phone | `token`, `socksPort`, `deviceName` | Pairing worked; followed by a `status`. |
-| `error` | phone | `reason` | `bad_code`, `expired`, `not_authenticated` or `unsupported_version`. |
+| `hello` | Mac | `protocolVersion`, `clientID`, `name`, `nonce`, `via`? | First message. `nonce` is 32 random bytes, base64, fresh per connection; no token. `via` is `usb` or `wireless`: how this connection reaches the phone (a phone may have a wireless link up while the Mac uses the cable). |
+| `welcome` | phone | `protocolVersion`, `paired`, `nonce`, `proof`?, `socksPort`, device facts | Reply to `hello`, with the phone's own fresh `nonce`. `paired: true` comes with `proof` (below); `paired: false` means pair first. |
+| `auth` | Mac | `proof` | The Mac's proof, sent first after a `welcome` whose proof it verified. The connection is authenticated once the phone has verified it. |
+| `pair` | Mac | `clientID`, `name`, `code` | The six digits shown on the phone. After `hello`; `clientID` must match it. |
+| `paired` | phone | `token`, `socksPort`, `deviceName` | Pairing worked (the connection is now authenticated); followed by a `status`. |
+| `error` | phone | `reason`, `protocolVersion`? | `bad_code`, `expired`, `locked`, `not_authenticated` or `unsupported_version` (which carries the phone's `protocolVersion`, absent from version 1 phones). |
 | `ping` / `pong` | Mac / phone | none | Heartbeat every 5 s; the Mac gives up after 20 s of silence. |
 | `status` | phone | device facts, `activeConnections`, `rxBytes`, `txBytes`, `timestamp` | Once a second to authenticated Macs. |
 | `shellGrant` | Mac | `shellKey`, `certSHA256`, `shellPort`, `addresses`, `macName`, `irohID`?, `irohRelay`?, `relayToken`?, `grantID`? | Over the cable, on every paired connection while Remote shell is on: gives the phone access to the Mac's remote shell (below). `shellKey` is 32 random bytes, base64; `addresses` are where to dial the Mac. Each grant is a fresh key; the Mac also accepts the key the phone last proved until the phone first proves the new one, since a phone adopts a grant only once its app is unlocked. The optional `irohID` (the Mac's iroh endpoint id: 64 lowercase hex), `irohRelay` (its home relay: an `https` URL, at most 256 characters) and `relayToken` (at most 512 characters; kept in the phone's secret store, never in the grant record) let the phone dial the Mac over iroh (below). If the iroh fields are not valid as a group (a valid `irohID` is required; lengths count UTF-8 bytes), the phone drops all three and still stores the rest of the grant. The optional `grantID` (at most 64 UTF-8 bytes) names this grant for the answer. The Mac keeps one grant per phone in flight; one unanswered within 15 s counts as lost. The Mac then grants again after a wait counted from the end of those 15 s: 15, 30, 60 and 120 s for consecutive lost grants, then every 10 minutes. The next control channel, a new pairing, a change in what grants carry, or an answer starts the waits over. |
@@ -45,19 +46,74 @@ phone sends traffic out on routes IPv6. When it is `false` the Mac rejects
 IPv6 in its tunnel, so apps fall back to IPv4 at once instead of hanging on
 connections the phone can't make; older phones omit it and nothing changes.
 
+### Authentication
+
+Whatever answers on the phone's port may not be the phone (another device on
+the cable, an app squatting the port on an Android phone), and whatever the
+Mac talks to may not be the Mac (an adb client), so each side proves the
+pairing before the other trusts it, and the token never goes on the wire
+after pairing (`ControlAuth`, `ControlAuth.kt`). With K = SHA-256(token), the
+32 bytes the phone keeps (as hex), labels as ASCII, the client ID as UTF-8,
+and nonces as their raw 32 bytes:
+
+```
+phone proof = HMAC-SHA256(K, "passthrough-control-v2 phone" ‖ clientID ‖ nonceMac ‖ noncePhone)
+Mac proof   = HMAC-SHA256(K, "passthrough-control-v2 mac"   ‖ clientID ‖ noncePhone ‖ nonceMac)
+```
+
+both base64, compared in constant time.
+
+1. `hello` with `nonce` = nonceMac.
+2. The phone answers `welcome` with `nonce` = noncePhone. If it holds K for
+   that `clientID`: `paired: true` and `proof` = phone proof; else
+   `paired: false`.
+3. The Mac checks the phone proof against its own token. Only then does it
+   send `auth` (`proof` = Mac proof), before anything else, followed by
+   `link`, `shellGrant` and so on. A `paired: true` without a valid proof
+   from a phone the Mac holds a token for ends the connection (the user can
+   forget the pairing and pair again); the Mac never sends anything secret to
+   it. A Mac with no token for the phone, or only the token from the slot
+   all iPhones once shared (below), treats it as unpaired.
+4. The phone treats the connection as authenticated once the Mac proof checks
+   out. A bad `auth` gets `error` `not_authenticated` and the connection is
+   closed. Before that, nothing privileged is acted on: `link` and
+   `shellGrant` are ignored, and no `status` is sent.
+5. A completed code pairing (`pair` → `paired`) authenticates the connection
+   for both sides. The Mac accepts `paired` only as the answer to its own
+   `pair`, once.
+
+Versions must match: a phone answers any other `protocolVersion` with `error`
+`unsupported_version` (carrying its own version) and closes; the Mac refuses a
+`welcome` with another version, and tells the user which side to update.
+
+The phone closes a connection that is not authenticated within 10 s, except
+while a pairing code is showing and the connection has said `hello` (then it
+may wait until the code expires). It drops an authenticated Mac silent for 30
+s over the cable (150 s over the wireless link, whose pings stop while it
+waits to resume). The Mac opens a fresh connection if the phone closes one
+while the user is still entering a code.
+
 ## Pairing
 
-* The phone shows a six-digit code, valid for 5 minutes. Five wrong guesses
-  withdraw it.
+* The phone shows a six-digit code, valid for 5 minutes. Five wrong guesses in
+  a row lock code entry for 30 s (every `pair` gets `locked`, even with the
+  right code); the code itself stays.
 * On success the phone issues a token: 32 random bytes as unpadded URL-safe
   base64 (43 characters, `PairingToken`). The phone stores only its SHA-256
-  (lowercase hex); the Mac keeps the token in its keychain.
-* The Mac sends the token in `hello`, and as the SOCKS5 password with its
-  `clientID` as the username.
+  (lowercase hex); the Mac keeps the token in its keychain, one slot per
+  phone: `token.iphone.<UDID>` or `token.android.<serial>` (letters, digits,
+  `-`, `_` and `.` only). iPhones once shared the slot `token`: the Mac still
+  tries it for an iPhone whose own slot is empty, and once the phone proves
+  that token it moves to the phone's slot, with the link key and any shell
+  access granted through it.
+* The token is never sent again. The SOCKS5 password is derived from it (below).
 
 ## SOCKS5 (7890)
 
-RFC 1928 with username/password auth (RFC 1929) only. Commands:
+RFC 1928 with username/password auth (RFC 1929) only. The username is the
+Mac's `clientID`; the password is HMAC-SHA256(K, "passthrough-socks-v2") as
+unpadded URL-safe base64 (43 characters, the shape of a token), so a process
+squatting port 7890 learns nothing it can use on the control channel. Commands:
 
 * `CONNECT` (1).
 * `FORWARD_UDP` (5), hev-socks5-tunnel's UDP-in-TCP: after the reply, each
@@ -117,7 +173,9 @@ pairing; the Mac keeps `linkKey` per phone, keyed by `phoneID`.
    `session` and `streams` are present only when the phone is resuming (below).
 4. The Mac answers `{"t":"fresh","session":"<id>"}` for a new session, or
    `{"t":"resume","streams":[…]}` to continue the phone's.
-5. From then on the connection carries multiplexed streams.
+5. From then on the connection carries multiplexed streams. A control
+   channel opened over it runs the same `hello`/`welcome`/`auth` exchange as
+   over the cable, with the token of the pairing the phone was linked through.
 
 ### Resuming
 

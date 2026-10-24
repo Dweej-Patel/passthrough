@@ -45,8 +45,12 @@ final class AndroidTransportTests: XCTestCase {
         XCTAssertEqual(a.label, "Pixel")
         XCTAssertEqual(i.label, "00008110…")
         XCTAssertEqual(i.kindName, "iPhone")
-        XCTAssertEqual(i.pairingSlot, "token", "iPhones keep the original keychain slot")
+        XCTAssertEqual(i.pairingSlot, "token.iphone.00008110ABCDEF", "one slot per iPhone")
+        XCTAssertEqual(PhoneDevice.iPhone(deviceID: 4, udid: "0000/8110").pairingSlot, "token.iphone.00008110")
         XCTAssertEqual(a.pairingSlot, "token.android.R58M1")
+        XCTAssertTrue(i.mayUseSharedSlot)
+        XCTAssertFalse(a.mayUseSharedSlot)
+        XCTAssertFalse(PhoneDevice.wireless(phoneID: "p", kind: .iPhone, label: "i", pairingSlot: i.pairingSlot, link: LoopbackLink()).mayUseSharedSlot)
     }
 
     func testADBHints() {
@@ -59,7 +63,7 @@ final class AndroidTransportTests: XCTestCase {
 
     /// What the Android app's kotlinx.serialization encoder emits (nulls omitted).
     func testDecodesAndroidEnvelopes() throws {
-        let welcome = try ControlEnvelope.decode(Data(#"{"t":"welcome","protocolVersion":1,"socksPort":7890,"deviceName":"Pixel 8","radio":"5G","carrier":"T-Mobile","battery":0.82,"hosting":"background","paired":false}"#.utf8))
+        let welcome = try ControlEnvelope.decode(Data(#"{"t":"welcome","protocolVersion":2,"socksPort":7890,"deviceName":"Pixel 8","radio":"5G","carrier":"T-Mobile","battery":0.82,"hosting":"background","paired":false}"#.utf8))
         XCTAssertEqual(welcome.t, ControlEnvelope.welcome)
         XCTAssertEqual(welcome.paired, false)
         XCTAssertEqual(welcome.battery, 0.82)
@@ -73,6 +77,7 @@ final class AndroidTransportTests: XCTestCase {
 /// the local adb server. Skipped unless PASSTHROUGH_ADB_SERIAL is set.
 /// Optional: PASSTHROUGH_ADB_CODE (pairing code shown on the phone) or
 /// PASSTHROUGH_ADB_TOKEN (a token from an earlier pairing) for the data path.
+/// The proxy password is derived from the token (`ControlAuth.socksPassword`).
 final class AndroidEndToEndTests: XCTestCase {
     private let env = ProcessInfo.processInfo.environment
     private let clientID = "e2e-test-mac"
@@ -131,7 +136,7 @@ final class AndroidEndToEndTests: XCTestCase {
         let curl = Process()
         curl.executableURL = URL(fileURLWithPath: "/usr/bin/curl")
         curl.arguments = ["-s", "-o", "/dev/null", "-w", "%{http_code}", "--max-time", "20",
-                          "--socks5-hostname", "127.0.0.1:17999", "--proxy-user", "\(clientID):\(token)", "https://example.com/"]
+                          "--socks5-hostname", "127.0.0.1:17999", "--proxy-user", "\(clientID):\(ControlAuth.socksPassword(token: token))", "https://example.com/"]
         let out = Pipe()
         curl.standardOutput = out
         try curl.run()

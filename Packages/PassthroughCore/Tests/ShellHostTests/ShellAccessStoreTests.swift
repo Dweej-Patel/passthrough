@@ -52,6 +52,26 @@ final class ShellAccessStoreTests: XCTestCase {
         XCTAssertTrue(store.record(phone("b", slot: "token")), "once that pairing is gone the ID is free")
     }
 
+    /// An iPhone's pairing moved out of the slot every iPhone once shared:
+    /// its access moves with it, keeping its keys and Screen switch, so the
+    /// next grant renews it instead of being refused.
+    func testMoveFollowsAPairingToItsNewSlot() {
+        let store = ShellAccessStore(secrets: InMemorySecrets())
+        let key = Data(repeating: 1, count: 32)
+        XCTAssertTrue(store.record(phone("a", slot: "token", key: key)))
+        XCTAssertTrue(store.record(phone("b", slot: "token")))
+        XCTAssertTrue(store.setScreenAllowed(true, forPhone: "a"))
+        XCTAssertFalse(store.record(phone("a", slot: "token.iphone.A")), "refused before the move")
+        XCTAssertFalse(store.move(phoneID: "a", fromSlot: "other", toSlot: "token.iphone.A"), "only from the slot it was granted through")
+        XCTAssertTrue(store.move(phoneID: "a", fromSlot: "token", toSlot: "token.iphone.A"))
+        XCTAssertEqual(store.phones.first { $0.phoneID == "a" }?.pairingSlot, "token.iphone.A")
+        XCTAssertEqual(store.phones.first { $0.phoneID == "b" }?.pairingSlot, "token", "other phones stay put")
+        XCTAssertEqual(store.candidateKeys(forPhone: "a"), [key])
+        XCTAssertTrue(store.screenAllowed(forPhone: "a"))
+        XCTAssertTrue(store.record(phone("a", slot: "token.iphone.A")))
+        XCTAssertFalse(store.move(phoneID: "nobody", fromSlot: "token", toSlot: "x"))
+    }
+
     /// A re-grant keeps the key the phone holds working until it uses the new one.
     func testRegrantKeepsThePreviousKeyUntilTheNewOneIsUsed() {
         let store = ShellAccessStore(secrets: InMemorySecrets())

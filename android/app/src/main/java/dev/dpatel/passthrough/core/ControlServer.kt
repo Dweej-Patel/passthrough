@@ -17,7 +17,11 @@ import java.util.concurrent.atomic.AtomicBoolean
 
 /**
  * Newline-delimited JSON control channel: pairing, heartbeat, live status.
- * Mirrors PassthroughCore/ControlServer.swift message for message.
+ * Mirrors PassthroughCore/ControlServer.swift message for message. Any app on
+ * the phone can connect to its loopback port, and anything on the Mac through
+ * adb, so a connection is a stranger until the Mac proves its pairing (`auth`)
+ * or pairs with the code shown; only then is it sent status or allowed to
+ * change anything. [unauthenticatedTimeoutMs] and [silenceLimitMs] are shorter in tests.
  */
 class ControlServer(
     val port: Int = PassthroughProtocol.DEFAULT_CONTROL_PORT,
@@ -25,6 +29,8 @@ class ControlServer(
     private val registry: PairingRegistry,
     private val counter: ByteCounter,
     private val bindAddress: InetAddress = InetAddress.getLoopbackAddress(),
+    private val unauthenticatedTimeoutMs: Long = PassthroughProtocol.UNAUTHENTICATED_TIMEOUT_MS,
+    private val silenceLimitMs: Long = PassthroughProtocol.SILENCE_LIMIT_MS,
     private val statusProvider: () -> DeviceStatus,
 ) {
     @Volatile var onClientsChanged: ((List<ConnectedMac>) -> Unit)? = null
@@ -45,9 +51,16 @@ class ControlServer(
         serverSocket = ss
         isRunning = true
         Thread({ acceptLoop(ss) }, "control-accept").apply { isDaemon = true }.start()
-        // Status broadcast once a second to every authenticated Mac.
+        // Once a second: close peers that should go, then status to every authenticated Mac.
         ticker = Executors.newSingleThreadScheduledExecutor { r -> Thread(r, "control-status").apply { isDaemon = true } }.also {
             it.scheduleWithFixedDelay({
+                val now = System.currentTimeMillis()
+                ArrayList(peers).forEach { p ->
+                    closeReason(p, now)?.let { reason ->
+                        ptLog(PtLog.Level.INFO, "Closing a control connection that $reason")
+                        p.cancel()
+                    }
+                }
                 val authenticated = peers.filter { p -> p.mac != null }
                 if (authenticated.isNotEmpty()) {
                     val status = statusMessage()
@@ -86,43 +99,87 @@ class ControlServer(
     // Message handling
 
     private fun handle(m: ControlEnvelope, peer: Peer): List<ControlEnvelope> = when (m.t) {
-        ControlEnvelope.HELLO -> {
-            if ((m.protocolVersion ?: 0) != PassthroughProtocol.VERSION) {
-                listOf(ControlEnvelope(ControlEnvelope.ERROR, reason = PairingFailure.UNSUPPORTED_VERSION.wire))
-            } else {
-                val id = m.clientID
-                val token = m.token
-                var paired = false
-                if (id != null && token != null && registry.verify(id, token)) {
-                    paired = true
-                    registry.touch(id)
-                    peer.authenticate(id, m.name ?: "Mac")
-                }
-                listOf(welcome().apply { this.paired = paired })
-            }
-        }
-        ControlEnvelope.PAIR -> {
-            val id = m.clientID
-            val code = m.code
-            if (id == null || code == null) {
-                listOf(ControlEnvelope(ControlEnvelope.ERROR, reason = PairingFailure.BAD_CODE.wire))
-            } else when (val r = registry.pair(code, id, m.name ?: "Mac")) {
-                is PairingRegistry.PairResult.Success -> {
-                    peer.authenticate(id, m.name ?: "Mac")
-                    listOf(
-                        ControlEnvelope(ControlEnvelope.PAIRED, token = r.token, deviceName = statusProvider().deviceName, socksPort = socksPort),
-                        statusMessage(),
-                    )
-                }
-                is PairingRegistry.PairResult.Failure -> listOf(ControlEnvelope(ControlEnvelope.ERROR, reason = r.reason.wire))
-            }
-        }
+        ControlEnvelope.HELLO -> hello(m, peer)
+        ControlEnvelope.AUTH -> auth(m, peer)
+        ControlEnvelope.PAIR -> pair(m, peer)
         ControlEnvelope.SHELL_GRANT -> grantShell(m, peer)
         ControlEnvelope.PING -> listOf(ControlEnvelope(ControlEnvelope.PONG))
         else -> emptyList()
     }
 
-    /** Only a Mac that already proved its pairing token may be granted a shell; anything malformed is ignored. */
+    private fun hello(m: ControlEnvelope, peer: Peer): List<ControlEnvelope> {
+        if (peer.hello != null) return emptyList()
+        val version = m.protocolVersion ?: 0
+        if (version != PassthroughProtocol.VERSION) {
+            ptLog(PtLog.Level.WARNING, if (version < PassthroughProtocol.VERSION) "A Mac with an older Passthrough tried to connect: update Passthrough on the Mac"
+                else "A Mac with a newer Passthrough tried to connect: update Passthrough on this phone")
+            peer.reject()
+            // Our version tells the Mac which side to update.
+            return listOf(ControlEnvelope(ControlEnvelope.ERROR, reason = PairingFailure.UNSUPPORTED_VERSION.wire, protocolVersion = PassthroughProtocol.VERSION))
+        }
+        val id = m.clientID?.takeIf { it.isNotEmpty() && it.toByteArray(Charsets.UTF_8).size <= 64 }
+        val macNonce = ControlAuth.decodeNonce(m.nonce)
+        if (id == null || macNonce == null) {
+            peer.reject()
+            return listOf(error(PairingFailure.NOT_AUTHENTICATED))
+        }
+        val phoneNonce = ControlAuth.nonce()
+        peer.hello = Hello(id, (m.name ?: "Mac").take(64), macNonce, phoneNonce)
+        val reply = welcome().apply { nonce = Base64.getEncoder().encodeToString(phoneNonce) }
+        // Proving first gives nothing away: the proof is bound to the Mac's
+        // fresh nonce and only says something to whoever holds K.
+        val key = registry.pairingKey(id)
+        reply.paired = key != null
+        if (key != null) reply.proof = Base64.getEncoder().encodeToString(ControlAuth.phoneProof(key, id, macNonce, phoneNonce))
+        return listOf(reply)
+    }
+
+    private fun auth(m: ControlEnvelope, peer: Peer): List<ControlEnvelope> {
+        if (peer.mac != null) return emptyList()
+        val hello = peer.hello
+        val key = hello?.let { registry.pairingKey(it.clientID) }
+        if (hello == null || key == null || !ControlAuth.isValidMacProof(m.proof, key, hello.clientID, hello.macNonce, hello.phoneNonce)) {
+            ptLog(PtLog.Level.WARNING, "A Mac could not prove its pairing; closing its control connection")
+            peer.reject()
+            return listOf(error(PairingFailure.NOT_AUTHENTICATED))
+        }
+        registry.touch(hello.clientID)
+        peer.authenticate(hello.clientID, hello.name)
+        return emptyList()
+    }
+
+    private fun pair(m: ControlEnvelope, peer: Peer): List<ControlEnvelope> {
+        // After hello, which checked the version and named the Mac being paired.
+        val hello = peer.hello ?: return listOf(error(PairingFailure.NOT_AUTHENTICATED))
+        val code = m.code
+        if (code == null || (m.clientID != null && m.clientID != hello.clientID)) return listOf(error(PairingFailure.BAD_CODE))
+        return when (val r = registry.pair(code, hello.clientID, hello.name)) {
+            is PairingRegistry.PairResult.Success -> {
+                peer.authenticate(hello.clientID, hello.name)
+                listOf(
+                    ControlEnvelope(ControlEnvelope.PAIRED, token = r.token, deviceName = statusProvider().deviceName, socksPort = socksPort),
+                    statusMessage(),
+                )
+            }
+            is PairingRegistry.PairResult.Failure -> listOf(error(r.reason))
+        }
+    }
+
+    private fun error(failure: PairingFailure) = ControlEnvelope(ControlEnvelope.ERROR, reason = failure.wire)
+
+    /** Why [peer] should be closed now, if it should: it was refused, has not proved a pairing in time, or (authenticated) went silent. */
+    private fun closeReason(peer: Peer, now: Long): String? {
+        if (peer.isRejected) return "was refused"
+        if (peer.mac == null) {
+            var deadline = peer.openedAt + unauthenticatedTimeoutMs
+            // A Mac waiting for its user to type the code shown may wait as long as the code lasts.
+            if (peer.hello != null) registry.activeCode?.let { deadline = maxOf(deadline, it.expiry) }
+            return if (now > deadline) "did not prove a pairing in time" else null
+        }
+        return if (now - peer.lastHeard > silenceLimitMs) "stopped answering" else null
+    }
+
+    /** Only a Mac that already proved its pairing may be granted a shell; anything malformed is ignored. */
     private fun grantShell(m: ControlEnvelope, peer: Peer): List<ControlEnvelope> {
         val mac = peer.mac ?: return emptyList()
         val cert = m.certSHA256?.takeIf { it.length == 64 && it.all { c -> c in '0'..'9' || c in 'a'..'f' || c in 'A'..'F' } } ?: return emptyList()
@@ -164,10 +221,21 @@ class ControlServer(
         )
     }
 
+    /** What a Mac's hello said, and the nonce this connection's proofs use. */
+    private class Hello(val clientID: String, val name: String, val macNonce: ByteArray, val phoneNonce: ByteArray)
+
     private inner class Peer(private val socket: Socket) {
         private val cancelled = AtomicBoolean(false)
         private lateinit var out: OutputStream
+        /** Set once the Mac proved its pairing, or paired with the code. */
         @Volatile var mac: ConnectedMac? = null
+            private set
+        @Volatile var hello: Hello? = null
+        val openedAt = System.currentTimeMillis()
+        @Volatile var lastHeard = openedAt
+            private set
+        /** Answered with an error: nothing it sends counts any more, and the next tick closes it. */
+        @Volatile var isRejected = false
             private set
 
         fun run() {
@@ -177,7 +245,8 @@ class ControlServer(
                 val lines = LineReader(socket.getInputStream())
                 while (!cancelled.get()) {
                     val line = lines.next() ?: break
-                    if (line.isBlank()) continue
+                    if (line.isBlank() || isRejected) continue
+                    lastHeard = System.currentTimeMillis()
                     val message = try { ControlEnvelope.decode(line) } catch (_: Exception) {
                         ptLog(PtLog.Level.WARNING, "control: undecodable message"); continue
                     }
@@ -196,6 +265,9 @@ class ControlServer(
                 onClientsChanged?.invoke(connectedMacs)
             }
         }
+
+        /** Closed at the next tick rather than now, so the error just sent gets out first. */
+        fun reject() { isRejected = true }
 
         fun send(messages: List<ControlEnvelope>) {
             if (messages.isEmpty() || cancelled.get() || !this::out.isInitialized) return

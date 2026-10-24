@@ -28,6 +28,15 @@ final class LinkStore: @unchecked Sendable {
         return Keychain.write(key.base64EncodedString(), account: account) ? key : nil
     }
 
+    /// The pairing in `fromSlot` moved to `toSlot`: the key goes with it, so
+    /// the phone keeps the one it holds. The phone's entry moves when it next
+    /// answers a link (`record`). Leaves a key already in `toSlot` alone.
+    func moveKey(fromSlot: String, toSlot: String) {
+        let from = "link." + fromSlot, to = "link." + toSlot
+        guard let key = Keychain.read(from), Keychain.read(to) == nil, Keychain.write(key, account: to), Keychain.read(to) == key else { return }
+        Keychain.delete(from)
+    }
+
     /// A slot holds one phone's pairing, so a phone that relinks with a new
     /// ID (reinstalled) replaces the slot's old entry.
     func record(_ phone: WirelessPhone) {

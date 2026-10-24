@@ -74,8 +74,8 @@ data class PairedClient(
 /**
  * Stores paired Macs and the short-lived pairing code. Mirrors
  * PassthroughCore/Pairing.swift: six digit codes valid for five minutes,
- * withdrawn after five wrong guesses, and a 32-byte URL-safe token per Mac of
- * which only the SHA-256 is kept.
+ * code entry locked for 30 s after five wrong guesses, and a 32-byte URL-safe
+ * token per Mac of which only the SHA-256 is kept.
  */
 class PairingRegistry(
     private val store: KeyValueStore,
@@ -93,6 +93,8 @@ class PairingRegistry(
     private val random = SecureRandom()
     private var code: Code? = null
     private var failedAttempts = 0
+    /** Until when code entry is locked after too many wrong guesses (clock millis). */
+    private var lockedUntil = 0L
     @Volatile var onChange: (() -> Unit)? = null
 
     val clients: List<PairedClient> get() = synchronized(lock) { loadClients() }
@@ -185,6 +187,8 @@ class PairingRegistry(
     /** Validates a code and registers the Mac; returns the token to hand back. */
     fun pair(code: String, clientID: String, name: String): PairResult {
         val result: PairResult = synchronized(lock) {
+            // Locked: not even the right code counts, so guessing stays slow.
+            if (clock() < lockedUntil) return@synchronized PairResult.Failure(PairingFailure.LOCKED)
             val stored = this.code ?: return@synchronized PairResult.Failure(PairingFailure.EXPIRED)
             if (stored.expiry <= clock()) {
                 this.code = null
@@ -192,12 +196,14 @@ class PairingRegistry(
             }
             if (!constantTimeEquals(stored.code, code.trim())) {
                 // A six-digit code must not be brute-forceable over the cable:
-                // a handful of wrong guesses burns it; the user shows a new one.
+                // a handful of wrong guesses locks code entry for a while. The
+                // code stays, so whatever is guessing can't make the user's vanish.
                 failedAttempts++
-                if (failedAttempts >= MAX_ATTEMPTS) {
-                    ptLog(PtLog.Level.WARNING, "Pairing code withdrawn after $failedAttempts wrong attempts")
-                    this.code = null
-                    return@synchronized PairResult.Failure(PairingFailure.EXPIRED)
+                if (failedAttempts >= PassthroughProtocol.PAIRING_MAX_ATTEMPTS) {
+                    ptLog(PtLog.Level.WARNING, "Pairing code entry locked for ${PassthroughProtocol.PAIRING_LOCKOUT_MS / 1000} s after $failedAttempts wrong attempts")
+                    failedAttempts = 0
+                    lockedUntil = clock() + PassthroughProtocol.PAIRING_LOCKOUT_MS
+                    return@synchronized PairResult.Failure(PairingFailure.LOCKED)
                 }
                 return@synchronized PairResult.Failure(PairingFailure.BAD_CODE)
             }
@@ -216,6 +222,17 @@ class PairingRegistry(
     fun verify(clientID: String, token: String): Boolean = synchronized(lock) {
         val client = loadClients().firstOrNull { it.id == clientID } ?: return false
         constantTimeEquals(client.tokenHash, PairingToken.hash(token))
+    }
+
+    /** K for a paired Mac ([ControlAuth]): what its proofs are checked against. */
+    fun pairingKey(clientID: String): ByteArray? = synchronized(lock) {
+        loadClients().firstOrNull { it.id == clientID }?.let { ControlAuth.keyFromHash(it.tokenHash) }
+    }
+
+    /** Whether [password] is the SOCKS5 password derived from this Mac's pairing. */
+    fun verifySocks(clientID: String, password: String): Boolean {
+        val key = pairingKey(clientID) ?: return false
+        return constantTimeEquals(ControlAuth.socksPassword(key), password)
     }
 
     fun touch(clientID: String) {
@@ -249,7 +266,6 @@ class PairingRegistry(
         const val PHONE_ID_KEY = "pairing.phoneID"
         private const val PENDING_SHELL = "shell.pending."
         private const val RELAY_TOKEN = "shell.relayToken."
-        private const val MAX_ATTEMPTS = 5
         private fun constantTimeEquals(a: String, b: String): Boolean =
             MessageDigest.isEqual(a.toByteArray(Charsets.UTF_8), b.toByteArray(Charsets.UTF_8))
     }

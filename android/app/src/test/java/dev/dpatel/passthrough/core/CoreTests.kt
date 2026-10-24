@@ -16,6 +16,7 @@ import java.net.DatagramSocket
 import java.net.InetAddress
 import java.net.ServerSocket
 import java.net.Socket
+import java.util.Base64
 import kotlin.concurrent.thread
 
 private fun Socket.io() = DataInputStream(getInputStream()) to getOutputStream()
@@ -173,12 +174,28 @@ class PairingTests {
         assertEquals(PairingRegistry.PairResult.Failure(PairingFailure.EXPIRED), registry.pair(code.code, "m1", "Mac"))
     }
 
-    @Test fun codeIsWithdrawnAfterFiveWrongGuesses() {
+    /** Five wrong guesses lock code entry for 30 s, even for the right code; the code itself stays. */
+    @Test fun wrongGuessesLockCodeEntry() {
         val code = registry.issueCode()
         val wrong = if (code.code == "000000") "111111" else "000000"
         repeat(4) { assertEquals(PairingRegistry.PairResult.Failure(PairingFailure.BAD_CODE), registry.pair(wrong, "m1", "Mac")) }
-        assertEquals(PairingRegistry.PairResult.Failure(PairingFailure.EXPIRED), registry.pair(wrong, "m1", "Mac"))
-        assertEquals(PairingRegistry.PairResult.Failure(PairingFailure.EXPIRED), registry.pair(code.code, "m1", "Mac"))
+        assertEquals(PairingRegistry.PairResult.Failure(PairingFailure.LOCKED), registry.pair(wrong, "m1", "Mac"))
+        assertEquals("the code is not withdrawn", code, registry.activeCode)
+        assertEquals(PairingRegistry.PairResult.Failure(PairingFailure.LOCKED), registry.pair(code.code, "m1", "Mac"))
+        now += PassthroughProtocol.PAIRING_LOCKOUT_MS - 1
+        assertEquals(PairingRegistry.PairResult.Failure(PairingFailure.LOCKED), registry.pair(code.code, "m1", "Mac"))
+        // The lock runs out: the count starts over and the right code works.
+        now += 2
+        assertEquals(PairingRegistry.PairResult.Failure(PairingFailure.BAD_CODE), registry.pair(wrong, "m1", "Mac"))
+        assertTrue(registry.pair(code.code, "m1", "Mac") is PairingRegistry.PairResult.Success)
+    }
+
+    /** The SOCKS5 password is derived from the pairing, never the token itself. */
+    @Test fun socksPasswordIsDerivedFromThePairing() {
+        val r = registry.pair(registry.issueCode().code, "m1", "Mac") as PairingRegistry.PairResult.Success
+        assertTrue(registry.verifySocks("m1", ControlAuth.socksPassword(ControlAuth.key(r.token))))
+        assertFalse("the token is not the password", registry.verifySocks("m1", r.token))
+        assertFalse(registry.verifySocks("m2", ControlAuth.socksPassword(ControlAuth.key(r.token))))
     }
 
     @Test fun generatesWellFormedTokens() {
@@ -189,56 +206,164 @@ class PairingTests {
 }
 
 class ControlTests {
-    private val registry = PairingRegistry(MemoryStore())
-    private val control = ControlServer(0, 7890, registry, ByteCounter()) { DeviceStatus("Pixel", "5G", "Carrier", 0.8, "background") }
+    private var now = System.currentTimeMillis()
+    private val registry = PairingRegistry(MemoryStore(), clock = { now })
+    private var control = ControlServer(0, 7890, registry, ByteCounter()) { DeviceStatus("Pixel", "5G", "Carrier", 0.8, "background") }
 
     @Before fun setUp() = control.start()
     @After fun tearDown() = control.stop()
 
-    private fun exchange(s: Socket, m: ControlEnvelope): ControlEnvelope {
-        s.getOutputStream().write(m.encodeLine())
-        return ControlEnvelope.decode(s.getInputStream().bufferedReader().readLine())
+    /** A Mac's end of one control connection. */
+    private inner class Mac(val clientID: String = "mac1") {
+        val socket = Socket(InetAddress.getLoopbackAddress(), control.boundPort).apply { soTimeout = 5000 }
+        private val reader = socket.getInputStream().bufferedReader()
+        val nonce = ControlAuth.nonce()
+        fun send(m: ControlEnvelope) = socket.getOutputStream().write(m.encodeLine())
+        fun receive(): ControlEnvelope = ControlEnvelope.decode(reader.readLine())
+        /** Null once the phone has closed the connection. */
+        fun receiveOrNull(): String? = runCatching { reader.readLine() }.getOrNull()
+        fun hello(): ControlEnvelope {
+            send(ControlEnvelope(ControlEnvelope.HELLO, protocolVersion = 2, clientID = clientID, name = "MacBook", nonce = Base64.getEncoder().encodeToString(nonce)))
+            return receive()
+        }
+        fun auth(token: String, welcome: ControlEnvelope) {
+            val proof = ControlAuth.macProof(ControlAuth.key(token), clientID, nonce, ControlAuth.decodeNonce(welcome.nonce)!!)
+            send(ControlEnvelope(ControlEnvelope.AUTH, proof = Base64.getEncoder().encodeToString(proof)))
+        }
+        /** Everything sent before it has been handled; returns what came first. */
+        fun sync(): List<ControlEnvelope> {
+            send(ControlEnvelope(ControlEnvelope.PING))
+            val seen = mutableListOf<ControlEnvelope>()
+            while (true) { val m = receive(); if (m.t == ControlEnvelope.PONG) return seen; seen += m }
+        }
     }
 
+    private fun paired(clientID: String = "mac1") = (registry.pair(registry.issueCode().code, clientID, "MacBook") as PairingRegistry.PairResult.Success).token
+
     @Test fun helloPairAndReconnect() {
-        val s = Socket(InetAddress.getLoopbackAddress(), control.boundPort).apply { soTimeout = 3000 }
-        val reader = s.getInputStream().bufferedReader()
-        fun send(m: ControlEnvelope) = s.getOutputStream().write(m.encodeLine())
-        send(ControlEnvelope(ControlEnvelope.HELLO, protocolVersion = 1, clientID = "mac1", name = "MacBook"))
-        val welcome = ControlEnvelope.decode(reader.readLine())
+        val mac = Mac()
+        val welcome = mac.hello()
         assertEquals(ControlEnvelope.WELCOME, welcome.t)
         assertEquals(false, welcome.paired)
+        assertNull(welcome.proof)
+        assertNotNull("a nonce even when unpaired", ControlAuth.decodeNonce(welcome.nonce))
         assertEquals("Pixel", welcome.deviceName)
         assertEquals(7890, welcome.socksPort)
 
         val code = registry.issueCode()
-        send(ControlEnvelope(ControlEnvelope.PAIR, clientID = "mac1", name = "MacBook", code = code.code))
-        val paired = ControlEnvelope.decode(reader.readLine())
+        mac.send(ControlEnvelope(ControlEnvelope.PAIR, clientID = "mac1", name = "MacBook", code = code.code))
+        val paired = mac.receive()
         assertEquals(ControlEnvelope.PAIRED, paired.t)
-        val token = assertNotNull(paired.token).let { paired.token!! }
-        assertEquals(ControlEnvelope.STATUS, ControlEnvelope.decode(reader.readLine()).t)
+        val token = paired.token!!
+        assertEquals(ControlEnvelope.STATUS, mac.receive().t)
         assertEquals(1, control.connectedMacs.size)
-        s.close()
+        mac.socket.close()
 
-        val again = Socket(InetAddress.getLoopbackAddress(), control.boundPort).apply { soTimeout = 3000 }
-        val w2 = exchange(again, ControlEnvelope(ControlEnvelope.HELLO, protocolVersion = 1, clientID = "mac1", name = "MacBook", token = token))
+        // Reconnect: the phone proves the pairing first (the same proof the Swift side checks), then the Mac does.
+        val again = Mac()
+        val w2 = again.hello()
         assertEquals(true, w2.paired)
-        again.close()
+        assertNull(w2.token)
+        val expected = ControlAuth.phoneProof(ControlAuth.key(token), "mac1", again.nonce, ControlAuth.decodeNonce(w2.nonce)!!)
+        assertEquals(Base64.getEncoder().encodeToString(expected), w2.proof)
+        again.auth(token, w2)
+        assertEquals("authenticated: status flows", ControlEnvelope.STATUS, again.receive().t)
+        again.socket.close()
     }
 
+    /** A Mac from before version 2 (token in hello) is refused, with our version so it knows who to update. */
     @Test fun rejectsOtherProtocolVersions() {
-        Socket(InetAddress.getLoopbackAddress(), control.boundPort).use { s ->
-            s.soTimeout = 3000
-            val r = exchange(s, ControlEnvelope(ControlEnvelope.HELLO, protocolVersion = 99, clientID = "x"))
+        val token = paired()
+        for (version in listOf(1, 99)) {
+            val mac = Mac()
+            mac.send(ControlEnvelope(ControlEnvelope.HELLO, protocolVersion = version, clientID = "mac1", token = token))
+            val r = mac.receive()
             assertEquals(ControlEnvelope.ERROR, r.t)
             assertEquals("unsupported_version", r.reason)
+            assertEquals(PassthroughProtocol.VERSION, r.protocolVersion)
+            assertNull("and the connection is closed", mac.receiveOrNull())
         }
+        assertTrue(control.connectedMacs.isEmpty())
+    }
+
+    /** Before the Mac proves the pairing nothing privileged is acted on; a wrong proof ends the connection. */
+    @Test fun privilegedMessagesNeedTheMacsProof() {
+        val token = paired()
+        val mac = Mac()
+        val welcome = mac.hello()
+        assertEquals(true, welcome.paired)
+        val grant = ControlEnvelope(ControlEnvelope.SHELL_GRANT, shellKey = Base64.getEncoder().encodeToString(ByteArray(32) { 1 }),
+            certSHA256 = "b".repeat(64), shellPort = 7893, addresses = emptyList(), macName = "M")
+        mac.send(grant)
+        assertEquals("no shellGranted or status before auth", emptyList<String>(), mac.sync().map { it.t })
+        assertNull(registry.pendingShellKey("mac1"))
+        assertTrue(control.connectedMacs.isEmpty())
+
+        mac.auth(PairingToken.generate(), welcome)
+        val refused = mac.receive()
+        assertEquals(ControlEnvelope.ERROR, refused.t)
+        assertEquals("not_authenticated", refused.reason)
+        assertNull("and the connection is closed", mac.receiveOrNull())
+
+        val good = Mac()
+        good.auth(token, good.hello())
+        good.send(grant)
+        assertTrue(good.sync().any { it.t == ControlEnvelope.SHELL_GRANTED })
+        assertNotNull(registry.pendingShellKey("mac1"))
+        good.socket.close()
+    }
+
+    /** A pair before hello (which checks the version) is not taken. */
+    @Test fun pairNeedsHello() {
+        val code = registry.issueCode()
+        val mac = Mac()
+        mac.send(ControlEnvelope(ControlEnvelope.PAIR, clientID = "mac1", name = "MacBook", code = code.code))
+        assertEquals("not_authenticated", mac.receive().reason)
+        assertTrue(registry.clients.isEmpty())
+        mac.socket.close()
+    }
+
+    /** A connection that proves nothing is closed after the timeout, unless a code is showing; once it goes, so does the extra time. */
+    @Test fun unauthenticatedConnectionsAreClosed() {
+        control.stop()
+        now = System.currentTimeMillis()
+        control = ControlServer(0, 7890, registry, ByteCounter(), unauthenticatedTimeoutMs = 1000) { DeviceStatus("Pixel", hosting = "background") }
+        control.start()
+        val silent = Mac()
+        val started = System.currentTimeMillis()
+        assertNull(silent.receiveOrNull())
+        assertTrue(System.currentTimeMillis() - started < 4000)
+
+        registry.issueCode()
+        val pairing = Mac("mac2")
+        pairing.hello()
+        Thread.sleep(2500)
+        assertEquals("still open while the code shows", 0, pairing.sync().size)
+        registry.clearCode()
+        assertNull(pairing.receiveOrNull())
+    }
+
+    /** An authenticated Mac that stops talking is dropped. */
+    @Test fun silentMacIsDropped() {
+        control.stop()
+        control = ControlServer(0, 7890, registry, ByteCounter(), silenceLimitMs = 1000) { DeviceStatus("Pixel", hosting = "background") }
+        control.start()
+        val token = paired()
+        val mac = Mac()
+        mac.auth(token, mac.hello())
+        mac.sync()
+        assertEquals(1, control.connectedMacs.size)
+        var lines = 0
+        while (mac.receiveOrNull() != null) lines++
+        assertTrue("closed after a second or two of silence", lines < 5)
+        assertTrue(control.connectedMacs.isEmpty())
     }
 
     @Test fun answersPing() {
         Socket(InetAddress.getLoopbackAddress(), control.boundPort).use { s ->
             s.soTimeout = 3000
-            assertEquals(ControlEnvelope.PONG, exchange(s, ControlEnvelope(ControlEnvelope.PING)).t)
+            s.getOutputStream().write(ControlEnvelope(ControlEnvelope.PING).encodeLine())
+            assertEquals(ControlEnvelope.PONG, ControlEnvelope.decode(s.getInputStream().bufferedReader().readLine()).t)
         }
     }
 }
@@ -251,10 +376,10 @@ class WireFormatTests {
 
     @Test fun decodesSwiftEncodedMessages() {
         // What the Mac's JSONEncoder produces for a hello (key order is not guaranteed).
-        val m = ControlEnvelope.decode("{\"name\":\"MacBook Pro\",\"protocolVersion\":1,\"clientID\":\"8F0C\",\"t\":\"hello\",\"token\":\"abc\"}")
+        val m = ControlEnvelope.decode("{\"name\":\"MacBook Pro\",\"protocolVersion\":2,\"clientID\":\"8F0C\",\"t\":\"hello\",\"nonce\":\"abc\"}")
         assertEquals(ControlEnvelope.HELLO, m.t)
-        assertEquals(1, m.protocolVersion)
-        assertEquals("abc", m.token)
+        assertEquals(2, m.protocolVersion)
+        assertEquals("abc", m.nonce)
         // Unknown future keys are ignored rather than failing the whole message.
         assertEquals(ControlEnvelope.PING, ControlEnvelope.decode("{\"t\":\"ping\",\"future\":true}").t)
     }

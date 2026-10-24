@@ -25,6 +25,26 @@ use the proxy, anything that lets an imported VPN profile execute code or read
 files as root, and anything that bypasses the kill switch or IPv6 blocking
 while a VPN is up.
 
+The cable control channel is in scope too. It assumes whatever is on the
+other end may be hostile: another phone plugged into the Mac, an app bound to
+the phone's loopback control port while Passthrough isn't running (reachable
+through adb), or a fake adb server on the Mac. The pairing token is sent once,
+in answer to the code shown on the phone, and never again: each connection
+proves the pairing both ways with HMAC-SHA256 over fresh nonces (the phone
+first), the Mac hands over link and shell keys only after that, the phone
+acts on nothing privileged before the Mac's proof, and the SOCKS5 password is
+a separate value derived from the token. Pairing codes lock for 30 seconds
+after five wrong guesses, and the phone closes connections that prove nothing
+within 10 seconds unless a code is showing. Anything that gets a token, a
+link key, a shell key or relay details out of this channel without the
+pairing, or lets a peer that hasn't proved it change what the phone or Mac
+stores, is a vulnerability. Deliberately pairing with a device (typing the
+code it shows) is not.
+
+The Mac app reads its secrets only from the data-protection keychain, never
+the legacy file keychain, where any process running as the user could plant
+an item under Passthrough's name.
+
 The remote shell (off by default) is in scope end to end: the shell listener (pre-auth connection limits, the HMAC challenge, pinned TLS 1.3, the private/Tailscale address policy, and the built-in iroh endpoint), the key grant over the control channel, how the shell key is stored on the Mac and on phones, transcripts at rest under `ShellHistory`, and the consequences of a network-reachable app holding Full Disk Access. Anything that gets a shell, or a transcript, to a device that was not paired over the cable is a vulnerability.
 
 Screen (off for every phone by default) is in scope too: the per-phone Screen permission, the hand-over of an authorized connection to the screen stream or to the Screen Sharing relay on loopback, the stream's binary messages as the Mac parses them, the input it posts as the user's own events, and the consequences of a network-reachable app holding Screen Recording and Accessibility. The stream asks for no Mac password by design (the Screen switch is the consent). Anything that shows the screen to, or takes input from, a phone without that permission is a vulnerability.

@@ -76,6 +76,8 @@ public final class PairingRegistry: @unchecked Sendable {
     /// Wrong guesses against the current code. Kept with the code in the shared
     /// defaults, since the iOS app issues codes and the extension checks them.
     public static let failedAttemptsKey = "pairing.failedAttempts"
+    /// Until when code entry is locked after too many wrong guesses.
+    public static let lockedUntilKey = "pairing.lockedUntil"
 
     public static let phoneIDKey = "pairing.phoneID"
 
@@ -205,8 +207,6 @@ public final class PairingRegistry: @unchecked Sendable {
 
     // MARK: Pairing code
 
-    private static let maxAttempts = 5
-
     /// Generates a fresh six digit code, valid for `PassthroughProtocol.pairingCodeLifetime`.
     @discardableResult
     public func issueCode() -> (code: String, expiry: Date) {
@@ -244,20 +244,27 @@ public final class PairingRegistry: @unchecked Sendable {
         lock.lock()
         let stored = defaults.string(forKey: Self.codeKey)
         let expiry = Date(timeIntervalSince1970: defaults.double(forKey: Self.codeExpiryKey))
+        let lockedUntil = Date(timeIntervalSince1970: defaults.double(forKey: Self.lockedUntilKey))
         lock.unlock()
+        // Locked: not even the right code counts, so guessing stays slow.
+        guard lockedUntil <= Date() else { return .failure(.locked) }
         guard let stored else { return .failure(.expired) }
         guard expiry > Date() else { clearCode(); return .failure(.expired) }
         guard constantTimeEquals(stored, code.trimmingCharacters(in: .whitespaces)) else {
             // A six-digit code must not be brute-forceable over the cable: a
-            // handful of wrong guesses burns the code; the user shows a new one.
+            // handful of wrong guesses locks code entry for a while. The code
+            // stays, so a device guessing can't make the user's code vanish.
             lock.lock()
-            let n = defaults.integer(forKey: Self.failedAttemptsKey) + 1
+            var n = defaults.integer(forKey: Self.failedAttemptsKey) + 1
+            if n >= PassthroughProtocol.pairingMaxAttempts {
+                defaults.set(Date().addingTimeInterval(PassthroughProtocol.pairingLockout).timeIntervalSince1970, forKey: Self.lockedUntilKey)
+                n = 0
+            }
             defaults.set(n, forKey: Self.failedAttemptsKey)
             lock.unlock()
-            if n >= Self.maxAttempts {
-                ptLog(.warning, "Pairing code withdrawn after \(n) wrong attempts")
-                clearCode()
-                return .failure(.expired)
+            if n == 0 {
+                ptLog(.warning, "Pairing code entry locked for \(Int(PassthroughProtocol.pairingLockout)) s after \(PassthroughProtocol.pairingMaxAttempts) wrong attempts")
+                return .failure(.locked)
             }
             return .failure(.badCode)
         }
@@ -280,6 +287,18 @@ public final class PairingRegistry: @unchecked Sendable {
         lock.lock(); defer { lock.unlock() }
         guard let client = loadClients().first(where: { $0.id == clientID }) else { return false }
         return constantTimeEquals(client.tokenHash, PairingToken.hash(token))
+    }
+
+    /// K for a paired Mac (`ControlAuth`): what its proofs are checked against.
+    public func pairingKey(clientID: String) -> SymmetricKey? {
+        lock.lock(); defer { lock.unlock() }
+        return loadClients().first(where: { $0.id == clientID }).flatMap { ControlAuth.key(tokenHash: $0.tokenHash) }
+    }
+
+    /// Whether `password` is the SOCKS5 password derived from this Mac's pairing.
+    public func verifySOCKS(clientID: String, password: String) -> Bool {
+        guard let key = pairingKey(clientID: clientID) else { return false }
+        return constantTimeEquals(ControlAuth.socksPassword(key: key), password)
     }
 
     public func touch(clientID: String) {

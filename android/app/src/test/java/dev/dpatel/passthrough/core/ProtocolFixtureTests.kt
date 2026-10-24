@@ -12,7 +12,11 @@ import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.long
+import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.io.StringReader
 
@@ -29,6 +33,9 @@ class ProtocolFixtureTests {
         assertEquals(ports["socks"]!!.jsonPrimitive.int, PassthroughProtocol.DEFAULT_SOCKS_PORT)
         assertEquals(ports["control"]!!.jsonPrimitive.int, PassthroughProtocol.DEFAULT_CONTROL_PORT)
         assertEquals(fixtures["pairingCodeLifetimeSeconds"]!!.jsonPrimitive.long * 1000, PassthroughProtocol.PAIRING_CODE_LIFETIME_MS)
+        assertEquals(fixtures["pairingMaxAttempts"]!!.jsonPrimitive.int, PassthroughProtocol.PAIRING_MAX_ATTEMPTS)
+        assertEquals(fixtures["pairingLockoutSeconds"]!!.jsonPrimitive.long * 1000, PassthroughProtocol.PAIRING_LOCKOUT_MS)
+        assertEquals(fixtures["unauthenticatedTimeoutSeconds"]!!.jsonPrimitive.long * 1000, PassthroughProtocol.UNAUTHENTICATED_TIMEOUT_MS)
         assertEquals(fixtures["pairingFailures"]!!.jsonArray.map { it.jsonPrimitive.content }, PairingFailure.entries.map { it.wire })
     }
 
@@ -38,6 +45,39 @@ class ProtocolFixtureTests {
             assertEquals(token, t["sha256"]!!.jsonPrimitive.content, PairingToken.hash(token))
             assertEquals(token, t["wellFormed"]!!.jsonPrimitive.boolean, PairingToken.isWellFormed(token))
         }
+    }
+
+    /** The same proofs and SOCKS5 password as the Swift side computes, from the same vectors. */
+    @Test fun controlAuthVectors() {
+        val f = fixtures["controlAuth"]!!.jsonObject
+        assertEquals(f["phoneLabel"]!!.jsonPrimitive.content, ControlAuth.PHONE_LABEL)
+        assertEquals(f["macLabel"]!!.jsonPrimitive.content, ControlAuth.MAC_LABEL)
+        assertEquals(f["socksLabel"]!!.jsonPrimitive.content, ControlAuth.SOCKS_LABEL)
+        assertEquals(f["nonceLength"]!!.jsonPrimitive.int, ControlAuth.NONCE_LENGTH)
+        val b64 = java.util.Base64.getEncoder()
+        for (v in f["vectors"]!!.jsonArray.map { it.jsonObject }) {
+            fun s(k: String) = v[k]!!.jsonPrimitive.content
+            val token = s("token")
+            val clientID = s("clientID")
+            val macNonce = ControlAuth.decodeNonce(s("macNonce"))!!
+            val phoneNonce = ControlAuth.decodeNonce(s("phoneNonce"))!!
+            assertEquals(s("tokenSHA256"), PairingToken.hash(token))
+            // The Mac's K (from the token) and the phone's (from the hash it keeps) agree.
+            val phoneKey = ControlAuth.keyFromHash(s("tokenSHA256"))!!
+            assertArrayEquals(ControlAuth.key(token), phoneKey)
+            assertEquals(s("phoneProof"), b64.encodeToString(ControlAuth.phoneProof(phoneKey, clientID, macNonce, phoneNonce)))
+            assertEquals(s("macProof"), b64.encodeToString(ControlAuth.macProof(ControlAuth.key(token), clientID, macNonce, phoneNonce)))
+            assertTrue(ControlAuth.isValidMacProof(s("macProof"), phoneKey, clientID, macNonce, phoneNonce))
+            // Bound to its own label, the nonces' order and the client ID.
+            assertFalse(ControlAuth.isValidMacProof(s("phoneProof"), phoneKey, clientID, macNonce, phoneNonce))
+            assertFalse(ControlAuth.isValidMacProof(s("macProof"), phoneKey, clientID, phoneNonce, macNonce))
+            assertFalse(ControlAuth.isValidMacProof(s("macProof"), phoneKey, clientID + "x", macNonce, phoneNonce))
+            assertEquals(s("socksPassword"), ControlAuth.socksPassword(phoneKey))
+            assertTrue("the password has a token's shape", PairingToken.isWellFormed(ControlAuth.socksPassword(phoneKey)))
+        }
+        assertNull(ControlAuth.keyFromHash("zz"))
+        assertNull(ControlAuth.keyFromHash("g".repeat(64)))
+        assertNull(ControlAuth.decodeNonce(java.util.Base64.getEncoder().encodeToString(ByteArray(31))))
     }
 
     /** Every field survives a decode and re-encode, and nothing extra (like nulls) is added. */

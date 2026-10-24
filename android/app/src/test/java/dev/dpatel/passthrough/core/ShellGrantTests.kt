@@ -39,7 +39,7 @@ class ShellGrantTests {
 
     private fun hello() {
         connect()
-        send(ControlEnvelope(ControlEnvelope.HELLO, protocolVersion = 1, clientID = "mac1", name = "MacBook"))
+        send(ControlEnvelope(ControlEnvelope.HELLO, protocolVersion = 2, clientID = "mac1", name = "MacBook", nonce = b64(ControlAuth.nonce())))
         assertEquals(ControlEnvelope.WELCOME, receive().t)
     }
 
