@@ -106,9 +106,8 @@ final class AndroidEndToEndTests: XCTestCase {
         var client: ControlClient!
         client = ControlClient(device: device, identity: .init(clientID: clientID, name: "E2E Mac", token: token)) { event in
             switch event {
-            case .welcomed(let paired, let status, let port):
-                XCTAssertEqual(port, 7890)
-                print("welcome from \(status.deviceName) radio=\(status.radio ?? "-") paired=\(paired)")
+            case .welcomed(let paired):
+                print("welcome paired=\(paired)")
                 welcomed.fulfill()
                 if let code { client.pair(code: code) }
             case .paired(let t):

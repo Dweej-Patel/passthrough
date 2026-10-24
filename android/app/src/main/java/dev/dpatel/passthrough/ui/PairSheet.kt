@@ -50,6 +50,7 @@ fun PairSheet(vm: AppViewModel, onDismiss: () -> Unit) {
     val c = LocalPT.current
     val sheet = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     val code by vm.pairingCode.collectAsStateWithLifecycle()
+    val withdrawn by vm.pairingCodeWithdrawn.collectAsStateWithLifecycle()
     val state by vm.state.collectAsStateWithLifecycle()
     val clients by vm.pairedClients.collectAsStateWithLifecycle()
     val now by vm.now.collectAsStateWithLifecycle()
@@ -101,6 +102,11 @@ fun PairSheet(vm: AppViewModel, onDismiss: () -> Unit) {
                         Text("Expires in ${ByteFormat.duration(remainingMs / 1000)}", style = PT.mono(13.sp), color = c.secondary)
                     }
                 } else {
+                    if (withdrawn) {
+                        Box(Modifier.padding(horizontal = 24.dp)) {
+                            PTNotice("That code was withdrawn", PT.warning, Icons.Filled.Warning, detail = PAIRING_CODE_WITHDRAWN)
+                        }
+                    }
                     Button(onClick = { vm.beginPairing() }, colors = ButtonDefaults.buttonColors(containerColor = PT.accentEnd, contentColor = Color.White)) {
                         Text("Generate a new code", style = PT.display(15.sp, FontWeight.SemiBold))
                     }
@@ -114,3 +120,5 @@ fun PairSheet(vm: AppViewModel, onDismiss: () -> Unit) {
     }
 }
 
+/** Why the code on screen went away early. Same words as the iPhone app's. */
+const val PAIRING_CODE_WITHDRAWN = "Too many wrong codes were entered, so it no longer works. If that wasn't you, something on this phone or the Mac tried to guess it. Generate a new code to pair."

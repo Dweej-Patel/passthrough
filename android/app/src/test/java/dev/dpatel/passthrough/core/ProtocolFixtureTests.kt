@@ -33,8 +33,8 @@ class ProtocolFixtureTests {
         assertEquals(ports["socks"]!!.jsonPrimitive.int, PassthroughProtocol.DEFAULT_SOCKS_PORT)
         assertEquals(ports["control"]!!.jsonPrimitive.int, PassthroughProtocol.DEFAULT_CONTROL_PORT)
         assertEquals(fixtures["pairingCodeLifetimeSeconds"]!!.jsonPrimitive.long * 1000, PassthroughProtocol.PAIRING_CODE_LIFETIME_MS)
-        assertEquals(fixtures["pairingMaxAttempts"]!!.jsonPrimitive.int, PassthroughProtocol.PAIRING_MAX_ATTEMPTS)
-        assertEquals(fixtures["pairingLockoutSeconds"]!!.jsonPrimitive.long * 1000, PassthroughProtocol.PAIRING_LOCKOUT_MS)
+        assertEquals(fixtures["pairingMaxWrongCodesPerConnection"]!!.jsonPrimitive.int, PassthroughProtocol.PAIRING_MAX_WRONG_CODES_PER_CONNECTION)
+        assertEquals(fixtures["pairingMaxWrongCodesPerCode"]!!.jsonPrimitive.int, PassthroughProtocol.PAIRING_MAX_WRONG_CODES_PER_CODE)
         assertEquals(fixtures["unauthenticatedTimeoutSeconds"]!!.jsonPrimitive.long * 1000, PassthroughProtocol.UNAUTHENTICATED_TIMEOUT_MS)
         assertEquals(fixtures["pairingFailures"]!!.jsonArray.map { it.jsonPrimitive.content }, PairingFailure.entries.map { it.wire })
     }

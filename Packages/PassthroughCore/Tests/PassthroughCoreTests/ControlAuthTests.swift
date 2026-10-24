@@ -112,7 +112,7 @@ final class ControlClientAuthTests: XCTestCase {
         defer { phone.close() }
         let welcomed = expectation(description: "welcomed")
         let paired = Locked<Bool?>(nil)
-        let client = client(phone, token: token) { if case .welcomed(let p, _, _) = $0 { paired.set(p); welcomed.fulfill() } }
+        let client = client(phone, token: token) { if case .welcomed(let p) = $0 { paired.set(p); welcomed.fulfill() } }
         defer { client.close() }
         let hello = phone.receive()
         let w = try welcome(to: hello, paired: true, proofKey: token)
@@ -160,7 +160,7 @@ final class ControlClientAuthTests: XCTestCase {
         defer { phone.close() }
         let welcomed = expectation(description: "welcomed")
         let paired = Locked<Bool?>(nil)
-        let client = client(phone, token: token, guess: true) { if case .welcomed(let p, _, _) = $0 { paired.set(p); welcomed.fulfill() } }
+        let client = client(phone, token: token, guess: true) { if case .welcomed(let p) = $0 { paired.set(p); welcomed.fulfill() } }
         defer { client.close() }
         phone.send(try welcome(to: phone.receive(), paired: true, proofKey: PairingToken.generate()))
         wait(for: [welcomed], timeout: 5)
@@ -201,6 +201,32 @@ final class ControlClientAuthTests: XCTestCase {
         offerSecrets(client)
         XCTAssertEqual(phone.receive()?.t, "link", "a completed pairing authenticates the channel")
         XCTAssertEqual(tokens.get(), [token], "the answer counts, once; the extra one does not")
+    }
+
+    /// The phone's status counts only on an authenticated channel: whatever
+    /// answers on the port can't put a name or radio of its choosing on screen.
+    func testStatusCountsOnlyOnceAuthenticated() throws {
+        for paired in [false, true] {
+            let phone = try FakePhone()
+            defer { phone.close() }
+            let welcomed = expectation(description: "welcomed"), status = expectation(description: "status")
+            status.isInverted = !paired
+            let names = Locked<[String]>([])
+            let client = client(phone, token: token) { event in
+                switch event {
+                case .welcomed: welcomed.fulfill()
+                case .status(let s, _, _, _): names.set(names.get() + [s.deviceName]); status.fulfill()
+                default: break
+                }
+            }
+            defer { client.close() }
+            phone.send(try welcome(to: phone.receive(), paired: paired, proofKey: paired ? token : nil))
+            wait(for: [welcomed], timeout: 5)
+            var s = ControlEnvelope(t: "status"); s.deviceName = "Phone"; s.radio = "5G"
+            phone.send(s)
+            wait(for: [status], timeout: paired ? 5 : 0.5)
+            XCTAssertEqual(names.get(), paired ? ["Phone"] : [])
+        }
     }
 
     /// A code typed before the phone's welcome waits for it.
@@ -263,7 +289,7 @@ final class ControlClientAuthTests: XCTestCase {
             // A guess, so the wrong token reads as unpaired rather than ending the channel.
             let client = ControlClient(device: device, port: port, identity: .init(clientID: "mac1", name: "MacBook", token: attempt, tokenIsGuess: true)) { event in
                 switch event {
-                case .welcomed(let p, _, _): paired.set(p); welcomed.fulfill()
+                case .welcomed(let p): paired.set(p); welcomed.fulfill()
                 case .linked: linked.fulfill()
                 default: break
                 }
@@ -318,6 +344,26 @@ final class PairingSlotsTests: XCTestCase {
         let oldLink = PhoneDevice.wireless(phoneID: "p", kind: .iPhone, label: "i", pairingSlot: "token", link: LoopbackLink())
         XCTAssertEqual(PairingSlots.lookup(for: oldLink, in: store)?.isShared, true)
         XCTAssertFalse(PairingSlots.adopt(PairingSlots.Stored(token: "legacy", slot: "token"), for: oldLink, in: store), "moves only over the cable, where the UDID is known")
+    }
+
+    /// The shared token may be another iPhone's: an iPhone that hasn't proved
+    /// it doesn't count as paired through it, and forgetting its pairing
+    /// leaves it alone. Once proved (and still there, the move having failed)
+    /// it is this iPhone's.
+    func testSharedTokenIsOnlyAniPhonesOnceProved() {
+        let store = MemoryTokens()
+        store.items["token"] = "legacy"
+        XCTAssertNotNil(PairingSlots.lookup(for: iPhone, in: store), "still tried, as a guess")
+        XCTAssertEqual(PairingSlots.provenSlots(for: iPhone, provedShared: false, in: store), [], "but not paired: unproven")
+        XCTAssertEqual(PairingSlots.provenSlots(for: iPhone, provedShared: true, in: store), ["token"])
+
+        store.items[iPhone.pairingSlot] = "own"
+        XCTAssertEqual(PairingSlots.provenSlots(for: iPhone, provedShared: false, in: store), [iPhone.pairingSlot], "its own slot only")
+        XCTAssertEqual(PairingSlots.provenSlots(for: .android(serial: "R58M", model: nil), provedShared: true, in: store), [],
+                       "never the shared slot for an Android phone")
+        // A wireless phone linked through the shared slot: that slot is its own.
+        let oldLink = PhoneDevice.wireless(phoneID: "p", kind: .iPhone, label: "i", pairingSlot: "token", link: LoopbackLink())
+        XCTAssertEqual(PairingSlots.provenSlots(for: oldLink, provedShared: false, in: store), ["token"])
     }
 
     /// The shared copy stays until the phone's own copy is stored.

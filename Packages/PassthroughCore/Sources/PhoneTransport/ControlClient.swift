@@ -27,8 +27,9 @@ public final class ControlClient: @unchecked Sendable {
 
     public enum Event: Sendable {
         /// `paired`: the phone proved it holds this Mac's pairing, and the
-        /// Mac has proved it back. False: pair first.
-        case welcomed(paired: Bool, status: DeviceStatus, socksPort: UInt16)
+        /// Mac has proved it back. False: pair first. The phone's name and
+        /// status follow as `status` once the channel is authenticated.
+        case welcomed(paired: Bool)
         case paired(token: String)
         case pairingFailed(PairingFailure)
         case status(DeviceStatus, rx: Int64, tx: Int64, active: Int)
@@ -190,12 +191,11 @@ public final class ControlClient: @unchecked Sendable {
 
     private func handle(_ m: ControlEnvelope) {
         lastPong = Date()
-        let status = DeviceStatus(deviceName: m.deviceName ?? device.kindName, radio: m.radio, carrier: m.carrier, battery: m.battery, hosting: m.hosting ?? "", ipv6: m.ipv6)
         switch m.t {
         case ControlEnvelope.welcome:
             guard !welcomed else { return }
             welcomed = true
-            welcome(m, status: status)
+            welcome(m)
         case ControlEnvelope.paired:
             // Only the answer to our own `pair`, once: anything else could
             // plant a token of its choosing.
@@ -224,20 +224,20 @@ public final class ControlClient: @unchecked Sendable {
             }
         case ControlEnvelope.status:
             guard authenticated else { return }
+            let status = DeviceStatus(deviceName: m.deviceName ?? device.kindName, radio: m.radio, carrier: m.carrier, battery: m.battery, hosting: m.hosting ?? "", ipv6: m.ipv6)
             handler(.status(status, rx: m.rxBytes ?? 0, tx: m.txBytes ?? 0, active: m.activeConnections ?? 0))
         default: break
         }
     }
 
-    private func welcome(_ m: ControlEnvelope, status: DeviceStatus) {
+    private func welcome(_ m: ControlEnvelope) {
         let version = m.protocolVersion ?? 0
         guard version == PassthroughProtocol.version else {
             finish(ControlError.incompatible(kind: device.kindName, phoneIsOlder: version < PassthroughProtocol.version))
             return
         }
-        // From the phone: a port it can't have is the default, never a trap.
-        var socksPort = PassthroughProtocol.defaultSOCKSPort
-        if let sent = m.socksPort, let port = UInt16(exactly: sent), port > 0 { socksPort = port }
+        // Nothing else in a welcome counts: the phone's status comes only after
+        // the proofs (earlier phones sent it here too, unproven).
         var paired = false
         if m.paired == true {
             if let token = identity.token, let phoneNonce = ControlAuth.decodeNonce(m.nonce),
@@ -260,7 +260,7 @@ public final class ControlClient: @unchecked Sendable {
                 return
             }
         }
-        handler(.welcomed(paired: paired, status: status, socksPort: socksPort))
+        handler(.welcomed(paired: paired))
         if !paired, let code = pendingCode {
             pendingCode = nil
             sendPair(code)

@@ -33,18 +33,30 @@ link-scoped multicast traffic, and Tailscale's ranges.
 The cable control channel is in scope too. It assumes whatever is on the
 other end may be hostile: another phone plugged into the Mac, an app bound to
 the phone's loopback control port while Passthrough isn't running (reachable
-through adb), or a fake adb server on the Mac. The pairing token is sent once,
-in answer to the code shown on the phone, and never again: each connection
-proves the pairing both ways with HMAC-SHA256 over fresh nonces (the phone
-first), the Mac hands over link and shell keys only after that, the phone
-acts on nothing privileged before the Mac's proof, and the SOCKS5 password is
-a separate value derived from the token. Pairing codes lock for 30 seconds
-after five wrong guesses, and the phone closes connections that prove nothing
-within 10 seconds unless a code is showing. Anything that gets a token, a
-link key, a shell key or relay details out of this channel without the
-pairing, or lets a peer that hasn't proved it change what the phone or Mac
-stores, is a vulnerability. Deliberately pairing with a device (typing the
-code it shows) is not.
+through adb), or a fake adb server on the Mac that answers itself. The
+pairing token is sent once, in answer to the code shown on the phone, and
+never again: each connection proves the pairing both ways with HMAC-SHA256
+over fresh nonces (the phone first), the Mac hands over link and shell keys
+only after that, the phone tells a connection nothing about itself and acts
+on nothing privileged before the Mac's proof, and the SOCKS5 password is a
+separate value derived from the token. A pairing code is withdrawn after ten
+wrong guesses in all (each connection may send three before the phone closes
+it), so wrong guesses can't lock out the right code, and the phone closes
+connections that prove nothing within 10 seconds unless a code is showing.
+Anything that gets a token, a link key, a shell key or relay details out of
+this channel without the pairing, or lets a peer that hasn't proved it change
+what the phone or Mac stores, is a vulnerability. Deliberately pairing with a
+device (typing the code it shows) is not.
+
+The control channel is authenticated, not encrypted. A process running as
+the Mac user can put itself between the app and adb (a fake adb server on
+`127.0.0.1:5037` that relays to the real one, or to the phone): the proofs
+pass through it untouched, and it can then read what is sent after them, the
+wireless link key, the shell key, relay details and, during a pairing, the new
+pairing token. That is out of scope: code already running as the user is
+outside the threat model (it can read the user's files and drive the user's
+apps). The fix would be an encrypted control channel bound to the pairing
+(keys derived from K and both nonces), which Passthrough does not have.
 
 The Mac app reads its secrets only from the data-protection keychain, never
 the legacy file keychain, where any process running as the user could plant

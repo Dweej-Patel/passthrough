@@ -32,7 +32,7 @@ public struct ConnectedMac: Identifiable, Sendable, Equatable, Codable {
 /// Anything on the phone can connect to its loopback port (and over adb, so
 /// can anything on the Mac), so a connection is a stranger until the Mac
 /// proves its pairing (`auth`) or pairs with the code shown. Only then is it
-/// sent status or allowed to change anything.
+/// sent the phone's name and status, or allowed to change anything.
 public final class ControlServer: @unchecked Sendable {
     public let port: UInt16
     private let registry: PairingRegistry
@@ -170,7 +170,8 @@ public final class ControlServer: @unchecked Sendable {
             }
             registry.touch(clientID: hello.clientID)
             peer.authenticate(id: hello.clientID, name: hello.name)
-            return []
+            // The phone's status goes only to a proven Mac: the first now, not at the next tick.
+            return [statusMessage()]
         case ControlEnvelope.pair:
             // After hello, which checked the version and named the Mac being paired.
             guard let hello = peer.hello else { return [Self.error(.notAuthenticated)] }
@@ -183,6 +184,16 @@ public final class ControlServer: @unchecked Sendable {
                 reply.deviceName = statusProvider().deviceName
                 reply.socksPort = Int(socksPort)
                 return [reply, statusMessage()]
+            case .failure(.badCode):
+                // A few wrong codes per connection, then it is closed: a guesser
+                // must keep reconnecting, and every guess still counts against
+                // the code itself (`PairingRegistry.pair`), so opening many
+                // connections buys nothing.
+                peer.wrongCodes += 1
+                guard peer.wrongCodes >= PassthroughProtocol.pairingMaxWrongCodesPerConnection else { return [Self.error(.badCode)] }
+                ptLog(.warning, "Closing a control connection after \(peer.wrongCodes) wrong pairing codes")
+                peer.reject()
+                return [Self.error(.locked)]
             case .failure(let failure):
                 return [Self.error(failure)]
             }
@@ -260,17 +271,14 @@ public final class ControlServer: @unchecked Sendable {
         return now.timeIntervalSince(peer.lastHeard) > limit ? "stopped answering" : nil
     }
 
+    /// Only what the handshake needs: whoever asks may be a stranger, so the
+    /// phone's name and status wait until the Mac has proved its pairing (the
+    /// `status` answering `auth`) or paired with the code (`paired`). The Mac
+    /// already knows the kind of phone from the cable, which is all its
+    /// pairing prompt needs.
     private func welcome() -> ControlEnvelope {
-        let status = statusProvider()
         var reply = ControlEnvelope(t: ControlEnvelope.welcome)
         reply.protocolVersion = PassthroughProtocol.version
-        reply.deviceName = status.deviceName
-        reply.socksPort = Int(socksPort)
-        reply.radio = status.radio
-        reply.carrier = status.carrier
-        reply.battery = status.battery
-        reply.hosting = status.hosting
-        reply.ipv6 = status.ipv6
         return reply
     }
 
@@ -312,6 +320,8 @@ private final class Peer: @unchecked Sendable {
     private(set) var lastHeard = Date()
     /// Answered with an error: nothing it sends counts any more, and the next tick closes it.
     private(set) var isRejected = false
+    /// Wrong pairing codes sent on this connection.
+    var wrongCodes = 0
     /// What the Mac's hello said carries this connection ("usb" or "wireless").
     var via: String?
 

@@ -12,9 +12,15 @@ object PassthroughProtocol {
     /** Control channel port (pairing, heartbeat, device status). */
     const val DEFAULT_CONTROL_PORT = 7891
     const val PAIRING_CODE_LIFETIME_MS = 300_000L
-    /** Wrong codes in a row that lock code entry, and for how long. */
-    const val PAIRING_MAX_ATTEMPTS = 5
-    const val PAIRING_LOCKOUT_MS = 30_000L
+    /** Wrong codes one control connection may send: the last of them is answered `locked` and the connection is closed. */
+    const val PAIRING_MAX_WRONG_CODES_PER_CONNECTION = 3
+    /**
+     * Wrong codes one pairing code takes, over every connection, before the phone
+     * withdraws it (`code_withdrawn`) and a new one must be shown: a guesser wins
+     * with odds of at most 10 in a million per code shown, and nothing can hold the
+     * right code off (see [PairingRegistry.pair]).
+     */
+    const val PAIRING_MAX_WRONG_CODES_PER_CODE = 10
     /** A control connection that has not proved a pairing is closed after this, unless a pairing code is showing. */
     const val UNAUTHENTICATED_TIMEOUT_MS = 10_000L
     /** An authenticated Mac silent this long is dropped (it pings every 5 s and gives up itself after 20 s). */
@@ -103,8 +109,10 @@ enum class PairingFailure(val wire: String) {
     EXPIRED("expired"),
     NOT_AUTHENTICATED("not_authenticated"),
     UNSUPPORTED_VERSION("unsupported_version"),
-    /** Too many wrong codes: code entry is locked for a while. */
+    /** Too many wrong codes on this connection: the phone closes it. The code still stands for a new connection, unless it was withdrawn. */
     LOCKED("locked"),
+    /** Too many wrong codes against this code in all: the phone withdrew it, and pairing needs a new one shown. */
+    CODE_WITHDRAWN("code_withdrawn"),
 }
 
 /** Facts about the phone the Mac likes to display. */

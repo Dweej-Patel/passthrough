@@ -214,20 +214,46 @@ class PairingTests {
         assertEquals(PairingRegistry.PairResult.Failure(PairingFailure.EXPIRED), registry.pair(code.code, "m1", "Mac"))
     }
 
-    /** Five wrong guesses lock code entry for 30 s, even for the right code; the code itself stays. */
-    @Test fun wrongGuessesLockCodeEntry() {
+    /** Wrong guesses never lock the right code out; the tenth in all withdraws the code, and says so. Mirrors the Swift test. */
+    @Test fun wrongGuessesWithdrawTheCode() {
+        var code = registry.issueCode()
+        var wrong = if (code.code == "000000") "111111" else "000000"
+        // Up to the budget, the right code still works.
+        repeat(PassthroughProtocol.PAIRING_MAX_WRONG_CODES_PER_CODE - 1) {
+            assertEquals(PairingRegistry.PairResult.Failure(PairingFailure.BAD_CODE), registry.pair(wrong, "m1", "Mac"))
+        }
+        assertTrue("the right code is never locked out", registry.pair(code.code, "m1", "Mac") is PairingRegistry.PairResult.Success)
+
+        // The last wrong guess of the budget withdraws the code.
+        code = registry.issueCode()
+        wrong = if (code.code == "000000") "111111" else "000000"
+        repeat(PassthroughProtocol.PAIRING_MAX_WRONG_CODES_PER_CODE - 1) {
+            assertEquals(PairingRegistry.PairResult.Failure(PairingFailure.BAD_CODE), registry.pair(wrong, "m2", "Mac"))
+        }
+        assertFalse(registry.codeWasWithdrawn)
+        assertEquals(PairingRegistry.PairResult.Failure(PairingFailure.CODE_WITHDRAWN), registry.pair(wrong, "m2", "Mac"))
+        assertNull("withdrawn", registry.activeCode)
+        assertTrue("and the app can say why", registry.codeWasWithdrawn)
+        assertEquals("not even the right code once withdrawn", PairingRegistry.PairResult.Failure(PairingFailure.EXPIRED), registry.pair(code.code, "m2", "Mac"))
+        assertFalse(registry.clients.any { it.id == "m2" })
+
+        // A new code starts over.
+        code = registry.issueCode()
+        wrong = if (code.code == "000000") "111111" else "000000"
+        assertFalse(registry.codeWasWithdrawn)
+        assertEquals(PairingRegistry.PairResult.Failure(PairingFailure.BAD_CODE), registry.pair(wrong, "m2", "Mac"))
+        assertTrue(registry.pair(code.code, "m2", "Mac") is PairingRegistry.PairResult.Success)
+    }
+
+    /** A malformed pair costs the code nothing and learns nothing about it. */
+    @Test fun malformedPairIsRefusedBeforeTheCode() {
         val code = registry.issueCode()
-        val wrong = if (code.code == "000000") "111111" else "000000"
-        repeat(4) { assertEquals(PairingRegistry.PairResult.Failure(PairingFailure.BAD_CODE), registry.pair(wrong, "m1", "Mac")) }
-        assertEquals(PairingRegistry.PairResult.Failure(PairingFailure.LOCKED), registry.pair(wrong, "m1", "Mac"))
-        assertEquals("the code is not withdrawn", code, registry.activeCode)
-        assertEquals(PairingRegistry.PairResult.Failure(PairingFailure.LOCKED), registry.pair(code.code, "m1", "Mac"))
-        now += PassthroughProtocol.PAIRING_LOCKOUT_MS - 1
-        assertEquals(PairingRegistry.PairResult.Failure(PairingFailure.LOCKED), registry.pair(code.code, "m1", "Mac"))
-        // The lock runs out: the count starts over and the right code works.
-        now += 2
-        assertEquals(PairingRegistry.PairResult.Failure(PairingFailure.BAD_CODE), registry.pair(wrong, "m1", "Mac"))
-        assertTrue(registry.pair(code.code, "m1", "Mac") is PairingRegistry.PairResult.Success)
+        repeat(PassthroughProtocol.PAIRING_MAX_WRONG_CODES_PER_CODE) {
+            assertEquals(PairingRegistry.PairResult.Failure(PairingFailure.BAD_CODE), registry.pair(code.code, "m".repeat(65), "Mac"))
+            assertEquals(PairingRegistry.PairResult.Failure(PairingFailure.BAD_CODE), registry.pair("000000", "", "Mac"))
+        }
+        assertEquals(code, registry.activeCode)
+        assertTrue(registry.pair(code.code, "m", "Mac") is PairingRegistry.PairResult.Success)
     }
 
     /** The SOCKS5 password is derived from the pairing, never the token itself. */
@@ -287,8 +313,7 @@ class ControlTests {
         assertEquals(false, welcome.paired)
         assertNull(welcome.proof)
         assertNotNull("a nonce even when unpaired", ControlAuth.decodeNonce(welcome.nonce))
-        assertEquals("Pixel", welcome.deviceName)
-        assertEquals(7890, welcome.socksPort)
+        assertNull("nothing about the phone before the Mac is proven", welcome.deviceName)
 
         val code = registry.issueCode()
         mac.send(ControlEnvelope(ControlEnvelope.PAIR, clientID = "mac1", name = "MacBook", code = code.code))
@@ -307,8 +332,71 @@ class ControlTests {
         val expected = ControlAuth.phoneProof(ControlAuth.key(token), "mac1", again.nonce, ControlAuth.decodeNonce(w2.nonce)!!)
         assertEquals(Base64.getEncoder().encodeToString(expected), w2.proof)
         again.auth(token, w2)
-        assertEquals("authenticated: status flows", ControlEnvelope.STATUS, again.receive().t)
+        val first = again.receive()
+        assertEquals("authenticated: status flows, the first at once", ControlEnvelope.STATUS, first.t)
+        assertEquals("Pixel", first.deviceName)
         again.socket.close()
+    }
+
+    /** A welcome holds what the handshake needs and nothing else: no name, radio, carrier, battery, hosting, IPv6 or port, paired or not. */
+    @Test fun welcomeTellsAStrangerNothingAboutThePhone() {
+        fun welcomeKeys(clientID: String): Set<String> {
+            val mac = Mac(clientID)
+            mac.send(ControlEnvelope(ControlEnvelope.HELLO, protocolVersion = 2, clientID = clientID, name = "MacBook", nonce = Base64.getEncoder().encodeToString(mac.nonce)))
+            val line = mac.receiveOrNull()!!
+            mac.socket.close()
+            return kotlinx.serialization.json.Json.parseToJsonElement(line).let { (it as kotlinx.serialization.json.JsonObject).keys }
+        }
+        assertEquals(setOf("t", "protocolVersion", "paired", "nonce"), welcomeKeys("stranger"))
+        paired("mac1")
+        assertEquals(setOf("t", "protocolVersion", "paired", "nonce", "proof"), welcomeKeys("mac1"))
+    }
+
+    private fun Mac.pair(code: String): String? {
+        send(ControlEnvelope(ControlEnvelope.PAIR, clientID = clientID, name = "MacBook", code = code))
+        val reply = receive()
+        return if (reply.t == ControlEnvelope.PAIRED) reply.t else reply.reason
+    }
+
+    /** A few wrong codes close the connection that sent them; the code still works on a new one. */
+    @Test fun wrongCodesCloseTheirConnectionOnly() {
+        val code = registry.issueCode().code
+        val wrong = if (code == "000000") "111111" else "000000"
+        val guesser = Mac()
+        guesser.hello()
+        repeat(PassthroughProtocol.PAIRING_MAX_WRONG_CODES_PER_CONNECTION - 1) { assertEquals("bad_code", guesser.pair(wrong)) }
+        assertEquals("locked", guesser.pair(wrong))
+        assertNull("and the connection is closed", guesser.receiveOrNull())
+
+        val mac = Mac()
+        mac.hello()
+        assertEquals("the right code works on a new connection", ControlEnvelope.PAIRED, mac.pair(code))
+        mac.socket.close()
+    }
+
+    /** Opening connection after connection buys no more guesses: the code takes so many wrong ones in all, then is withdrawn. */
+    @Test fun wrongCodesOverManyConnectionsWithdrawTheCode() {
+        val code = registry.issueCode().code
+        val wrong = if (code == "000000") "111111" else "000000"
+        var guesses = 0
+        var last: String? = null
+        while (guesses < PassthroughProtocol.PAIRING_MAX_WRONG_CODES_PER_CODE) {
+            val guesser = Mac()
+            guesser.hello()
+            for (i in 0 until PassthroughProtocol.PAIRING_MAX_WRONG_CODES_PER_CONNECTION) {
+                if (guesses == PassthroughProtocol.PAIRING_MAX_WRONG_CODES_PER_CODE) break
+                last = guesser.pair(wrong)
+                guesses++
+            }
+            guesser.socket.close()
+        }
+        assertEquals("code_withdrawn", last)
+        assertNull(registry.activeCode)
+        assertTrue(registry.codeWasWithdrawn)
+        val mac = Mac()
+        mac.hello()
+        assertEquals("a new code must be shown", "expired", mac.pair(code))
+        mac.socket.close()
     }
 
     /** A Mac from before version 2 (token in hello) is refused, with our version so it knows who to update. */

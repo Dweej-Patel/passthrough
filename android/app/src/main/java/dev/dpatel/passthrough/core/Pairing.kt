@@ -75,8 +75,8 @@ data class PairedClient(
 /**
  * Stores paired Macs and the short-lived pairing code. Mirrors
  * PassthroughCore/Pairing.swift: six digit codes valid for five minutes,
- * code entry locked for 30 s after five wrong guesses, and a 32-byte URL-safe
- * token per Mac of which only the SHA-256 is kept.
+ * withdrawn after ten wrong guesses in all, and a 32-byte URL-safe token per
+ * Mac of which only the SHA-256 is kept.
  */
 class PairingRegistry(
     private val store: KeyValueStore,
@@ -93,9 +93,10 @@ class PairingRegistry(
     private val lock = Any()
     private val random = SecureRandom()
     private var code: Code? = null
+    /** Wrong guesses against the current code, over every connection. */
     private var failedAttempts = 0
-    /** Until when code entry is locked after too many wrong guesses (clock millis). */
-    private var lockedUntil = 0L
+    /** The last code was withdrawn for too many wrong guesses; cleared by the next code. */
+    private var withdrawn = false
     @Volatile var onChange: (() -> Unit)? = null
 
     val clients: List<PairedClient> get() = synchronized(lock) { loadClients() }
@@ -187,42 +188,52 @@ class PairingRegistry(
 
     fun issueCode(): Code {
         val c = Code(String.format(Locale.US, "%06d", random.nextInt(1_000_000)), clock() + PassthroughProtocol.PAIRING_CODE_LIFETIME_MS)
-        synchronized(lock) { code = c; failedAttempts = 0 }
+        synchronized(lock) { code = c; failedAttempts = 0; withdrawn = false }
         onChange?.invoke()
         return c
     }
 
     fun clearCode() {
-        synchronized(lock) { code = null }
+        synchronized(lock) { code = null; withdrawn = false }
         onChange?.invoke()
     }
 
+    /** Whether the last code was withdrawn because too many wrong codes were tried against it (until a new code is issued or pairing is ended). */
+    val codeWasWithdrawn: Boolean get() = synchronized(lock) { withdrawn }
+
     val activeCode: Code? get() = synchronized(lock) { code?.takeIf { it.expiry > clock() } }
 
-    /** Validates a code and registers the Mac; returns the token to hand back. */
+    /**
+     * Validates a code and registers the Mac; returns the token to hand back.
+     *
+     * Any app on the phone can reach the control port, and anything on the Mac
+     * through adb, so wrong guesses must not be able to lock the user out: a
+     * lockout in time, renewed by a few guesses every so often, would refuse even
+     * the right code for as long as the guesser liked. Instead each code takes
+     * [PassthroughProtocol.PAIRING_MAX_WRONG_CODES_PER_CODE] wrong guesses in all,
+     * over every connection (each connection is also held to a few by
+     * [ControlServer]), and is then withdrawn: a new one must be shown, so guessing
+     * wins with odds of at most 10 in a million per code the user shows, and until
+     * then the right code always works. A guesser can still make the user's code
+     * vanish, but not silently: the phone says why.
+     */
     fun pair(code: String, clientID: String, name: String): PairResult {
+        // Before the code is looked at, so a malformed request learns nothing and costs nothing.
+        if (clientID.isEmpty() || clientID.length > 64 || name.length > 64) return PairResult.Failure(PairingFailure.BAD_CODE)
         val result: PairResult = synchronized(lock) {
-            // Locked: not even the right code counts, so guessing stays slow.
-            if (clock() < lockedUntil) return@synchronized PairResult.Failure(PairingFailure.LOCKED)
             val stored = this.code ?: return@synchronized PairResult.Failure(PairingFailure.EXPIRED)
             if (stored.expiry <= clock()) {
                 this.code = null
                 return@synchronized PairResult.Failure(PairingFailure.EXPIRED)
             }
             if (!constantTimeEquals(stored.code, code.trim())) {
-                // A six-digit code must not be brute-forceable over the cable:
-                // a handful of wrong guesses locks code entry for a while. The
-                // code stays, so whatever is guessing can't make the user's vanish.
                 failedAttempts++
-                if (failedAttempts >= PassthroughProtocol.PAIRING_MAX_ATTEMPTS) {
-                    ptLog(PtLog.Level.WARNING, "Pairing code entry locked for ${PassthroughProtocol.PAIRING_LOCKOUT_MS / 1000} s after $failedAttempts wrong attempts")
-                    failedAttempts = 0
-                    lockedUntil = clock() + PassthroughProtocol.PAIRING_LOCKOUT_MS
-                    return@synchronized PairResult.Failure(PairingFailure.LOCKED)
-                }
-                return@synchronized PairResult.Failure(PairingFailure.BAD_CODE)
+                if (failedAttempts < PassthroughProtocol.PAIRING_MAX_WRONG_CODES_PER_CODE) return@synchronized PairResult.Failure(PairingFailure.BAD_CODE)
+                ptLog(PtLog.Level.WARNING, "Withdrew the pairing code after $failedAttempts wrong codes")
+                this.code = null
+                withdrawn = true
+                return@synchronized PairResult.Failure(PairingFailure.CODE_WITHDRAWN)
             }
-            if (clientID.length > 64 || name.length > 64 || clientID.isEmpty()) return@synchronized PairResult.Failure(PairingFailure.BAD_CODE)
             val token = PairingToken.generate()
             val now = clock()
             save(loadClients().filter { it.id != clientID } + PairedClient(clientID, name, PairingToken.hash(token), now, now))

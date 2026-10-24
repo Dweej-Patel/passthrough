@@ -27,6 +27,22 @@ public enum PairingSlots {
         return Stored(token: token, slot: PhoneDevice.sharediPhonePairingSlot)
     }
 
+    /// The slots that hold `device`'s own pairing: its own slot when it has a
+    /// token, and the shared iPhone slot only when the phone proved the token
+    /// there on the open channel (`provedShared`: it stays there when moving
+    /// it failed). A shared token not yet proved may be another iPhone's, so
+    /// it neither makes this one count as paired nor goes when this one
+    /// forgets its pairing; it moves once its owner proves it (`adopt`), and
+    /// can be forgotten with no iPhone attached.
+    public static func provenSlots(for device: PhoneDevice, provedShared: Bool, in store: PairingTokenStore) -> [String] {
+        var slots: [String] = []
+        if store.read(device.pairingSlot) != nil { slots.append(device.pairingSlot) }
+        if provedShared, device.mayUseSharedSlot, store.read(PhoneDevice.sharediPhonePairingSlot) != nil {
+            slots.append(PhoneDevice.sharediPhonePairingSlot)
+        }
+        return slots
+    }
+
     /// `device` proved `stored`: a token from the shared slot is this phone's,
     /// so it moves to the phone's own slot. The shared copy is deleted only
     /// once the new one reads back. False if nothing moved.

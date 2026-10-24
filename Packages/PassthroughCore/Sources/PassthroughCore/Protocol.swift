@@ -29,9 +29,14 @@ public enum PassthroughProtocol {
     /// App Group shared between the iOS app and its tunnel extension.
     public static let appGroup = "group.\(PassthroughProtocol.identifier)"
     public static let pairingCodeLifetime: TimeInterval = 300
-    /// Wrong codes in a row that lock code entry, and for how long.
-    public static let pairingMaxAttempts = 5
-    public static let pairingLockout: TimeInterval = 30
+    /// Wrong codes one control connection may send: the last of them is
+    /// answered `locked` and the connection is closed (a new one may try again).
+    public static let pairingMaxWrongCodesPerConnection = 3
+    /// Wrong codes one pairing code takes, over every connection, before the
+    /// phone withdraws it (`code_withdrawn`) and a new one must be shown: a
+    /// guesser wins with odds of at most 10 in a million per code shown, and
+    /// nothing can hold the right code off (see `PairingRegistry.pair`).
+    public static let pairingMaxWrongCodesPerCode = 10
     /// The phone closes a control connection that has not proved a pairing
     /// within this long, unless a pairing code is showing (then it waits for
     /// as long as the code is valid).
@@ -128,8 +133,12 @@ public enum PairingFailure: String, Sendable, Error {
     case expired = "expired"
     case notAuthenticated = "not_authenticated"
     case unsupportedVersion = "unsupported_version"
-    /// Too many wrong codes: code entry is locked for a while.
+    /// Too many wrong codes on this connection: the phone closes it. The
+    /// code still stands for a new connection, unless it was withdrawn.
     case locked = "locked"
+    /// Too many wrong codes against this code in all: the phone withdrew it,
+    /// and pairing needs a new one shown.
+    case codeWithdrawn = "code_withdrawn"
 }
 
 /// Snapshot the tunnel extension hands the iOS app on request.

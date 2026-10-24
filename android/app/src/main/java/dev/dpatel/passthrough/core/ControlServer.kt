@@ -20,8 +20,8 @@ import java.util.concurrent.atomic.AtomicBoolean
  * Mirrors PassthroughCore/ControlServer.swift message for message. Any app on
  * the phone can connect to its loopback port, and anything on the Mac through
  * adb, so a connection is a stranger until the Mac proves its pairing (`auth`)
- * or pairs with the code shown; only then is it sent status or allowed to
- * change anything. [unauthenticatedTimeoutMs] and [silenceLimitMs] are shorter in tests.
+ * or pairs with the code shown; only then is it sent the phone's name and
+ * status, or allowed to change anything. [unauthenticatedTimeoutMs] and [silenceLimitMs] are shorter in tests.
  */
 class ControlServer(
     val port: Int = PassthroughProtocol.DEFAULT_CONTROL_PORT,
@@ -145,7 +145,8 @@ class ControlServer(
         }
         registry.touch(hello.clientID)
         peer.authenticate(hello.clientID, hello.name)
-        return emptyList()
+        // The phone's status goes only to a proven Mac: the first now, not at the next tick.
+        return listOf(statusMessage())
     }
 
     private fun pair(m: ControlEnvelope, peer: Peer): List<ControlEnvelope> {
@@ -161,7 +162,17 @@ class ControlServer(
                     statusMessage(),
                 )
             }
-            is PairingRegistry.PairResult.Failure -> listOf(error(r.reason))
+            is PairingRegistry.PairResult.Failure -> {
+                if (r.reason != PairingFailure.BAD_CODE) return listOf(error(r.reason))
+                // A few wrong codes per connection, then it is closed: a guesser must
+                // keep reconnecting, and every guess still counts against the code
+                // itself ([PairingRegistry.pair]), so opening many connections buys nothing.
+                val wrong = peer.countWrongCode()
+                if (wrong < PassthroughProtocol.PAIRING_MAX_WRONG_CODES_PER_CONNECTION) return listOf(error(PairingFailure.BAD_CODE))
+                ptLog(PtLog.Level.WARNING, "Closing a control connection after $wrong wrong pairing codes")
+                peer.reject()
+                listOf(error(PairingFailure.LOCKED))
+            }
         }
     }
 
@@ -210,13 +221,13 @@ class ControlServer(
         return listOf(ControlEnvelope(ControlEnvelope.SHELL_GRANTED, phoneID = registry.phoneID, grantID = grantID))
     }
 
-    private fun welcome(): ControlEnvelope {
-        val s = statusProvider()
-        return ControlEnvelope(
-            ControlEnvelope.WELCOME, protocolVersion = PassthroughProtocol.VERSION, deviceName = s.deviceName, socksPort = socksPort,
-            radio = s.radio, carrier = s.carrier, battery = s.battery, hosting = s.hosting, ipv6 = s.ipv6,
-        )
-    }
+    /**
+     * Only what the handshake needs: whoever asks may be a stranger, so the phone's
+     * name and status wait until the Mac has proved its pairing (the `status`
+     * answering `auth`) or paired with the code (`paired`). The Mac already knows
+     * the kind of phone from the cable, which is all its pairing prompt needs.
+     */
+    private fun welcome(): ControlEnvelope = ControlEnvelope(ControlEnvelope.WELCOME, protocolVersion = PassthroughProtocol.VERSION)
 
     private fun statusMessage(): ControlEnvelope {
         val s = statusProvider()
@@ -244,6 +255,10 @@ class ControlServer(
         /** Answered with an error: nothing it sends counts any more, and the next tick closes it. */
         @Volatile var isRejected = false
             private set
+        /** Wrong pairing codes sent on this connection (counted on its own reader thread). */
+        private var wrongCodes = 0
+
+        fun countWrongCode(): Int = ++wrongCodes
 
         fun run() {
             try {

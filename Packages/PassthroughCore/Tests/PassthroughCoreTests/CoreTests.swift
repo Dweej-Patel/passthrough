@@ -300,25 +300,49 @@ final class PairingTests: XCTestCase {
     }
 
     /// The iOS app issues codes and the tunnel extension checks them: two
-    /// registries on one set of defaults. Five wrong guesses lock code entry
-    /// for 30 s, even for the right code; the code itself stays.
-    func testWrongGuessesLockCodeEntryAcrossProcesses() {
+    /// registries on one set of defaults. Wrong guesses never lock the right
+    /// code out; the tenth in all withdraws the code, and says so.
+    func testWrongGuessesWithdrawTheCodeAcrossProcesses() {
         let app = registry!
         let tunnel = PairingRegistry(defaults: defaults)
         func wrong(_ code: String) -> String { code == "000000" ? "111111" : "000000" }
 
-        let code = app.issueCode().code
-        for _ in 0..<4 { XCTAssertEqual(tunnel.pair(code: wrong(code), clientID: "m", name: "Mac"), .failure(.badCode)) }
-        XCTAssertEqual(tunnel.pair(code: wrong(code), clientID: "m", name: "Mac"), .failure(.locked), "the fifth wrong guess locks code entry")
-        XCTAssertEqual(defaults.double(forKey: PairingRegistry.lockedUntilKey), Date().timeIntervalSince1970 + PassthroughProtocol.pairingLockout, accuracy: 2)
-        XCTAssertEqual(app.activeCode?.code, code, "the code is not withdrawn")
-        XCTAssertEqual(tunnel.pair(code: code, clientID: "m", name: "Mac"), .failure(.locked), "not even the right code while locked")
-        XCTAssertEqual(app.pair(code: code, clientID: "m", name: "Mac"), .failure(.locked))
+        // Up to the budget, the right code still works.
+        var code = app.issueCode().code
+        for _ in 1..<PassthroughProtocol.pairingMaxWrongCodesPerCode {
+            XCTAssertEqual(tunnel.pair(code: wrong(code), clientID: "m", name: "Mac"), .failure(.badCode))
+        }
+        guard case .success = tunnel.pair(code: code, clientID: "m", name: "Mac") else { return XCTFail("the right code is never locked out") }
 
-        // The lock runs out: the count starts over and the right code works.
-        defaults.set(Date().timeIntervalSince1970 - 1, forKey: PairingRegistry.lockedUntilKey)
-        XCTAssertEqual(tunnel.pair(code: wrong(code), clientID: "m", name: "Mac"), .failure(.badCode))
-        guard case .success = tunnel.pair(code: code, clientID: "m", name: "Mac") else { return XCTFail() }
+        // The last wrong guess of the budget withdraws the code, whichever registry counted the others.
+        code = app.issueCode().code
+        for n in 1..<PassthroughProtocol.pairingMaxWrongCodesPerCode {
+            XCTAssertEqual((n.isMultiple(of: 2) ? app : tunnel).pair(code: wrong(code), clientID: "m2", name: "Mac"), .failure(.badCode))
+        }
+        XCTAssertFalse(app.codeWasWithdrawn)
+        XCTAssertEqual(tunnel.pair(code: wrong(code), clientID: "m2", name: "Mac"), .failure(.codeWithdrawn))
+        XCTAssertNil(app.activeCode, "withdrawn")
+        XCTAssertTrue(app.codeWasWithdrawn, "and the app can say why")
+        XCTAssertEqual(tunnel.pair(code: code, clientID: "m2", name: "Mac"), .failure(.expired), "not even the right code once withdrawn")
+        XCTAssertFalse(app.clients.contains { $0.id == "m2" })
+
+        // A new code starts over.
+        code = app.issueCode().code
+        XCTAssertFalse(app.codeWasWithdrawn)
+        XCTAssertEqual(tunnel.pair(code: wrong(code), clientID: "m2", name: "Mac"), .failure(.badCode))
+        guard case .success = tunnel.pair(code: code, clientID: "m2", name: "Mac") else { return XCTFail() }
+    }
+
+    /// A malformed pair costs the code nothing and learns nothing about it.
+    func testMalformedPairIsRefusedBeforeTheCode() {
+        let code = registry.issueCode().code
+        let long = String(repeating: "m", count: 65)
+        for _ in 0..<PassthroughProtocol.pairingMaxWrongCodesPerCode {
+            XCTAssertEqual(registry.pair(code: code, clientID: long, name: "Mac"), .failure(.badCode))
+            XCTAssertEqual(registry.pair(code: "000000", clientID: "", name: "Mac"), .failure(.badCode))
+        }
+        XCTAssertEqual(registry.activeCode?.code, code)
+        guard case .success = registry.pair(code: code, clientID: "m", name: "Mac") else { return XCTFail() }
     }
 
     /// The SOCKS5 password is derived from the pairing, never the token itself.
@@ -402,7 +426,7 @@ final class ControlServerTests: XCTestCase {
         XCTAssertEqual(welcome.paired, false)
         XCTAssertNil(welcome.proof)
         XCTAssertNotNil(ControlAuth.decodeNonce(welcome.nonce), "a nonce even when unpaired")
-        XCTAssertEqual(welcome.deviceName, "Test iPhone")
+        XCTAssertNil(welcome.deviceName, "nothing about the phone before the Mac is proven")
 
         var pair = ControlEnvelope(t: "pair"); pair.clientID = "mac1"; pair.name = "MacBook"; pair.code = "nope"
         try send(pair, on: client)
@@ -431,8 +455,79 @@ final class ControlServerTests: XCTestCase {
         XCTAssertFalse(ControlAuth.isValidPhoneProof(again.proof, key: ControlAuth.key(token: token), clientID: "mac1", macNonce: ControlAuth.nonce(), phoneNonce: phoneNonce),
                        "the proof is bound to this connection's nonce")
         try auth(client2, token: token, welcome: again, macNonce: macNonce)
-        XCTAssertEqual(try receive(client2).t, "status", "authenticated: status flows")
+        let first = try receive(client2)
+        XCTAssertEqual(first.t, "status", "authenticated: status flows, the first at once")
+        XCTAssertEqual(first.deviceName, "Test iPhone")
         client2.close()
+    }
+
+    /// A welcome holds what the handshake needs and nothing else: no name,
+    /// radio, carrier, battery, hosting, IPv6 or port, paired or not.
+    func testWelcomeTellsAStrangerNothingAboutThePhone() throws {
+        try start()
+        func welcomeKeys(_ clientID: String) throws -> Set<String> {
+            let client = TestClient(port: port)
+            defer { client.close() }
+            var hello = ControlEnvelope(t: "hello"); hello.protocolVersion = 2; hello.clientID = clientID; hello.name = "MacBook"
+            hello.nonce = ControlAuth.nonce().base64EncodedString()
+            try send(hello, on: client)
+            let object = try XCTUnwrap(JSONSerialization.jsonObject(with: client.readLine()) as? [String: Any])
+            return Set(object.keys)
+        }
+        XCTAssertEqual(try welcomeKeys("stranger"), ["t", "protocolVersion", "paired", "nonce"])
+        _ = paired("mac1")
+        XCTAssertEqual(try welcomeKeys("mac1"), ["t", "protocolVersion", "paired", "nonce", "proof"])
+    }
+
+    private func pair(_ code: String, on client: TestClient) throws -> String? {
+        var pair = ControlEnvelope(t: "pair"); pair.clientID = "mac1"; pair.name = "MacBook"; pair.code = code
+        try send(pair, on: client)
+        let reply = try receive(client)
+        return reply.t == "paired" ? reply.t : reply.reason
+    }
+
+    /// A few wrong codes close the connection that sent them; the code still
+    /// works on a new one, so guessing from elsewhere can't keep the user out.
+    func testWrongCodesCloseTheirConnectionOnly() throws {
+        try start()
+        let code = registry.issueCode().code
+        let wrong = code == "000000" ? "111111" : "000000"
+        let guesser = TestClient(port: port)
+        _ = try hello(guesser)
+        for _ in 1..<PassthroughProtocol.pairingMaxWrongCodesPerConnection { XCTAssertEqual(try pair(wrong, on: guesser), "bad_code") }
+        XCTAssertEqual(try pair(wrong, on: guesser), "locked")
+        XCTAssertTrue(guesser.readLine().isEmpty, "and the connection is closed")
+
+        let mac = TestClient(port: port)
+        _ = try hello(mac)
+        XCTAssertEqual(try pair(code, on: mac), "paired", "the right code works on a new connection")
+        mac.close()
+    }
+
+    /// Opening connection after connection buys no more guesses: the code
+    /// takes so many wrong ones in all, then is withdrawn.
+    func testWrongCodesOverManyConnectionsWithdrawTheCode() throws {
+        try start()
+        let code = registry.issueCode().code
+        let wrong = code == "000000" ? "111111" : "000000"
+        var guesses = 0
+        var last: String?
+        while guesses < PassthroughProtocol.pairingMaxWrongCodesPerCode {
+            let guesser = TestClient(port: port)
+            _ = try hello(guesser)
+            for _ in 0..<PassthroughProtocol.pairingMaxWrongCodesPerConnection where guesses < PassthroughProtocol.pairingMaxWrongCodesPerCode {
+                last = try pair(wrong, on: guesser)
+                guesses += 1
+            }
+            guesser.close()
+        }
+        XCTAssertEqual(last, "code_withdrawn")
+        XCTAssertNil(registry.activeCode)
+        XCTAssertTrue(registry.codeWasWithdrawn)
+        let mac = TestClient(port: port)
+        _ = try hello(mac)
+        XCTAssertEqual(try pair(code, on: mac), "expired", "a new code must be shown")
+        mac.close()
     }
 
     /// A Mac from before version 2 (token in hello) is refused, with our version so it knows who to update.

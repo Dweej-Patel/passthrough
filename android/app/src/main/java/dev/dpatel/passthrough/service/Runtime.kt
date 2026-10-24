@@ -41,6 +41,9 @@ object Runtime {
     val pairedClients: StateFlow<List<PairedClient>> = _pairedClients
     private val _pairingCode = MutableStateFlow<PairingRegistry.Code?>(null)
     val pairingCode: StateFlow<PairingRegistry.Code?> = _pairingCode
+    private val _pairingCodeWithdrawn = MutableStateFlow(false)
+    /** The code on screen was withdrawn after too many wrong guesses. */
+    val pairingCodeWithdrawn: StateFlow<Boolean> = _pairingCodeWithdrawn
     private val _cellularFallback = MutableStateFlow(false)
     /** True while "cellular only" is temporarily using another network. */
     val cellularFallback: StateFlow<Boolean> = _cellularFallback
@@ -49,9 +52,10 @@ object Runtime {
     fun updateStats(transform: (ProviderStats) -> ProviderStats) = _stats.update(transform)
     fun setCellularFallback(active: Boolean) { _cellularFallback.value = active }
 
-    /** Re-reads paired Macs and the code on screen (gone once used or expired). */
+    /** Re-reads paired Macs and the code on screen (gone once used, expired or withdrawn). */
     fun refreshPairing() {
         _pairedClients.value = registry.clients
         _pairingCode.value = registry.activeCode
+        _pairingCodeWithdrawn.value = registry.codeWasWithdrawn
     }
 }

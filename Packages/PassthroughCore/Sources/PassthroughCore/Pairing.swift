@@ -73,11 +73,13 @@ public final class PairingRegistry: @unchecked Sendable {
     public static let changedNotification = "\(PassthroughProtocol.identifier).pairings-changed"
     public static let codeKey = "pairing.code"
     public static let codeExpiryKey = "pairing.codeExpiry"
-    /// Wrong guesses against the current code. Kept with the code in the shared
-    /// defaults, since the iOS app issues codes and the extension checks them.
+    /// Wrong guesses against the current code, over every connection. Kept
+    /// with the code in the shared defaults, since the iOS app issues codes
+    /// and the extension checks them.
     public static let failedAttemptsKey = "pairing.failedAttempts"
-    /// Until when code entry is locked after too many wrong guesses.
-    public static let lockedUntilKey = "pairing.lockedUntil"
+    /// Set when the last code was withdrawn for too many wrong guesses, so
+    /// the app can say why it is gone; cleared by the next code.
+    public static let codeWithdrawnKey = "pairing.codeWithdrawn"
 
     public static let phoneIDKey = "pairing.phoneID"
 
@@ -238,6 +240,7 @@ public final class PairingRegistry: @unchecked Sendable {
         defaults.set(code, forKey: Self.codeKey)
         defaults.set(expiry.timeIntervalSince1970, forKey: Self.codeExpiryKey)
         defaults.set(0, forKey: Self.failedAttemptsKey)
+        defaults.removeObject(forKey: Self.codeWithdrawnKey)
         lock.unlock()
         onChange?()
         return (code, expiry)
@@ -247,8 +250,16 @@ public final class PairingRegistry: @unchecked Sendable {
         lock.lock()
         defaults.removeObject(forKey: Self.codeKey)
         defaults.removeObject(forKey: Self.codeExpiryKey)
+        defaults.removeObject(forKey: Self.codeWithdrawnKey)
         lock.unlock()
         onChange?()
+    }
+
+    /// Whether the last code was withdrawn because too many wrong codes were
+    /// tried against it (until a new code is issued or pairing is ended).
+    public var codeWasWithdrawn: Bool {
+        lock.lock(); defer { lock.unlock() }
+        return defaults.bool(forKey: Self.codeWithdrawnKey)
     }
 
     public var activeCode: (code: String, expiry: Date)? {
@@ -260,38 +271,44 @@ public final class PairingRegistry: @unchecked Sendable {
     }
 
     /// Validates a code and registers the Mac; returns the token to hand back.
+    ///
+    /// Anything on the phone can reach the control port, and anything on the
+    /// Mac through adb, so wrong guesses must not be able to lock the user
+    /// out: a lockout in time, renewed by a few guesses every so often, would
+    /// refuse even the right code for as long as the guesser liked. Instead
+    /// each code takes `pairingMaxWrongCodesPerCode` wrong guesses in all,
+    /// over every connection (each connection is also held to a few by
+    /// `ControlServer`), and is then withdrawn: a new one must be shown, so
+    /// guessing wins with odds of at most 10 in a million per code the user
+    /// shows, and until then the right code always works. A guesser can still
+    /// make the user's code vanish, but not silently: the phone says why.
     public func pair(code: String, clientID: String, name: String) -> Result<String, PairingFailure> {
+        // Before the code is looked at, so a malformed request learns nothing and costs nothing.
+        guard !clientID.isEmpty, clientID.count <= 64, name.count <= 64 else { return .failure(.badCode) }
         lock.lock()
-        let stored = defaults.string(forKey: Self.codeKey)
-        let expiry = Date(timeIntervalSince1970: defaults.double(forKey: Self.codeExpiryKey))
-        let lockedUntil = Date(timeIntervalSince1970: defaults.double(forKey: Self.lockedUntilKey))
-        lock.unlock()
-        // Locked: not even the right code counts, so guessing stays slow.
-        guard lockedUntil <= Date() else { return .failure(.locked) }
-        guard let stored else { return .failure(.expired) }
-        guard expiry > Date() else { clearCode(); return .failure(.expired) }
-        guard constantTimeEquals(stored, code.trimmingCharacters(in: .whitespaces)) else {
-            // A six-digit code must not be brute-forceable over the cable: a
-            // handful of wrong guesses locks code entry for a while. The code
-            // stays, so a device guessing can't make the user's code vanish.
-            lock.lock()
-            var n = defaults.integer(forKey: Self.failedAttemptsKey) + 1
-            if n >= PassthroughProtocol.pairingMaxAttempts {
-                defaults.set(Date().addingTimeInterval(PassthroughProtocol.pairingLockout).timeIntervalSince1970, forKey: Self.lockedUntilKey)
-                n = 0
-            }
-            defaults.set(n, forKey: Self.failedAttemptsKey)
+        guard let stored = defaults.string(forKey: Self.codeKey) else { lock.unlock(); return .failure(.expired) }
+        guard Date(timeIntervalSince1970: defaults.double(forKey: Self.codeExpiryKey)) > Date() else {
             lock.unlock()
-            if n == 0 {
-                ptLog(.warning, "Pairing code entry locked for \(Int(PassthroughProtocol.pairingLockout)) s after \(PassthroughProtocol.pairingMaxAttempts) wrong attempts")
-                return .failure(.locked)
-            }
-            return .failure(.badCode)
+            clearCode()
+            return .failure(.expired)
         }
-        guard clientID.count <= 64, name.count <= 64 else { return .failure(.badCode) }
+        guard constantTimeEquals(stored, code.trimmingCharacters(in: .whitespaces)) else {
+            let n = defaults.integer(forKey: Self.failedAttemptsKey) + 1
+            defaults.set(n, forKey: Self.failedAttemptsKey)
+            let withdrawn = n >= PassthroughProtocol.pairingMaxWrongCodesPerCode
+            if withdrawn {
+                defaults.removeObject(forKey: Self.codeKey)
+                defaults.removeObject(forKey: Self.codeExpiryKey)
+                defaults.set(true, forKey: Self.codeWithdrawnKey)
+            }
+            lock.unlock()
+            guard withdrawn else { return .failure(.badCode) }
+            ptLog(.warning, "Withdrew the pairing code after \(n) wrong codes")
+            onChange?()
+            return .failure(.codeWithdrawn)
+        }
 
         let token = PairingToken.generate()
-        lock.lock()
         var list = loadClients().filter { $0.id != clientID }
         list.append(PairedClient(id: clientID, name: name, tokenHash: PairingToken.hash(token), pairedAt: Date(), lastSeen: Date()))
         save(list)

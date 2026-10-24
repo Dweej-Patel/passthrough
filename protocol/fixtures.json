@@ -6,15 +6,16 @@
     "control": 7891
   },
   "pairingCodeLifetimeSeconds": 300,
-  "pairingMaxAttempts": 5,
-  "pairingLockoutSeconds": 30,
+  "pairingMaxWrongCodesPerConnection": 3,
+  "pairingMaxWrongCodesPerCode": 10,
   "unauthenticatedTimeoutSeconds": 10,
   "pairingFailures": [
     "bad_code",
     "expired",
     "not_authenticated",
     "unsupported_version",
-    "locked"
+    "locked",
+    "code_withdrawn"
   ],
   "tokens": [
     {
@@ -57,7 +58,7 @@
       "line": "{\"t\":\"hello\",\"protocolVersion\":2,\"clientID\":\"8F0C2A51-4C8E-4D3B-9B1E-2F5C8A7D6E10\",\"name\":\"MacBook Pro\",\"nonce\":\"QEFCQ0RFRkdISUpLTE1OT1BRUlNUVVZXWFlaW1xdXl8=\",\"via\":\"usb\"}"
     },
     {
-      "line": "{\"t\":\"welcome\",\"protocolVersion\":2,\"paired\":false,\"nonce\":\"YGFiY2RlZmdoaWprbG1ub3BxcnN0dXZ3eHl6e3x9fn8=\",\"socksPort\":7890,\"deviceName\":\"Pixel 8\",\"radio\":\"5G\",\"carrier\":\"T-Mobile\",\"battery\":0.82,\"hosting\":\"background\"}"
+      "line": "{\"t\":\"welcome\",\"protocolVersion\":2,\"paired\":false,\"nonce\":\"YGFiY2RlZmdoaWprbG1ub3BxcnN0dXZ3eHl6e3x9fn8=\"}"
     },
     {
       "line": "{\"t\":\"auth\",\"proof\":\"zC5fd9NGXIKwv4lYJrFtQt+R/GV5de9PjT/xd0T2bIw=\"}"
@@ -75,6 +76,9 @@
       "line": "{\"t\":\"error\",\"reason\":\"locked\"}"
     },
     {
+      "line": "{\"t\":\"error\",\"reason\":\"code_withdrawn\"}"
+    },
+    {
       "line": "{\"t\":\"error\",\"reason\":\"unsupported_version\",\"protocolVersion\":2}"
     },
     {
@@ -90,7 +94,7 @@
       "line": "{\"t\":\"status\",\"deviceName\":\"iPhone\",\"radio\":\"Wi-Fi\",\"hosting\":\"background\",\"ipv6\":false,\"activeConnections\":1,\"rxBytes\":10,\"txBytes\":20,\"timestamp\":1758062400.5}"
     },
     {
-      "line": "{\"t\":\"welcome\",\"protocolVersion\":2,\"paired\":true,\"nonce\":\"YGFiY2RlZmdoaWprbG1ub3BxcnN0dXZ3eHl6e3x9fn8=\",\"proof\":\"KG8T1+HX19LNtQHrj3YohbhZc9EpLvPb90zFcqaGHek=\",\"socksPort\":7890,\"deviceName\":\"Pixel 8\",\"hosting\":\"background\",\"ipv6\":true}"
+      "line": "{\"t\":\"welcome\",\"protocolVersion\":2,\"paired\":true,\"nonce\":\"YGFiY2RlZmdoaWprbG1ub3BxcnN0dXZ3eHl6e3x9fn8=\",\"proof\":\"KG8T1+HX19LNtQHrj3YohbhZc9EpLvPb90zFcqaGHek=\"}"
     },
     {
       "line": "{\"t\":\"shellGrant\",\"shellKey\":\"AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=\",\"certSHA256\":\"abababababababababababababababababababababababababababababababab\",\"shellPort\":7893,\"addresses\":[\"192.168.1.20\",\"100.101.102.103\"],\"macName\":\"MacBook Pro\"}"

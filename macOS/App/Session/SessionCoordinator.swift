@@ -197,7 +197,19 @@ final class SessionCoordinator: ObservableObject {
     /// Keychain slot of the attached phone's pairing token (the slot iPhones
     /// once shared when none is attached).
     private var pairingSlot: String { device?.pairingSlot ?? PhoneDevice.sharediPhonePairingSlot }
-    var hasToken: Bool { device.map { PairingSlots.lookup(for: $0, in: tokens) != nil } ?? (Keychain.read(pairingSlot) != nil) }
+    /// Paired with the attached phone: a token of its own, not one in the
+    /// slot iPhones once shared that it hasn't proved (that may be another
+    /// iPhone's). With no phone attached, whether that shared slot holds one,
+    /// so Forget Pairing can clear it.
+    var hasToken: Bool {
+        guard let device else { return Keychain.read(pairingSlot) != nil }
+        return !PairingSlots.provenSlots(for: device, provedShared: controlProvedSharedSlot, in: tokens).isEmpty
+    }
+    /// The open channel's phone proved the token in the shared slot (which
+    /// stays there only if moving it to the phone's own slot failed).
+    private var controlProvedSharedSlot: Bool {
+        controlState == .paired && controlDeviceID == device?.id && controlPairing?.isShared == true
+    }
     var linkedPhoneCount: Int { links.phones.count }
     /// "over USB" or "over Hotspot" (the wireless carrier), for status copy.
     var linkName: String { device?.medium == .wireless ? "over \(wirelessCarrier ?? "Wi-Fi")" : "over USB" }
@@ -626,10 +638,11 @@ final class SessionCoordinator: ObservableObject {
     private func handleControl(_ event: ControlClient.Event, control cgen: Int) {
         guard cgen == controlGeneration, let device, device.id == controlDeviceID else { return }
         switch event {
-        case .welcomed(let paired, let status, _):
+        case .welcomed(let paired):
             shellControlBackoff.succeeded()
-            phoneStatus = status
-            syncTunnelIPv6()
+            // The phone's name and status come only once the channel is
+            // authenticated (`status`, right after the proofs or the pairing).
+            phoneStatus = nil
             if paired {
                 controlState = .paired
                 adoptSharedPairing(device)
@@ -643,8 +656,9 @@ final class SessionCoordinator: ObservableObject {
                 // step the user can finish now (and it gets the phone its shell key).
                 // Once paired, or if pairing is cancelled, .helperRequired returns.
                 if !phase.isBusy || tunnelUsesControl {
+                    // A fresh channel for a pairing already on screen keeps what went wrong last.
+                    if phase != .pairingRequired { pairingError = nil }
                     phase = .pairingRequired
-                    pairingError = nil
                 }
             }
         case .paired(let token):
@@ -714,7 +728,14 @@ final class SessionCoordinator: ObservableObject {
             case .expired: pairingError = "The code expired or wasn't generated yet. Tap Pair on the \(phoneKindName) and try again."
             case .notAuthenticated: pairingError = "Not authenticated."
             case .unsupportedVersion: pairingError = "The \(phoneKindName) app is a different version. Update both apps."
-            case .locked: pairingError = "Too many wrong codes. Wait \(Int(PassthroughProtocol.pairingLockout)) seconds, then try again."
+            case .locked:
+                // The phone closes a channel after a few wrong codes; the code
+                // still works on a new one, so open that now.
+                pairingError = "That code didn't match again. Check the digits on the \(phoneKindName), then type them once more."
+                closeControl()
+                openControl(for: device)
+            case .codeWithdrawn:
+                pairingError = "Too many wrong codes were tried, so the \(phoneKindName) withdrew that code. Tap Pair on the \(phoneKindName) for a new one, then type it here."
             }
         case .status(let status, _, _, let active):
             phoneStatus = status
@@ -893,14 +914,18 @@ final class SessionCoordinator: ObservableObject {
     func openLoginItems() { HelperClient.openLoginItemsSettings() }
 
     func forgetPairing() {
+        // The phone's own slot; the slot iPhones once shared only if this
+        // iPhone proved the token there, since it may be another iPhone's.
+        // Decided before the channel that proved it closes.
+        var slots = [pairingSlot]
+        if let device {
+            slots += PairingSlots.provenSlots(for: device, provedShared: controlProvedSharedSlot, in: tokens).filter { $0 != pairingSlot }
+        }
         // Mid-connect too: the attempt's forwarder and control step go with it.
         if phase.isConnected || phase.isBusy || tunnelUsesControl || phase == .pairingRequired { disconnect() }
         // The open channel was authenticated with the forgotten token; a fresh one asks to pair.
         closeControl()
         if phase == .pairingRequired { phase = device == nil ? .noDevice : .deviceFound }
-        // An iPhone still on the slot iPhones once shared forgets that one too.
-        var slots = [pairingSlot]
-        if let device, let stored = PairingSlots.lookup(for: device, in: tokens), stored.slot != pairingSlot { slots.append(stored.slot) }
         for slot in slots {
             Keychain.delete(slot)
             let forgotten = links.phones.filter { $0.pairingSlot == slot }.map(\.phoneID)

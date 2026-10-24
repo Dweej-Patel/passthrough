@@ -23,6 +23,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     val stats = Runtime.stats
     val pairedClients = Runtime.pairedClients
     val pairingCode = Runtime.pairingCode
+    val pairingCodeWithdrawn = Runtime.pairingCodeWithdrawn
     val usage = Runtime.usage.usage
     val settings = Runtime.settings
 
