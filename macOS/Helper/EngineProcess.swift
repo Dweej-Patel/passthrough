@@ -97,6 +97,11 @@ final class EngineChild: @unchecked Sendable {
         var pid: pid_t = 0
         let argv = [strdup(executable.path), strdup(EngineProcess.flag), nil]
         defer { argv.forEach { free($0) } }
+        // Last look before exec: still the verified root-only copy.
+        do { try BundledEngines.requireIntactCopy(executable) } catch {
+            [input[1], output[0], errors[0]].forEach { close($0) }
+            throw error
+        }
         let status = posix_spawn(&pid, executable.path, &actions, &attributes, argv, environ)
         guard status == 0 else {
             [input[1], output[0], errors[0]].forEach { close($0) }

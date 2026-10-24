@@ -38,6 +38,12 @@ public final class IrohShellListener: @unchecked Sendable {
         set { gate.screenAccess.set(newValue) }
     }
 
+    /// As `ShellListener.screenSharingVerified`.
+    public var screenSharingVerified: (@Sendable () async -> Bool)? {
+        get { gate.screenSharingCheck.get() }
+        set { gate.screenSharingCheck.set(newValue) }
+    }
+
     /// As `ShellListener.screenVideo`.
     public var screenVideo: (@Sendable (_ phoneID: String) -> (any ScreenVideoSource)?)? {
         get { gate.screenVideoFactory.get() }

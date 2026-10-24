@@ -1,4 +1,5 @@
 import Foundation
+import HelperLogic
 import SystemConfiguration
 
 /// Small process helpers shared by the tunnel and VPN engines.
@@ -128,12 +129,10 @@ enum RouteTable {
 enum RecoverySweep {
     static func run() {
         var cleaned: [String] = []
-        // An engine left by a helper that died: it quits by itself once it
-        // notices, but its quit is what can spin forever.
-        let staleEngine = BundledEngines.stateDirectory + "/bin/"
-        if (try? Shell.run("/usr/bin/pkill", ["-9", "-f", "^" + staleEngine + ".* " + EngineProcess.flag + "$"], quiet: true)) != nil {
-            cleaned.append("engine process")
-        }
+        // Engines left by a helper that died: the tun2socks engine quits by
+        // itself once it notices, but its quit is what can spin forever; an
+        // openvpn or wireguard-go would carry on running as root unmanaged.
+        cleaned += EnginePIDs.killStrays()
         let v4 = RouteTable.present(v6: false), v6 = RouteTable.present(v6: true)
         for q in ["0.0.0.0/2", "64.0.0.0/2", "128.0.0.0/2", "192.0.0.0/2"] where RouteTable.deleteIfPresent(q, v6: false, table: v4) {
             cleaned.append(q)
@@ -192,22 +191,99 @@ enum BundledEngines {
         try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: stateDirectory)
     }
 
+    /// Where staged engines are executed from; root only.
+    static var binDirectory: String { stateDirectory + "/bin" }
+
     /// The app bundle lives in a user-writable place and this helper runs as
-    /// root, so an engine is never executed from the bundle. It is copied into
-    /// the root-only state directory, the *copy* is verified (strictly, and by
-    /// identifier as well as Team ID) and the copy is what gets executed, so
-    /// nothing can be swapped between check and exec.
+    /// root, so an engine is never executed from the bundle. Its bytes are
+    /// copied into a new file in the root-only state directory, the *copy* is
+    /// verified (strictly, and by identifier as well as Team ID) and the copy
+    /// is what gets executed, so nothing can be swapped between check and exec.
+    ///
+    /// Only the bytes are copied, through descriptors: the source is opened
+    /// without following a final symlink and must be a regular file, and the
+    /// copy is created exclusively (never through a link). A file manager copy
+    /// would copy a symlink planted in the bundle as a symlink, and the chmod,
+    /// the signature check and the exec would all have followed it to a file
+    /// its planter can swap at any moment.
     static func stagedEngine(_ url: URL, identifier: String? = nil) throws -> URL {
-        guard FileManager.default.isExecutableFile(atPath: url.path) else { throw EngineFileError.missing(url.lastPathComponent) }
+        let name = url.lastPathComponent
+        let source = open(url.path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC)
+        guard source >= 0 else {
+            throw errno == ENOENT ? EngineFileError.missing(name) : EngineFileError.notAFile(name)
+        }
+        defer { close(source) }
+        var info = stat()
+        guard fstat(source, &info) == 0, info.st_mode & S_IFMT == S_IFREG else { throw EngineFileError.notAFile(name) }
+
         try prepareStateDirectory()
-        let binDir = URL(fileURLWithPath: stateDirectory).appendingPathComponent("bin", isDirectory: true)
-        try FileManager.default.createDirectory(at: binDir, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
-        let staged = binDir.appendingPathComponent(url.lastPathComponent)
-        try? FileManager.default.removeItem(at: staged)
-        try FileManager.default.copyItem(at: url, to: staged)
-        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: staged.path)
-        try verifySignature(of: staged, identifier: identifier ?? url.lastPathComponent)
-        return staged
+        try FileManager.default.createDirectory(atPath: binDirectory, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+        var dir = stat()
+        guard lstat(binDirectory, &dir) == 0, dir.st_mode & S_IFMT == S_IFDIR, dir.st_uid == 0 else { throw EngineFileError.notAFile(binDirectory) }
+        let staged = binDirectory + "/" + name
+        // Whatever is there (an old copy, or anything else) goes; a running
+        // engine keeps its own inode.
+        if unlink(staged) != 0, errno != ENOENT { try? FileManager.default.removeItem(atPath: staged) }
+        let copy = open(staged, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0o700)
+        guard copy >= 0 else { throw EngineFileError.copyFailed(name, errno) }
+        do {
+            defer { close(copy) }
+            var buffer = [UInt8](repeating: 0, count: 1 << 16)
+            while true {
+                let n = read(source, &buffer, buffer.count)
+                if n < 0, errno == EINTR { continue }
+                guard n >= 0 else { throw EngineFileError.copyFailed(name, errno) }
+                if n == 0 { break }
+                var written = 0
+                while written < n {
+                    let w = buffer[written..<n].withUnsafeBytes { write(copy, $0.baseAddress, $0.count) }
+                    if w < 0, errno == EINTR { continue }
+                    guard w > 0 else { throw EngineFileError.copyFailed(name, errno) }
+                    written += w
+                }
+            }
+            // The umask may have narrowed the mode; owner root whatever the directory's group.
+            guard fchown(copy, 0, 0) == 0, fchmod(copy, 0o700) == 0, fsync(copy) == 0 else { throw EngineFileError.copyFailed(name, errno) }
+        } catch {
+            unlink(staged)
+            throw error
+        }
+        let stagedURL = URL(fileURLWithPath: staged)
+        try requireIntactCopy(stagedURL)
+        try verifySignature(of: stagedURL, identifier: identifier ?? name)
+        return stagedURL
+    }
+
+    /// The staged copy is still what `stagedEngine` made: a regular file (not
+    /// a link), owned by root, mode 0700, with no other name. Checked before
+    /// it is verified and again right before every exec, a cached copy
+    /// included.
+    static func isIntactCopy(_ url: URL) -> Bool {
+        var info = stat()
+        return lstat(url.path, &info) == 0 && info.st_mode & S_IFMT == S_IFREG && info.st_uid == 0
+            && info.st_mode & 0o7777 == 0o700 && info.st_nlink == 1
+            && (url.path as NSString).deletingLastPathComponent == binDirectory
+    }
+
+    static func requireIntactCopy(_ url: URL) throws {
+        guard isIntactCopy(url) else { throw EngineFileError.notAFile(url.path) }
+    }
+
+    /// The environment an engine starts with: a fixed PATH and only `extra`,
+    /// never the helper's own. The bundled openvpn links OpenSSL statically
+    /// with OPENSSLDIR in Homebrew's prefix (user-writable): without these,
+    /// a root openvpn would read an openssl.cnf, and load providers and
+    /// engines, from there.
+    static func environment(_ extra: [String: String] = [:]) -> [String: String] {
+        let nowhere = "/var/empty/passthrough-none"   // /var/empty is root's and stays empty
+        return [
+            "PATH": "/usr/bin:/bin:/usr/sbin:/sbin",
+            "OPENSSL_CONF": "/dev/null",
+            "OPENSSL_MODULES": nowhere,
+            "OPENSSL_ENGINES": nowhere,
+            "SSL_CERT_FILE": nowhere,
+            "SSL_CERT_DIR": nowhere,
+        ].merging(extra) { _, new in new }
     }
 
     /// `identifier`: the signing identifier the file must carry.
@@ -231,11 +307,59 @@ enum BundledEngines {
     enum EngineFileError: LocalizedError {
         case missing(String)
         case unsigned(String)
+        case notAFile(String)
+        case copyFailed(String, Int32)
         var errorDescription: String? {
             switch self {
             case .missing(let name): return "The \(name) engine is not bundled with this build. Run scripts/build-vpn-engines.sh and rebuild."
             case .unsigned(let name): return "The \(name) engine is not signed by this app's team; refusing to run it as root."
+            case .notAFile(let name): return "\(name) is not a plain file (a link, or changed after it was copied); refusing to run it as root."
+            case .copyFailed(let name, let e): return "Could not copy the \(name) engine: \(String(cString: strerror(e)))"
             }
         }
+    }
+}
+
+/// Pid files for the engines the helper starts, in the root-only state
+/// directory, so a helper started after a crash can end the ones its
+/// predecessor left running (`RecoverySweep`).
+enum EnginePIDs {
+    static func path(_ name: String) -> String { BundledEngines.stateDirectory + "/\(name).pid" }
+
+    static func record(_ pid: pid_t, for name: String) {
+        do {
+            try BundledEngines.prepareStateDirectory()
+            try "\(pid)\n".write(toFile: path(name), atomically: true, encoding: .utf8)
+        } catch {
+            HelperLog.warn("could not record the \(name) engine's pid: \(error.localizedDescription)")
+        }
+    }
+
+    static func clear(_ name: String) { unlink(path(name)) }
+
+    /// Ends every process executing a staged engine: those in pid files, then
+    /// any other (one that started before its pid was written, say). A pid is
+    /// only signalled while its executable is in the staged directory: a pid
+    /// file outlives its process and the number may belong to another by now.
+    /// Returns what it ended.
+    static func killStrays() -> [String] {
+        var ended: [String] = []
+        func end(_ pid: pid_t, _ label: String) {
+            guard pid > 1, pid != getpid(),
+                  let exe = ProcessTable.executablePath(of: pid), ProcessTable.isDirectlyInside(exe, BundledEngines.binDirectory) else { return }
+            if kill(pid, SIGKILL) == 0 { ended.append("\(label) (pid \(pid))") }
+        }
+        let files = (try? FileManager.default.contentsOfDirectory(atPath: BundledEngines.stateDirectory)) ?? []
+        for file in files where file.hasSuffix(".pid") {
+            let name = String(file.dropLast(4))
+            if let text = try? String(contentsOfFile: path(name), encoding: .utf8), let pid = pid_t(text.trimmingCharacters(in: .whitespacesAndNewlines)) {
+                end(pid, name)
+            }
+            clear(name)
+        }
+        for process in ProcessTable.processes(executingIn: BundledEngines.binDirectory) {
+            end(process.pid, ((process.path ?? "engine") as NSString).lastPathComponent)
+        }
+        return ended
     }
 }

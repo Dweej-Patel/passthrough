@@ -219,6 +219,15 @@ final class HelperClient {
         await call(timeout: 4, fallback: [:]) { proxy, finish in proxy.getStatus { finish($0) } }
     }
 
+    /// Who listens on Screen Sharing's port, as the root helper sees it; nil
+    /// when the helper did not answer (not registered, approved or running).
+    func checkScreenSharing() async -> ScreenSharingCheck.Result? {
+        guard availability == .ready else { return nil }
+        return await call(timeout: 4, fallback: nil) { proxy, finish in
+            proxy.checkScreenSharing { finish(ScreenSharingCheck.Result(rawValue: $0)) }
+        }
+    }
+
     func quitHelper() {
         // quit() is a one-way message; invalidating the connection immediately
         // can cancel it before delivery, leaving the stale helper running. Send

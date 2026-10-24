@@ -1,22 +1,33 @@
 import Foundation
+import HelperLogic
 
 /// Exported XPC object. Serialises all engine calls on one queue.
 final class HelperService: NSObject, PassthroughHelperProtocol {
     private let engine = TunnelEngine()
     private let queue = DispatchQueue(label: "\(HelperConstants.identifier).helper")
     private lazy var vpn = VPNEngine(queue: queue, tunnel: engine)
-    private var vpnOwner: ObjectIdentifier?
-    private var owner: ObjectIdentifier?
-    private var clients: Set<ObjectIdentifier> = []
+    private var vpnOwner: UUID?
+    private var owner: UUID?
+    /// Connections still open (`ClientID`), kept on `queue` in the order
+    /// arrivals and departures happened.
+    private var clients: Set<UUID> = []
     private var sleepDisabled = false
 
-    func clientArrived(_ id: ObjectIdentifier) {
+    func clientArrived(_ id: UUID) {
         queue.async { self.clients.insert(id) }
+    }
+
+    /// Whether a start's caller is still connected. Asked on `queue`: its
+    /// connection may have closed between the call and here, and then
+    /// `clientGone` has already run for it, so ownership recorded now would
+    /// never be released. Such a start is refused instead.
+    private func isConnected(_ caller: UUID?) -> Bool {
+        caller.map(clients.contains) ?? false
     }
 
     /// If the app that started the tunnel goes away, tear the tunnel down so the
     /// Mac never sits on a dead default route.
-    func clientGone(_ id: ObjectIdentifier) {
+    func clientGone(_ id: UUID) {
         queue.async {
             self.clients.remove(id)
             if self.vpnOwner == id, self.vpn.isActive {
@@ -73,17 +84,24 @@ final class HelperService: NSObject, PassthroughHelperProtocol {
     }
 
     func startTunnel(configuration: [String: Any], reply: @escaping (Bool, String) -> Void) {
-        let caller = NSXPCConnection.current().map { ObjectIdentifier($0) }
+        let caller = ClientID.current()
         queue.async {
+            guard self.isConnected(caller) else { reply(false, "The app disconnected before the tunnel started"); return }
             var config = TunnelEngine.Config()
-            config.socksPort = UInt16(configuration[TunnelConfigKey.socksPort] as? Int ?? 17890)
-            config.username = configuration[TunnelConfigKey.username] as? String ?? ""
-            config.password = configuration[TunnelConfigKey.password] as? String ?? ""
+            do {
+                // Checked, never converted blindly: UInt16(70000) would crash
+                // the helper, and the rest reaches ifconfig and configd.
+                config.socksPort = try XPCInput.port(configuration, TunnelConfigKey.socksPort, default: 17890)
+                config.username = try XPCInput.string(configuration, TunnelConfigKey.username, maxLength: 64, default: "")
+                config.password = try XPCInput.string(configuration, TunnelConfigKey.password, maxLength: 64, default: "")
+                config.ipv6 = try XPCInput.bool(configuration, TunnelConfigKey.ipv6, default: true)
+                config.dns = try XPCInput.ipAddresses(configuration, TunnelConfigKey.dns, maxCount: 8, default: ["1.1.1.1", "1.0.0.1"])
+                config.mtu = try XPCInput.integer(configuration, TunnelConfigKey.mtu, in: 576...65535, default: 8500)
+            } catch {
+                reply(false, error.localizedDescription); return
+            }
             let safe = { (s: String) in s.count <= 64 && s.allSatisfy { $0.isASCII && ($0.isLetter || $0.isNumber || "+/=-_".contains($0)) } }
             guard safe(config.username), safe(config.password) else { reply(false, "Invalid credentials format"); return }
-            config.ipv6 = configuration[TunnelConfigKey.ipv6] as? Bool ?? true
-            config.dns = configuration[TunnelConfigKey.dns] as? [String] ?? ["1.1.1.1", "1.0.0.1"]
-            config.mtu = configuration[TunnelConfigKey.mtu] as? Int ?? 8500
             do {
                 try self.engine.start(config)
                 self.owner = caller
@@ -138,18 +156,26 @@ final class HelperService: NSObject, PassthroughHelperProtocol {
     }
 
     func startVPN(configuration: [String: Any], reply: @escaping (Bool, String) -> Void) {
-        let caller = NSXPCConnection.current().map { ObjectIdentifier($0) }
+        let caller = ClientID.current()
         queue.async {
+            guard self.isConnected(caller) else { reply(false, "The app disconnected before the VPN started"); return }
             guard let engineName = configuration[VPNConfigKey.engine] as? String,
                   let engine = VPNEngine.Config.Engine(rawValue: engineName),
-                  let text = configuration[VPNConfigKey.config] as? String, !text.isEmpty else {
+                  let text = try? XPCInput.string(configuration, VPNConfigKey.config, maxLength: 1 << 20, allowNewlines: true, default: ""),
+                  !text.isEmpty else {
                 reply(false, "Invalid VPN configuration"); return
             }
-            var config = VPNEngine.Config(engine: engine, name: configuration[VPNConfigKey.name] as? String ?? engineName, configText: text)
-            config.username = configuration[VPNConfigKey.username] as? String ?? ""
-            config.password = configuration[VPNConfigKey.password] as? String ?? ""
-            config.killSwitch = configuration[VPNConfigKey.killSwitch] as? Bool ?? true
-            config.blockIPv6 = configuration[VPNConfigKey.blockIPv6] as? Bool ?? true
+            var config = VPNEngine.Config(engine: engine, name: engineName, configText: text)
+            do {
+                config.name = try XPCInput.string(configuration, VPNConfigKey.name, maxLength: 256, default: engineName)
+                // Credentials go to openvpn on stdin, a line each: no newlines.
+                config.username = try XPCInput.string(configuration, VPNConfigKey.username, maxLength: 512, default: "")
+                config.password = try XPCInput.string(configuration, VPNConfigKey.password, maxLength: 512, default: "")
+                config.killSwitch = try XPCInput.bool(configuration, VPNConfigKey.killSwitch, default: true)
+                config.blockIPv6 = try XPCInput.bool(configuration, VPNConfigKey.blockIPv6, default: true)
+            } catch {
+                reply(false, error.localizedDescription); return
+            }
             do {
                 try self.vpn.start(config)
                 self.vpnOwner = caller
@@ -159,6 +185,21 @@ final class HelperService: NSObject, PassthroughHelperProtocol {
                 self.vpn.stop()
                 reply(false, error.localizedDescription)
             }
+        }
+    }
+
+    /// Who listens on Screen Sharing's port, judged as root (only root sees
+    /// every process's sockets). Off the queue: a walk of the process table
+    /// must not hold up the tunnel's calls.
+    func checkScreenSharing(reply: @escaping (Int) -> Void) {
+        DispatchQueue.global(qos: .userInitiated).async {
+            let owners = ProcessTable.tcpListeners(port: ScreenSharingCheck.port)
+            let verdict = ScreenSharingOwners.verdict(owners)
+            if verdict == .impostor {
+                let who = owners.map { "pid \($0.pid) \($0.path ?? "?") uid \($0.uid.map(String.init) ?? "?")" }.joined(separator: ", ")
+                HelperLog.warn("port \(ScreenSharingCheck.port) is held by something other than Screen Sharing: \(who)")
+            }
+            reply(verdict.rawValue)
         }
     }
 

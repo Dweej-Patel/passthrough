@@ -271,6 +271,9 @@ final class SessionCoordinator: ObservableObject {
             }
         }
 
+        // Before any listener starts: a phone is relayed to Screen Sharing
+        // only once the root helper has checked who listens on its port.
+        shell.screenSharingCheck = { [helper] in await ScreenSharing.check(helper) }
         if remoteShellEnabled { startShell() }
         // Revoked access: the next grant hands out a key again (also after re-pairing).
         shell.onAccessRevoked = { [weak self] slots in self?.shellAccessRevoked(pairingSlots: slots) }

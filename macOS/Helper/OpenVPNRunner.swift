@@ -30,6 +30,7 @@ final class OpenVPNRunner: VPNRunner {
     private var lastLinkRx = 0
     private static let configPath = BundledEngines.stateDirectory + "/openvpn.conf"
     private static let statusPath = BundledEngines.stateDirectory + "/openvpn.status"
+    private static let pidName = "openvpn"
 
     init(configText: String, username: String, password: String, queue: DispatchQueue) throws {
         let profile = try OpenVPNProfile(text: configText)
@@ -49,6 +50,9 @@ final class OpenVPNRunner: VPNRunner {
 
         let process = Process()
         process.executableURL = binary
+        // Never the helper's environment (see BundledEngines.environment):
+        // openvpn needs nothing from it, and OpenSSL must not read Homebrew's config.
+        process.environment = BundledEngines.environment()
         process.arguments = [
             "--config", Self.configPath,
             "--dev", "utun", "--dev-type", "tun",
@@ -106,8 +110,10 @@ final class OpenVPNRunner: VPNRunner {
                 self.onEvent?(.exited(fatal: self.fatalReason))
             }
         }
+        try BundledEngines.requireIntactCopy(binary)
         try process.run()
         self.process = process
+        EnginePIDs.record(process.processIdentifier, for: Self.pidName)
         stdin = input.fileHandleForWriting
         stdin?.write(Data((username + "\n" + password + "\n").utf8))
         try? stdin?.close()
@@ -132,6 +138,7 @@ final class OpenVPNRunner: VPNRunner {
     private func cleanupFiles() {
         try? FileManager.default.removeItem(atPath: Self.configPath)
         try? FileManager.default.removeItem(atPath: Self.statusPath)
+        EnginePIDs.clear(Self.pidName)
     }
 
     // MARK: Log parsing

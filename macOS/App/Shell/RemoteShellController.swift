@@ -18,8 +18,16 @@ final class RemoteShellController: ObservableObject {
     @Published private(set) var listenerError: String?
     /// Phones seeing the screen right now, through Screen Sharing.
     @Published private(set) var screenViewers: [ScreenViewer] = []
-    /// Whether Screen Sharing answers; nil until checked.
+    /// Whether macOS's own Screen Sharing is on (and only it listens on its
+    /// port); nil until checked.
     @Published private(set) var screenSharingOn: Bool?
+    /// Why phones can't be relayed to Screen Sharing even though something
+    /// may be listening (an impostor on its port, or no helper to check).
+    @Published private(set) var screenSharingProblem: String?
+    /// Asks the root helper who listens on Screen Sharing's port (nil: no
+    /// answer). Set before `start`: the listeners relay a phone to Screen
+    /// Sharing only once it says `.genuine`.
+    var screenSharingCheck: (@Sendable () async -> ScreenSharingCheck.Result?)?
     /// What streaming the screen itself needs (Screen Recording, Accessibility); without both, phones fall back to Screen Sharing.
     @Published private(set) var screenVideo = ScreenVideoAccess(capture: false, control: false)
 
@@ -136,6 +144,7 @@ final class RemoteShellController: ObservableObject {
             macInfo: { reach.get().macInfo() })
         listener.onSessionEvent = { text in ptLog(.info, "shell: \(text)") }
         listener.screenAllowed = { store.screenAllowed(forPhone: $0) }
+        listener.screenSharingVerified = screenSharingVerifier()
         listener.screenVideo = Self.screenVideoSource
         listener.onScreenViewer = screenViewerHandler()
         listener.onFailure = { [weak self, weak listener] error in
@@ -213,6 +222,7 @@ final class RemoteShellController: ObservableObject {
         iroh = run
         irohStatus = IrohStatus(state: .starting)
         let store = self.store, reach = self.reach, relay = self.relay, onScreenViewer = screenViewerHandler()
+        let screenSharingVerified = screenSharingVerifier()
         lifecycle.async { [weak self] in
             let host: IrohEndpointHost
             do {
@@ -246,6 +256,7 @@ final class RemoteShellController: ObservableObject {
                 macInfo: { reach.get().macInfo() })
             listener.onSessionEvent = { text in ptLog(.info, "shell: \(text)") }
             listener.screenAllowed = { store.screenAllowed(forPhone: $0) }
+            listener.screenSharingVerified = screenSharingVerified
             listener.screenVideo = Self.screenVideoSource
             listener.onScreenViewer = onScreenViewer
             listener.onFailure = { [weak self] error in
@@ -462,8 +473,34 @@ final class RemoteShellController: ObservableObject {
     }
 
     func refreshScreenSharing() async {
-        screenSharingOn = await ScreenSharing.isOn()
+        let result = await screenSharingCheck?()
+        screenSharingOn = result == .genuine
+        screenSharingProblem = Self.screenSharingProblem(result)
         refreshScreenVideo()
+    }
+
+    private static func screenSharingProblem(_ result: ScreenSharingCheck.Result?) -> String? {
+        switch result {
+        case .genuine, .off: return nil
+        case .impostor: return "Another app is listening on Screen Sharing's port (5900). Phones are not relayed to it: it could collect your Mac's password."
+        case nil: return "Passthrough's helper isn't running, so it can't check that Screen Sharing is really macOS's. Phones are not relayed to it until it is."
+        }
+    }
+
+    /// For both listeners: true only when the helper says macOS's own Screen
+    /// Sharing alone listens on its port; logs why when not.
+    private func screenSharingVerifier() -> @Sendable () async -> Bool {
+        let check = screenSharingCheck
+        return {
+            let result = await check?()
+            switch result {
+            case .genuine: return true
+            case .off: ptLog(.info, "shell: Screen Sharing is off")
+            case .impostor: ptLog(.error, "shell: something other than Screen Sharing listens on port \(ScreenSharingCheck.port); not relaying a phone to it")
+            case nil: ptLog(.warning, "shell: the helper did not answer, so Screen Sharing can't be checked; not relaying a phone to it")
+            }
+            return false
+        }
     }
 
     func refreshScreenVideo() {
