@@ -26,9 +26,10 @@ files as root, and anything that bypasses the kill switch or IPv6 blocking
 while a VPN is up. That includes routes a network can push (DHCP option 121,
 IPv6 route information), which the kill switch's pf rules are meant to defeat,
 and a crash of the app or the helper, which is meant to leave the kill switch
-in place. By design, the kill switch lets through traffic to the networks the
-Mac is directly on while *Allow local network* is on, link-local and
-link-scoped multicast traffic, and Tailscale's ranges.
+in place. By design, the kill switch lets through traffic to the private
+networks the Mac is directly on while *Allow local network* is on, link-local
+and link-scoped multicast traffic, Tailscale's own interfaces, and the Mac's
+replies on Passthrough's wireless link to the phone.
 
 The cable control channel is in scope too. It assumes whatever is on the
 other end may be hostile: another phone plugged into the Mac, an app bound to

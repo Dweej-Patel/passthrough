@@ -3,6 +3,32 @@ import Network
 @testable import PassthroughCore
 @testable import PhoneTransport
 
+/// A UDP peer refused for resolving to a private address goes idle however
+/// long the Mac keeps sending, so the sweep drops it and the next datagram
+/// gets a fresh peer that resolves the name again.
+final class UDPPeerActivityTests: XCTestCase {
+    func testARefusedPeerIdlesOutWhileTheMacKeepsSending() {
+        let start = Date(timeIntervalSince1970: 1000)
+        var activity = UDPPeerActivity(now: start)
+        XCTAssertTrue(activity.fromMac(now: start.addingTimeInterval(10)))
+        XCTAssertFalse(activity.isIdle(since: start.addingTimeInterval(5)))
+        activity.refuse()
+        for second in stride(from: 11.0, through: 100, by: 1) {
+            XCTAssertFalse(activity.fromMac(now: start.addingTimeInterval(second)), "dropped, and not activity")
+        }
+        XCTAssertTrue(activity.isIdle(since: start.addingTimeInterval(40)), "a 60 s idle sweep at 100 s drops it")
+    }
+
+    func testTrafficEitherWayKeepsAPeer() {
+        let start = Date(timeIntervalSince1970: 1000)
+        var activity = UDPPeerActivity(now: start)
+        XCTAssertTrue(activity.fromMac(now: start.addingTimeInterval(50)))
+        activity.fromServer(now: start.addingTimeInterval(90))
+        XCTAssertFalse(activity.isIdle(since: start.addingTimeInterval(40)))
+        XCTAssertTrue(activity.isIdle(since: start.addingTimeInterval(91)))
+    }
+}
+
 /// Minimal blocking TCP client for exercising the servers from tests.
 final class TestClient {
     let connection: NWConnection

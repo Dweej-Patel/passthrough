@@ -15,6 +15,8 @@ final class WirelessLinkTests: XCTestCase {
     private var echoPort: UInt16 = 0
     private let key = WirelessLink.randomBytes(32)
     private let echoConnections = Locked<[NWConnection]>([])
+    /// Where the last phone `link()` linked dialed from.
+    private let linkedPeer = Locked<String?>(nil)
 
     override func setUpWithError() throws {
         label = "passthrough-test-\(UUID().uuidString)"
@@ -80,6 +82,21 @@ final class WirelessLinkTests: XCTestCase {
         XCTAssertEqual(PeerAddress.host(of: connection), "10.1.2.3")
     }
 
+    /// The phone's address as the VPN kill switch is told it: numeric, no zone.
+    func testPeerAddressForTheKillSwitch() {
+        XCTAssertEqual(PeerAddress.numeric("172.20.10.1"), "172.20.10.1")
+        XCTAssertEqual(PeerAddress.numeric("fe80::1c%en0"), "fe80::1c")
+        XCTAssertEqual(PeerAddress.numeric("2001:db8::7"), "2001:db8::7")
+        XCTAssertNil(PeerAddress.numeric("phone.local"))
+        XCTAssertNil(PeerAddress.numeric(""))
+    }
+
+    /// The link says where the phone dialed from (for the kill switch).
+    func testLinkReportsThePhonesAddress() {
+        XCTAssertNotNil(link())
+        XCTAssertEqual(linkedPeer.get(), "127.0.0.1")
+    }
+
     func testCertificateIsWellFormedAndKeychainIdentityIsStable() throws {
         XCTAssertNotNil(SecCertificateCreateWithData(nil, identity.certificate as CFData))
         let stored = try MacIdentity.loadOrCreate(label: label, dataProtection: false)
@@ -95,7 +112,8 @@ final class WirelessLinkTests: XCTestCase {
         let linked = expectation(description: "linked")
         linked.isInverted = pin != nil || dialKey != nil
         let muxBox = Locked<Mux?>(nil)
-        listener.onLink = { link in muxBox.set(link.mux); link.mux.start(); linked.fulfill() }
+        let peer = linkedPeer
+        listener.onLink = { link in peer.set(link.peer); muxBox.set(link.mux); link.mux.start(); linked.fulfill() }
         let listening = expectation(description: "listening")
         try! listener.start { _ in listening.fulfill() }
         wait(for: [listening], timeout: 5)

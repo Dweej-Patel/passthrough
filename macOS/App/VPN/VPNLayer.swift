@@ -15,7 +15,8 @@ final class VPNLayer: ObservableObject {
     @AppStorage("vpnKillSwitch") var killSwitch = true
     @AppStorage("vpnBlockIPv6") var blockIPv6 = true
     /// The kill switch lets the local network through (LAN devices, AirPlay,
-    /// the wireless link to the phone, the remote shell's local path).
+    /// the remote shell's local path). The wireless link to the phone goes
+    /// through either way (`phoneLink`).
     @AppStorage("vpnAllowLocalNetwork") var allowLocalNetwork = true
     @AppStorage("vpnAutoStart") var autoStart = false
     @AppStorage("vpnActiveProfile") var activeProfileID = ""
@@ -23,6 +24,18 @@ final class VPNLayer: ObservableObject {
 
     /// Fires when turning the layer on needs the helper approved first.
     var onHelperRequired: (() -> Void)?
+
+    /// The wireless link to the phone while it may carry passthrough, which
+    /// the kill switch always lets through (else a VPN over a wireless
+    /// passthrough could never connect). Set by the session; sent with each
+    /// start, and to a running session whenever it changes.
+    var phoneLink: HelperClient.PhoneLink? {
+        didSet {
+            guard phoneLink != oldValue, isWanted else { return }
+            let link = phoneLink
+            Task { await helper.setPhoneLink(link) }
+        }
+    }
 
     private let helper: HelperClient
     /// Bumped on every on/off so a late status poll can't undo a newer choice.
@@ -88,7 +101,12 @@ final class VPNLayer: ObservableObject {
             await helper.ensureCurrent(mayReregister: false)
             guard isWanted else { return }
             do {
+                var config = config
+                config.phoneLink = phoneLink
                 try await helper.startVPN(config)
+                // A change while the start was on its way may have reached
+                // the helper before the session did, and been dropped.
+                if phoneLink != config.phoneLink { await helper.setPhoneLink(phoneLink) }
                 ptLog(.info, "VPN layer starting: \(profile.name) (\(profile.engine.label))")
                 apply(await helper.status())
             } catch {

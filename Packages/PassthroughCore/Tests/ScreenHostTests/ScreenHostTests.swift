@@ -102,6 +102,46 @@ final class TypingPacerTests: XCTestCase {
         XCTAssertTrue(pacer.push(.text("y")), "room again once some went")
     }
 
+    /// Keys cost no bytes, but count: behind text that waits, a phone sending
+    /// keys without end gets only `itemLimit` of them queued.
+    func testKeysBehindWaitingTextAreCapped() {
+        var pacer = TypingPacer(rate: 10, burst: 10, limit: 1000, itemLimit: 5, now: 0)
+        XCTAssertTrue(pacer.push(.text(String(repeating: "x", count: 30))))
+        _ = pacer.take(now: 0)
+        for k in 0..<4 { XCTAssertTrue(pacer.push(.key(keysym: UInt32(k), modifiers: 0))) }
+        XCTAssertFalse(pacer.push(.key(keysym: 99, modifiers: 0)), "past the item limit")
+        XCTAssertFalse(pacer.push(.text("y")), "text too")
+        XCTAssertEqual(pacer.count, 5)
+        XCTAssertEqual(pacer.take(now: 1), [.text(String(repeating: "x", count: 10))])
+        XCTAssertEqual(pacer.take(now: 2), [.text(String(repeating: "x", count: 10))] + (0..<4).map { .key(keysym: UInt32($0), modifiers: 0) },
+                       "in order, the keys behind the text")
+        XCTAssertTrue(pacer.isEmpty)
+        XCTAssertTrue(pacer.push(.key(keysym: 99, modifiers: 0)), "room again")
+    }
+
+    /// Many items, pushed and taken in turns across the queue's compaction:
+    /// each comes out once, in order.
+    func testLongQueueDrainsInOrder() {
+        var pacer = TypingPacer(rate: 1, burst: 1, limit: 1 << 20, itemLimit: 10_000, now: 0)
+        var expected: [TypingPacer.Item] = [], taken: [TypingPacer.Item] = []
+        var now: TimeInterval = 0
+        for round in 0..<20 {
+            for k in 0..<500 {
+                let item: TypingPacer.Item = k % 50 == 0 ? .text("a") : .key(keysym: UInt32(round * 1000 + k), modifiers: 0)
+                XCTAssertTrue(pacer.push(item))
+                expected.append(item)
+            }
+            now += 0.5
+            taken += pacer.take(now: now)
+        }
+        while !pacer.isEmpty {
+            now += 1
+            taken += pacer.take(now: now)
+        }
+        XCTAssertEqual(taken, expected)
+        XCTAssertEqual(pacer.count, 0)
+    }
+
     func testACharacterBiggerThanTheBucketStillGoes() {
         var pacer = TypingPacer(rate: 4, burst: 4, limit: 100, now: 0)
         XCTAssertTrue(pacer.push(.text("👨‍👩‍👧‍👦")))

@@ -19,6 +19,7 @@ import dev.dpatel.passthrough.core.ptLog
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import java.security.InvalidKeyException
 import java.security.KeyStore
 import java.security.ProviderException
 import javax.crypto.Cipher
@@ -65,6 +66,9 @@ class ShellKeyVault(context: Context) {
     }
 
     private enum class Stored { OK, LOCKED, INVALIDATED, FAILED }
+
+    /** The Keystore failed for now: what the vault holds stays, for a later try. */
+    private class VaultBusy : Exception("vault busy")
 
     private val keyguard = context.getSystemService(KeyguardManager::class.java)
     private val prefs = context.applicationContext.getSharedPreferences("shell_vault", Context.MODE_PRIVATE)
@@ -163,6 +167,9 @@ class ShellKeyVault(context: Context) {
             if (perUse) blobSealingPair(create = true) else entrySealingPair(create = true)
         } catch (_: UserNotAuthenticatedException) {
             null
+        } catch (e: Exception) {
+            ptLog(PtLog.Level.ERROR, "shell: sealing key unavailable (${e.javaClass.simpleName})")
+            null
         }
         val publicHalf = pair?.second?.let(ShellKeySeal::x963) ?: return
         if (registry.shellSealingKey?.let(ShellKeySeal::x963)?.contentEquals(publicHalf) != true) {
@@ -182,7 +189,14 @@ class ShellKeyVault(context: Context) {
     fun adoptPending(registry: PairingRegistry): Int {
         if (!supported || !deviceSecure) return 0.also { _status.value = baseStatus() }
         migrateLegacyLost(registry)
-        if (perUse) return adoptIntoBlob(registry)
+        if (perUse) {
+            return try {
+                adoptIntoBlob(registry)
+            } catch (e: Exception) {
+                ptLog(PtLog.Level.ERROR, "shell: vault adoption failed (${e.javaClass.simpleName}); keys stay pending")
+                0.also { _status.value = baseStatus() }
+            }
+        }
         var moved = 0
         // Its 60 s window passed: what is sealed waits for the next unlock.
         var locked = false
@@ -191,6 +205,11 @@ class ShellKeyVault(context: Context) {
         } catch (_: UserNotAuthenticatedException) {
             locked = true
             null
+        } catch (e: Exception) {
+            // Not a missing sealing key (that discards what is sealed): the
+            // Keystore failed for now, so everything waits for the next unlock.
+            ptLog(PtLog.Level.ERROR, "shell: sealing key unreadable (${e.javaClass.simpleName}); keys stay pending")
+            return 0.also { _status.value = baseStatus() }
         }
         for (client in registry.clients) {
             if (client.shell == null) continue
@@ -534,15 +553,31 @@ class ShellKeyVault(context: Context) {
     /**
      * Android 10: the sealing key pair, an entry like a Mac's key (usable for 60 s after an
      * authentication), made on first use when [create]. Throws [UserNotAuthenticatedException]
-     * when that window has passed.
+     * when that window has passed, and [VaultBusy] when the Keystore fails for now: the entry
+     * stays then, with none made in its place (grants may be sealed to it). An entry altered
+     * for good is discarded, as grants sealed to it can never open, and replaced when [create].
      */
     private fun entrySealingPair(create: Boolean): Pair<java.security.PrivateKey, java.security.interfaces.ECPublicKey>? {
         val raw = prefs.getString(SEALING_ENTRY, null)
         if (raw != null) {
-            try {
-                decryptEntry(raw)?.let(ShellKeySeal::decodeKeyPair)?.let { return it }
+            val read = try {
+                ShellVaultBlob.readEntry { decryptEntry(raw)?.let(ShellKeySeal::decodeKeyPair) }
             } catch (_: KeyPermanentlyInvalidatedException) {
                 wipeEntries()
+                null
+            } catch (e: UserNotAuthenticatedException) {
+                throw e
+            } catch (_: InvalidKeyException) {
+                ShellVaultBlob.EntryRead.Retry
+            }
+            when (read) {
+                is ShellVaultBlob.EntryRead.Value -> read.value?.let { return it }
+                ShellVaultBlob.EntryRead.Corrupt -> {
+                    ptLog(PtLog.Level.WARNING, "shell: sealing key unreadable; discarded")
+                    prefs.edit().remove(SEALING_ENTRY).commit()
+                }
+                ShellVaultBlob.EntryRead.Retry -> throw VaultBusy()
+                null -> Unit
             }
         }
         if (!create) return null

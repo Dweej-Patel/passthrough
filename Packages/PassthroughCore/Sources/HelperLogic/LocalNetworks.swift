@@ -3,8 +3,9 @@ import Darwin
 import Foundation
 
 /// The networks this Mac is directly on, for the kill switch's "Allow local
-/// network": LAN devices, AirPlay, the remote shell's local and hotspot
-/// paths, and Passthrough's own wireless link to the phone.
+/// network" (LAN devices, AirPlay, the remote shell's local and hotspot
+/// paths) and for the phone dialing in over the wireless link, which the
+/// kill switch lets through either way (`KillSwitchRules.PhoneLink`).
 public enum LocalNetworks {
     public struct Address: Equatable, Sendable {
         public var interface: String
@@ -24,24 +25,41 @@ public enum LocalNetworks {
     /// traffic elsewhere; `feth` is the passthrough's dummy keepalive.
     static let tunnelPrefixes = ["utun", "ipsec", "ppp", "gif", "stf", "feth", "tun", "tap"]
 
-    /// The connected subnets of up, non-tunnel interfaces. IPv6 link-local
-    /// ones are left out (always allowed), as are host-only prefixes.
+    /// Where a directly connected network may lie for the kill switch to let
+    /// it through: private IPv4 and IPv6 unique-local space (link-local is
+    /// let through on its own). Not carrier-grade NAT (100.64.0.0/10): a LAN handing that out is more
+    /// likely posing as Tailscale than being one. A network's prefix must sit
+    /// inside one of these whole, so a hostile netmask ("10.0.0.5/1") that
+    /// would make half the internet "local" is refused rather than passed
+    /// (TunnelCrack's LocalNet attack).
+    static let localRanges = ["10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "fc00::/7"].compactMap { CIDR($0) }
+
+    /// The connected subnets of up, non-tunnel interfaces, private ones only
+    /// (`localRanges`). Link-local ones are left out (always allowed), as
+    /// are host-only prefixes.
     public static func subnets(_ addresses: [Address]) -> [CIDR] {
         var result: [CIDR] = []
         for a in addresses where a.isUp && !a.isLoopback && !a.isPointToPoint
             && !tunnelPrefixes.contains(where: { a.interface.hasPrefix($0) }) {
             guard let subnet = CIDR(address: a.address, prefixLength: a.prefixLength),
                   subnet.prefixLength > 0, subnet.prefixLength < (subnet.isIPv6 ? 128 : 32),
-                  !(subnet.isIPv6 && CIDR("fe80::/10")!.contains(subnet)), !result.contains(subnet) else { continue }
+                  !(subnet.isIPv6 && CIDR("fe80::/10")!.contains(subnet)),
+                  localRanges.contains(where: { $0.contains(subnet) }), !result.contains(subnet) else { continue }
             result.append(subnet)
         }
         return result
     }
 
-    /// Interfaces holding an address in Tailscale's ranges.
-    public static func tailscaleInterfaces(_ addresses: [Address]) -> [String] {
+    /// Tailscale's interfaces: up, point-to-point `utun`s holding an address
+    /// in its ranges. Anything else with such an address (a Wi-Fi network
+    /// handing out carrier-grade NAT addresses, plus routes) is not Tailscale,
+    /// and passing everything it carries would leak in the clear. `excluding`
+    /// names interfaces that never count: the VPN's underlay, which would
+    /// otherwise carry everything around the VPN.
+    public static func tailscaleInterfaces(_ addresses: [Address], excluding: Set<String> = []) -> [String] {
         var names: [String] = []
-        for a in addresses where KillSwitchRules.tailscaleRanges.contains(where: { $0.contains(a.address) }) && !names.contains(a.interface) {
+        for a in addresses where a.isUp && a.isPointToPoint && a.interface.hasPrefix("utun") && !excluding.contains(a.interface)
+            && KillSwitchRules.tailscaleRanges.contains(where: { $0.contains(a.address) }) && !names.contains(a.interface) {
             names.append(a.interface)
         }
         return names

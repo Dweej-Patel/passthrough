@@ -40,9 +40,10 @@ protocol VPNRunner: AnyObject {
 /// Routes win by prefix length only, so a network that pushes longer ones
 /// (TunnelVision) would still get traffic past them; the kill switch's pf
 /// rules (`PacketFilter`, `KillSwitchRules`) close that, connected or not:
-/// out through the VPN, to the VPN server, or to the local network, else
-/// dropped. The kill switch outlives a crash of the app or the helper
-/// (`KillSwitchStateStore`): only turning the VPN off lifts it.
+/// out through the VPN, to the VPN server, to the phone over the wireless
+/// link, or to the local network, else dropped. The kill switch outlives a
+/// crash of the app or the helper (`KillSwitchStateStore`): only turning the
+/// VPN off lifts it.
 final class VPNEngine {
     struct Config {
         enum Engine: String { case wireguard, openvpn }
@@ -57,6 +58,10 @@ final class VPNEngine {
         /// The kill switch lets traffic to directly connected networks through.
         var allowLocalNetwork = true
         var fallbackDNS = ["1.1.1.1", "1.0.0.1"]
+        /// Passthrough's wireless link, which the kill switch always lets
+        /// through: the app's listener port and where the phone is now.
+        /// `subnets` is filled in when the rules are made.
+        var phoneLink: KillSwitchRules.PhoneLink?
     }
 
     /// `held`: no session and no app, but the kill switch still blocks (the
@@ -112,6 +117,8 @@ final class VPNEngine {
     /// The packet filter rules last loaded, and why loading them failed.
     private var filterRules: String?
     private var filterError: String?
+    /// The VPN interface the filter was last made for (nil while the VPN is down).
+    private var filterInterface: String?
     /// Routes the network pushed around the VPN, last time it was looked at.
     private var foreignRoutes: [String] = []
     private var routeWatch: DispatchSourceTimer?
@@ -191,6 +198,8 @@ final class VPNEngine {
         HelperLog.warn("vpn: the app went away with the VPN on; the kill switch keeps traffic blocked until the VPN reconnects or is turned off")
         endSession()
         state = .held
+        // Its wireless listener went with it; reconnecting names the link again.
+        self.config?.phoneLink = nil
         engageKillSwitch()
         self.config = nil
     }
@@ -232,7 +241,23 @@ final class VPNEngine {
         if PacketFilter.lift() { HelperLog.info("vpn: kill switch packet filter lifted") }
         filterRules = nil
         filterError = nil
+        filterInterface = nil
         Self.stateStore.clearWanted()
+    }
+
+    /// The app's wireless link to the phone changed (it came up, moved to
+    /// another address, or went): the filter follows at once, since a link
+    /// it drops can't carry the VPN back. Ignored with no VPN session: the
+    /// next `start` carries the link.
+    func setPhoneLink(_ link: KillSwitchRules.PhoneLink?) {
+        guard config != nil, config?.phoneLink != link else { return }
+        config?.phoneLink = link
+        if let link {
+            HelperLog.info("vpn: wireless link to the phone on port \(link.port), at \(link.peers.isEmpty ? "no address yet" : link.peers.joined(separator: ", "))")
+        } else {
+            HelperLog.info("vpn: wireless link to the phone gone")
+        }
+        if filterRules != nil || filterError != nil { updateFilter(vpnInterface: filterInterface) }
     }
 
     /// The passthrough tunnel came up or went down: the encrypted flow has to
@@ -629,18 +654,21 @@ final class VPNEngine {
     // MARK: Packet filter + foreign routes
 
     /// Loads the kill switch's pf rules for the session as it is now: the
-    /// VPN's interface (while connected), the servers, the local networks
-    /// (when allowed) and Tailscale. Unchanged rules are not reloaded. If pf
-    /// can't be used the reject routes still block while the VPN is down,
-    /// and the app is told protection is weaker.
+    /// VPN's interface (while connected), the servers, the wireless link to
+    /// the phone, the local networks (when allowed) and Tailscale. Unchanged
+    /// rules are not reloaded. If pf can't be used the reject routes still
+    /// block while the VPN is down, and the app is told protection is weaker.
     private func updateFilter(vpnInterface: String?) {
         guard let config, config.killSwitch else { return }
+        filterInterface = vpnInterface
         let addresses = LocalNetworks.current()
+        let lan = LocalNetworks.subnets(addresses)
         let rules = KillSwitchRules.ruleset(KillSwitchRules.Input(
             vpnInterface: vpnInterface,
             endpoints: endpointPasses,
-            localSubnets: config.allowLocalNetwork ? LocalNetworks.subnets(addresses) : [],
-            tailscaleInterfaces: LocalNetworks.tailscaleInterfaces(addresses),
+            localSubnets: config.allowLocalNetwork ? lan : [],
+            tailscaleInterfaces: LocalNetworks.tailscaleInterfaces(addresses, excluding: notTailscale),
+            phoneLink: config.phoneLink.map { KillSwitchRules.PhoneLink(port: $0.port, peers: $0.peers, subnets: lan) },
             allowIPv6Bypass: vpnInterface != nil && ipv6Bypass))
         guard rules != filterRules else { return }
         do {
@@ -675,8 +703,15 @@ final class VPNEngine {
         checkForeignRoutes(vpnInterface: vpnInterface)
     }
 
+    /// Interfaces that are never Tailscale's, whatever address they hold:
+    /// the underlay (the passthrough's utun, or Wi-Fi), which carries
+    /// everything around the VPN.
+    private var notTailscale: Set<String> {
+        Set([underlay?.interface, tunnel.interfaceName].compactMap { $0 })
+    }
+
     private func checkForeignRoutes(vpnInterface: String) {
-        let tailscale = Set(LocalNetworks.tailscaleInterfaces(LocalNetworks.current()))
+        let tailscale = Set(LocalNetworks.tailscaleInterfaces(LocalNetworks.current(), excluding: notTailscale))
         let ours = Set(endpointRoutes.map(\.ip))
         let foreign = ForeignRoutes.find(RouteTable.all(v6: false), vpnInterface: vpnInterface, ownInterfaces: tailscale, ownHosts: ours)
             + ForeignRoutes.find(RouteTable.all(v6: true), vpnInterface: vpnInterface, ownInterfaces: tailscale, ownHosts: ours)

@@ -176,6 +176,8 @@ final class HelperService: NSObject, PassthroughHelperProtocol {
                 config.killSwitch = try XPCInput.bool(configuration, VPNConfigKey.killSwitch, default: true)
                 config.blockIPv6 = try XPCInput.bool(configuration, VPNConfigKey.blockIPv6, default: true)
                 config.allowLocalNetwork = try XPCInput.bool(configuration, VPNConfigKey.allowLocalNetwork, default: true)
+                config.phoneLink = try KillSwitchRules.PhoneLink.read(configuration, portKey: VPNConfigKey.phoneLinkPort,
+                                                                      peersKey: VPNConfigKey.phoneLinkPeers)
             } catch {
                 reply(false, error.localizedDescription); return
             }
@@ -205,6 +207,19 @@ final class HelperService: NSObject, PassthroughHelperProtocol {
                 HelperLog.warn("port \(ScreenSharingCheck.port) is held by something other than Screen Sharing: \(who)")
             }
             reply(verdict.rawValue)
+        }
+    }
+
+    func setPhoneLink(configuration: [String: Any], reply: @escaping () -> Void) {
+        queue.async {
+            do {
+                let link = try KillSwitchRules.PhoneLink.read(configuration, portKey: VPNConfigKey.phoneLinkPort,
+                                                              peersKey: VPNConfigKey.phoneLinkPeers)
+                self.vpn.setPhoneLink(link)
+            } catch {
+                HelperLog.warn("phone link refused: \(error.localizedDescription)")
+            }
+            reply()
         }
     }
 

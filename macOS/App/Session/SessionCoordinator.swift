@@ -205,10 +205,26 @@ final class SessionCoordinator: ObservableObject {
     /// "USB", "Wi-Fi network", or "Wireless" when not known.
     @Published private(set) var wirelessCarrier: String?
     private func refreshWirelessCarrier() {
+        syncPhoneLink()
         guard let device, device.medium == .wireless, device.id.hasPrefix("wifi:") else { wirelessCarrier = nil; return }
         let carrier = wirelessWatcher.carriers[String(device.id.dropFirst(5))] ?? WirelessLink.carrier(interface: nil)
         wirelessCarrier = carrier == "Wi-Fi network" && onPhoneHotspot ? "Hotspot" : carrier
     }
+
+    /// The wireless link for the VPN's kill switch to let through, while it
+    /// may carry passthrough: the listener's port, and where the phone is
+    /// once one is linked (none yet: it must be able to dial in). Not while
+    /// the cable carries passthrough, or the listener is off.
+    private func syncPhoneLink() {
+        guard let port = wirelessWatcher.listenerPort, device?.medium != .usb else { vpnLayer.phoneLink = nil; return }
+        var peers: [String] = []
+        if let device, device.id.hasPrefix("wifi:"), let host = wirelessWatcher.peers[String(device.id.dropFirst(5))],
+           let peer = PeerAddress.numeric(host) {
+            peers = [peer]
+        }
+        vpnLayer.phoneLink = HelperClient.PhoneLink(port: port, peers: peers)
+    }
+
     /// "iPhone" or "Android phone" for the attached device; "phone" when none.
     var phoneKindName: String { device?.kindName ?? "phone" }
     var dnsList: [String] { dnsServers.split(whereSeparator: { $0 == "," || $0 == " " }).map(String.init).filter { !$0.isEmpty } }

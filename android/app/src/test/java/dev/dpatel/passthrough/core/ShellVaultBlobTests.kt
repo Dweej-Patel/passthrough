@@ -96,6 +96,30 @@ class ShellVaultBlobTests {
         assertKeys(mapOf("m1" to a, "m2" to b), ShellVaultBlob.open(dataKey, ShellVaultBlob.seal(dataKey, m.keys)))
     }
 
+    @Test fun aCorruptEntryIsReportedAndAKeystoreHiccupIsRetriedNeitherCrashes() {
+        // A real AES-GCM entry, altered: decrypting it fails its tag (AEADBadTagException).
+        val key = javax.crypto.spec.SecretKeySpec(ShellVaultBlob.newDataKey(), "AES")
+        val seal = javax.crypto.Cipher.getInstance("AES/GCM/NoPadding").apply { init(javax.crypto.Cipher.ENCRYPT_MODE, key) }
+        val stored = seal.iv + seal.doFinal(a)
+        fun decrypt(entry: ByteArray): ByteArray = javax.crypto.Cipher.getInstance("AES/GCM/NoPadding").run {
+            init(javax.crypto.Cipher.DECRYPT_MODE, key, javax.crypto.spec.GCMParameterSpec(128, entry, 0, 12))
+            doFinal(entry, 12, entry.size - 12)
+        }
+        val read = ShellVaultBlob.readEntry { decrypt(stored) }
+        assertArrayEquals(a, (read as ShellVaultBlob.EntryRead.Value).value)
+        val altered = stored.copyOf().also { it[it.size - 1] = (it[it.size - 1].toInt() xor 1).toByte() }
+        assertEquals(ShellVaultBlob.EntryRead.Corrupt, ShellVaultBlob.readEntry { decrypt(altered) })
+        assertEquals(ShellVaultBlob.EntryRead.Corrupt, ShellVaultBlob.readEntry { decrypt(stored.copyOf(4)) })
+        assertEquals(ShellVaultBlob.EntryRead.Corrupt, ShellVaultBlob.readEntry { throw IllegalArgumentException("bad base-64") })
+        // The Keystore failing for now keeps the entry for a later try.
+        assertEquals(ShellVaultBlob.EntryRead.Retry, ShellVaultBlob.readEntry { throw java.security.ProviderException("keystore") })
+        assertEquals(ShellVaultBlob.EntryRead.Retry, ShellVaultBlob.readEntry { throw java.security.KeyStoreException("busy") })
+        assertEquals(ShellVaultBlob.EntryRead.Retry, ShellVaultBlob.readEntry { throw IllegalStateException("not initialized") })
+        // The Keystore's verdicts on its own key are the vault's to act on (invalidated, locked).
+        val verdict = runCatching { ShellVaultBlob.readEntry { throw java.security.InvalidKeyException("locked") } }
+        assertEquals(java.security.InvalidKeyException::class.java, verdict.exceptionOrNull()?.javaClass)
+    }
+
     private fun entry(id: String, key: ByteArray): ByteArray {
         val name = id.toByteArray()
         return byteArrayOf(0, name.size.toByte()) + name + byteArrayOf(0, key.size.toByte()) + key
