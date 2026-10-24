@@ -25,6 +25,8 @@ public enum ScreenVideoWire {
         case format(width: Int, height: Int, sps: Data, pps: Data)
         /// One frame: AVCC NAL units (4-byte lengths), numbered from 1.
         case frame(number: UInt32, keyframe: Bool, data: Data)
+        /// The answer to `copy`.
+        case copied(CopyResult)
 
         // Phone → Mac
         /// The phone's largest useful size in pixels; the Mac fits the stream inside it.
@@ -43,6 +45,21 @@ public enum ScreenVideoWire {
         case clipboard(String)
         /// The phone lost its place in the stream: send a keyframe.
         case keyframeRequest
+        /// Press ⌘C on the Mac and answer with what it copied (`copied`).
+        case copy
+    }
+
+    /// What a `copy` found. Only what that ⌘C put on the Mac's clipboard is
+    /// sent: a clipboard that didn't change is `nothing`, never what was on
+    /// it before (a password copied on the Mac, say).
+    public enum CopyResult: Equatable, Sendable {
+        case text(String)
+        /// The clipboard didn't change: nothing was selected, or the app doesn't copy.
+        case nothing
+        /// Text longer than `maxClipboardPayload`.
+        case tooLong
+        /// Something that isn't text (an image, a file).
+        case notText
     }
 
     public struct Modifiers: OptionSet, Sendable {
@@ -55,8 +72,8 @@ public enum ScreenVideoWire {
     }
 
     enum Kind: UInt8 {
-        case format = 1, frame = 2
-        case hello = 16, ack = 17, pointer = 18, scroll = 19, key = 20, text = 21, clipboard = 22, keyframeRequest = 23
+        case format = 1, frame = 2, copied = 3
+        case hello = 16, ack = 17, pointer = 18, scroll = 19, key = 20, text = 21, clipboard = 22, keyframeRequest = 23, copy = 24
     }
 
     public enum Failure: Error, Equatable { case tooLarge, malformed }
@@ -73,6 +90,14 @@ public enum ScreenVideoWire {
         case let .frame(number, keyframe, data):
             kind = .frame
             payload.append(u32: number); payload.append(keyframe ? 1 : 0); payload.append(data)
+        case let .copied(result):
+            kind = .copied
+            switch result {
+            case let .text(text): payload.append(0); payload.append(Data(text.utf8))
+            case .nothing: payload.append(1)
+            case .tooLong: payload.append(2)
+            case .notText: payload.append(3)
+            }
         case let .hello(maxWidth, maxHeight):
             kind = .hello
             payload.append(u16: maxWidth); payload.append(u16: maxHeight)
@@ -96,6 +121,8 @@ public enum ScreenVideoWire {
             payload.append(Data(text.utf8))
         case .keyframeRequest:
             kind = .keyframeRequest
+        case .copy:
+            kind = .copy
         }
         var out = Data([kind.rawValue])
         out.append(u32: UInt32(payload.count))
@@ -128,7 +155,8 @@ public enum ScreenVideoWire {
 
     /// The most a payload of message type `type` from `sender` may be.
     static func maxPayload(of type: UInt8, from sender: Sender) -> Int {
-        guard sender == .phone else { return maxPayload }
+        // What the Mac copied is held to what a phone may paste (and a status byte).
+        guard sender == .phone else { return Kind(rawValue: type) == .copied ? maxClipboardPayload + 1 : maxPayload }
         switch Kind(rawValue: type) {
         case .text: return maxTextPayload
         case .clipboard: return maxClipboardPayload
@@ -201,8 +229,19 @@ public enum ScreenVideoWire {
             return .text(String(decoding: p, as: UTF8.self))
         case .clipboard:
             return .clipboard(String(decoding: p, as: UTF8.self))
+        case .copied:
+            try need(1)
+            switch p[b] {
+            case 0: return .copied(.text(String(decoding: p.dropFirst(), as: UTF8.self)))
+            case 2: return .copied(.tooLong)
+            case 3: return .copied(.notText)
+            // A status added later reads as nothing copied.
+            default: return .copied(.nothing)
+            }
         case .keyframeRequest:
             return .keyframeRequest
+        case .copy:
+            return .copy
         }
     }
 }

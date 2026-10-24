@@ -42,6 +42,10 @@ final class ScreenModel: ObservableObject {
     @Published private(set) var macName = "your Mac"
     /// Why the view is on Screen Sharing rather than the Mac's own stream; nil when it isn't.
     @Published private(set) var slowReason: String?
+    /// Said briefly over the screen: what a copy or paste did.
+    @Published private(set) var notice: String?
+    /// A Copy is waiting for the Mac's answer; another waits for it.
+    @Published private(set) var copying = false
 
     private var shell: ShellModel?
     private var context: LAContext?
@@ -58,6 +62,10 @@ final class ScreenModel: ObservableObject {
     private var lastPointer: CGPoint?
     /// The stream has shown its size: a stream ending before that never worked, so Screen Sharing is tried.
     private var videoStarted = false
+    private var noticeTask: Task<Void, Never>?
+    /// Ends a Copy the Mac doesn't answer (the stream: a Mac that predates
+    /// copying; Screen Sharing: one whose clipboard didn't change).
+    private var copyTimeout: Task<Void, Never>?
     /// Bumped by every start and stop, so a stale connection's events are dropped.
     private var generation = 0
     private var pendingLogin: (login: RFBClient.Login, remember: Bool)?
@@ -160,6 +168,8 @@ final class ScreenModel: ObservableObject {
         rfb = nil
         video?.close()
         video = nil
+        copyTimeout?.cancel()
+        copying = false
         pendingLogin = nil
         client?.disconnect()
         client = nil
@@ -215,6 +225,13 @@ final class ScreenModel: ObservableObject {
             // Not shown (no canvas yet, or its display failed): what follows needs a new keyframe.
             if onVideoFrame?(sample) != true { video?.requestKeyframe() }
             video?.shown(number)
+        case let .copied(result):
+            switch result {
+            case let .text(text): copied(text)
+            case .nothing: copyFailed("Nothing was copied. Select something on \(macName) first.")
+            case .tooLong: copyFailed("That's too long to copy to this iPhone.")
+            case .notText: copyFailed("Only text can be copied to this iPhone.")
+            }
         case .closed:
             let worked = videoStarted
             stop()
@@ -248,8 +265,9 @@ final class ScreenModel: ObservableObject {
             if size != screenSize { screenSize = size }
             onFrame?(image)
         case let .clipboard(text):
-            // Screen Sharing sends the Mac's clipboard whenever it changes, whatever is on it.
-            if !text.isEmpty, let macID, ScreenClipboardSetting.isOn(macID: macID) { MacClipboard.put(text) }
+            // Screen Sharing sends the Mac's clipboard whenever it changes, whatever is on it:
+            // taken only as the answer to Copy's ⌘C.
+            if copying, !text.isEmpty { copied(text) }
         case .bell:
             UINotificationFeedbackGenerator().notificationOccurred(.warning)
         case let .closed(failure):
@@ -366,11 +384,56 @@ final class ScreenModel: ObservableObject {
         guard let text = UIPasteboard.general.string, !text.isEmpty else { return }
         if let video {
             // Longer than the Mac takes: pasting would paste what was there before.
-            guard video.clipboard(text) else { return UINotificationFeedbackGenerator().notificationOccurred(.error) }
+            guard video.clipboard(text) else {
+                UINotificationFeedbackGenerator().notificationOccurred(.error)
+                return show("That's too long to paste on \(macName).")
+            }
         } else {
             rfb?.clipboard(text)
         }
         key(0x76, modifiers: [RFBKeys.command])   // ⌘V
+    }
+
+    /// ⌘C on the Mac, and what it copied onto this iPhone's clipboard
+    /// (`MacClipboard`: this iPhone only, for two minutes). Nothing else of
+    /// the Mac's clipboard ever comes here: the stream answers with only what
+    /// this ⌘C copied, and Screen Sharing's clipboard is taken only right after it.
+    func copyFromMac() {
+        guard !copying, video != nil || rfb != nil else { return }
+        copying = true
+        if let video { video.copySelection() } else { key(0x63, modifiers: [RFBKeys.command]) }   // ⌘C
+        copyTimeout?.cancel()
+        copyTimeout = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(4))
+            guard !Task.isCancelled, let self, self.copying else { return }
+            self.copyFailed(self.video != nil ? "\(self.macName) didn't answer. Update Passthrough on it to copy from it."
+                                             : "Nothing was copied. Select something on \(self.macName) first.")
+        }
+    }
+
+    private func copied(_ text: String) {
+        copying = false
+        copyTimeout?.cancel()
+        MacClipboard.put(text)
+        UINotificationFeedbackGenerator().notificationOccurred(.success)
+        show("Copied from \(macName)")
+    }
+
+    private func copyFailed(_ message: String) {
+        copying = false
+        copyTimeout?.cancel()
+        UINotificationFeedbackGenerator().notificationOccurred(.warning)
+        show(message)
+    }
+
+    private func show(_ message: String) {
+        notice = message
+        noticeTask?.cancel()
+        noticeTask = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(2.5))
+            guard !Task.isCancelled else { return }
+            self?.notice = nil
+        }
     }
 
     /// The display lost its place (it was in the background, say): ask for a keyframe.

@@ -62,6 +62,7 @@ struct ScreenView: View {
             }
             Spacer(minLength: 0)
             if model.phase == .live {
+                clipboardMenu
                 desktopsMenu
                 modeButton
                 keyboardButton
@@ -80,6 +81,7 @@ struct ScreenView: View {
                 .accessibilityLabel("Done")
             Spacer(minLength: 0)
             if model.phase == .live {
+                clipboardMenu
                 desktopsMenu
                 modeButton
                 keyboardButton
@@ -108,6 +110,18 @@ struct ScreenView: View {
         .accessibilityLabel(keyboard ? "Hide keyboard" : "Show keyboard")
     }
 
+    /// Copy and paste between the Mac and this iPhone, also on the keyboard's key row.
+    private var clipboardMenu: some View {
+        Menu {
+            Button { model.copyFromMac() } label: { Label("Copy from \(model.macName)", systemImage: "doc.on.doc") }
+                .disabled(model.copying)
+            Button { model.pastePhoneClipboard() } label: { Label("Paste on \(model.macName)", systemImage: "doc.on.clipboard") }
+        } label: {
+            Image(systemName: "doc.on.clipboard")
+        }
+        .accessibilityLabel("Copy and paste")
+    }
+
     /// Mission Control: the same as the canvas's three-finger swipes.
     private var desktopsMenu: some View {
         Menu {
@@ -129,6 +143,21 @@ struct ScreenView: View {
         case .live:
             ScreenCanvas(model: model, mode: mode, keyboard: $keyboard)
                 .ignoresSafeArea(.container, edges: .bottom)
+                .overlay(alignment: .bottom) {
+                    if let notice = model.notice {
+                        Text(notice)
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(.secondary)
+                            .multilineTextAlignment(.center)
+                            .padding(.horizontal, 12).padding(.vertical, 7)
+                            .background(.regularMaterial, in: Capsule())
+                            .padding(.bottom, 14)
+                            .padding(.horizontal, 16)
+                            .allowsHitTesting(false)
+                            .transition(.opacity.combined(with: .move(edge: .bottom)))
+                    }
+                }
+                .animation(.easeInOut(duration: 0.2), value: model.notice)
         case .connecting:
             VStack(spacing: 12) {
                 ProgressView()

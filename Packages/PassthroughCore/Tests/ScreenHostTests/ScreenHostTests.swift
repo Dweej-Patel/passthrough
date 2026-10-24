@@ -22,6 +22,12 @@ final class ScreenVideoWireTests: XCTestCase {
             .text("héllo 👋"),
             .clipboard(""),
             .keyframeRequest,
+            .copy,
+            .copied(.text("copié ✂︎")),
+            .copied(.text("")),
+            .copied(.nothing),
+            .copied(.tooLong),
+            .copied(.notText),
         ]
         let bytes = messages.reduce(Data()) { $0 + ScreenVideoWire.encode($1) }
         var reader = ScreenVideoWire.Reader()
@@ -56,6 +62,11 @@ final class ScreenVideoWireTests: XCTestCase {
         }
         var fromMac = ScreenVideoWire.Reader()
         XCTAssertNoThrow(try fromMac.append(header(2, 8 << 20)), "frames from the Mac keep the large cap")
+        var copiedFromMac = ScreenVideoWire.Reader()
+        XCTAssertThrowsError(try copiedFromMac.append(header(3, ScreenVideoWire.maxClipboardPayload + 2)),
+                             "what the Mac copied is held to what a phone may paste")
+        var copiedAtCap = ScreenVideoWire.Reader()
+        XCTAssertNoThrow(try copiedAtCap.append(header(3, ScreenVideoWire.maxClipboardPayload + 1)))
         let text = String(repeating: "é", count: 2048)
         var exact = ScreenVideoWire.Reader(from: .phone)
         XCTAssertEqual(try exact.append(ScreenVideoWire.encode(.text(text))), [.text(text)], "4 KiB of text is one message")
@@ -245,6 +256,83 @@ final class ScreenVideoStreamerTests: XCTestCase {
         XCTAssertEqual(typed, paste)
     }
 
+    /// Copy: the Mac presses ⌘C and answers with what it copied; a clipboard
+    /// that didn't change is `nothing`, never what was on it before.
+    func testCopySendsOnlyWhatItsCommandCCopied() {
+        let capture = FakeCapture(width: 320, height: 200)
+        let input = RecordingInput()
+        input.clipboard = (count: 5, text: "a password copied earlier")
+        var limits = ScreenVideoStreamer.Limits()
+        limits.copyTimeout = 0.3
+        let streamer = ScreenVideoStreamer(capture: capture, input: { _ in input }, limits: limits)
+        let (mac, phone) = MemoryPipe.pair()
+        streamer.start(stream: mac, initialBytes: ScreenVideoWire.encode(.hello(maxWidth: 320, maxHeight: 320))) {}
+        addTeardownBlock { streamer.stop() }
+        let events = Locked<[ScreenVideoClient.Event]>([])
+        let client = ScreenVideoClient(stream: phone, maxSide: 320, queue: DispatchQueue(label: "test")) { event in
+            events.set(events.get() + [event])
+        }
+        client.start()
+        waitUntil("capture started") { capture.maxSide.get() == 320 }
+        waitUntil("input ready") {
+            client.pointer(x: 0, y: 0, buttons: [])
+            Thread.sleep(forTimeInterval: 0.02)
+            return !input.log.get().isEmpty
+        }
+
+        // Nothing selected: ⌘C changes nothing, so the old clipboard stays on the Mac.
+        client.copySelection()
+        waitUntil("answered") { Self.copies(events.get()).count == 1 }
+        XCTAssertEqual(Self.copies(events.get()), [.nothing])
+        XCTAssertTrue(input.log.get().contains("key 99 1"), "⌘C pressed")
+
+        // Something selected: ⌘C copies it, and that is the answer.
+        input.copies = "the selection"
+        client.copySelection()
+        waitUntil("answered again") { Self.copies(events.get()).count == 2 }
+        XCTAssertEqual(Self.copies(events.get()).last, .text("the selection"))
+
+        input.copies = String(repeating: "x", count: ScreenVideoWire.maxClipboardPayload + 1)
+        client.copySelection()
+        waitUntil("answered a third time") { Self.copies(events.get()).count == 3 }
+        XCTAssertEqual(Self.copies(events.get()).last, .tooLong)
+    }
+
+    /// The phone takes the Mac's copies only as answers: one sent unasked is dropped.
+    func testTheClientIgnoresCopiesItDidNotAskFor() {
+        let (mac, phone) = MemoryPipe.pair()
+        let events = Locked<[ScreenVideoClient.Event]>([])
+        let client = ScreenVideoClient(stream: phone, maxSide: 320, queue: DispatchQueue(label: "test")) { event in
+            events.set(events.get() + [event])
+        }
+        client.start()
+        let heard = Locked<[ScreenVideoWire.Message]>([])
+        func read() {
+            mac.receive(maximumLength: 1 << 16) { data, _, _ in
+                var reader = ScreenVideoWire.Reader(from: .phone)
+                heard.set(heard.get() + ((try? reader.append(data ?? Data())) ?? []))
+                read()
+            }
+        }
+        read()
+        waitUntil("hello") { !heard.get().isEmpty }
+        Thread.sleep(forTimeInterval: 0.1)   // the client reading
+        mac.send(ScreenVideoWire.encode(.copied(.text("pushed"))), isComplete: false) { _ in }
+        Thread.sleep(forTimeInterval: 0.2)
+        client.copySelection()
+        waitUntil("asked") { heard.get().contains(.copy) }
+        mac.send(ScreenVideoWire.encode(.copied(.text("answer"))), isComplete: false) { _ in }
+        mac.send(ScreenVideoWire.encode(.copied(.text("pushed again"))), isComplete: false) { _ in }
+        waitUntil("answer arrived") { !Self.copies(events.get()).isEmpty }
+        Thread.sleep(forTimeInterval: 0.2)
+        XCTAssertEqual(Self.copies(events.get()), [.text("answer")])
+        client.close()
+    }
+
+    private static func copies(_ events: [ScreenVideoClient.Event]) -> [ScreenVideoWire.CopyResult] {
+        events.compactMap { if case let .copied(result) = $0 { result } else { nil } }
+    }
+
     /// The phone hanging up ends the stream (and so, upstream, the connection).
     func testThePhoneLeavingEndsIt() {
         let capture = FakeCapture(width: 320, height: 200)
@@ -375,9 +463,21 @@ private final class RecordingInput: InputSink, @unchecked Sendable {
     let log = Locked<[String]>([])
     func pointer(x: UInt16, y: UInt16, buttons: UInt8) { log.set(log.get() + ["pointer \(x) \(y) \(buttons)"]) }
     func scroll(dx: Int16, dy: Int16) { log.set(log.get() + ["scroll \(dx) \(dy)"]) }
-    func key(keysym: UInt32, modifiers: UInt8) { log.set(log.get() + ["key \(keysym) \(modifiers)"]) }
+    func key(keysym: UInt32, modifiers: UInt8) {
+        log.set(log.get() + ["key \(keysym) \(modifiers)"])
+        if keysym == 0x63, modifiers == ScreenVideoWire.Modifiers.command.rawValue, let copied = copy.get() {
+            board.set((board.get().count + 1, copied))
+        }
+    }
     func text(_ text: String) { log.set(log.get() + ["text \(text)"]) }
     func clipboard(_ text: String) { log.set(log.get() + ["clipboard \(text)"]) }
+    /// The Mac's clipboard; ⌘C replaces it with `copies` when that is set.
+    private let board = Locked<(count: Int, text: String?)>((0, nil))
+    private let copy = Locked<String?>(nil)
+    var clipboard: (count: Int, text: String?) { get { board.get() } set { board.set(newValue) } }
+    var copies: String? { get { copy.get() } set { copy.set(newValue) } }
+    var clipboardChangeCount: Int { board.get().count }
+    func clipboardText() -> String? { board.get().text }
 }
 
 /// Two `ByteStream`s joined in memory.

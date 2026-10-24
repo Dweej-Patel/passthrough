@@ -380,7 +380,8 @@ byte, a 4-byte big-endian payload length (at most 16 MiB from the Mac), the
 payload. Unknown types are skipped. Numbers are big-endian. The Mac takes
 less from a phone, and closes the connection on a payload over it: 4 KiB for
 `text` (the phone sends a longer paste in pieces), 64 KiB for `clipboard` and
-for a type it doesn't know, 64 bytes for every other message. It types text
+for a type it doesn't know, 64 bytes for every other message. The phone, in
+turn, takes at most 64 KiB and a byte for `copied`. It types text
 at up to 8 KiB a second (keys sent after text wait their turn), and drops
 text once 256 KiB is waiting.
 
@@ -389,6 +390,11 @@ Mac → phone:
   PPS. Sent before every keyframe.
 - `2` frame: number u32 (from 1), flags u8 (bit 0: keyframe), then the
   frame's NAL units, each after a 4-byte length (AVCC).
+- `3` copied: the answer to `copy`. Status u8, then for status 0 the copied
+  text, UTF-8. Status 0: text; 1: nothing was copied (the clipboard didn't
+  change in 2 seconds); 2: text over 64 KiB; 3: not text. A status the phone
+  doesn't know reads as 1. The phone takes `copied` only as the answer to a
+  `copy` it sent, never unasked.
 
 Phone → Mac:
 - `16` hello: max width u16, max height u16, the phone's largest useful
@@ -409,6 +415,17 @@ Phone → Mac:
 - `22` clipboard: UTF-8, put on the Mac's clipboard.
 - `23` keyframe request: the phone lost its place (its display failed, or
   it was in the background).
+- `24` copy: no payload. The Mac presses ⌘C (in order with the text and keys
+  before it) and answers `copied` with what that put on its clipboard. It
+  sends the clipboard only if its change count moved after the ⌘C, so what
+  was on it before (a password copied on the Mac, say) never goes to the
+  phone. One at a time: a `copy` while another is unanswered is dropped.
+
+The Mac marks text a phone puts on its clipboard (`22`) with
+`org.nspasteboard.ConcealedType` and `TransientType`, so clipboard managers
+leave it out of their history. Over Screen Sharing, which sends the Mac's
+clipboard whenever it changes (RFB ServerCutText), the phone takes it only
+while its own ⌘C for Copy is unanswered (4 seconds), and ignores it otherwise.
 
 When the screen goes still the Mac sends its last frame again, twice, a
 quarter of a second apart, so the encoder sharpens it.

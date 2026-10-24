@@ -11,6 +11,10 @@ protocol InputSink: AnyObject {
     func key(keysym: UInt32, modifiers: UInt8)
     func text(_ text: String)
     func clipboard(_ text: String)
+    /// How many times the Mac's clipboard has changed (`NSPasteboard.changeCount`).
+    var clipboardChangeCount: Int { get }
+    /// The text on the Mac's clipboard; nil when what's on it isn't text.
+    func clipboardText() -> String?
 }
 
 /// A phone's input as the Mac's own events (Accessibility lets the app post
@@ -118,10 +122,23 @@ final class InputInjector: InputSink {
     }
 
     /// At once, not on the main queue: the ⌘V that usually follows must find it there.
+    /// Marked concealed and transient (nspasteboard.org), so clipboard managers
+    /// leave what a phone pastes, a password often, out of their history.
     func clipboard(_ text: String) {
-        NSPasteboard.general.clearContents()
-        NSPasteboard.general.setString(text, forType: .string)
+        let pasteboard = NSPasteboard.general
+        pasteboard.clearContents()
+        pasteboard.declareTypes([.string, Self.concealedType, Self.transientType], owner: nil)
+        pasteboard.setString(text, forType: .string)
+        pasteboard.setData(Data(), forType: Self.concealedType)
+        pasteboard.setData(Data(), forType: Self.transientType)
     }
+
+    static let concealedType = NSPasteboard.PasteboardType("org.nspasteboard.ConcealedType")
+    static let transientType = NSPasteboard.PasteboardType("org.nspasteboard.TransientType")
+
+    var clipboardChangeCount: Int { NSPasteboard.general.changeCount }
+
+    func clipboardText() -> String? { NSPasteboard.general.string(forType: .string) }
 
     // MARK: Keys
 

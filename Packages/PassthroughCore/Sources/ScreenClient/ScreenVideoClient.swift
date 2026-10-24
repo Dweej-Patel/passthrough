@@ -14,6 +14,8 @@ public final class ScreenVideoClient: @unchecked Sendable {
         case size(width: Int, height: Int)
         /// A frame to show, then pass `number` to `shown`.
         case frame(CMSampleBuffer, number: UInt32)
+        /// The answer to `copySelection()`.
+        case copied(ScreenVideoWire.CopyResult)
         /// The connection is over: nil when `close()` ended it.
         case closed(Error?)
     }
@@ -32,6 +34,9 @@ public final class ScreenVideoClient: @unchecked Sendable {
     private var format: CMVideoFormatDescription?
     private var parameterSets: (Data, Data)?
     private var size: (Int, Int)?
+    /// `copySelection()` calls not yet answered: the Mac's copies are taken
+    /// only as answers, so it can't put things on this phone's clipboard unasked.
+    private var copiesAsked = 0
     /// After a keyframe request, frames are skipped until a keyframe arrives.
     private var awaitingKeyframe = true
     private var closed = false
@@ -93,6 +98,15 @@ public final class ScreenVideoClient: @unchecked Sendable {
         return true
     }
 
+    /// Presses ⌘C on the Mac; what it copied comes back as `copied`.
+    public func copySelection() {
+        queue.async { [self] in
+            guard !closed else { return }
+            copiesAsked += 1
+            send(.copy)
+        }
+    }
+
     /// Frame `number` is on screen.
     public func shown(_ number: UInt32) { send(.ack(number: number)) }
 
@@ -149,6 +163,10 @@ public final class ScreenVideoClient: @unchecked Sendable {
                 awaitingKeyframe = false
             }
             emit(.frame(try Self.sampleBuffer(data, format: format, number: number), number: number))
+        case let .copied(result):
+            guard copiesAsked > 0 else { return }
+            copiesAsked -= 1
+            emit(.copied(result))
         default:
             break
         }

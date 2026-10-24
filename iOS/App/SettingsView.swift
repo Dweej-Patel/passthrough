@@ -163,35 +163,7 @@ private struct RemoteShellSettings: View {
             } footer: {
                 Text("Only needed when this iPhone can't find your Mac by itself, for example over Tailscale. Enter its Tailscale name or IP address. Leave blank to use the addresses your Mac shares.")
             }
-            Section {
-                ForEach(shellMacs, id: \.id) { mac in
-                    ScreenClipboardRow(macID: mac.id, macName: mac.name, showsName: shellMacs.count > 1)
-                }
-            } header: {
-                Text("Screen")
-            } footer: {
-                Text("Whenever something is copied on the Mac, Screen Sharing sends it to this iPhone, where any app could read it. When on, it stays on this iPhone only, never on your other devices, and is cleared after two minutes.")
-            }
         }
-    }
-}
-
-/// One Mac's "Copy the Mac's clipboard to this iPhone".
-private struct ScreenClipboardRow: View {
-    let macID: String
-    let macName: String
-    let showsName: Bool
-    @State private var on = false
-
-    var body: some View {
-        Toggle(isOn: $on) {
-            VStack(alignment: .leading, spacing: 2) {
-                Text("Copy the Mac's clipboard to this iPhone")
-                if showsName { Text(macName).font(.footnote).foregroundStyle(.secondary) }
-            }
-        }
-        .onAppear { on = ScreenClipboardSetting.isOn(macID: macID) }
-        .onChange(of: on) { _, value in ScreenClipboardSetting.set(value, macID: macID) }
     }
 }
 
