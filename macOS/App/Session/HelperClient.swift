@@ -192,6 +192,7 @@ final class HelperClient {
         var password: String
         var killSwitch: Bool
         var blockIPv6: Bool
+        var allowLocalNetwork: Bool
     }
 
     func startVPN(_ config: VPNConfig) async throws {
@@ -203,6 +204,7 @@ final class HelperClient {
             VPNConfigKey.password: config.password,
             VPNConfigKey.killSwitch: config.killSwitch,
             VPNConfigKey.blockIPv6: config.blockIPv6,
+            VPNConfigKey.allowLocalNetwork: config.allowLocalNetwork,
         ]
         _ = try await start(timeout: 20) { proxy, reply in proxy.startVPN(configuration: dict, reply: reply) }
     }

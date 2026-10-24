@@ -296,6 +296,9 @@ final class SessionCoordinator: ObservableObject {
         Task {
             await ensureHelperCurrent()
             keepAwake.resume()
+            // A kill switch still blocking from before Passthrough crashed or
+            // was killed with the VPN on: reconnect it (or show it, to turn off).
+            if helper.availability == .ready { vpnLayer.checkHeld(await helper.status()) }
         }
         if let raw = env["PASSTHROUGH_DIRECT_SOCKS"], let port = UInt16(raw) {
             Task { await self.directDiagnosticConnect(socksPort: port) }
@@ -924,12 +927,17 @@ final class SessionCoordinator: ObservableObject {
         forwarder?.stop()
         // Quitting ends every session; wait so their transcripts are finished.
         shell.stop(wait: true)
-        // The app quits 0.8 s from now: release sleep and tear down routes side by side.
-        Task { await keepAwake.shutdown() }
+        // Release sleep and tear down routes side by side; the app quits once
+        // both are done (or after a few seconds). The VPN must be turned off
+        // explicitly here: the helper takes a connection that merely drops
+        // for a crash, and keeps the kill switch blocking.
+        let sleep = Task { await keepAwake.shutdown() }
         Task {
             await vpnLayer.shutdown()
             await helper.stopTunnel()
+            await sleep.value
             helper.invalidate()
+            NotificationCenter.default.post(name: .passthroughReadyToQuit, object: nil)
         }
     }
 

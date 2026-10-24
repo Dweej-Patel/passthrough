@@ -31,8 +31,10 @@ final class HelperService: NSObject, PassthroughHelperProtocol {
         queue.async {
             self.clients.remove(id)
             if self.vpnOwner == id, self.vpn.isActive {
-                HelperLog.info("owning client disconnected; stopping VPN layer")
-                self.vpn.stop()
+                // Not a stopVPN: the app crashed or was killed (a clean quit
+                // turns the VPN off first). The kill switch, if on, holds.
+                HelperLog.info("owning client disconnected; stopping the VPN session")
+                self.vpn.hold()
                 self.vpnOwner = nil
             }
             if self.owner == id {
@@ -173,6 +175,7 @@ final class HelperService: NSObject, PassthroughHelperProtocol {
                 config.password = try XPCInput.string(configuration, VPNConfigKey.password, maxLength: 512, default: "")
                 config.killSwitch = try XPCInput.bool(configuration, VPNConfigKey.killSwitch, default: true)
                 config.blockIPv6 = try XPCInput.bool(configuration, VPNConfigKey.blockIPv6, default: true)
+                config.allowLocalNetwork = try XPCInput.bool(configuration, VPNConfigKey.allowLocalNetwork, default: true)
             } catch {
                 reply(false, error.localizedDescription); return
             }
@@ -182,7 +185,9 @@ final class HelperService: NSObject, PassthroughHelperProtocol {
                 reply(true, "")
             } catch {
                 HelperLog.error("vpn start failed: \(error.localizedDescription)")
-                self.vpn.stop()
+                // A kill switch that was already holding (a reconnect after a
+                // crash) keeps holding; turning the VPN off lifts it.
+                self.vpn.abandonStart()
                 reply(false, error.localizedDescription)
             }
         }
@@ -214,7 +219,10 @@ final class HelperService: NSObject, PassthroughHelperProtocol {
     func quit() {
         queue.async {
             if self.sleepDisabled { self.applyDisableSleep(false) }
-            self.vpn.stop()
+            // The app replaces an outdated helper with quit(): a VPN with its
+            // kill switch on stays blocked across the swap (the new helper
+            // keeps it, the app reconnects).
+            self.vpn.hold()
             self.engine.stop()
             HelperLog.info("quit requested")
             exit(0)

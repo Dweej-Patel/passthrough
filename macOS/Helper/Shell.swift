@@ -60,24 +60,52 @@ enum Shell {
     }
 
     static func isIPv6(_ ip: String) -> Bool { ip.contains(":") }
+
+    /// Runs a command with `input` on its stdin; returns its status, stdout
+    /// and stderr (status -1 when it could not start). For tools like pfctl
+    /// that report on stderr.
+    @discardableResult
+    static func output(_ path: String, _ arguments: [String], input: String? = nil) -> (status: Int32, stdout: String, stderr: String) {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: path)
+        process.arguments = arguments
+        let out = Pipe(), err = Pipe(), stdin = Pipe()
+        process.standardOutput = out
+        process.standardError = err
+        process.standardInput = input == nil ? FileHandle.nullDevice : stdin
+        guard (try? process.run()) != nil else { return (-1, "", "") }
+        if let input {
+            stdin.fileHandleForWriting.write(Data(input.utf8))
+            try? stdin.fileHandleForWriting.close()
+        }
+        // stderr on its own thread: either pipe filling up must not stall the other.
+        let errors = Locked(Data())
+        let readErrors = DispatchSemaphore(value: 0)
+        DispatchQueue.global(qos: .utility).async {
+            errors.set(err.fileHandleForReading.readDataToEndOfFile())
+            readErrors.signal()
+        }
+        let data = out.fileHandleForReading.readDataToEndOfFile()
+        readErrors.wait()
+        process.waitUntilExit()
+        return (process.terminationStatus, String(decoding: data, as: UTF8.self), String(decoding: errors.get(), as: UTF8.self))
+    }
 }
 
 /// Exact-match queries against the kernel routing table, so a delete never
 /// touches a route we didn't add (`route delete` on a missing prefix is not
 /// something to rely on) and cleanup reports only what was really there.
 enum RouteTable {
-    /// netstat prints IPv4 prefixes classfully abbreviated: trailing zero
-    /// octets dropped beyond the class's network part ("0.0.0.0/2" is "0/2",
-    /// "128.0.0.0/3" is "128.0/3", "192.0.0.0/3" is "192.0.0/3").
-    static func netstatName(_ prefix: String) -> String {
-        let parts = prefix.split(separator: "/", maxSplits: 1)
-        let octets = parts[0].split(separator: ".")
-        guard parts.count == 2, octets.count == 4, let first = Int(octets[0]) else { return prefix }
-        let keep = first < 128 ? 1 : first < 192 ? 2 : 3
-        var shown = Array(octets)
-        while shown.count > keep, shown.last == "0" { shown.removeLast() }
-        return shown.joined(separator: ".") + "/" + parts[1]
+    /// `prefix` as netstat prints it (`RouteNames.netstat`).
+    static func netstatName(_ prefix: String) -> String { RouteNames.netstat(prefix) }
+
+    /// Every route line of one family's table, from one netstat run.
+    static func all(v6: Bool) -> [RouteEntry] {
+        RouteEntry.parse(Shell.capture("/usr/sbin/netstat", ["-rn", "-f", v6 ? "inet6" : "inet"]))
     }
+
+    /// Destination (as netstat prints it) → the unscoped route there.
+    static func entries(v6: Bool) -> [String: RouteEntry] { RouteEntry.unscoped(all(v6: v6)) }
 
     static func present(v6: Bool) -> Set<String> {
         let table = Shell.capture("/usr/sbin/netstat", ["-rn", "-f", v6 ? "inet6" : "inet"])
@@ -87,30 +115,19 @@ enum RouteTable {
         })
     }
 
-    /// Destination → gateway for every route in one family's table, from one netstat run.
-    static func gateways(v6: Bool) -> [String: String] {
-        var result: [String: String] = [:]
-        for line in Shell.capture("/usr/sbin/netstat", ["-rn", "-f", v6 ? "inet6" : "inet"]).split(separator: "\n") {
-            let fields = line.split(separator: " ", omittingEmptySubsequences: true)
-            if fields.count >= 2, result[String(fields[0])] == nil { result[String(fields[0])] = String(fields[1]) }
-        }
-        return result
-    }
-
-    /// The gateway column of `prefix`'s route, if it is in the table.
-    static func gateway(of prefix: String, v6: Bool) -> String? {
-        gateways(v6: v6)[netstatName(prefix)]
-    }
-
     static func exists(_ prefix: String, v6: Bool, in table: Set<String>) -> Bool {
         table.contains(netstatName(prefix))
     }
 
-    /// Whether `prefix` is one of our reject routes (gateway 127.0.0.1 or ::1),
-    /// in `gateways` when given (one snapshot for many prefixes).
-    static func isReject(_ prefix: String, v6: Bool, in gateways: [String: String]? = nil) -> Bool {
-        let gateway = gateways.map { $0[netstatName(prefix)] } ?? gateway(of: prefix, v6: v6)
-        return gateway == (v6 ? "::1" : "127.0.0.1")
+    /// Whether `prefix` is one of our reject routes (the reject flag, to
+    /// 127.0.0.1 or ::1), in `table` when given (one snapshot for many prefixes).
+    static func isReject(_ prefix: String, v6: Bool, in table: [String: RouteEntry]? = nil) -> Bool {
+        RejectRoutes.isOurs((table ?? entries(v6: v6))[netstatName(prefix)], v6: v6)
+    }
+
+    /// Whether the route at `prefix` is ours to delete (`RejectRoutes.mayDelete`).
+    static func isOurs(_ prefix: String, v6: Bool, in table: [String: RouteEntry]? = nil) -> Bool {
+        RejectRoutes.mayDelete((table ?? entries(v6: v6))[netstatName(prefix)], v6: v6)
     }
 
     /// Deletes `prefix` only if it is really in the table. Returns true if removed.
@@ -140,14 +157,26 @@ enum RecoverySweep {
         for q in ["::/2", "4000::/2", "8000::/2", "c000::/2"] where RouteTable.deleteIfPresent(q, v6: true, table: v6) {
             cleaned.append(q)
         }
-        // The tunnel's IPv6 halves and the kill switch's eighths, only when they
-        // are our reject routes (interface routes vanished with their utun;
-        // anyone else's are not ours).
-        for q in TunnelEngine.ipv6Halves + VPNEngine.v6Eighths where RouteTable.isReject(q, v6: true) && RouteTable.deleteIfPresent(q, v6: true, table: v6) {
+        // The tunnel's IPv6 halves, only when they are our reject routes
+        // (interface routes vanished with their utun; anyone else's are not ours).
+        let e4 = RouteTable.entries(v6: false), e6 = RouteTable.entries(v6: true)
+        for q in TunnelEngine.ipv6Halves where RouteTable.isOurs(q, v6: true, in: e6) && RouteTable.deleteIfPresent(q, v6: true, table: v6) {
             cleaned.append(q)
         }
-        for q in VPNEngine.v4Eighths where RouteTable.isReject(q, v6: false) && RouteTable.deleteIfPresent(q, v6: false, table: v4) {
-            cleaned.append(q)
+        // The kill switch: kept while the VPN was on when its app or the last
+        // helper went away (`vpn-wanted`), so a crash never opens the Mac up;
+        // the app reconnects it, or turning the VPN off lifts it. Else, gone.
+        switch KillSwitchHold.helperStart(wanted: VPNEngine.stateStore.isWanted) {
+        case .hold:
+            HelperLog.warn("the VPN was on when Passthrough or its helper stopped: its kill switch stays engaged until the VPN reconnects or is turned off")
+        case .lift:
+            for q in VPNEngine.v6Eighths where RouteTable.isOurs(q, v6: true, in: e6) && RouteTable.deleteIfPresent(q, v6: true, table: v6) {
+                cleaned.append(q)
+            }
+            for q in VPNEngine.v4Eighths where RouteTable.isOurs(q, v6: false, in: e4) && RouteTable.deleteIfPresent(q, v6: false, table: v4) {
+                cleaned.append(q)
+            }
+            if PacketFilter.lift() { cleaned.append("kill switch packet filter") }
         }
         cleaned += HotspotGuard.removeAll()
         for name in Shell.capture("/sbin/ifconfig", ["-l"]).split(separator: " ").map(String.init) where name.hasPrefix("feth") {

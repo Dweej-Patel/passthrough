@@ -23,7 +23,12 @@ soon as they are ready, and you will be credited unless you would rather not be.
 In scope: anything that lets an unpaired device or another process on the Mac
 use the proxy, anything that lets an imported VPN profile execute code or read
 files as root, and anything that bypasses the kill switch or IPv6 blocking
-while a VPN is up.
+while a VPN is up. That includes routes a network can push (DHCP option 121,
+IPv6 route information), which the kill switch's pf rules are meant to defeat,
+and a crash of the app or the helper, which is meant to leave the kill switch
+in place. By design, the kill switch lets through traffic to the networks the
+Mac is directly on while *Allow local network* is on, link-local and
+link-scoped multicast traffic, and Tailscale's ranges.
 
 The remote shell (off by default) is in scope end to end: the shell listener (pre-auth connection limits, the HMAC challenge, pinned TLS 1.3, the private/Tailscale address policy, and the built-in iroh endpoint), the key grant over the control channel, how the shell key is stored on the Mac and on phones, transcripts at rest under `ShellHistory`, and the consequences of a network-reachable app holding Full Disk Access. Anything that gets a shell, or a transcript, to a device that was not paired over the cable is a vulnerability.
 

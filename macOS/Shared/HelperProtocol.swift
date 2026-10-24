@@ -63,7 +63,7 @@ public enum HelperConstants {
     public static let machService = "\(HelperConstants.identifier).helper"
     public static let plistName = "\(HelperConstants.identifier).helper.plist"
     /// Bump together with the helper binary so the app can detect stale daemons.
-    public static let version = "1.2.27"
+    public static let version = "1.2.28"
 }
 
 /// Keys of the configuration dictionary handed to `startTunnel`.
@@ -103,13 +103,19 @@ public enum VPNConfigKey {
     public static let killSwitch = "killSwitch"
     /// When the VPN carries no IPv6, reject IPv6 instead of letting it fall through to the underlay.
     public static let blockIPv6 = "blockIPv6"
+    /// The kill switch lets traffic to directly connected networks through (LAN, hotspot, AirPlay).
+    public static let allowLocalNetwork = "allowLocalNetwork"
 }
 
 /// Keys of the `vpn` sub-dictionary in `getStatus`.
 public enum VPNStatusKey {
     public static let vpn = "vpn"
-    /// "off", "starting", "connected", "reconnecting", "blocked", "failed".
+    /// "off", "starting", "connected", "reconnecting", "blocked", "failed",
+    /// or "held": no session, but the kill switch still blocks because the
+    /// app or the helper went away with the VPN on.
     public static let state = "state"
+    /// Something weakens protection, or the network is pushing routes around the VPN.
+    public static let warning = "warning"
     public static let interface = "interface"
     public static let engine = "engine"
     public static let name = "name"
