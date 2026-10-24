@@ -1,10 +1,15 @@
 package dev.dpatel.passthrough.ui.shell
 
 import android.annotation.SuppressLint
+import android.content.ClipData
+import android.content.ClipDescription
+import android.content.ClipboardManager
 import android.content.Context
 import android.graphics.Canvas
 import android.graphics.Paint
 import android.graphics.Typeface
+import android.os.Build
+import android.os.PersistableBundle
 import android.text.InputType
 import android.util.TypedValue
 import android.view.GestureDetector
@@ -17,6 +22,7 @@ import android.view.inputmethod.EditorInfo
 import android.view.inputmethod.InputConnection
 import android.view.inputmethod.InputMethodManager
 import android.widget.Scroller
+import android.widget.Toast
 import com.termux.terminal.KeyHandler
 import com.termux.terminal.TerminalEmulator
 import com.termux.terminal.TerminalOutput
@@ -58,6 +64,8 @@ class ShellTerminalView(context: Context, readOnly: Boolean, private val transcr
     var onLongPress: (() -> Unit)? = null
     /** Output being fed is a replay: see the class comment. */
     var replaying = false
+    /** The Mac this terminal shows, for "Copied from …" when a program there copies. */
+    var macName: () -> String = { "your Mac" }
 
     var ctrlLatched = false
         private set
@@ -535,10 +543,18 @@ class ShellTerminalView(context: Context, readOnly: Boolean, private val transcr
         }
 
         override fun onCopyTextToClipboard(text: String) {
-            // OSC 52 from the shell. Never from a replay or a read-only transcript.
+            // OSC 52 from the shell (Claude Code, tmux, vim). Never from a replay or a read-only transcript.
             if (readOnly || replaying) return
-            val clipboard = context.getSystemService(android.content.ClipboardManager::class.java) ?: return
-            clipboard.setPrimaryClip(android.content.ClipData.newPlainText("Terminal", text))
+            val clipboard = context.getSystemService(ClipboardManager::class.java) ?: return
+            val clip = ClipData.newPlainText("Terminal", text)
+            // Sensitive: kept out of the clipboard preview and keyboard suggestions. Android 13 has the
+            // constant; earlier, keyboards that honour it read the same key spelled out.
+            clip.description.extras = PersistableBundle().apply {
+                putBoolean(if (Build.VERSION.SDK_INT >= 33) ClipDescription.EXTRA_IS_SENSITIVE else "android.content.extra.IS_SENSITIVE", true)
+            }
+            clipboard.setPrimaryClip(clip)
+            // Android 13+ confirms every copy itself; before that, nothing would say a copy happened unasked.
+            if (Build.VERSION.SDK_INT < 33) Toast.makeText(context, "Copied from ${macName()}", Toast.LENGTH_SHORT).show()
         }
 
         // OSC 52 reads would hand the clipboard to the Mac: never answered.

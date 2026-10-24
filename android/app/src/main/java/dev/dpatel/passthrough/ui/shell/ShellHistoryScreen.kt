@@ -75,6 +75,7 @@ import dev.dpatel.passthrough.ui.PTCard
 import dev.dpatel.passthrough.ui.PTColors
 import dev.dpatel.passthrough.ui.PTSectionTitle
 import dev.dpatel.passthrough.ui.PTStatusDot
+import dev.dpatel.passthrough.ui.lock.HideFromCapture
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.yield
 import kotlin.coroutines.resume
@@ -86,6 +87,8 @@ import java.util.Date
 fun ShellHistoryScreen(vm: ShellViewModel, onDone: () -> Unit) {
     var openID by rememberSaveable { mutableStateOf<String?>(null) }
     LaunchedEffect(Unit) { vm.loadHistory() }
+    // Covers the transcripts too: they open inside this screen.
+    HideFromCapture()
     val history by vm.history.collectAsStateWithLifecycle()
     BackHandler(enabled = openID != null) { openID = null }
     val open = openID

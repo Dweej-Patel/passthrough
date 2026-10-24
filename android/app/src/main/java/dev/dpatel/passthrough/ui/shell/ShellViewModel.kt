@@ -167,15 +167,19 @@ class ShellViewModel(app: Application) : AndroidViewModel(app) {
 
     // Lock and lifecycle
 
-    /** Right after each unlock (inside the vault's 60 s window): adopt and read keys, then connect. */
+    /**
+     * Right after each unlock, whose prompt opened the vault (Android 11+: its CryptoObject; Android 10:
+     * the vault's 60 s window): adopt and read keys, then connect.
+     */
     fun onUnlocked(lock: AppLock) {
         this.lock = lock
         foreground = true
         refresh()
     }
 
-    /** The app lock closed: forget keys held in memory and hang up. Tabs stay for the next unlock. */
+    /** The app lock closed: forget keys held in memory (the vault's too) and hang up. Tabs stay for the next unlock. */
     fun onLocked() {
+        vault.lock()
         val granting = Runtime.pairedClients.value.any { it.shell != null }
         clear(ShellReach.beforeKeys(vault.supported, unlocked = false, deviceSecure = true, granting = granting) ?: ShellReach.LOCKED)
     }
@@ -258,8 +262,9 @@ class ShellViewModel(app: Application) : AndroidViewModel(app) {
         ShellReach.beforeKeys(vault.supported, unlocked = true, loaded.deviceSecure, granting.isNotEmpty())?.let { return clear(it) }
         if (loaded.anyLocked) {
             if (!relockRequested) {
-                // Outside the vault's authentication window (a grant arrived while the app was open):
-                // lock once, so the next unlock adopts and reads it.
+                // The vault needs an unlock prompt (a grant arrived while the app was open and the vault
+                // wasn't opened, or its 60 s window passed on Android 10): lock once, so the next
+                // unlock adopts and reads it.
                 relockRequested = true
                 ptLog(PtLog.Level.INFO, "shell: key needs a fresh unlock; relocking")
                 clear(ShellReach.LOCKED)

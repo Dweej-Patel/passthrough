@@ -4,7 +4,6 @@ import android.app.KeyguardManager
 import android.content.pm.PackageManager
 import android.os.Build
 import android.util.Log
-import android.view.WindowManager
 import androidx.biometric.BiometricManager
 import androidx.biometric.BiometricManager.Authenticators.BIOMETRIC_STRONG
 import androidx.biometric.BiometricManager.Authenticators.DEVICE_CREDENTIAL
@@ -57,6 +56,7 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -82,9 +82,14 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.repeatOnLifecycle
 import dev.dpatel.passthrough.R
+import dev.dpatel.passthrough.service.Runtime
 import dev.dpatel.passthrough.ui.LocalPT
 import dev.dpatel.passthrough.ui.PT
 import dev.dpatel.passthrough.ui.PTBackground
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 private const val TAG = "AppLock"
 
@@ -120,18 +125,22 @@ fun LockGate(lock: AppLock, activity: FragmentActivity, content: @Composable () 
     }
 }
 
-/** Keeps content out of the Recents thumbnail (and screenshots on API < 33). */
+/**
+ * Keeps content out of the Recents thumbnail (and screenshots on API < 33, where only
+ * FLAG_SECURE does that). The shell's screens add FLAG_SECURE on every API ([HideFromCapture]).
+ */
 @Composable
 private fun PrivacyWindow(activity: FragmentActivity) {
     DisposableEffect(activity) {
+        val window = activity.window
         if (Build.VERSION.SDK_INT >= 33) {
             activity.setRecentsScreenshotEnabled(false)
         } else {
-            activity.window.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
+            SecureFlag.acquire(window)
         }
         onDispose {
             if (Build.VERSION.SDK_INT >= 33) activity.setRecentsScreenshotEnabled(true)
-            else activity.window.clearFlags(WindowManager.LayoutParams.FLAG_SECURE)
+            else SecureFlag.release(window)
         }
     }
 }
@@ -146,6 +155,7 @@ private fun LockScreen(lock: AppLock, activity: FragmentActivity) {
     var error by remember { mutableStateOf<String?>(null) }
     val reason by lock.reason.collectAsState()
     var method by remember { mutableStateOf(unlockMethod(activity)) }
+    val scope = rememberCoroutineScope()
 
     val prompt = remember(activity) {
         BiometricPrompt(
@@ -154,6 +164,8 @@ private fun LockScreen(lock: AppLock, activity: FragmentActivity) {
             object : BiometricPrompt.AuthenticationCallback() {
                 override fun onAuthenticationSucceeded(result: BiometricPrompt.AuthenticationResult) {
                     error = null
+                    // This prompt also opened the shell key vault (Android 11+): hand it the authorized cipher.
+                    result.cryptoObject?.cipher?.let(Runtime.shellVault::authorize)
                     lock.onUnlocked()
                 }
 
@@ -183,12 +195,23 @@ private fun LockScreen(lock: AppLock, activity: FragmentActivity) {
         }
         if (!lock.beginPrompt()) return
         error = null
-        try {
-            prompt.authenticate(promptInfo())
-        } catch (e: RuntimeException) {
-            lock.endPrompt()
-            Log.w(TAG, "Could not start the prompt", e)
-            error = "Couldn't start authentication. Try again."
+        scope.launch {
+            // The shell key vault's cipher, when it has keys to open or store: this one
+            // prompt authorizes it, so several Macs never mean several prompts.
+            val cipher = try {
+                withContext(Dispatchers.IO) { runCatching { Runtime.shellVault.unlockCipher(Runtime.registry) }.getOrNull() }
+            } catch (e: CancellationException) {
+                lock.endPrompt()   // the lock screen went away first: free the prompt slot
+                throw e
+            }
+            try {
+                if (cipher != null) prompt.authenticate(promptInfo(), BiometricPrompt.CryptoObject(cipher))
+                else prompt.authenticate(promptInfo())
+            } catch (e: RuntimeException) {
+                lock.endPrompt()
+                Log.w(TAG, "Could not start the prompt", e)
+                error = "Couldn't start authentication. Try again."
+            }
         }
     }
 
