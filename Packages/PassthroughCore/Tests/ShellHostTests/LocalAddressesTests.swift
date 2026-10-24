@@ -10,6 +10,21 @@ final class LocalAddressesTests: XCTestCase {
         XCTAssertTrue(all.contains("::1"))
     }
 
+    /// Each address comes with its interface: loopback is lo0 and not a tunnel.
+    func testAddressesKnowTheirInterface() {
+        let all = LocalAddresses.withInterfaces()
+        XCTAssertEqual(all.map(\.address), LocalAddresses.all())
+        let loopback = all.first { $0.address == "127.0.0.1" }
+        XCTAssertEqual(loopback?.interface, "lo0")
+        XCTAssertEqual(loopback?.isPointToPoint, false)
+        XCTAssertTrue(all.allSatisfy { !$0.interface.isEmpty })
+        let tunnel = LocalAddresses.Interface(flags: Int32(IFF_UP | IFF_POINTOPOINT), address: "100.90.0.1",
+                                              prefixLength: 32, name: "utun4").policyAddress
+        XCTAssertTrue(tunnel.isOverlayTunnel)
+        let wifi = LocalAddresses.Interface(flags: Int32(IFF_UP), address: "100.90.0.1", prefixLength: 10, name: "en0").policyAddress
+        XCTAssertFalse(wifi.isOverlayTunnel, "carrier-grade NAT on Wi-Fi")
+    }
+
     func testAdvertisableKeepsOnlyDialableAddresses() {
         let advertised = LocalAddresses.advertisable()
         XCTAssertEqual(advertised, ShellAddressPolicy.advertisable(LocalAddresses.all()))

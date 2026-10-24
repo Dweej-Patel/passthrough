@@ -18,6 +18,10 @@ public final class ShellListener: @unchecked Sendable {
     private let requestedPort: UInt16
     private let advertise: Bool
     private let peerAllowed: @Sendable (String) -> Bool
+    private let arrivalAllowed: @Sendable (_ peer: String, _ local: String?) -> Bool
+    /// The Mac's address a connection arrived on, as its path tells (tests
+    /// make it unknown). Set before `start`.
+    var localAddress: @Sendable (NWPath?) -> String? = { $0?.localEndpoint.map(PeerAddress.host(of:)) }
     let gate: ShellGate
     /// Everything below, and every connection's state, lives on this queue.
     var queue: DispatchQueue { gate.queue }
@@ -98,28 +102,42 @@ public final class ShellListener: @unchecked Sendable {
     /// after `ready` when it returns an envelope (see `ShellGate`). The
     /// closures run on the listener's queue for every handshake, so they must
     /// not block (no Keychain reads: `ShellAccessStore` answers from memory).
-    /// `advertise` is false in tests.
+    /// `advertise` is false in tests. `peerAllowed` decides on the peer's
+    /// address; `arrivalAllowed` on the peer's and the Mac's address it
+    /// arrived on (nil while unknown: false makes the listener wait until the
+    /// connection knows it, and refuse it if it never does). Both run before
+    /// TLS. `provenAddresses` keeps the addresses that proved themselves
+    /// across launches (`HandshakeLimiter`).
     public init(identity: MacIdentity, port: UInt16 = RemoteShell.defaultPort, advertise: Bool = true,
                 manager: ShellSessionManager, transcripts: TranscriptStore,
                 shellKeys: @escaping @Sendable (String) -> [Data],
                 keyConfirmed: @escaping @Sendable (_ phoneID: String, _ key: Data) -> Void = { _, _ in },
                 phoneLabel: @escaping @Sendable (String) -> String,
                 peerAllowed: @escaping @Sendable (String) -> Bool = ShellListener.defaultPeerAllowed,
+                arrivalAllowed: @escaping @Sendable (_ peer: String, _ local: String?) -> Bool = ShellListener.defaultArrivalAllowed,
+                provenAddresses: ProvenAddressStore = MemoryProvenAddressStore(),
                 macInfo: @escaping @Sendable () -> ShellEnvelope? = { nil }) {
         self.identity = identity
         self.requestedPort = port
         self.advertise = advertise
         self.peerAllowed = peerAllowed
+        self.arrivalAllowed = arrivalAllowed
         gate = ShellGate(label: "shell-listener", manager: manager, transcripts: transcripts, shellKeys: shellKeys,
-                         keyConfirmed: keyConfirmed, phoneLabel: phoneLabel, macInfo: macInfo)
+                         keyConfirmed: keyConfirmed, phoneLabel: phoneLabel, macInfo: macInfo,
+                         provenAddresses: provenAddresses)
     }
 
     /// The address policy, with global IPv6 peers checked against the Mac's
     /// own /64s, and overlay (Tailscale-range) peers against the Mac's own
-    /// overlay addresses, as they are now (interfaces come and go).
+    /// overlay tunnel addresses, as they are now (interfaces come and go).
     public static func defaultPeerAllowed(_ host: String) -> Bool {
-        ShellAddressPolicy.isAllowedPeer(host, localAddresses: LocalAddresses.all(),
+        ShellAddressPolicy.isAllowedPeer(host, localAddresses: LocalAddresses.withInterfaces(),
                                          onLinkPrefixes: LocalAddresses.onLinkPrefixes())
+    }
+
+    /// `ShellAddressPolicy.arrivedOnItsNetwork` against the Mac's addresses as they are now.
+    public static func defaultArrivalAllowed(_ peer: String, _ local: String?) -> Bool {
+        ShellAddressPolicy.arrivedOnItsNetwork(peer: peer, local: local, localAddresses: LocalAddresses.withInterfaces())
     }
 
     public func start(onReady: (@Sendable (UInt16) -> Void)? = nil) throws {
@@ -198,17 +216,54 @@ public final class ShellListener: @unchecked Sendable {
     /// On `queue`: policy and a handshake slot before TLS, then the shared handshake.
     private func accept(_ connection: NWConnection) {
         let host = PeerAddress.host(of: connection)
-        // Known before the connection starts, for an accepted one.
-        let local = connection.currentPath?.localEndpoint.map(PeerAddress.host(of:))
+        // Known before the connection starts, for an accepted one (`AcceptedPathTests`).
+        let local = localAddress(connection.currentPath)
         // Before TLS: a peer outside the private ranges gets nothing at all.
-        guard !gate.stopped, peerAllowed(host), ShellAddressPolicy.arrivedOnItsNetwork(peer: host, local: local) else {
+        // One the policy refuses only for want of `local` waits for it (`awaitArrival`).
+        let arrived = arrivalAllowed(host, local)
+        guard !gate.stopped, peerAllowed(host), arrived || local == nil else {
             ptLog(.warning, "shell: refused a connection from outside the allowed networks")
             connection.cancel(); return
         }
         guard let admission = gate.admit(host: host, abandon: { connection.cancel() }) else {
             connection.cancel(); return
         }
+        guard arrived else { return awaitArrival(connection, host: host, admission: admission) }
         gate.runHandshake(admission, stream: ConnectionStream(connection, queue: queue), expectHello: false)
+    }
+
+    /// On `queue`: a connection whose arrival must be known to be let in, and
+    /// isn't yet. Started, it learns its path (before TLS completes, as a
+    /// rule): then it goes on or is dropped. One still without a local
+    /// address once TLS is up is dropped before anything is read from it.
+    /// Its slot is held meanwhile, so the timeout bounds the wait.
+    private func awaitArrival(_ connection: NWConnection, host: String, admission: ShellGate.Admission) {
+        let decided = Locked(false), localAddress = self.localAddress
+        let decide: @Sendable (String?, Bool) -> Void = { [weak self] local, final in
+            guard let self, !decided.get(), local != nil || final else { return }
+            decided.set(true)
+            connection.pathUpdateHandler = nil
+            connection.stateUpdateHandler = nil
+            guard self.arrivalAllowed(host, local) else {
+                ptLog(.warning, "shell: refused a connection that did not arrive on its network")
+                self.gate.abandon(admission); connection.cancel(); return
+            }
+            self.gate.runHandshake(admission, stream: ConnectionStream(connection, queue: self.queue), expectHello: false)
+        }
+        connection.pathUpdateHandler = { path in decide(localAddress(path), false) }
+        connection.stateUpdateHandler = { [weak self] state in
+            switch state {
+            case .ready:
+                decide(localAddress(connection.currentPath), true)
+            case .failed, .cancelled:
+                guard !decided.get() else { return }
+                decided.set(true)
+                self?.gate.abandon(admission)
+            default:
+                break
+            }
+        }
+        connection.start(queue: queue)
     }
 }
 
@@ -318,10 +373,11 @@ final class ShellGate: @unchecked Sendable {
          keyConfirmed: @escaping @Sendable (_ phoneID: String, _ key: Data) -> Void,
          phoneLabel: @escaping @Sendable (String) -> String,
          macInfo: @escaping @Sendable () -> ShellEnvelope?,
-         handshakeTimeout: TimeInterval = WirelessLink.handshakeTimeout) {
+         handshakeTimeout: TimeInterval = WirelessLink.handshakeTimeout,
+         provenAddresses: ProvenAddressStore = MemoryProvenAddressStore()) {
         queue = DispatchQueue(label: "\(PassthroughProtocol.identifier).\(label)")
         work = DispatchQueue(label: "\(PassthroughProtocol.identifier).\(label)-work")
-        limiter = HandshakeLimiter(queue: queue, timeout: handshakeTimeout)
+        limiter = HandshakeLimiter(queue: queue, timeout: handshakeTimeout, store: provenAddresses)
         self.manager = manager
         self.transcripts = transcripts
         self.shellKeys = shellKeys

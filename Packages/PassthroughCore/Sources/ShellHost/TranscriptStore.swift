@@ -20,6 +20,11 @@ public final class TranscriptStore: @unchecked Sendable {
     private let castLimit: Int64
     private let sizeCheckpoint: Int64
     private let lock = NSLock()
+    /// Held for a whole `prune`, never by `begin`.
+    private let pruning = NSLock()
+    /// Runs in `prune` once it has seen which sessions are recording, before
+    /// it reads the folder (tests: a session that begins mid-scan).
+    var afterPruneSnapshot: (() -> Void)?
     /// Writers still recording, so a deletion can stop them from writing again.
     private var live: [String: WeakWriter] = [:]
     /// Decoded entries by id, with the `.json` file's modification date and
@@ -278,14 +283,22 @@ public final class TranscriptStore: @unchecked Sendable {
     /// recorded, or just opening, is never deleted, whatever its age or size.
     /// One the Mac never saw end (it quit mid-session) counts as ending when
     /// it was last written. Returns how many sessions were deleted.
+    ///
+    /// The folder is read and every entry decoded outside the lock `begin`
+    /// takes, so opening a shell never waits on the scan; the lock is held
+    /// only to see which sessions are recording and around the deletes,
+    /// where each one is checked again: a session begun mid-scan stays.
     @discardableResult
     public func prune(endedBefore cutoff: Date?, maxBytes: Int64 = TranscriptStore.maxTotalBytes) -> Int {
+        // One prune at a time, so two never delete on the same stale scan.
+        pruning.lock(); defer { pruning.unlock() }
         let keys: [URLResourceKey] = [.contentModificationDateKey, .fileSizeKey]
-        let files = (try? FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: keys)) ?? []
         struct Finished { var files: [URL] = []; var bytes: Int64 = 0; var lastWrite = Date.distantPast; var ended: Date? }
-        // One critical section with `begin`, as `deleteFinished`: a session opening meanwhile is live.
-        lock.lock(); defer { lock.unlock() }
-        let recording = Set(live.compactMap { $0.value.writer?.isRecording == true ? $0.key : nil })
+        lock.lock()
+        let recordingAtStart = Set(live.compactMap { $0.value.writer?.isRecording == true ? $0.key : nil })
+        lock.unlock()
+        afterPruneSnapshot?()
+        let files = (try? FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: keys)) ?? []
         var total: Int64 = 0
         var finished: [String: Finished] = [:]
         for file in files where file.pathExtension == "cast" || file.pathExtension == "json" {
@@ -293,7 +306,7 @@ public final class TranscriptStore: @unchecked Sendable {
             let size = Int64(values?.fileSize ?? 0)
             total += size
             let id = file.deletingPathExtension().lastPathComponent
-            guard !recording.contains(id) else { continue }
+            guard !recordingAtStart.contains(id) else { continue }
             var item = finished[id, default: Finished()]
             item.files.append(file)
             item.bytes += size
@@ -306,10 +319,14 @@ public final class TranscriptStore: @unchecked Sendable {
             finished[id] = item
         }
         var deleted = 0
+        // One critical section with `begin`, as `deleteFinished`: a session opening now waits, one opened is live.
+        lock.lock(); defer { lock.unlock() }
         // Oldest first: once one is neither expired nor needed for room, no later one is.
         for (id, item) in finished.sorted(by: { ($0.value.ended ?? $0.value.lastWrite) < ($1.value.ended ?? $1.value.lastWrite) }) {
             let expired = cutoff.map { (item.ended ?? item.lastWrite) < $0 } ?? false
             guard expired || total > maxBytes else { break }
+            // Begun since the snapshot (its files were scanned as finished): it stays.
+            if live[id]?.writer?.isRecording == true { continue }
             item.files.forEach { try? FileManager.default.removeItem(at: $0) }
             total -= item.bytes
             live[id] = nil

@@ -22,8 +22,9 @@ public final class WirelessListener: @unchecked Sendable {
     private let queue = DispatchQueue(label: "\(PassthroughProtocol.identifier).wireless-listener")
     private var listener: NWListener?
     private var stopped = false
+    private let provenAddresses: ProvenAddressStore
     /// Unproven connections, few at once and from one address (`HandshakeLimiter`).
-    private lazy var handshakes = HandshakeLimiter(queue: queue)
+    private lazy var handshakes = HandshakeLimiter(queue: queue, store: provenAddresses)
     /// A phone's first line (its proof, plus its streams when resuming). Read
     /// before it has proved anything, so far below the general line limit.
     static let proofLineLimit = 128 * 1024
@@ -37,12 +38,16 @@ public final class WirelessListener: @unchecked Sendable {
     public private(set) var port: UInt16?
 
     /// `linkKey` returns the key shared with the phone of that ID, if linked.
-    /// `advertise` is false in tests (no Bonjour).
-    public init(identity: MacIdentity, macTag: String, advertise: Bool = true, peerToPeer: Bool = false, linkKey: @escaping @Sendable (String) -> Data?) {
+    /// `advertise` is false in tests (no Bonjour). `provenAddresses` keeps
+    /// the addresses that proved themselves across launches (`HandshakeLimiter`).
+    public init(identity: MacIdentity, macTag: String, advertise: Bool = true, peerToPeer: Bool = false,
+                provenAddresses: ProvenAddressStore = MemoryProvenAddressStore(),
+                linkKey: @escaping @Sendable (String) -> Data?) {
         self.identity = identity
         self.macTag = macTag
         self.advertise = advertise
         self.peerToPeer = peerToPeer
+        self.provenAddresses = provenAddresses
         self.linkKey = linkKey
     }
 

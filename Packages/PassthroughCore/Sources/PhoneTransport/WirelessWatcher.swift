@@ -34,6 +34,7 @@ public final class WirelessWatcher: DeviceWatcher {
     private let macTag: @Sendable () -> String
     private let identity: () throws -> MacIdentity
     private let phones: @Sendable () -> [WirelessPhone]
+    private let provenAddresses: ProvenAddressStore
     /// Also listen over Apple peer-to-peer Wi-Fi; takes effect on the next start.
     public var peerToPeer = false
     private var listener: WirelessListener?
@@ -41,17 +42,22 @@ public final class WirelessWatcher: DeviceWatcher {
     private var order: [String] = []
 
     /// `phones` must be safe to call from any thread (the listener asks for keys).
-    public init(macTag: @escaping @Sendable () -> String, identity: @escaping () throws -> MacIdentity, phones: @escaping @Sendable () -> [WirelessPhone]) {
+    /// `provenAddresses` is every listener's, across restarts (`WirelessListener`).
+    public init(macTag: @escaping @Sendable () -> String, identity: @escaping () throws -> MacIdentity,
+                phones: @escaping @Sendable () -> [WirelessPhone],
+                provenAddresses: ProvenAddressStore = MemoryProvenAddressStore()) {
         self.macTag = macTag
         self.identity = identity
         self.phones = phones
+        self.provenAddresses = provenAddresses
     }
 
     public func start() {
         guard listener == nil else { return }
         do {
             let phones = self.phones
-            let listener = WirelessListener(identity: try identity(), macTag: macTag(), peerToPeer: peerToPeer) { id in
+            let listener = WirelessListener(identity: try identity(), macTag: macTag(), peerToPeer: peerToPeer,
+                                            provenAddresses: provenAddresses) { id in
                 phones().first { $0.phoneID == id }?.linkKey
             }
             listener.onLink = { [weak self] link in Task { @MainActor in self?.linked(link) } }

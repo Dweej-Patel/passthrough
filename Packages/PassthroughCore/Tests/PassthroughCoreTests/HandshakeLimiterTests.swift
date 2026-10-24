@@ -36,17 +36,124 @@ final class HandshakeLimiterTests: XCTestCase {
         }
     }
 
-    /// Link-local (AWDL), ULA and on-link global addresses are counted by
-    /// /64 too: a stranger taking many addresses on the link gets one share.
-    func testNeighboursShareTheirSlash64() {
+    /// ULA and on-link global addresses are counted by /64 too: a stranger
+    /// taking many addresses on the link gets one share.
+    func testULANeighboursShareTheirSlash64() {
         queue.sync {
             let limiter = HandshakeLimiter(queue: queue, timeout: 60, maxTotal: 16, maxPerHost: 2, reservedForProven: 0)
-            for prefix in ["fe80::", "fd00:1:2:3::"] {
-                XCTAssertNotNil(limiter.acquire(host: prefix + "1%awdl0") {})
-                XCTAssertNotNil(limiter.acquire(host: prefix + "2%en0") {})
-                XCTAssertNil(limiter.acquire(host: prefix + "3") {}, prefix)
-            }
+            XCTAssertNotNil(limiter.acquire(host: "fd00:1:2:3::1%en0") {})
+            XCTAssertNotNil(limiter.acquire(host: "fd00:1:2:3::2") {})
+            XCTAssertNil(limiter.acquire(host: "fd00:1:2:3::3") {})
         }
+    }
+
+    /// Every AWDL or LAN neighbour is in fe80::/64, so link-local peers are
+    /// counted by address: a chatty neighbour holding its share leaves the
+    /// owner's phone (not yet proven, say after a relaunch) its own.
+    func testLinkLocalPeersAreCountedByAddress() {
+        queue.sync {
+            let limiter = HandshakeLimiter(queue: queue, timeout: 60, maxTotal: 16, maxPerHost: 2, reservedForProven: 0)
+            XCTAssertNotNil(limiter.acquire(host: "fe80::1%awdl0") {})
+            XCTAssertNotNil(limiter.acquire(host: "fe80::1%awdl0") {})
+            XCTAssertNil(limiter.acquire(host: "fe80::1%en0") {}, "one address, whatever the link")
+            XCTAssertNotNil(limiter.acquire(host: "fe80::2%awdl0") {}, "another neighbour has its own share")
+            XCTAssertNotNil(limiter.acquire(host: "febf::9") {}, "all of fe80::/10")
+            XCTAssertEqual(HandshakeLimiter.bucket("fe80::1%awdl0"), HandshakeLimiter.bucket("fe80::1"))
+            XCTAssertNotEqual(HandshakeLimiter.bucket("fe80::1"), HandshakeLimiter.bucket("fe80::2"))
+            XCTAssertEqual(HandshakeLimiter.bucket("2001:db8::1"), HandshakeLimiter.bucket("2001:db8::2"))
+        }
+    }
+
+    /// Proven addresses outlive the limiter (an app relaunch) through its
+    /// store: a new limiter on the same store keeps their reserved slots.
+    func testProvenAddressesSurviveARelaunch() {
+        let store = MemoryProvenAddressStore()
+        queue.sync {
+            let first = HandshakeLimiter(queue: queue, timeout: 60, maxTotal: 2, maxPerHost: 2, reservedForProven: 1, store: store)
+            first.proven("192.168.1.5")
+            first.proven("fe80::77%awdl0")
+            first.proven("relay")
+        }
+        XCTAssertEqual(Set(store.load().keys), ["192.168.1.5", "fe80::77"])
+        queue.sync {
+            let relaunched = HandshakeLimiter(queue: queue, timeout: 60, maxTotal: 2, maxPerHost: 2, reservedForProven: 1, store: store)
+            XCTAssertTrue(relaunched.isProven("192.168.1.5"))
+            XCTAssertTrue(relaunched.isProven("fe80::77"))
+            XCTAssertNotNil(relaunched.acquire(host: "192.168.1.9") {})
+            XCTAssertNil(relaunched.acquire(host: "192.168.1.10") {}, "the shared slot is taken")
+            XCTAssertNotNil(relaunched.acquire(host: "192.168.1.5") {}, "the proven address still has the reserved one")
+        }
+    }
+
+    /// What is read back drops expired entries, anything but addresses, and
+    /// all but the newest `provenLimit`; a date ahead of the clock counts as now.
+    func testStoredProvenAddressesAreCheckedOnLoad() {
+        let now = Date(timeIntervalSince1970: 100_000_000)
+        var table: [String: Date] = [
+            "10.0.0.1": now - 60,
+            "10.0.0.2": now - HandshakeLimiter.provenFor - 1,
+            "relay": now,
+            "10.0.0.3": now + 10 * HandshakeLimiter.provenFor,
+        ]
+        for i in 0..<(HandshakeLimiter.provenLimit + 10) {
+            table["10.1.\(i / 256).\(i % 256)"] = now - 3600 - TimeInterval(i)
+        }
+        let kept = HandshakeLimiter.kept(table, at: now)
+        XCTAssertEqual(kept.count, HandshakeLimiter.provenLimit)
+        XCTAssertEqual(kept["10.0.0.1"], now - 60)
+        XCTAssertNil(kept["10.0.0.2"], "expired")
+        XCTAssertNil(kept["relay"])
+        XCTAssertEqual(kept["10.0.0.3"], now, "from the future: as of now")
+        XCTAssertNotNil(kept["10.1.0.0"])
+        XCTAssertNil(kept["10.1.1.9"], "the oldest went past the cap")
+    }
+
+    /// An address proven again is written down only once its stored date is
+    /// an hour old; a new one at once.
+    func testProvenAgainIsNotRewrittenEveryTime() {
+        final class Counting: ProvenAddressStore, @unchecked Sendable {
+            var saves = 0
+            var table: [String: Date] = [:]
+            func load() -> [String: Date] { table }
+            func save(_ proven: [String: Date]) { saves += 1; table = proven }
+        }
+        let store = Counting()
+        let clock = Locked(Date(timeIntervalSince1970: 1_000_000))
+        queue.sync {
+            let limiter = HandshakeLimiter(queue: queue, timeout: 60, store: store, now: { clock.get() })
+            limiter.proven("192.168.1.5")
+            limiter.proven("192.168.1.5")
+            XCTAssertEqual(store.saves, 1)
+            limiter.proven("192.168.1.6")
+            XCTAssertEqual(store.saves, 2)
+            clock.set(clock.get() + HandshakeLimiter.resaveInterval)
+            limiter.proven("192.168.1.5")
+            XCTAssertEqual(store.saves, 3)
+            XCTAssertEqual(store.table["192.168.1.5"], clock.get())
+        }
+    }
+
+    /// The file store reads back what it wrote, keeps it 0600, and treats a
+    /// missing or damaged file as empty.
+    func testFileStoreRoundTripsPrivately() throws {
+        let folder = FileManager.default.temporaryDirectory.appendingPathComponent("ProvenStore-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let url = folder.appendingPathComponent("proven.json")
+        let store = FileProvenAddressStore(url: url)
+        XCTAssertEqual(store.load(), [:])
+        let table = ["192.168.1.5": Date(timeIntervalSince1970: 1_000_000), "fe80::77": Date(timeIntervalSince1970: 2_000_000)]
+        store.save(table)
+        XCTAssertEqual(store.load(), table, "load waits for the write")
+        XCTAssertEqual(FileProvenAddressStore(url: url).load(), table)
+        let mode = try FileManager.default.attributesOfItem(atPath: url.path)[.posixPermissions] as? Int
+        XCTAssertEqual(mode, 0o600)
+        let folderMode = try FileManager.default.attributesOfItem(atPath: folder.path)[.posixPermissions] as? Int
+        XCTAssertEqual(folderMode, 0o700)
+        store.save([:])
+        XCTAssertEqual(store.load(), [:])
+        try Data("not json".utf8).write(to: url)
+        XCTAssertEqual(store.load(), [:])
+        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: folder.path), ["proven.json"], "no temporary files left")
     }
 
     /// Public IPv4 peers are counted by /24; private, Tailscale and
