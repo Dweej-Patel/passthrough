@@ -465,7 +465,7 @@ final class ControlServerTests: XCTestCase {
         try send(grant, on: client)
         XCTAssertEqual(try sync(client).map(\.t), [], "no linked, shellGranted or status before auth")
         XCTAssertTrue(registry.linkCredentials().isEmpty)
-        XCTAssertNil(registry.pendingShellKey(clientID: "mac1"))
+        XCTAssertNil(registry.sealedPendingShellKey(clientID: "mac1"))
         XCTAssertTrue(server.connectedMacs.isEmpty)
 
         // A proof made with another token (or over other nonces) is refused.

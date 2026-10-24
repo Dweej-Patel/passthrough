@@ -124,6 +124,16 @@ class ProtocolFixtureTests {
         }
     }
 
+    /** Sealed by the Swift implementation: the Android one opens it, byte for byte the same format. */
+    @Test fun shellKeySealVector() {
+        val f = fixtures["shellKeySeal"]!!.jsonObject
+        fun hex(name: String) = f[name]!!.jsonPrimitive.content.chunked(2).map { it.toInt(16).toByte() }.toByteArray()
+        val recipientPrivate = ShellKeySeal.privateKeyFromScalar(hex("recipientPrivateKey"))
+        val recipientPublic = ShellKeySeal.publicKey(hex("recipientPublicKey"))!!
+        val clientID = f["clientID"]!!.jsonPrimitive.content
+        org.junit.Assert.assertArrayEquals(hex("key"), ShellKeySeal.open(hex("sealed"), clientID, recipientPrivate, recipientPublic))
+    }
+
     @Test fun localDestinations() {
         val f = fixtures["localDestinations"]!!.jsonObject
         for (d in f["addresses"]!!.jsonArray.map { it.jsonObject }) {

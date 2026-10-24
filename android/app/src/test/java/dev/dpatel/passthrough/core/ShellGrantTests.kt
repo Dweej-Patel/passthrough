@@ -19,6 +19,7 @@ class ShellGrantTests {
     private val store = MemoryStore()
     private val secrets = MemorySecrets()
     private val registry = PairingRegistry(store, secrets = secrets)
+    private val sealing = registry.withSealing()
     private val control = ControlServer(0, 7890, registry, ByteCounter()) { DeviceStatus("Pixel", "5G", "Carrier", 0.8, "background") }
     private val cert = "b".repeat(64)
     private var socket: Socket? = null
@@ -75,10 +76,36 @@ class ShellGrantTests {
         assertEquals(ControlEnvelope.SHELL_GRANTED, reply.t)
         assertEquals(registry.phoneID, reply.phoneID)
         assertNull("no grant ID sent, none echoed", reply.grantID)
-        assertArrayEquals(k, registry.pendingShellKey("mac1"))
+        assertArrayEquals(k, registry.openedPendingShellKey("mac1", sealing))
+        assertFalse("never stored as it came", k.contentEquals(registry.sealedPendingShellKey("mac1")))
         assertEquals(ShellGrant(cert, 7893, listOf("192.168.1.5", "fe80::1"), "MacBook"), registry.clients.first().shell)
         registry.clearPendingShellKey("mac1")
-        assertNull(registry.pendingShellKey("mac1"))
+        assertNull(registry.sealedPendingShellKey("mac1"))
+    }
+
+    /** Before the app has published its sealing key, a grant is neither stored nor answered; the Mac grants again later. */
+    @Test fun grantWithoutSealingKeyIsNotStoredOrAnswered() {
+        registry.publishShellSealingKey(null)
+        pair()
+        grant(key())
+        // A ping round trip: the grant before it has been handled.
+        send(ControlEnvelope(ControlEnvelope.PING))
+        val seen = ArrayList<String>()
+        do {
+            val m = receive()
+            seen += m.t
+        } while (m.t != ControlEnvelope.PONG)
+        assertFalse(ControlEnvelope.SHELL_GRANTED in seen)
+        assertNull(registry.sealedPendingShellKey("mac1"))
+        assertNull(registry.clients.first().shell)
+        assertFalse(registry.grantShell("mac1", ShellGrant(cert, 7893, emptyList(), "M"), key()))
+
+        // Once the app has opened and published its key, the Mac's next grant lands.
+        val sealing = registry.withSealing()
+        val k = key()
+        grant(k)
+        grantedReply()
+        assertArrayEquals(k, registry.openedPendingShellKey("mac1", sealing))
     }
 
     private fun grantedReply(): ControlEnvelope {
@@ -100,7 +127,7 @@ class ShellGrantTests {
         val id = "g".repeat(ControlEnvelope.MAX_GRANT_ID_LENGTH + 1)
         send(ControlEnvelope(ControlEnvelope.SHELL_GRANT, shellKey = b64(key()), certSHA256 = cert, shellPort = 7893, macName = "M", grantID = id))
         assertNull("the grant is stored; the bad ID is not echoed", grantedReply().grantID)
-        assertNotNull(registry.pendingShellKey("mac1"))
+        assertNotNull(registry.sealedPendingShellKey("mac1"))
     }
 
     @Test fun grantWithIrohFieldsStoresTokenAsSecret() {
@@ -117,7 +144,7 @@ class ShellGrantTests {
         grantIroh(relay = "http://relay.example.com/")
         sync()
         assertEquals(ShellGrant(cert, 7893, listOf("192.168.1.5"), "MacBook"), registry.clients.first().shell)
-        assertNotNull(registry.pendingShellKey("mac1"))
+        assertNotNull(registry.sealedPendingShellKey("mac1"))
         assertNull(registry.relayToken("mac1"))
     }
 
@@ -132,6 +159,7 @@ class ShellGrantTests {
 
     @Test fun updateShellInfoKeepsKeyAndCert() {
         val reg = PairingRegistry(MemoryStore(), secrets = secrets)
+        val regSealing = reg.withSealing()
         val code = reg.issueCode().code
         reg.pair(code, "mac1", "M")
         assertFalse(reg.updateShellInfo("mac1", irohID, null, null, null))
@@ -143,7 +171,7 @@ class ShellGrantTests {
         assertEquals("https://r.example.com/", g.irohRelay)
         assertEquals(16, g.addresses.size)
         assertEquals(cert, g.certSHA256)
-        assertArrayEquals(k, reg.pendingShellKey("mac1"))
+        assertArrayEquals(k, reg.openedPendingShellKey("mac1", regSealing))
         assertEquals("tk", reg.relayToken("mac1"))
 
         // Invalid iroh details change nothing about the stored ones, but valid addresses still apply.
@@ -170,7 +198,7 @@ class ShellGrantTests {
     }
 
     @Test fun revokeAllDeletesRelayTokens() {
-        val reg = PairingRegistry(MemoryStore(), secrets = secrets)
+        val reg = PairingRegistry(MemoryStore(), secrets = secrets).apply { withSealing() }
         for (id in listOf("a", "b")) {
             reg.pair(reg.issueCode().code, id, id)
             assertTrue(reg.grantShell(id, ShellGrant(cert, 7893, emptyList(), id, irohID), key(), "tok-$id"))
@@ -198,7 +226,7 @@ class ShellGrantTests {
         hello()
         grant()
         sync()
-        assertNull(registry.pendingShellKey("mac1"))
+        assertNull(registry.sealedPendingShellKey("mac1"))
         assertTrue(registry.clients.isEmpty())
     }
 
@@ -209,7 +237,7 @@ class ShellGrantTests {
         grant(port = 0)
         grant(port = 65536)
         sync()
-        assertNull(registry.pendingShellKey("mac1"))
+        assertNull(registry.sealedPendingShellKey("mac1"))
         assertNull(registry.clients.first().shell)
         // The channel survived: a valid grant still works.
         grant()
@@ -219,7 +247,7 @@ class ShellGrantTests {
     }
 
     @Test fun revokeDeletesShellGrant() {
-        val reg = PairingRegistry(MemoryStore(), secrets = secrets)
+        val reg = PairingRegistry(MemoryStore(), secrets = secrets).apply { withSealing() }
         for (id in listOf("mac1", "mac2")) {
             val code = reg.issueCode().code
             assertTrue(reg.pair(code, id, id) is PairingRegistry.PairResult.Success)
@@ -228,10 +256,10 @@ class ShellGrantTests {
         assertFalse(reg.grantShell("unknown", ShellGrant(cert, 7893, emptyList(), "x"), key()))
         assertNull(secrets.read("shell.pending.unknown"))
         reg.revoke("mac1")
-        assertNull(reg.pendingShellKey("mac1"))
-        assertNotNull(reg.pendingShellKey("mac2"))
+        assertNull(reg.sealedPendingShellKey("mac1"))
+        assertNotNull(reg.sealedPendingShellKey("mac2"))
         reg.revokeAll()
-        assertNull(reg.pendingShellKey("mac2"))
+        assertNull(reg.sealedPendingShellKey("mac2"))
         assertTrue(reg.clients.isEmpty())
     }
 
@@ -241,7 +269,7 @@ class ShellGrantTests {
             override fun write(account: String, data: ByteArray) = false
             override fun delete(account: String) {}
         }
-        val reg = PairingRegistry(MemoryStore(), secrets = refusing)
+        val reg = PairingRegistry(MemoryStore(), secrets = refusing).apply { withSealing() }
         assertTrue(reg.pair(reg.issueCode().code, "mac1", "M") is PairingRegistry.PairResult.Success)
         assertFalse(reg.grantShell("mac1", ShellGrant(cert, 7893, emptyList(), "M"), key()))
         assertNull(reg.clients.first().shell)

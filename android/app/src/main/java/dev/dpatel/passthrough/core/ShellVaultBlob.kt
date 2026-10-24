@@ -19,20 +19,30 @@ import javax.crypto.spec.SecretKeySpec
  *
  * - wrapped data key: `[iv 12][AES-GCM(data key 32) + tag]`, by the Keystore key
  * - sealed blob: `[iv 12][AES-GCM(payload) + tag]`, by the data key, with [AAD]
- * - payload: `[version 1][count u16]`, then per Mac `[id length u16][id UTF-8][key length u16][key]`
+ * - payload: `[version 2][count u16]`, then per Mac `[id length u16][id UTF-8][key length u16][key]`,
+ *   then `[length u16][sealing key]`: the private half of the key pending grants are sealed to
+ *   ([ShellKeySeal], PKCS#8; length 0 when there is none yet). Version 1 had no sealing key.
  */
 object ShellVaultBlob {
-    const val VERSION = 1
+    const val VERSION = 2
     const val DATA_KEY_SIZE = 32
     const val IV_SIZE = 12
     private const val TAG_BITS = 128
     private const val TRANSFORM = "AES/GCM/NoPadding"
     /** Binds the sealed blob to this use: it can't pass for anything else sealed with the same key. */
-    private val AAD = "passthrough.shell.vault.$VERSION".toByteArray()
+    private val AAD = "passthrough.shell.vault.1".toByteArray()
+
+    /** What the blob holds: every Mac's key, and the sealing key's private half. */
+    class Contents(val keys: Map<String, ByteArray>, val sealingKey: ByteArray? = null)
 
     fun newDataKey(random: SecureRandom = SecureRandom()): ByteArray = ByteArray(DATA_KEY_SIZE).also(random::nextBytes)
 
-    fun encode(keys: Map<String, ByteArray>): ByteArray {
+    fun encode(keys: Map<String, ByteArray>): ByteArray = encode(Contents(keys))
+
+    fun encode(contents: Contents): ByteArray {
+        val keys = contents.keys
+        val sealing = contents.sealingKey ?: ByteArray(0)
+        require(sealing.size <= 0xFFFF)
         val out = ByteArrayOutputStream()
         DataOutputStream(out).use { d ->
             d.writeByte(VERSION)
@@ -43,14 +53,16 @@ object ShellVaultBlob {
                 d.writeShort(name.size); d.write(name)
                 d.writeShort(key.size); d.write(key)
             }
+            d.writeShort(sealing.size); d.write(sealing)
         }
         return out.toByteArray()
     }
 
-    /** Null when [payload] isn't a whole, well-formed payload of this version. */
-    fun decode(payload: ByteArray): Map<String, ByteArray>? = try {
+    /** Null when [payload] isn't a whole, well-formed payload of this version or version 1. */
+    fun decode(payload: ByteArray): Contents? = try {
         DataInputStream(payload.inputStream()).use { d ->
-            if (d.readUnsignedByte() != VERSION) return null
+            val version = d.readUnsignedByte()
+            if (version != 1 && version != VERSION) return null
             val count = d.readUnsignedShort()
             val keys = LinkedHashMap<String, ByteArray>(count)
             repeat(count) {
@@ -59,23 +71,27 @@ object ShellVaultBlob {
                 if (id.isEmpty() || id in keys) return null
                 keys[id] = key
             }
+            val sealing = if (version >= 2) ByteArray(d.readUnsignedShort()).also(d::readFully).takeIf { it.isNotEmpty() } else null
             if (d.read() != -1) return null   // trailing bytes: not what was written
-            keys
+            Contents(keys, sealing)
         }
     } catch (_: IOException) {
         null
     }
 
-    fun seal(dataKey: ByteArray, keys: Map<String, ByteArray>, random: SecureRandom = SecureRandom()): ByteArray {
+    fun seal(dataKey: ByteArray, keys: Map<String, ByteArray>, random: SecureRandom = SecureRandom()): ByteArray =
+        seal(dataKey, Contents(keys), random)
+
+    fun seal(dataKey: ByteArray, contents: Contents, random: SecureRandom = SecureRandom()): ByteArray {
         val iv = ByteArray(IV_SIZE).also(random::nextBytes)
         val cipher = Cipher.getInstance(TRANSFORM)
         cipher.init(Cipher.ENCRYPT_MODE, SecretKeySpec(dataKey, "AES"), GCMParameterSpec(TAG_BITS, iv))
         cipher.updateAAD(AAD)
-        return iv + cipher.doFinal(encode(keys))
+        return iv + cipher.doFinal(encode(contents))
     }
 
     /** Null when [sealed] wasn't sealed with [dataKey] (or was altered) or doesn't decode. */
-    fun open(dataKey: ByteArray, sealed: ByteArray): Map<String, ByteArray>? {
+    fun open(dataKey: ByteArray, sealed: ByteArray): Contents? {
         if (sealed.size < IV_SIZE + TAG_BITS / 8) return null
         return try {
             val cipher = Cipher.getInstance(TRANSFORM)

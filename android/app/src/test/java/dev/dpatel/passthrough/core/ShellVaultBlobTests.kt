@@ -10,6 +10,22 @@ class ShellVaultBlobTests {
     private val a = ByteArray(32) { it.toByte() }
     private val b = ByteArray(32) { (it * 3).toByte() }
 
+    private fun assertKeys(expected: Map<String, ByteArray>, actual: ShellVaultBlob.Contents?) = assertKeys(expected, actual?.keys)
+
+    @Test fun sealingKeyTravelsWithTheKeysAndVersion1StillReads() {
+        val sealing = ShellKeySeal.encodeKeyPair(ShellKeySeal.newKeyPair())
+        val dataKey = ShellVaultBlob.newDataKey()
+        val opened = ShellVaultBlob.open(dataKey, ShellVaultBlob.seal(dataKey, ShellVaultBlob.Contents(mapOf("mac" to a), sealing)))
+        assertKeys(mapOf("mac" to a), opened)
+        assertArrayEquals(sealing, opened!!.sealingKey)
+        assertNull("none yet", ShellVaultBlob.decode(ShellVaultBlob.encode(mapOf("mac" to a)))!!.sealingKey)
+        // What the vault wrote before it held a sealing key: version 1, no trailing field.
+        val v1 = byteArrayOf(1, 0, 1) + entry("mac", a)
+        val old = ShellVaultBlob.decode(v1)
+        assertKeys(mapOf("mac" to a), old)
+        assertNull(old!!.sealingKey)
+    }
+
     private fun assertKeys(expected: Map<String, ByteArray>, actual: Map<String, ByteArray>?) {
         assertNotNull(actual)
         assertEquals(expected.keys, actual!!.keys)
@@ -27,7 +43,7 @@ class ShellVaultBlobTests {
         assertNull(ShellVaultBlob.decode(ByteArray(0)))
         assertNull("truncated", ShellVaultBlob.decode(good.copyOf(good.size - 1)))
         assertNull("trailing bytes", ShellVaultBlob.decode(good + 0))
-        assertNull("other version", ShellVaultBlob.decode(byteArrayOf(2) + good.copyOfRange(1, good.size)))
+        assertNull("other version", ShellVaultBlob.decode(byteArrayOf(3) + good.copyOfRange(1, good.size)))
         // Two entries for one Mac: not something the vault writes.
         val twice = byteArrayOf(1, 0, 2) + entry("mac", a) + entry("mac", b)
         assertNull(ShellVaultBlob.decode(twice))

@@ -215,6 +215,13 @@ public final class ControlServer: @unchecked Sendable {
             let grant = ShellGrant(certSHA256: cert.lowercased(), port: port, addresses: Array((message.addresses ?? []).prefix(IrohInfo.maxAddresses)),
                                    macName: String((message.macName ?? mac.name).prefix(64)),
                                    irohID: iroh.id, irohRelay: iroh.relay)
+            // The key is only ever kept sealed to the app's key. Before the app has made
+            // one, no answer: the Mac keeps the key unrecorded and grants again later
+            // (with backoff, and on every new cable connection).
+            guard registry.shellSealingKey != nil else {
+                ptLog(.info, "shell: open Passthrough once to set up Remote shell with \(mac.name)")
+                return []
+            }
             guard registry.grantShell(clientID: mac.id, grant: grant, shellKey: key, relayToken: iroh.token) else {
                 ptLog(.error, "Could not store the shell key from \(mac.name)")
                 return []
