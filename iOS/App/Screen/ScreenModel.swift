@@ -248,7 +248,8 @@ final class ScreenModel: ObservableObject {
             if size != screenSize { screenSize = size }
             onFrame?(image)
         case let .clipboard(text):
-            if !text.isEmpty { UIPasteboard.general.string = text }
+            // Screen Sharing sends the Mac's clipboard whenever it changes, whatever is on it.
+            if !text.isEmpty, let macID, ScreenClipboardSetting.isOn(macID: macID) { MacClipboard.put(text) }
         case .bell:
             UINotificationFeedbackGenerator().notificationOccurred(.warning)
         case let .closed(failure):

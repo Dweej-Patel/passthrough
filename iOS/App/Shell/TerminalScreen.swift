@@ -25,6 +25,9 @@ final class ShellTerminalController: ObservableObject {
     private let shell: ShellModel
     /// The session whose output the terminal shows.
     @Published private(set) var shown: String?
+    /// A program on the Mac just copied to this iPhone's clipboard: said briefly, since it happens unasked.
+    @Published private(set) var copiedNotice = false
+    private var noticeTask: Task<Void, Never>?
     private var subscriptions: Set<AnyCancellable> = []
 
     init(shell: ShellModel) {
@@ -58,6 +61,17 @@ final class ShellTerminalController: ObservableObject {
         driver.onResize = { [weak self] cols, rows in
             guard self != nil, shell.activeSession != nil else { return }
             shell.resize(cols: cols, rows: rows)
+        }
+        driver.onClipboardCopy = { [weak self] in self?.showCopiedNotice() }
+    }
+
+    private func showCopiedNotice() {
+        copiedNotice = true
+        noticeTask?.cancel()
+        noticeTask = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(2))
+            guard !Task.isCancelled else { return }
+            self?.copiedNotice = false
         }
     }
 
@@ -124,9 +138,17 @@ struct TerminalScreen: View {
                     .padding(.horizontal, 12)
                     .padding(.top, 8)
                 }
+                .overlay(alignment: .bottom) {
+                    if controller.copiedNotice { copiedBanner.transition(.opacity.combined(with: .move(edge: .bottom))) }
+                }
+                .animation(.easeInOut(duration: 0.2), value: controller.copiedNotice)
             }
         }
         .environment(\.colorScheme, .dark)
+        .hiddenWhileCaptured { covered in
+            // Typing into a terminal no one can see would be blind.
+            if covered { _ = controller.driver.view.resignFirstResponder() }
+        }
         .onAppear { controller.start(intent) }
     }
 
@@ -269,6 +291,20 @@ struct TerminalScreen: View {
         } else {
             dismiss()
         }
+    }
+
+    private var macName: String {
+        shell.macs.first { $0.macID == shell.selectedMacID }?.macName ?? "your Mac"
+    }
+
+    private var copiedBanner: some View {
+        Label("Copied from \(macName)", systemImage: "doc.on.clipboard")
+            .font(.caption.weight(.semibold))
+            .foregroundStyle(.secondary)
+            .padding(.horizontal, 12).padding(.vertical, 7)
+            .background(.regularMaterial, in: Capsule())
+            .padding(.bottom, 10)
+            .allowsHitTesting(false)
     }
 
     private var statusText: String? {

@@ -187,6 +187,54 @@ final class SOCKS5ServerTests: XCTestCase {
     }
 }
 
+/// The phone's default: destinations nothing on its uplink can answer are refused.
+final class SOCKS5LocalRefusalTests: XCTestCase {
+    var server: SOCKS5Server!
+    var port: UInt16!
+
+    override func setUpWithError() throws {
+        port = freePort()
+        var config = SOCKS5Server.Configuration()
+        config.port = port
+        server = SOCKS5Server(configuration: config, authenticator: nil)
+        try server.start()
+    }
+
+    override func tearDown() { server.stop() }
+
+    private func connectReply(_ request: [UInt8]) -> [UInt8] {
+        let client = TestClient(port: port)
+        defer { client.close() }
+        client.send([5, 1, 0])
+        XCTAssertEqual(Array(client.read(2)), [5, 0])
+        client.send(request)
+        return Array(client.read(10).prefix(2))
+    }
+
+    func testRefusesLoopbackSpelledAsAName() throws {
+        let echo = try EchoServer()
+        let portBytes = [UInt8(echo.port >> 8), UInt8(echo.port & 0xFF)]
+        for spelling in ["127.0.0.1", "127.1", "2130706433", "[::1]", "localhost."] {
+            let name = Array(spelling.utf8)
+            XCTAssertEqual(connectReply([5, 1, 0, 3, UInt8(name.count)] + name + portBytes), [5, SOCKS5.Reply.networkUnreachable], spelling)
+        }
+        XCTAssertEqual(connectReply([5, 1, 0, 1, 127, 0, 0, 1] + portBytes), [5, SOCKS5.Reply.networkUnreachable])
+    }
+}
+
+final class LogPrivacyTests: XCTestCase {
+    func testPrivatePartsAreRedactedOnlyWhenAsked() {
+        let marked = "connect to \(ptPrivate("example.com:443")) failed: \(ptPrivate(42)) timed out"
+        let shown = PassthroughLog.render(marked, redacting: false)
+        XCTAssertEqual(shown.text, "connect to example.com:443 failed: 42 timed out")
+        XCTAssertEqual(shown.hidden, [])
+        let hidden = PassthroughLog.render(marked, redacting: true)
+        XCTAssertEqual(hidden.text, "connect to <private> failed: <private> timed out")
+        XCTAssertEqual(hidden.hidden, ["example.com:443", "42"])
+        XCTAssertEqual(PassthroughLog.render("plain", redacting: true).text, "plain")
+    }
+}
+
 final class ProtocolTests: XCTestCase {
     func testAddressParsing() {
         XCTAssertNil(SOCKS5.Address(raw: Data([1, 1, 2, 3])))

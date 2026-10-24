@@ -53,6 +53,8 @@ struct ShellHistoryView: View {
                 TranscriptScreen(shell: shell, entry: shell.history.first { $0.id == id })
             }
         }
+        // Covers the recorded transcripts too: they are pushed inside this stack.
+        .hiddenWhileCaptured()
         .onAppear { shell.loadHistory() }
     }
 

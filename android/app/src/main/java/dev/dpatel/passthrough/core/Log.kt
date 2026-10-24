@@ -31,7 +31,35 @@ object PtLog {
         }
     }
 
-    fun log(level: Level, message: String) {
+    /**
+     * Replace what [ptPrivate] marks (where the Mac's traffic goes) with
+     * "<private>" in every sink, the file included. On unless the app says
+     * otherwise: PassthroughApp turns it off for debug builds only.
+     */
+    @Volatile var redactPrivate = true
+
+    const val PRIVATE_OPEN = ''
+    const val PRIVATE_CLOSE = ''
+    const val REDACTED = "<private>"
+
+    /** [marked] with each [ptPrivate] part kept (markers dropped) or, when [redacting], replaced. */
+    fun render(marked: String, redacting: Boolean): String {
+        if (PRIVATE_OPEN !in marked) return marked
+        val out = StringBuilder(marked.length)
+        var inside = false
+        for (c in marked) {
+            when {
+                c == PRIVATE_OPEN && !inside -> { inside = true; if (redacting) out.append(REDACTED) }
+                c == PRIVATE_CLOSE && inside -> inside = false
+                inside && redacting -> {}
+                else -> out.append(c)
+            }
+        }
+        return out.toString()
+    }
+
+    fun log(level: Level, marked: String) {
+        val message = render(marked, redactPrivate)
         val entry = Entry(System.currentTimeMillis(), level, message)
         val target: File?
         synchronized(lock) {
@@ -71,3 +99,10 @@ object PtLog {
 }
 
 fun ptLog(level: PtLog.Level, message: String) = PtLog.log(level, message)
+
+/**
+ * Marks [value] as the private part of a log message, such as where a
+ * connection goes: `ptLog(DEBUG, "connect to ${ptPrivate(address)} failed")`.
+ * Release builds log it as "<private>" (see [PtLog.redactPrivate]).
+ */
+fun ptPrivate(value: Any?): String = "${PtLog.PRIVATE_OPEN}$value${PtLog.PRIVATE_CLOSE}"

@@ -116,4 +116,32 @@ final class ProtocolFixtureTests: XCTestCase {
         // Reads the real resolver configuration without crashing; the list depends on the machine.
         _ = DNSRedirect.systemServers()
     }
+
+    func testLocalDestinations() throws {
+        let f = try XCTUnwrap(fixtures()["localDestinations"] as? [String: Any])
+        func name(_ text: String) -> SOCKS5.Address? {
+            SOCKS5.Address(raw: Data([SOCKS5.AddressType.domain, UInt8(text.utf8.count)] + Array(text.utf8) + [1, 187]))
+        }
+        for d in try XCTUnwrap(f["addresses"] as? [[String: Any]]) {
+            let text = try XCTUnwrap(d["ip"] as? String)
+            let local = try XCTUnwrap(d["local"] as? Bool)
+            let host: NWEndpoint.Host
+            let raw: Data
+            if let v4 = IPv4Address(text) { host = .ipv4(v4); raw = Data([SOCKS5.AddressType.ipv4]) + v4.rawValue + [1, 187] }
+            else {
+                let v6 = try XCTUnwrap(IPv6Address(text), text)
+                host = .ipv6(v6); raw = Data([SOCKS5.AddressType.ipv6]) + v6.rawValue + [1, 187]
+            }
+            XCTAssertEqual(try XCTUnwrap(SOCKS5.Address(raw: raw)).isLocalOnly, local, text)
+            XCTAssertEqual(try XCTUnwrap(name(text)).isLocalOnly, local, "\(text) as a name")
+            // What a name resolved to, as a ready connection reports it.
+            XCTAssertEqual(SOCKS5.Address.isLocal(endpoint: .hostPort(host: host, port: 443)), local, "\(text) reached")
+        }
+        for d in try XCTUnwrap(f["names"] as? [[String: Any]]) {
+            let text = try XCTUnwrap(d["name"] as? String)
+            XCTAssertEqual(try XCTUnwrap(name(text)).isLocalOnly, d["local"] as? Bool, text)
+        }
+        XCTAssertFalse(SOCKS5.Address.isLocal(endpoint: nil))
+        XCTAssertFalse(SOCKS5.Address.isLocal(endpoint: .hostPort(host: "localhost", port: 80)), "only addresses count once reached")
+    }
 }

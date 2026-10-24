@@ -30,6 +30,9 @@ class AppSettings(context: Context) {
     private val _shellConnectMode = MutableStateFlow(ShellConnectMode.fromStored(prefs.getString(SHELL_CONNECT_MODE, null)))
     /** Remote shell's "Connect using", for this device only. */
     val shellConnectMode: StateFlow<ShellConnectMode> = _shellConnectMode
+    private val _captureProtection = MutableStateFlow(prefs.getBoolean(CAPTURE_PROTECTION, true))
+    /** "Hide shell and Screen from screenshots and recordings": on unless the user turns it off. */
+    val captureProtection: StateFlow<Boolean> = _captureProtection
 
     fun setDeviceName(v: String) { _deviceName.value = v; prefs.edit().putString(DEVICE_NAME, v).apply() }
     fun setCellularOnly(v: Boolean) { _cellularOnly.value = v; prefs.edit().putBoolean(CELLULAR_ONLY, v).apply() }
@@ -37,6 +40,7 @@ class AppSettings(context: Context) {
     fun setSocksPort(v: Int) { _socksPort.value = v; prefs.edit().putInt(SOCKS_PORT, v).apply() }
     fun setControlPort(v: Int) { _controlPort.value = v; prefs.edit().putInt(CONTROL_PORT, v).apply() }
     fun setShellConnectMode(v: ShellConnectMode) { _shellConnectMode.value = v; prefs.edit().putString(SHELL_CONNECT_MODE, v.stored).apply() }
+    fun setCaptureProtection(v: Boolean) { _captureProtection.value = v; prefs.edit().putBoolean(CAPTURE_PROTECTION, v).apply() }
 
     /** The address the user typed for a Mac's shell, dialed before the ones the Mac sent. */
     fun shellManualAddress(macID: String): String? = prefs.getString(SHELL_MANUAL_ADDRESS + macID, null)
@@ -64,6 +68,8 @@ class AppSettings(context: Context) {
         const val SHELL_MANUAL_ADDRESS = "shell.manualAddress."
         /** Same key and values as the iOS app. */
         const val SHELL_CONNECT_MODE = "shell.connectMode"
+        /** Same key as the iOS app. */
+        const val CAPTURE_PROTECTION = "captureProtection"
     }
 }
 

@@ -96,8 +96,8 @@ class MainActivity : FragmentActivity() {
                 }
             }
         }
-        // Runs right after each unlock (and again, harmlessly, on rotation): inside the shell key
-        // vault's 60 s window, so pending keys are adopted and read now.
+        // Runs right after each unlock (and again, harmlessly, on rotation): the unlock prompt just
+        // opened the shell key vault, so pending keys are adopted and read now.
         LaunchedEffect(Unit) {
             shell.onUnlocked(lockModel.lock)
             // Debug builds only: sample Remote shell state for UI work (see ShellDemo).

@@ -1,5 +1,6 @@
 import SwiftUI
 import UIKit
+import UniformTypeIdentifiers
 import SwiftTerm
 import PassthroughUI
 
@@ -11,6 +12,19 @@ enum TerminalStyle {
     static let font = UIFont.monospacedSystemFont(ofSize: 13, weight: .regular)
 }
 
+/// Text from the Mac (its shell's OSC 52 copies, its clipboard in Screen) on
+/// this iPhone's clipboard: kept off Universal Clipboard, so other devices
+/// never see it, and gone after two minutes, so it doesn't linger for every
+/// app to read.
+enum MacClipboard {
+    static let lifetime: TimeInterval = 120
+
+    static func put(_ text: String) {
+        UIPasteboard.general.setItems([[UTType.plainText.identifier: text]],
+                                      options: [.localOnly: true, .expirationDate: Date().addingTimeInterval(lifetime)])
+    }
+}
+
 /// Owns one SwiftTerm `TerminalView` and relays its input and size changes.
 /// Nothing here logs what passes through it.
 @MainActor
@@ -20,6 +34,8 @@ final class TerminalDriver: NSObject, ObservableObject, TerminalViewDelegate {
     var onInput: ((Data) -> Void)?
     /// The terminal's grid changed after its first layout.
     var onResize: ((Int, Int) -> Void)?
+    /// A program on the Mac put text on this iPhone's clipboard.
+    var onClipboardCopy: (() -> Void)?
     /// Output being fed is a replay: the terminal's answers to queries in it
     /// (device attributes, cursor position, colors…) and clipboard writes are dropped.
     var replaying = false
@@ -123,10 +139,13 @@ final class TerminalDriver: NSObject, ObservableObject, TerminalViewDelegate {
     nonisolated func scrolled(source: TerminalView, position: Double) {}
     nonisolated func requestOpenLink(source: TerminalView, link: String, params: [String: String]) {}
     nonisolated func bell(source: TerminalView) {}
+    /// A program on the Mac copied to the clipboard (OSC 52: Claude Code, tmux,
+    /// vim…). Never during a replay or in a read-only terminal; reads are never answered.
     nonisolated func clipboardCopy(source: TerminalView, content: Data) {
         MainActor.assumeIsolated {
-            guard !view.readOnly, !replaying else { return }
-            if let text = String(data: content, encoding: .utf8) { UIPasteboard.general.string = text }
+            guard !view.readOnly, !replaying, let text = String(data: content, encoding: .utf8) else { return }
+            MacClipboard.put(text)
+            onClipboardCopy?()
         }
     }
     nonisolated func clipboardRead(source: TerminalView) -> Data? { nil }

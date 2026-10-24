@@ -9,7 +9,17 @@ int pt_system_dns_servers(char *out, int out_len) {
     out[0] = '\0';
     struct __res_state state;
     memset(&state, 0, sizeof state);
-    if (res_ninit(&state) != 0) return 0;
+    // res_ninit can fail after allocating (BIND's res_vinit records a failed
+    // allocation and still returns an error), and only res_ndestroy frees what
+    // it allocated. res_ndestroy also closes `_vcsock` when it is >= 0, so mark
+    // it unused first: a failure before res_ninit sets it must not close fd 0.
+    // Its other frees are NULL-checked, and it clears what it freed, so this
+    // never frees twice.
+    state._vcsock = -1;
+    if (res_ninit(&state) != 0) {
+        res_ndestroy(&state);
+        return 0;
+    }
     union res_sockaddr_union servers[8];
     int n = res_getservers(&state, servers, 8);
     int count = 0;

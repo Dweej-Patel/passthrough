@@ -21,41 +21,84 @@ public enum SOCKS5 {
 
         /// Private, loopback, link-local or multicast: never reachable through
         /// the phone's uplink, so refuse up front instead of waiting on the radio.
-        public var isLocalOnly: Bool {
+        /// A name only counts when it is local by its spelling (`localhost`, an
+        /// IP literal); one that resolves to a local address is caught once its
+        /// connection is ready (see `isLocal(endpoint:)`).
+        public var isLocalOnly: Bool { Self.isLocal(host) }
+
+        /// Whether `host` is a local-only destination; see `isLocalOnly`.
+        public static func isLocal(_ host: NWEndpoint.Host) -> Bool {
             switch host {
             case .ipv4(let a):
-                return Self.isLocalV4([UInt8](a.rawValue))
+                return isLocalV4([UInt8](a.rawValue))
             case .ipv6(let a):
-                let b = [UInt8](a.rawValue)
-                guard b.count == 16 else { return false }
-                if b[0] == 0xfe, (b[1] & 0xc0) == 0x80 { return true }      // fe80::/10
-                if (b[0] & 0xfe) == 0xfc { return true }                    // fc00::/7
-                if b[0] == 0xff { return true }                             // multicast
-                if b.allSatisfy({ $0 == 0 }) { return true }                // ::
-                if b.dropLast().allSatisfy({ $0 == 0 }) && b.last == 1 { return true }   // ::1
-                // IPv4-mapped (::ffff:a.b.c.d), IPv4-compatible and NAT64 (64:ff9b::/96): classify the embedded v4.
-                let mapped = b[0..<10].allSatisfy { $0 == 0 } && b[10] == 0xff && b[11] == 0xff
-                let compat = b[0..<12].allSatisfy { $0 == 0 }
-                let nat64 = b[0] == 0x00 && b[1] == 0x64 && b[2] == 0xff && b[3] == 0x9b && b[4..<12].allSatisfy { $0 == 0 }
-                if mapped || compat || nat64 { return Self.isLocalV4(Array(b[12..<16])) }
-                if b[0] == 0x20, b[1] == 0x02 { return true }               // 2002::/16 (6to4, wraps v4)
-                return false
-            case .name(let host, _):
-                let h = host.lowercased()
+                return isLocalV6([UInt8](a.rawValue))
+            case .name(let name, _):
+                if let literal = ipLiteral(name) { return isLocal(literal) }
+                var h = name.lowercased()
+                if h.hasSuffix(".") { h.removeLast() }   // "localhost." is localhost too
                 return h == "localhost" || h.hasSuffix(".localhost") || h.hasSuffix(".local") || h.hasSuffix(".home.arpa") || h.hasSuffix(".internal")
             default:
                 return false
             }
         }
 
+        /// The address a ready connection actually reached. A name the Mac
+        /// sent can resolve to a private address (a rebinding DNS answer, or a
+        /// spelling of an IP this parser doesn't know): checked after the
+        /// fact, since Network resolves inside the connection.
+        public static func isLocal(endpoint: NWEndpoint?) -> Bool {
+            guard case .hostPort(let host, _)? = endpoint else { return false }
+            switch host {
+            case .ipv4, .ipv6: return isLocal(host)
+            default: return false
+            }
+        }
+
+        /// An IP address written as a name: `[::1]`, `127.0.0.1`, and the
+        /// shorthand the system resolver also accepts (`127.1`, `2130706433`,
+        /// `0x7f.0.0.1`), which would otherwise slip past as an ordinary name.
+        static func ipLiteral(_ name: String) -> NWEndpoint.Host? {
+            var n = name
+            if n.hasPrefix("["), n.hasSuffix("]") { n = String(n.dropFirst().dropLast()) }
+            if n.contains(":") { return IPv6Address(n).map { .ipv6($0) } }
+            if n.hasSuffix(".") { n.removeLast() }
+            var addr = in_addr()
+            guard !n.isEmpty, n.first?.isNumber == true, inet_aton(n, &addr) == 1 else { return nil }
+            return IPv4Address(withUnsafeBytes(of: addr.s_addr) { Data($0) }).map { .ipv4($0) }
+        }
+
         static func isLocalV4(_ b: [UInt8]) -> Bool {
             guard b.count == 4 else { return false }
-            if b[0] == 10 || b[0] == 127 || b[0] == 0 { return true }
+            if b[0] == 10 || b[0] == 127 || b[0] == 0 { return true }   // 0.0.0.0/8 too
             if b[0] == 172, (16...31).contains(b[1]) { return true }
             if b[0] == 192, b[1] == 168 { return true }
+            if b[0] == 192, b[1] == 0, b[2] == 0 { return true }       // 192.0.0.0/24 (IETF protocol assignments)
+            if b[0] == 198, b[1] == 18 || b[1] == 19 { return true }   // 198.18.0.0/15 (benchmarking)
             if b[0] == 169, b[1] == 254 { return true }
             if b[0] == 100, (64...127).contains(b[1]) { return true }   // CGNAT space
             return b[0] >= 224
+        }
+
+        static func isLocalV6(_ b: [UInt8]) -> Bool {
+            guard b.count == 16 else { return false }
+            if b[0] == 0xfe, (b[1] & 0xc0) == 0x80 { return true }      // fe80::/10
+            if (b[0] & 0xfe) == 0xfc { return true }                    // fc00::/7
+            if b[0] == 0xff { return true }                             // multicast
+            if b.allSatisfy({ $0 == 0 }) { return true }                // ::
+            if b.dropLast().allSatisfy({ $0 == 0 }) && b.last == 1 { return true }   // ::1
+            // IPv4-mapped (::ffff:a.b.c.d), IPv4-compatible and the well-known
+            // NAT64 prefix (64:ff9b::/96): classify the embedded v4. NAT64 is
+            // how an IPv6-only carrier reaches IPv4 sites, so it can't be blocked whole.
+            let mapped = b[0..<10].allSatisfy { $0 == 0 } && b[10] == 0xff && b[11] == 0xff
+            let compat = b[0..<12].allSatisfy { $0 == 0 }
+            let nat64 = b[0] == 0x00 && b[1] == 0x64 && b[2] == 0xff && b[3] == 0x9b && b[4..<12].allSatisfy { $0 == 0 }
+            if mapped || compat || nat64 { return isLocalV4(Array(b[12..<16])) }
+            // 64:ff9b:1::/48, the local-use NAT64 prefix: translated by
+            // something on this network, not the uplink.
+            if b[0] == 0x00, b[1] == 0x64, b[2] == 0xff, b[3] == 0x9b, b[4] == 0x00, b[5] == 0x01 { return true }
+            if b[0] == 0x20, b[1] == 0x02 { return true }               // 2002::/16 (6to4, wraps v4)
+            return false
         }
 
         public init?(raw: Data) {
@@ -72,7 +115,8 @@ public enum SOCKS5 {
                 guard let len = body.first, body.count == Int(len) + 3 else { return nil }
                 let nameData = body.dropFirst().prefix(Int(len))
                 guard let name = String(data: Data(nameData), encoding: .utf8), !name.isEmpty else { return nil }
-                host = .name(name, nil)
+                // "10.0.0.1" sent as a name is that IP: classify (and redirect DNS) by it.
+                host = Self.ipLiteral(name) ?? .name(name, nil)
             default:
                 return nil
             }
@@ -369,7 +413,7 @@ public final class SOCKS5Server: @unchecked Sendable {
         let changed = server != lastDNSServer
         lastDNSServer = server
         egressLock.unlock()
-        if changed { ptLog(.info, "DNS sent to \(address.host) goes to this phone's DNS server \(server) instead") }
+        if changed { ptLog(.info, "DNS sent to \(ptPrivate(address.host)) goes to this phone's DNS server \(server) instead") }
         return .hostPort(host: NWEndpoint.Host(server), port: NWEndpoint.Port(rawValue: DNSRedirect.port)!)
     }
 
@@ -544,7 +588,7 @@ private final class Session: @unchecked Sendable {
                     connect(to: address, via: server.dnsRedirectTarget(for: address))
                     return
                 }
-                ptLog(.debug, "refused \(address): private/local address, not reachable via the phone")
+                ptLog(.debug, "refused \(ptPrivate(address)): private/local address, not reachable via the phone")
                 write(SOCKS5.reply(SOCKS5.Reply.networkUnreachable)) { self.close(reason: "local-only destination") }
                 return
             }
@@ -576,9 +620,11 @@ private final class Session: @unchecked Sendable {
             case .dns: code = SOCKS5.Reply.hostUnreachable
             default: code = SOCKS5.Reply.generalFailure
             }
-            ptLog(.debug, "connect to \(address) failed: \(Self.describe(error))")
+            ptLog(.debug, "connect to \(ptPrivate(address)) failed: \(Self.describe(error))")
             self.write(SOCKS5.reply(code)) { self.close(reason: "connect failed") }
         }
+        // A redirected DNS query goes to the phone's own resolver, which may well be private.
+        let checkReached = endpoint == nil && server.configuration.refuseLocalDestinations
         remote.stateUpdateHandler = { [weak self] state in
             guard let self else { return }
             switch state {
@@ -586,6 +632,15 @@ private final class Session: @unchecked Sendable {
                 guard !replied else { return }
                 replied = true
                 self.waitTimer?.cancel(); self.waitTimer = nil
+                if checkReached, SOCKS5.Address.isLocal(endpoint: remote.currentPath?.remoteEndpoint) {
+                    // A name that resolved to a private address: drop it before
+                    // a byte of the Mac's traffic goes there.
+                    remote.stateUpdateHandler = nil
+                    remote.cancel()
+                    ptLog(.debug, "refused \(ptPrivate(address)): resolves to a private/local address")
+                    self.write(SOCKS5.reply(SOCKS5.Reply.networkUnreachable)) { self.close(reason: "local-only destination") }
+                    return
+                }
                 self.handshakeDone()
                 self.countedOpen = true
                 self.server.counter.connectionOpened()
@@ -624,7 +679,7 @@ private final class Session: @unchecked Sendable {
         source.receive(minimumIncompleteLength: 1, maximumLength: 256 * 1024) { [weak self] data, _, isComplete, error in
             guard let self, !self.closed else { return }
             if let error {
-                if case .posix(.ECANCELED) = error {} else { ptLog(.debug, "stream to \(self.remoteLabel) ended: \(Self.describe(error))") }
+                if case .posix(.ECANCELED) = error {} else { ptLog(.debug, "stream to \(ptPrivate(self.remoteLabel)) ended: \(Self.describe(error))") }
                 self.close(reason: "stream error")
                 return
             }
@@ -720,6 +775,7 @@ private final class Session: @unchecked Sendable {
         remoteLabel = "\(address)"
         let redirected = server.configuration.refuseLocalDestinations && DNSRedirect.applies(to: address)
         let peer = UDPPeer(address: address, target: redirected ? server.dnsRedirectTarget(for: address) : nil,
+                           refuseLocal: server.configuration.refuseLocalDestinations,
                            parameters: server.remoteParameters(tcp: false), queue: queue,
                            waitTimeout: TimeInterval(server.configuration.connectTimeout)) { [weak self] datagram in
             guard let self, !self.closed else { return }
@@ -791,6 +847,10 @@ private final class UDPPeer: @unchecked Sendable {
     private let waitTimeout: TimeInterval
     /// Set once the socket failed or never became viable; the session replaces it.
     private(set) var dead = false
+    /// The destination's name resolved to a private address: its datagrams
+    /// are dropped until the flow goes idle (replacing the peer would only
+    /// resolve the same answer again).
+    private var refused = false
     var lastActivity = Date()
     var onDead: (() -> Void)?
     private let onDatagram: (Data) -> Void
@@ -808,19 +868,29 @@ private final class UDPPeer: @unchecked Sendable {
     private let verbose: Bool
     private let label: String
 
-    /// Datagrams go to `target` when given (a redirected DNS query), else to `address`.
-    init(address: SOCKS5.Address, target: NWEndpoint?, parameters: NWParameters, queue: DispatchQueue, waitTimeout: TimeInterval, onDatagram: @escaping (Data) -> Void) {
+    /// Datagrams go to `target` when given (a redirected DNS query), else to
+    /// `address`, which `refuseLocal` refuses when it turns out to be private.
+    init(address: SOCKS5.Address, target: NWEndpoint?, refuseLocal: Bool, parameters: NWParameters, queue: DispatchQueue, waitTimeout: TimeInterval, onDatagram: @escaping (Data) -> Void) {
         self.onDatagram = onDatagram
         self.label = "\(address)"
         self.verbose = address.port.rawValue != 443 && address.port.rawValue != 53
         self.queue = queue
         self.waitTimeout = waitTimeout
         connection = NWConnection(to: target ?? .hostPort(host: address.host, port: address.port), using: parameters)
+        let checkReached = target == nil && refuseLocal
         connection.stateUpdateHandler = { [weak self] state in
             guard let self else { return }
             switch state {
             case .ready:
                 self.waitTimer?.cancel(); self.waitTimer = nil
+                if checkReached, SOCKS5.Address.isLocal(endpoint: self.connection.currentPath?.remoteEndpoint) {
+                    ptLog(.debug, "UDP to \(ptPrivate(self.label)) dropped: resolves to a private/local address")
+                    self.refused = true
+                    self.pending = []
+                    self.connection.stateUpdateHandler = nil
+                    self.connection.cancel()
+                    return
+                }
                 self.ready = true
                 let queued = self.pending
                 self.pending = []
@@ -857,14 +927,14 @@ private final class UDPPeer: @unchecked Sendable {
         dead = true
         waitTimer?.cancel(); waitTimer = nil
         pending = []
-        if let why { ptLog(.debug, "UDP to \(label) reset: \(why)") }
+        if let why { ptLog(.debug, "UDP to \(ptPrivate(label)) reset: \(why)") }
         connection.cancel()
         onDead?()
     }
 
     func send(_ datagram: Data) {
         lastActivity = Date()
-        guard !dead else { return }
+        guard !dead, !refused else { return }
         guard ready else {
             if pending.count < 64 { pending.append(datagram) }
             return
@@ -889,7 +959,7 @@ private final class UDPPeer: @unchecked Sendable {
         else if fromMacLastCheck >= 50, sentSinceCheck == 0, receivedSinceCheck == 0 { problem = "went quiet" }
         else if verbose, sentSinceCheck + receivedSinceCheck > 0 { problem = "flowing" }
         else { return }
-        ptLog(.info, "UDP \(label) \(problem), last \(Int(interval)) s: \(sentSinceCheck) from Mac, \(receivedSinceCheck) from server, "
+        ptLog(.info, "UDP \(ptPrivate(label)) \(problem), last \(Int(interval)) s: \(sentSinceCheck) from Mac, \(receivedSinceCheck) from server, "
               + "\(relayedSinceCheck) to Mac, \(droppedSinceCheck) dropped, \(queuedToMac) B queued")
     }
 

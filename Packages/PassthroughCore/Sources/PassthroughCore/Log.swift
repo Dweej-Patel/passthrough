@@ -47,12 +47,24 @@ public final class PassthroughLog: @unchecked Sendable {
     }
 
     public func log(_ level: Level, _ message: @autoclosure () -> String) {
-        let text = message()
-        switch level {
-        case .debug: logger.debug("\(text, privacy: .public)")
-        case .info: logger.notice("\(text, privacy: .public)")
-        case .warning: logger.warning("\(text, privacy: .public)")
-        case .error: logger.error("\(text, privacy: .public)")
+        let (text, hidden) = Self.render(message(), redacting: Self.redactsPrivate)
+        if hidden.isEmpty {
+            switch level {
+            case .debug: logger.debug("\(text, privacy: .public)")
+            case .info: logger.notice("\(text, privacy: .public)")
+            case .warning: logger.warning("\(text, privacy: .public)")
+            case .error: logger.error("\(text, privacy: .public)")
+            }
+        } else {
+            // The hidden parts still reach the unified log, as private values:
+            // shown only on a device set up to reveal them.
+            let values = hidden.joined(separator: ", ")
+            switch level {
+            case .debug: logger.debug("\(text, privacy: .public) [\(values, privacy: .private)]")
+            case .info: logger.notice("\(text, privacy: .public) [\(values, privacy: .private)]")
+            case .warning: logger.warning("\(text, privacy: .public) [\(values, privacy: .private)]")
+            case .error: logger.error("\(text, privacy: .public) [\(values, privacy: .private)]")
+            }
         }
         let entry = Entry(date: Date(), level: level, message: text)
         lock.lock()
@@ -62,6 +74,40 @@ public final class PassthroughLog: @unchecked Sendable {
         lock.unlock()
         if hasFile { fileQueue.async { [self] in self.persist(entry) } }
         onAppend?(entry)
+    }
+
+    // MARK: Private parts of a message
+
+    /// Release builds keep what `ptPrivate` marks (where the Mac's traffic
+    /// goes) out of the diagnostics log and its file, and log it to the
+    /// unified log as private; Debug builds show it, for development.
+    #if DEBUG
+    static let redactsPrivate = false
+    #else
+    static let redactsPrivate = true
+    #endif
+    static let privateOpen: Character = "\u{E000}"
+    static let privateClose: Character = "\u{E001}"
+    static let redacted = "<private>"
+
+    /// `marked` with each `ptPrivate` part either kept (markers dropped) or
+    /// replaced by "<private>", plus the parts that were replaced.
+    static func render(_ marked: String, redacting: Bool) -> (text: String, hidden: [String]) {
+        guard marked.contains(privateOpen) else { return (marked, []) }
+        var text = "", part = "", hidden: [String] = []
+        var inside = false
+        func endPart() {
+            if redacting { text += redacted; hidden.append(part) } else { text += part }
+            inside = false
+        }
+        for c in marked {
+            if c == privateOpen, !inside { inside = true; part = "" }
+            else if c == privateClose, inside { endPart() }
+            else if inside { part.append(c) }
+            else { text.append(c) }
+        }
+        if inside { endPart() }
+        return (text, hidden)
     }
 
     public func snapshot() -> [Entry] {
@@ -128,6 +174,13 @@ public final class PassthroughLog: @unchecked Sendable {
         return Entry(date: Date(timeIntervalSince1970: epoch), level: level,
                      message: String(parts[2]).replacingOccurrences(of: "\\n", with: "\n"))
     }
+}
+
+/// Marks `value` as the private part of a log message, such as where a
+/// connection goes: `ptLog(.debug, "connect to \(ptPrivate(address)) failed")`.
+/// Release builds show it as "<private>" (see `PassthroughLog.redactsPrivate`).
+public func ptPrivate(_ value: some Any) -> String {
+    "\(PassthroughLog.privateOpen)\(value)\(PassthroughLog.privateClose)"
 }
 
 @inline(__always) public func ptLog(_ level: PassthroughLog.Level = .info, _ message: @autoclosure () -> String) {

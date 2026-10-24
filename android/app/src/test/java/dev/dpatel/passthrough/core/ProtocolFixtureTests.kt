@@ -124,5 +124,24 @@ class ProtocolFixtureTests {
         }
     }
 
+    @Test fun localDestinations() {
+        val f = fixtures["localDestinations"]!!.jsonObject
+        for (d in f["addresses"]!!.jsonArray.map { it.jsonObject }) {
+            val text = d["ip"]!!.jsonPrimitive.content
+            val local = d["local"]!!.jsonPrimitive.boolean
+            // The JDK parses literals without a lookup; this checks ipLiteral against it too.
+            val ip = java.net.InetAddress.getByName(text)
+            assertEquals(text, ip, Socks5.Address.ipLiteral(text))
+            val raw = byteArrayOf((if (ip.address.size == 4) Socks5.AddressType.IPV4 else Socks5.AddressType.IPV6).toByte()) + ip.address + byteArrayOf(1, 187.toByte())
+            assertEquals(text, local, Socks5.Address.parse(raw)!!.isLocalOnly)
+            assertEquals("$text as a name", local, Socks5.Address.parse(Socks5.Address.domain(text, 443))!!.isLocalOnly)
+            assertEquals("$text resolved", local, Socks5.Address.isLocalIp(ip))
+        }
+        for (d in f["names"]!!.jsonArray.map { it.jsonObject }) {
+            val text = d["name"]!!.jsonPrimitive.content
+            assertEquals(text, d["local"]!!.jsonPrimitive.boolean, Socks5.Address.parse(Socks5.Address.domain(text, 443))!!.isLocalOnly)
+        }
+    }
+
     private fun normalize(e: JsonElement): Any? = Fixtures.normalize(e)
 }

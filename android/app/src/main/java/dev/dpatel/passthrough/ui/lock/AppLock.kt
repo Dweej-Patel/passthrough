@@ -70,7 +70,8 @@ class AppLock(private val clock: () -> Long = SystemClock::elapsedRealtime) {
 
     /**
      * Locks now, as if the app had been away too long. Remote shell uses it once when
-     * a key needs a fresh unlock (Keystore's 60 s window); the lock screen says why.
+     * a key needs a fresh unlock (the shell key vault opens only with the unlock prompt's
+     * cipher, or within Keystore's 60 s window on Android 10); the lock screen says why.
      */
     fun relock(reason: LockReason = LockReason.SHELL_KEY) = lock(reason)
 
