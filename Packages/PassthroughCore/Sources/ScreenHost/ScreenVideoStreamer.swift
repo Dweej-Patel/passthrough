@@ -30,15 +30,19 @@ public final class ScreenVideoStreamer: ScreenVideoSource, @unchecked Sendable {
         var softBytes = 4 << 20
         var hardBytes = 8 << 20
         var stallTimeout: TimeInterval = 5
-        /// How long a `copy` waits for its ⌘C to change the clipboard (it may
-        /// queue behind text still being typed) before answering `nothing`.
-        var copyTimeout: TimeInterval = 2
+        /// How long after its ⌘C a `copy` waits for the clipboard to change
+        /// before answering `nothing`. Kept short: any change in that time is
+        /// taken as the ⌘C's.
+        var copyTimeout: TimeInterval = 1
     }
     /// How long the screen must be still before the last frame is sharpened.
     static let refineDelay: TimeInterval = 0.25
     static let refinePasses = 2
 
     private let queue = DispatchQueue(label: "\(PassthroughProtocol.identifier).screen-video", qos: .userInteractive)
+    /// Reads the copied text: an app that provides its data lazily is asked
+    /// for it then, which mustn't hold up frames and input on `queue`.
+    private let clipboardQueue = DispatchQueue(label: "\(PassthroughProtocol.identifier).screen-video.clipboard", qos: .userInitiated)
     private let capture: FrameCapturing
     private let makeInput: (CGRect) -> InputSink
     private let limits: Limits
@@ -155,38 +159,61 @@ public final class ScreenVideoStreamer: ScreenVideoSource, @unchecked Sendable {
         }
     }
 
-    /// ⌘C, then what it copied once the clipboard changes. One at a time:
-    /// the phone waits for each answer before asking again.
+    /// ⌘C, then what it copied. The ⌘C waits for text still being typed, the
+    /// clipboard's change count is read just before it, and only a change in
+    /// the `copyTimeout` after it counts; one from another device (Universal
+    /// Clipboard) or a phone's paste doesn't. Every `copy` is answered once
+    /// (one sent while another is unanswered gets `nothing` at once), so
+    /// the phone's count of them stays right.
     private func copySelection() {
-        guard !copying else { return }
-        guard let input else { return write(ScreenVideoWire.encode(.copied(.nothing)), frame: false) }
+        guard !copying, input != nil else { return send(copied: .nothing) }
         copying = true
+        postCopyWhenTyped()
+    }
+
+    private func postCopyWhenTyped() {
+        guard !stopped, let input else { return }
+        guard typing.isEmpty else {
+            queue.asyncAfter(deadline: .now() + 0.05) { [weak self] in self?.postCopyWhenTyped() }
+            return
+        }
         let before = input.clipboardChangeCount
-        type(.key(keysym: 0x63, modifiers: ScreenVideoWire.Modifiers.command.rawValue))   // ⌘C
+        input.key(keysym: 0x63, modifiers: ScreenVideoWire.Modifiers.command.rawValue)   // ⌘C
         awaitCopy(since: before, until: ProcessInfo.processInfo.systemUptime + limits.copyTimeout)
     }
 
     private func awaitCopy(since before: Int, until deadline: TimeInterval) {
         queue.asyncAfter(deadline: .now() + 0.05) { [weak self] in
             guard let self, !self.stopped, let input = self.input else { return }
-            let timedOut = ProcessInfo.processInfo.systemUptime >= deadline
-            let result: ScreenVideoWire.CopyResult
-            if input.clipboardChangeCount != before {
-                if let text = input.clipboardText() {
-                    result = text.utf8.count <= ScreenVideoWire.maxClipboardPayload ? .text(text) : .tooLong
-                } else if !timedOut {
-                    // Cleared, but the app may not have written its text yet.
-                    return self.awaitCopy(since: before, until: deadline)
-                } else {
-                    result = .notText
-                }
-            } else if !timedOut {
-                return self.awaitCopy(since: before, until: deadline)
-            } else {
-                result = .nothing
+            guard input.clipboardChangeCount != before else {
+                if ProcessInfo.processInfo.systemUptime < deadline { self.awaitCopy(since: before, until: deadline) } else { self.finishCopy(.nothing) }
+                return
             }
-            self.copying = false
-            self.write(ScreenVideoWire.encode(.copied(result)), frame: false)
+            self.clipboardQueue.async {
+                let result = Self.copyResult(input.clipboardContents())
+                self.queue.async { self.finishCopy(result) }
+            }
+        }
+    }
+
+    private func finishCopy(_ result: ScreenVideoWire.CopyResult) {
+        copying = false
+        send(copied: result)
+    }
+
+    private func send(copied result: ScreenVideoWire.CopyResult) {
+        guard !stopped else { return }
+        write(ScreenVideoWire.encode(.copied(result)), frame: false)
+    }
+
+    /// What a changed clipboard answers a `copy` with.
+    static func copyResult(_ contents: ClipboardContents) -> ScreenVideoWire.CopyResult {
+        switch contents {
+        case .elsewhere: return .nothing
+        case .notText: return .notText
+        case let .text(text):
+            if text.isEmpty { return .nothing }
+            return text.utf8.count <= ScreenVideoWire.maxClipboardPayload ? .text(text) : .tooLong
         }
     }
 

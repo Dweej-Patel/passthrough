@@ -13,8 +13,17 @@ protocol InputSink: AnyObject {
     func clipboard(_ text: String)
     /// How many times the Mac's clipboard has changed (`NSPasteboard.changeCount`).
     var clipboardChangeCount: Int { get }
-    /// The text on the Mac's clipboard; nil when what's on it isn't text.
-    func clipboardText() -> String?
+    /// What's on the Mac's clipboard now. May block: an app that provides
+    /// its data lazily is asked for it.
+    func clipboardContents() -> ClipboardContents
+}
+
+/// What's on the Mac's clipboard, as a `copy` sees it.
+enum ClipboardContents: Equatable {
+    case text(String)
+    case notText
+    /// Not copied on this Mac: from another device (Universal Clipboard), or what a phone pasted.
+    case elsewhere
 }
 
 /// A phone's input as the Mac's own events (Accessibility lets the app post
@@ -126,7 +135,6 @@ final class InputInjector: InputSink {
     /// leave what a phone pastes, a password often, out of their history.
     func clipboard(_ text: String) {
         let pasteboard = NSPasteboard.general
-        pasteboard.clearContents()
         pasteboard.declareTypes([.string, Self.concealedType, Self.transientType], owner: nil)
         pasteboard.setString(text, forType: .string)
         pasteboard.setData(Data(), forType: Self.concealedType)
@@ -135,10 +143,22 @@ final class InputInjector: InputSink {
 
     static let concealedType = NSPasteboard.PasteboardType("org.nspasteboard.ConcealedType")
     static let transientType = NSPasteboard.PasteboardType("org.nspasteboard.TransientType")
+    /// What macOS adds to a clipboard that came from another device.
+    static let remoteType = NSPasteboard.PasteboardType("com.apple.is-remote-clipboard")
 
     var clipboardChangeCount: Int { NSPasteboard.general.changeCount }
 
-    func clipboardText() -> String? { NSPasteboard.general.string(forType: .string) }
+    func clipboardContents() -> ClipboardContents {
+        let pasteboard = NSPasteboard.general
+        var types = pasteboard.types ?? []
+        // Cleared, and the app's data not written yet: give it a moment.
+        for _ in 0..<10 where types.isEmpty {
+            Thread.sleep(forTimeInterval: 0.05)
+            types = pasteboard.types ?? []
+        }
+        if types.contains(Self.remoteType) || types.contains(Self.transientType) { return .elsewhere }
+        return pasteboard.string(forType: .string).map { .text($0) } ?? .notText
+    }
 
     // MARK: Keys
 

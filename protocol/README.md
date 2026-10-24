@@ -392,7 +392,8 @@ Mac → phone:
   frame's NAL units, each after a 4-byte length (AVCC).
 - `3` copied: the answer to `copy`. Status u8, then for status 0 the copied
   text, UTF-8. Status 0: text; 1: nothing was copied (the clipboard didn't
-  change in 2 seconds); 2: text over 64 KiB; 3: not text. A status the phone
+  change within a second of the ⌘C, the change came from another device or
+  a phone's paste, or the text is empty); 2: text over 64 KiB; 3: not text. A status the phone
   doesn't know reads as 1. The phone takes `copied` only as the answer to a
   `copy` it sent, never unasked.
 
@@ -415,17 +416,21 @@ Phone → Mac:
 - `22` clipboard: UTF-8, put on the Mac's clipboard.
 - `23` keyframe request: the phone lost its place (its display failed, or
   it was in the background).
-- `24` copy: no payload. The Mac presses ⌘C (in order with the text and keys
-  before it) and answers `copied` with what that put on its clipboard. It
-  sends the clipboard only if its change count moved after the ⌘C, so what
-  was on it before (a password copied on the Mac, say) never goes to the
-  phone. One at a time: a `copy` while another is unanswered is dropped.
+- `24` copy: no payload. Once the text and keys before it are typed, the Mac
+  reads its clipboard's change count, presses ⌘C, and answers `copied` with
+  the clipboard only if the count moves within a second, so what was on it
+  before (a password copied on the Mac, say) doesn't go to the phone. A
+  clipboard marked `com.apple.is-remote-clipboard` (Universal Clipboard) or
+  `org.nspasteboard.TransientType` (a phone's paste among them) is not the
+  ⌘C's and answers 1. Every `copy` gets exactly one answer: one sent while
+  another is unanswered gets 1 at once.
 
 The Mac marks text a phone puts on its clipboard (`22`) with
 `org.nspasteboard.ConcealedType` and `TransientType`, so clipboard managers
 leave it out of their history. Over Screen Sharing, which sends the Mac's
 clipboard whenever it changes (RFB ServerCutText), the phone takes it only
-while its own ⌘C for Copy is unanswered (4 seconds), and ignores it otherwise.
+in the 2 seconds after its own ⌘C for Copy, never when it is the text the
+phone itself just pasted, and ignores it otherwise.
 
 When the screen goes still the Mac sends its last frame again, twice, a
 quarter of a second apart, so the encoder sharpens it.

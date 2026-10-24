@@ -296,6 +296,24 @@ final class ScreenVideoStreamerTests: XCTestCase {
         client.copySelection()
         waitUntil("answered a third time") { Self.copies(events.get()).count == 3 }
         XCTAssertEqual(Self.copies(events.get()).last, .tooLong)
+
+        // A copy while one is unanswered is answered too (nothing, at once), so every copy gets one answer.
+        input.copies = "again"
+        client.copySelection()
+        client.copySelection()
+        waitUntil("both answered") { Self.copies(events.get()).count == 5 }
+        XCTAssertEqual(Self.copies(events.get()).suffix(2), [.nothing, .text("again")])
+    }
+
+    /// A changed clipboard that isn't this Mac's own copy, or is empty, answers nothing.
+    func testCopyResults() {
+        XCTAssertEqual(ScreenVideoStreamer.copyResult(.text("hi")), .text("hi"))
+        XCTAssertEqual(ScreenVideoStreamer.copyResult(.text("")), .nothing)
+        XCTAssertEqual(ScreenVideoStreamer.copyResult(.elsewhere), .nothing)
+        XCTAssertEqual(ScreenVideoStreamer.copyResult(.notText), .notText)
+        XCTAssertEqual(ScreenVideoStreamer.copyResult(.text(String(repeating: "é", count: ScreenVideoWire.maxClipboardPayload / 2))),
+                       .text(String(repeating: "é", count: ScreenVideoWire.maxClipboardPayload / 2)))
+        XCTAssertEqual(ScreenVideoStreamer.copyResult(.text(String(repeating: "x", count: ScreenVideoWire.maxClipboardPayload + 1))), .tooLong)
     }
 
     /// The phone takes the Mac's copies only as answers: one sent unasked is dropped.
@@ -477,7 +495,7 @@ private final class RecordingInput: InputSink, @unchecked Sendable {
     var clipboard: (count: Int, text: String?) { get { board.get() } set { board.set(newValue) } }
     var copies: String? { get { copy.get() } set { copy.set(newValue) } }
     var clipboardChangeCount: Int { board.get().count }
-    func clipboardText() -> String? { board.get().text }
+    func clipboardContents() -> ClipboardContents { board.get().text.map { .text($0) } ?? .notText }
 }
 
 /// Two `ByteStream`s joined in memory.

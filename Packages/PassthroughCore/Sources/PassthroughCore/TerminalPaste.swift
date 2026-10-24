@@ -4,7 +4,8 @@ import Foundation
 /// drops escape characters and C1 controls, so a paste can neither end a
 /// bracketed paste early nor send terminal commands of its own; the other
 /// control characters (^C, ^D, backspace…) go too, so it can't press keys,
-/// tabs aside. Line breaks are sent as they are to a program that asked for
+/// tabs aside. Line breaks (NEL and the Unicode line and paragraph
+/// separators among them) are sent as \n to a program that asked for
 /// bracketed paste, and as Return to one that didn't (as Ghostty does).
 public struct TerminalPaste: Equatable, Sendable {
     /// What is pasted, with every line break as \n.
@@ -14,14 +15,17 @@ public struct TerminalPaste: Equatable, Sendable {
         var out = String.UnicodeScalarView()
         var afterReturn = false
         for scalar in raw.unicodeScalars {
-            let value = scalar.value
-            defer { afterReturn = value == 0x0D }
-            switch value {
-            case 0x0D: out.append("\n")
-            case 0x0A: if !afterReturn { out.append("\n") }   // \r\n is one line break
-            case 0x09: out.append(scalar)
-            case 0x00...0x1F, 0x7F, 0x80...0x9F: continue
-            default: out.append(scalar)
+            switch scalar.value {
+            case 0x0A where afterReturn:
+                afterReturn = false   // \r\n is one line break, whatever was dropped between
+            case 0x0D, 0x0A, 0x85, 0x2028, 0x2029:   // CR, LF, NEL, line and paragraph separators
+                out.append("\n")
+                afterReturn = scalar.value == 0x0D
+            case 0x00...0x1F where scalar.value != 0x09, 0x7F, 0x80...0x9F:
+                continue
+            default:
+                out.append(scalar)
+                afterReturn = false
             }
         }
         text = String(out)

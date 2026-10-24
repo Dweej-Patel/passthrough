@@ -66,6 +66,8 @@ final class ScreenModel: ObservableObject {
     /// Ends a Copy the Mac doesn't answer (the stream: a Mac that predates
     /// copying; Screen Sharing: one whose clipboard didn't change).
     private var copyTimeout: Task<Void, Never>?
+    /// What Paste last put on the Mac over Screen Sharing, which may send it back.
+    private var lastPaste: String?
     /// Bumped by every start and stop, so a stale connection's events are dropped.
     private var generation = 0
     private var pendingLogin: (login: RFBClient.Login, remember: Bool)?
@@ -226,8 +228,11 @@ final class ScreenModel: ObservableObject {
             if onVideoFrame?(sample) != true { video?.requestKeyframe() }
             video?.shown(number)
         case let .copied(result):
+            // An answer after Copy timed out (and said so) changes nothing now.
+            guard copying else { return }
             switch result {
-            case let .text(text): copied(text)
+            case let .text(text) where !text.isEmpty: copied(text)
+            case .text: copyFailed("Nothing was copied. Select something on \(macName) first.")
             case .nothing: copyFailed("Nothing was copied. Select something on \(macName) first.")
             case .tooLong: copyFailed("That's too long to copy to this iPhone.")
             case .notText: copyFailed("Only text can be copied to this iPhone.")
@@ -266,8 +271,8 @@ final class ScreenModel: ObservableObject {
             onFrame?(image)
         case let .clipboard(text):
             // Screen Sharing sends the Mac's clipboard whenever it changes, whatever is on it:
-            // taken only as the answer to Copy's ⌘C.
-            if copying, !text.isEmpty { copied(text) }
+            // taken only as the answer to Copy's ⌘C, and never the phone's own paste coming back.
+            if copying, !text.isEmpty, text != lastPaste { copied(text) }
         case .bell:
             UINotificationFeedbackGenerator().notificationOccurred(.warning)
         case let .closed(failure):
@@ -390,21 +395,25 @@ final class ScreenModel: ObservableObject {
             }
         } else {
             rfb?.clipboard(text)
+            lastPaste = text
         }
         key(0x76, modifiers: [RFBKeys.command])   // ⌘V
     }
 
     /// ⌘C on the Mac, and what it copied onto this iPhone's clipboard
-    /// (`MacClipboard`: this iPhone only, for two minutes). Nothing else of
-    /// the Mac's clipboard ever comes here: the stream answers with only what
-    /// this ⌘C copied, and Screen Sharing's clipboard is taken only right after it.
+    /// (`MacClipboard`: this iPhone only, for two minutes). Only what changed
+    /// the Mac's clipboard right after this ⌘C comes here: the stream answers
+    /// with that (a second at most), and Screen Sharing's clipboard is taken
+    /// only in the two seconds after it.
     func copyFromMac() {
         guard !copying, video != nil || rfb != nil else { return }
         copying = true
         if let video { video.copySelection() } else { key(0x63, modifiers: [RFBKeys.command]) }   // ⌘C
         copyTimeout?.cancel()
+        // The stream's ⌘C may wait for typing to finish on the Mac.
+        let wait: Duration = video != nil ? .seconds(5) : .seconds(2)
         copyTimeout = Task { [weak self] in
-            try? await Task.sleep(for: .seconds(4))
+            try? await Task.sleep(for: wait)
             guard !Task.isCancelled, let self, self.copying else { return }
             self.copyFailed(self.video != nil ? "\(self.macName) didn't answer. Update Passthrough on it to copy from it."
                                              : "Nothing was copied. Select something on \(self.macName) first.")

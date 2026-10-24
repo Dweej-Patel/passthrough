@@ -13,7 +13,7 @@ final class TerminalPasteTests: XCTestCase {
 
     /// Control characters, DEL and C1 controls (8-bit CSI among them) are dropped; tabs and text stay.
     func testDropsControls() {
-        XCTAssertEqual(TerminalPaste("a\u{03}b\u{04}\u{08}c\u{7F}\td\u{9B}31m\u{85}é👋").text, "abc\td31mé👋")
+        XCTAssertEqual(TerminalPaste("a\u{03}b\u{04}\u{08}c\u{7F}\td\u{9B}31m\u{90}é👋").text, "abc\td31mé👋")
         XCTAssertEqual(TerminalPaste("\u{1B}]52;c;aGk=\u{07}").text, "]52;c;aGk=", "no OSC of its own")
     }
 
@@ -26,6 +26,8 @@ final class TerminalPasteTests: XCTestCase {
         XCTAssertEqual(TerminalPaste("ls -la").lineBreaks, 0)
         XCTAssertEqual(TerminalPaste("ls -la\n").lineBreaks, 1, "a trailing line break runs it too")
         XCTAssertEqual(TerminalPaste("\r\n\r\n").lineBreaks, 2)
+        XCTAssertEqual(TerminalPaste("a\r\u{03}\nb").text, "a\nb", "a dropped control doesn't split \\r\\n")
+        XCTAssertEqual(TerminalPaste("ls\u{85}rm x\u{2028}y\u{2029}z").text, "ls\nrm x\ny\nz", "NEL and the separators are line breaks")
     }
 
     func testNothingLeft() {
