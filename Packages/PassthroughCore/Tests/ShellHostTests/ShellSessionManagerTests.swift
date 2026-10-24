@@ -75,6 +75,19 @@ final class ShellSessionManagerTests: XCTestCase {
         }
     }
 
+    /// Revoking a phone ends the sessions it opened, and only those.
+    func testCloseSessionsOpenedByAPhone() throws {
+        let a1 = try manager.open(phoneLabel: "A", phoneID: "a", cols: 80, rows: 24)
+        let a2 = try manager.open(phoneLabel: "A", phoneID: "a", cols: 80, rows: 24)
+        let b = try manager.open(phoneLabel: "B", phoneID: "b", cols: 80, rows: 24)
+        let mac = try manager.open(phoneLabel: "Mac", cols: 80, rows: 24)
+        manager.closeSessions(openedBy: "a")
+        wait("a's sessions ended") { info(a1)?.running == false && info(a2)?.running == false }
+        Thread.sleep(forTimeInterval: 0.1)
+        XCTAssertEqual(info(b)?.running, true)
+        XCTAssertEqual(info(mac)?.running, true)
+    }
+
     func testEndedSessionsDoNotCountTowardCap() throws {
         let first = try manager.open(phoneLabel: "Pixel", cols: 80, rows: 24)
         manager.input(first, Data("exit 0\n".utf8))

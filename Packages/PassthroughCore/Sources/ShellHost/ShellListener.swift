@@ -65,6 +65,13 @@ public final class ShellListener: @unchecked Sendable {
         set { gate.screenHandler.set(newValue) }
     }
 
+    /// How many views of the screen may be open at once. Give both
+    /// listeners the same one so the caps hold across them; set before `start`.
+    public var screenViews: ScreenViewLimit {
+        get { gate.screenViews.get() }
+        set { gate.screenViews.set(newValue) }
+    }
+
     /// The listener stopped for good (the port is taken, say); it will not
     /// accept again, so make a new one. On the listener's queue.
     public var onFailure: (@Sendable (Error) -> Void)? {
@@ -97,10 +104,11 @@ public final class ShellListener: @unchecked Sendable {
     }
 
     /// The address policy, with global IPv6 peers checked against the Mac's
-    /// own /64s as they are now (interfaces come and go).
+    /// own /64s, and overlay (Tailscale-range) peers against the Mac's own
+    /// overlay addresses, as they are now (interfaces come and go).
     public static func defaultPeerAllowed(_ host: String) -> Bool {
-        ShellAddressPolicy.isAllowed(host)
-            || ShellAddressPolicy.isAllowed(host, onLinkPrefixes: LocalAddresses.onLinkPrefixes())
+        ShellAddressPolicy.isAllowedPeer(host, localAddresses: LocalAddresses.all(),
+                                         onLinkPrefixes: LocalAddresses.onLinkPrefixes())
     }
 
     public func start(onReady: (@Sendable (UInt16) -> Void)? = nil) throws {
@@ -163,9 +171,10 @@ public final class ShellListener: @unchecked Sendable {
         waiting.forEach { $0() }
     }
 
-    /// Drops every connection of this phone at once (it was revoked). Its
-    /// sessions keep running: they belong to the Mac. Call after its keys are
-    /// gone from `shellKeys`, so it cannot prove itself again.
+    /// Drops every connection of this phone at once (it was revoked) and ends
+    /// the sessions it opened, including one being opened right now. Sessions
+    /// other phones opened keep running. Call after its keys are gone from
+    /// `shellKeys`, so it cannot prove itself again.
     public func disconnect(phoneID: String) {
         gate.disconnect(phoneID: phoneID)
     }
@@ -178,8 +187,10 @@ public final class ShellListener: @unchecked Sendable {
     /// On `queue`: policy and a handshake slot before TLS, then the shared handshake.
     private func accept(_ connection: NWConnection) {
         let host = PeerAddress.host(of: connection)
+        // Known before the connection starts, for an accepted one.
+        let local = connection.currentPath?.localEndpoint.map(PeerAddress.host(of:))
         // Before TLS: a peer outside the private ranges gets nothing at all.
-        guard !gate.stopped, peerAllowed(host) else {
+        guard !gate.stopped, peerAllowed(host), ShellAddressPolicy.arrivedOnItsNetwork(peer: host, local: local) else {
             ptLog(.warning, "shell: refused a connection from outside the allowed networks")
             connection.cancel(); return
         }
@@ -188,6 +199,41 @@ public final class ShellListener: @unchecked Sendable {
         }
         gate.runHandshake(admission, stream: ConnectionStream(connection, queue: queue), expectHello: false)
     }
+}
+
+/// Views of the screen open at once, per phone and in all: each one captures
+/// and encodes (or relays) the whole screen, so a phone, even an authorized
+/// one, cannot open them without end. Shared by both listeners.
+public final class ScreenViewLimit: @unchecked Sendable {
+    public static let maxPerPhone = RemoteShell.maxScreenViewsPerPhone
+    public static let maxTotal = RemoteShell.maxScreenViews
+
+    private let lock = NSLock()
+    private var open: [String: Int] = [:]
+    private let maxPerPhone: Int
+    private let maxTotal: Int
+
+    public init(maxPerPhone: Int = ScreenViewLimit.maxPerPhone, maxTotal: Int = ScreenViewLimit.maxTotal) {
+        self.maxPerPhone = maxPerPhone
+        self.maxTotal = maxTotal
+    }
+
+    /// A view for `phoneID`, or false when it has its share or all are taken.
+    func take(_ phoneID: String) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        guard open.values.reduce(0, +) < maxTotal, open[phoneID, default: 0] < maxPerPhone else { return false }
+        open[phoneID, default: 0] += 1
+        return true
+    }
+
+    func release(_ phoneID: String) {
+        lock.lock(); defer { lock.unlock() }
+        let left = (open[phoneID] ?? 1) - 1
+        open[phoneID] = left > 0 ? left : nil
+    }
+
+    /// Views open now (tests).
+    var count: Int { lock.lock(); defer { lock.unlock() }; return open.values.reduce(0, +) }
 }
 
 /// What both shell listeners share once a stream is open: pre-auth slots,
@@ -212,6 +258,7 @@ final class ShellGate: @unchecked Sendable {
     let screenAccess = Locked<(@Sendable (String) -> Bool)?>(nil)
     let screenHandler = Locked<(@Sendable (_ phoneID: String, _ label: String, _ viewing: Bool) -> Void)?>(nil)
     let screenVideoFactory = Locked<(@Sendable (String) -> (any ScreenVideoSource)?)?>(nil)
+    let screenViews = Locked(ScreenViewLimit())
     /// Where `screen` requests are relayed; another port in tests.
     let screenPort = Locked(RemoteShell.screenSharingPort)
     private let shellKeys: @Sendable (String) -> [Data]
@@ -233,12 +280,15 @@ final class ShellGate: @unchecked Sendable {
     /// gate's queue (it only crosses into closures that hop back onto it).
     final class Admission: @unchecked Sendable {
         fileprivate let slot: HandshakeLimiter.Slot
+        /// What the slot was taken for: remembered as proven once the proof checks out.
+        fileprivate let host: String
         /// Drops the attempt while it has no stream yet.
         private let abandon: () -> Void
         fileprivate var stream: (any ByteStream)?
 
-        fileprivate init(slot: HandshakeLimiter.Slot, abandon: @escaping () -> Void) {
+        fileprivate init(slot: HandshakeLimiter.Slot, host: String, abandon: @escaping () -> Void) {
             self.slot = slot
+            self.host = host
             self.abandon = abandon
         }
 
@@ -258,7 +308,7 @@ final class ShellGate: @unchecked Sendable {
          handshakeTimeout: TimeInterval = WirelessLink.handshakeTimeout) {
         queue = DispatchQueue(label: "\(PassthroughProtocol.identifier).\(label)")
         work = DispatchQueue(label: "\(PassthroughProtocol.identifier).\(label)-work")
-        limiter = HandshakeLimiter(queue: queue, timeout: handshakeTimeout, onLinkPrefixes: LocalAddresses.onLinkPrefixes)
+        limiter = HandshakeLimiter(queue: queue, timeout: handshakeTimeout)
         self.manager = manager
         self.transcripts = transcripts
         self.shellKeys = shellKeys
@@ -272,7 +322,8 @@ final class ShellGate: @unchecked Sendable {
 
     /// On the queue: a handshake slot for an attempt from `host` (at most
     /// `maxForHost` at once from it, else the per-host cap), or nil when it
-    /// must be refused. At the timeout the slot is freed and the attempt
+    /// must be refused. Once its proof checks out, `host` is remembered as
+    /// proven, so it can still get in while strangers hold the shared slots. At the timeout the slot is freed and the attempt
     /// dropped: its stream cancelled, or `abandon` run if it has none yet.
     func admit(host: String, maxForHost: Int? = nil, abandon: @escaping () -> Void) -> Admission? {
         guard !stopped else { return nil }
@@ -282,7 +333,7 @@ final class ShellGate: @unchecked Sendable {
             self?.handshakes[ObjectIdentifier(admission)] = nil
             admission.cancel()
         }) else { return nil }
-        let admission = Admission(slot: slot, abandon: abandon)
+        let admission = Admission(slot: slot, host: host, abandon: abandon)
         admitted = admission
         handshakes[ObjectIdentifier(admission)] = admission
         return admission
@@ -339,6 +390,7 @@ final class ShellGate: @unchecked Sendable {
                     return
                 }
                 _ = self.release(admission)
+                self.limiter.proven(admission.host)
                 self.authorized(stream, phoneID: phoneID, rest: rest)
             }
         }
@@ -407,6 +459,9 @@ final class ShellGate: @unchecked Sendable {
     func disconnect(phoneID: String) {
         queue.async { [self] in
             connections.values.filter { $0.phoneID == phoneID }.forEach { $0.close() }
+            // After a session one of them is opening on `work` is open (later
+            // ones see the connection closed and open nothing).
+            afterWork { [manager] in manager.closeSessions(openedBy: phoneID) }
         }
     }
 
@@ -466,6 +521,8 @@ final class ShellConnection: ShellAttachment, @unchecked Sendable {
     private var screenRelay: Splice?
     /// The connection now carries the Mac's own screen stream; no more lines.
     private var screenVideo: (any ScreenVideoSource)?
+    /// The `ScreenViewLimit` it holds a view from, while asking for or showing the screen.
+    private var screenView: ScreenViewLimit?
     var onClose: (() -> Void)?
 
     init(gate: ShellGate, stream: any ByteStream, phoneID: String, label: String) {
@@ -513,6 +570,7 @@ final class ShellConnection: ShellAttachment, @unchecked Sendable {
             gate?.screenViewer(phoneID, label, viewing: false)
         }
         screenVideo = nil
+        releaseScreenView()
         stream.onTerminated = nil
         stream.cancel()
         let onClose = self.onClose
@@ -556,6 +614,8 @@ final class ShellConnection: ShellAttachment, @unchecked Sendable {
 
     /// The request handled off the queue is done: carry on with the next ones.
     private func resume() {
+        // Screen Sharing didn't answer: the connection stays a shell one, and its view is free again.
+        if !isScreen { releaseScreenView() }
         busy = false
         drain()
         if !busy, readPaused, !closed {
@@ -600,10 +660,15 @@ final class ShellConnection: ShellAttachment, @unchecked Sendable {
             sendTranscript(id)
         case ShellEnvelope.screen:
             guard gate?.screenAllowed(phoneID) == true else { return fail(.screenNotAllowed) }
+            guard takeScreenView() else { return fail(.tooManyScreens) }
             screen()
         case ShellEnvelope.screenVideo:
             guard gate?.screenAllowed(phoneID) == true else { return fail(.screenNotAllowed) }
-            guard let source = gate?.screenVideoFactory.get()?(phoneID) else { return fail(.screenVideoUnavailable) }
+            guard takeScreenView() else { return fail(.tooManyScreens) }
+            guard let source = gate?.screenVideoFactory.get()?(phoneID) else {
+                releaseScreenView()
+                return fail(.screenVideoUnavailable)
+            }
             streamScreen(source)
         case ShellEnvelope.ping:
             send(ShellEnvelope(t: ShellEnvelope.pong))
@@ -620,11 +685,12 @@ final class ShellConnection: ShellAttachment, @unchecked Sendable {
     private func open(cols: Int, rows: Int) {
         guard let gate else { return }
         busy = true
-        let manager = self.manager, label = self.label, isOpen = self.isOpen, accepting = gate.accepting, queue = self.queue
+        let manager = self.manager, label = self.label, phoneID = self.phoneID, isOpen = self.isOpen, accepting = gate.accepting
+        let queue = self.queue
         gate.work.async { [weak self] in
             // Not for a phone already gone (revoked, say) or a listener stopping.
             let result = isOpen.get() && accepting.get()
-                ? Result { try manager.open(phoneLabel: label, cols: cols, rows: rows) }
+                ? Result { try manager.open(phoneLabel: label, phoneID: phoneID, cols: cols, rows: rows) }
                 : .failure(ShellError.badRequest)
             queue.async { self?.opened(result, cols: cols, rows: rows) }
         }
@@ -799,6 +865,23 @@ final class ShellConnection: ShellAttachment, @unchecked Sendable {
                 self?.queue.async { self?.close() }
             }
         }
+    }
+
+    /// One of the screen views the gate allows, held until the connection
+    /// closes or stops asking for the screen. A connection holds one at most.
+    private func takeScreenView() -> Bool {
+        if screenView != nil { return true }
+        guard let views = gate?.screenViews.get(), views.take(phoneID) else {
+            ptLog(.warning, "shell: refused a screen view: too many open")
+            return false
+        }
+        screenView = views
+        return true
+    }
+
+    private func releaseScreenView() {
+        screenView?.release(phoneID)
+        screenView = nil
     }
 
     /// Manager errors keep their reason; anything else (a shell that could not

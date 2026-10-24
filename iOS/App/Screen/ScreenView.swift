@@ -135,6 +135,10 @@ struct ScreenView: View {
             ScreenLoginForm(macName: model.macName, error: error) { login, remember in
                 model.connect(login, remember: remember)
             }
+        case .confirmScreenSharing:
+            ScreenSharingPrompt(macName: model.macName, reason: model.slowReason,
+                                onUse: { model.useScreenSharing(always: $0) },
+                                onCancel: { model.stop(); dismiss() })
         case let .failed(message):
             VStack(spacing: 16) {
                 Image(systemName: "display.trianglebadge.exclamationmark")
@@ -149,6 +153,44 @@ struct ScreenView: View {
             }
             .padding(32)
         }
+    }
+}
+
+/// Asked when the Mac's own stream didn't work, before the Mac's login is
+/// sent to Screen Sharing: once, always for this Mac, or not.
+struct ScreenSharingPrompt: View {
+    let macName: String
+    let reason: String?
+    let onUse: (_ always: Bool) -> Void
+    let onCancel: () -> Void
+
+    var body: some View {
+        VStack(spacing: 16) {
+            Image(systemName: "rectangle.on.rectangle")
+                .font(.system(size: 40)).foregroundStyle(PTTheme.warning)
+            Text("Use Screen Sharing with your Mac login?").font(.title3.weight(.semibold)).multilineTextAlignment(.center)
+            Text("\(macName) can't stream its screen itself right now. Screen Sharing is slower and needs the name and password of your account on \(macName): the one saved on this iPhone, if there is one.")
+                .font(.subheadline).foregroundStyle(.secondary).multilineTextAlignment(.center)
+                .fixedSize(horizontal: false, vertical: true)
+            if let reason {
+                Text(reason).font(.caption).foregroundStyle(.secondary).multilineTextAlignment(.center)
+            }
+            VStack(spacing: 10) {
+                Button { onUse(false) } label: {
+                    Text("Use Screen Sharing").font(.subheadline.weight(.semibold)).frame(maxWidth: .infinity, minHeight: 34)
+                }
+                .buttonStyle(.borderedProminent)
+                Button { onUse(true) } label: {
+                    Text("Always for This Mac").font(.subheadline.weight(.semibold)).frame(maxWidth: .infinity, minHeight: 34)
+                }
+                .buttonStyle(.bordered)
+                Button("Cancel", action: onCancel).font(.subheadline)
+            }
+            .buttonBorderShape(.capsule)
+            .tint(PTTheme.accentEnd)
+        }
+        .padding(32)
+        .frame(maxWidth: 420)
     }
 }
 

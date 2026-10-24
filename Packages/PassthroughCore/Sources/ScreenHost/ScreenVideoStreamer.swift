@@ -10,9 +10,27 @@ import ShellHost
 /// newest captured frame waits alone (older ones are dropped before they
 /// are encoded, never after). When the screen goes still, its last frame is
 /// sent again a couple of times so the encoder can sharpen it.
+///
+/// Acks are the phone's word, so they are not all that paces it: a frame is
+/// also only encoded while the stream has taken what was sent before it
+/// (`Limits`), and a phone that acks without reading is dropped once what
+/// waits for it passes a hard cap for a few seconds. Its input is bounded
+/// too: payload caps in `ScreenVideoWire.Reader(from: .phone)`, and text
+/// posted at a steady rate (`TypingPacer`).
 public final class ScreenVideoStreamer: ScreenVideoSource, @unchecked Sendable {
     /// Frames sent but not yet on the phone's screen.
     static let maxInFlight = 2
+
+    /// What the streamer lets wait in the stream (handed over, its send not
+    /// yet complete): new frames are only encoded under `frames` and
+    /// `softBytes`, and over `hardBytes` for `stallTimeout` the phone is
+    /// dropped (the shell lines' own cap, `ShellConnection.sendBacklogLimit`).
+    struct Limits {
+        var frames = 2
+        var softBytes = 4 << 20
+        var hardBytes = 8 << 20
+        var stallTimeout: TimeInterval = 5
+    }
     /// How long the screen must be still before the last frame is sharpened.
     static let refineDelay: TimeInterval = 0.25
     static let refinePasses = 2
@@ -20,11 +38,19 @@ public final class ScreenVideoStreamer: ScreenVideoSource, @unchecked Sendable {
     private let queue = DispatchQueue(label: "\(PassthroughProtocol.identifier).screen-video", qos: .userInteractive)
     private let capture: FrameCapturing
     private let makeInput: (CGRect) -> InputSink
+    private let limits: Limits
 
     // On `queue`.
     private var stream: (any ByteStream)?
     private var ended: (@Sendable () -> Void)?
-    private var reader = ScreenVideoWire.Reader()
+    private var reader = ScreenVideoWire.Reader(from: .phone)
+    /// Bytes handed to the stream whose send has not completed, and the frames among them.
+    private var unsentBytes = 0
+    private var unsentFrames = 0
+    /// Since when (system uptime) `unsentBytes` has been over `limits.hardBytes`.
+    private var overHardLimitSince: TimeInterval?
+    private var typing = TypingPacer(now: ProcessInfo.processInfo.systemUptime)
+    private var typingScheduled = false
     private var stopped = false
     private var captureStarted = false
     private var encoder: VideoEncoder?
@@ -49,9 +75,11 @@ public final class ScreenVideoStreamer: ScreenVideoSource, @unchecked Sendable {
         self.init(capture: ScreenCapturer(), input: { InputInjector(display: $0) })
     }
 
-    init(capture: FrameCapturing, input: @escaping (CGRect) -> InputSink) {
+    /// `limits` are smaller in tests.
+    init(capture: FrameCapturing, input: @escaping (CGRect) -> InputSink, limits: Limits = Limits()) {
         self.capture = capture
         self.makeInput = input
+        self.limits = limits
     }
 
     public func start(stream: any ByteStream, initialBytes: Data, ended: @escaping @Sendable () -> Void) {
@@ -113,11 +141,35 @@ public final class ScreenVideoStreamer: ScreenVideoSource, @unchecked Sendable {
             pump()
         case let .pointer(x, y, buttons): input?.pointer(x: x, y: y, buttons: buttons)
         case let .scroll(dx, dy): input?.scroll(dx: dx, dy: dy)
-        case let .key(keysym, modifiers): input?.key(keysym: keysym, modifiers: modifiers)
-        case let .text(text): input?.text(text)
+        case let .key(keysym, modifiers): type(.key(keysym: keysym, modifiers: modifiers))
+        case let .text(text): type(.text(text))
         case let .clipboard(text): input?.clipboard(text)
         case .format, .frame:
             break
+        }
+    }
+
+    /// Text and keys go through the pacer, so keys stay behind text still waiting.
+    private func type(_ item: TypingPacer.Item) {
+        guard input != nil else { return }
+        if !typing.push(item) { ptLog(.warning, "screen: a phone sent text faster than it can be typed; dropped some") }
+        typeWaiting()
+    }
+
+    private func typeWaiting() {
+        guard !stopped, let input else { return }
+        for item in typing.take(now: ProcessInfo.processInfo.systemUptime) {
+            switch item {
+            case let .text(text): input.text(text)
+            case let .key(keysym, modifiers): input.key(keysym: keysym, modifiers: modifiers)
+            }
+        }
+        guard !typingScheduled, let delay = typing.nextDelay else { return }
+        typingScheduled = true
+        queue.asyncAfter(deadline: .now() + delay) { [weak self] in
+            guard let self else { return }
+            self.typingScheduled = false
+            self.typeWaiting()
         }
     }
 
@@ -176,9 +228,10 @@ public final class ScreenVideoStreamer: ScreenVideoSource, @unchecked Sendable {
         pump()
     }
 
-    /// Encodes the waiting frame if the phone has room for it.
+    /// Encodes the waiting frame if the phone has room for it, and the stream has taken what was sent before.
     private func pump() {
-        guard !stopped, !encoding, let encoder, let buffer = waiting, sent &- acked < UInt32(Self.maxInFlight) else { return }
+        guard !stopped, !encoding, let encoder, let buffer = waiting, sent &- acked < UInt32(Self.maxInFlight),
+              unsentFrames < limits.frames, unsentBytes < limits.softBytes else { return }
         waiting = nil
         last = buffer
         encoding = true
@@ -222,16 +275,47 @@ public final class ScreenVideoStreamer: ScreenVideoSource, @unchecked Sendable {
     }
 
     private func send(_ encoded: VideoEncoder.Encoded) {
-        guard let stream, let encoder else { return }
+        guard stream != nil, let encoder else { return }
         if encoded.keyframe {
             needsKeyframe = false
             if let sps = encoded.sps, let pps = encoded.pps {
-                stream.send(ScreenVideoWire.encode(.format(width: encoder.width, height: encoder.height, sps: sps, pps: pps)),
-                            isComplete: false) { _ in }
+                write(ScreenVideoWire.encode(.format(width: encoder.width, height: encoder.height, sps: sps, pps: pps)), frame: false)
             }
         }
         sent &+= 1
-        stream.send(ScreenVideoWire.encode(.frame(number: sent, keyframe: encoded.keyframe, data: encoded.data)), isComplete: false) { _ in }
+        write(ScreenVideoWire.encode(.frame(number: sent, keyframe: encoded.keyframe, data: encoded.data)), frame: true)
+    }
+
+    /// Hands `data` to the stream, counted as waiting until its send completes.
+    private func write(_ data: Data, frame: Bool) {
+        guard let stream else { return }
+        let count = data.count
+        unsentBytes += count
+        if frame { unsentFrames += 1 }
+        checkBacklog()
+        stream.send(data, isComplete: false) { [weak self] _ in
+            guard let self else { return }
+            self.queue.async {
+                guard !self.stopped else { return }
+                self.unsentBytes -= count
+                if frame { self.unsentFrames -= 1 }
+                self.checkBacklog()
+                self.pump()
+            }
+        }
+    }
+
+    /// Over the hard cap: the phone has `stallTimeout` to read before it is dropped.
+    private func checkBacklog() {
+        guard unsentBytes > limits.hardBytes else { overHardLimitSince = nil; return }
+        guard overHardLimitSince == nil else { return }
+        let since = ProcessInfo.processInfo.systemUptime
+        overHardLimitSince = since
+        queue.asyncAfter(deadline: .now() + limits.stallTimeout) { [weak self] in
+            guard let self, !self.stopped, self.overHardLimitSince == since else { return }
+            ptLog(.warning, "screen: a phone is not reading the screen stream; disconnected")
+            self.finish()
+        }
     }
 
     /// Sends the last frame again once the screen has been still a moment.

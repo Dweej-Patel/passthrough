@@ -40,6 +40,73 @@ final class ScreenVideoWireTests: XCTestCase {
         var short = ScreenVideoWire.Reader()
         XCTAssertThrowsError(try short.append(Data([17, 0, 0, 0, 1, 0])), "an ack needs 4 bytes")
     }
+
+    /// What the Mac reads from a phone has a cap per type, checked from the
+    /// header before the payload is buffered.
+    func testPhoneMessagesHaveSmallCaps() throws {
+        func header(_ type: UInt8, _ length: Int) -> Data {
+            Data([type, UInt8(length >> 24), UInt8(length >> 16 & 0xFF), UInt8(length >> 8 & 0xFF), UInt8(length & 0xFF)])
+        }
+        for (type, cap) in [(UInt8(21), ScreenVideoWire.maxTextPayload), (22, ScreenVideoWire.maxClipboardPayload),
+                            (18, 64), (17, 64), (2, 64), (200, ScreenVideoWire.maxClipboardPayload)] {
+            var fromPhone = ScreenVideoWire.Reader(from: .phone)
+            XCTAssertThrowsError(try fromPhone.append(header(type, cap + 1)), "type \(type) over its cap")
+            var ok = ScreenVideoWire.Reader(from: .phone)
+            XCTAssertNoThrow(try ok.append(header(type, cap)), "type \(type) at its cap waits for the payload")
+        }
+        var fromMac = ScreenVideoWire.Reader()
+        XCTAssertNoThrow(try fromMac.append(header(2, 8 << 20)), "frames from the Mac keep the large cap")
+        let text = String(repeating: "é", count: 2048)
+        var exact = ScreenVideoWire.Reader(from: .phone)
+        XCTAssertEqual(try exact.append(ScreenVideoWire.encode(.text(text))), [.text(text)], "4 KiB of text is one message")
+    }
+
+    /// Long text is sent in pieces under the cap, split between characters.
+    func testTextPieces() {
+        XCTAssertEqual(ScreenVideoWire.textPieces(""), [])
+        XCTAssertEqual(ScreenVideoWire.textPieces("hi"), ["hi"])
+        let long = String(repeating: "ab👋", count: 3000)   // 6 bytes each: 18 000 bytes
+        let pieces = ScreenVideoWire.textPieces(long)
+        XCTAssertEqual(pieces.joined(), long)
+        XCTAssertTrue(pieces.allSatisfy { $0.utf8.count <= ScreenVideoWire.maxTextPayload })
+        XCTAssertEqual(pieces.count, 5)
+        let family = "👨‍👩‍👧‍👦"   // one character of 25 bytes
+        XCTAssertEqual(ScreenVideoWire.textPieces(family + "x", maxBytes: 10).joined(), family + "x")
+        XCTAssertTrue(ScreenVideoWire.textPieces(family, maxBytes: 10).allSatisfy { $0.utf8.count <= 10 })
+    }
+}
+
+final class TypingPacerTests: XCTestCase {
+    func testTypingGoesAtOnceAndAFloodIsPaced() {
+        var pacer = TypingPacer(rate: 1000, burst: 100, limit: 1000, now: 0)
+        XCTAssertTrue(pacer.push(.text("hello")))
+        XCTAssertEqual(pacer.take(now: 0), [.text("hello")], "typing is not held up")
+        XCTAssertTrue(pacer.push(.text(String(repeating: "x", count: 250))))
+        XCTAssertTrue(pacer.push(.key(keysym: RFBKeys.returnKey, modifiers: 0)))
+        XCTAssertEqual(pacer.take(now: 0), [.text(String(repeating: "x", count: 95))], "what the bucket holds")
+        XCTAssertNotNil(pacer.nextDelay)
+        XCTAssertEqual(pacer.take(now: 0.05), [.text(String(repeating: "x", count: 50))])
+        XCTAssertEqual(pacer.take(now: 1), [.text(String(repeating: "x", count: 100))], "never more than the burst")
+        XCTAssertEqual(pacer.take(now: 2), [.text(String(repeating: "x", count: 5)), .key(keysym: RFBKeys.returnKey, modifiers: 0)],
+                       "the key waited behind the text")
+        XCTAssertTrue(pacer.isEmpty)
+        XCTAssertNil(pacer.nextDelay)
+    }
+
+    func testTooMuchWaitingIsDropped() {
+        var pacer = TypingPacer(rate: 10, burst: 10, limit: 100, now: 0)
+        XCTAssertTrue(pacer.push(.text(String(repeating: "x", count: 100))))
+        XCTAssertFalse(pacer.push(.text("y")), "past the limit")
+        XCTAssertTrue(pacer.push(.key(keysym: 0x61, modifiers: 0)), "keys still queue")
+        _ = pacer.take(now: 0)
+        XCTAssertTrue(pacer.push(.text("y")), "room again once some went")
+    }
+
+    func testACharacterBiggerThanTheBucketStillGoes() {
+        var pacer = TypingPacer(rate: 4, burst: 4, limit: 100, now: 0)
+        XCTAssertTrue(pacer.push(.text("👨‍👩‍👧‍👦")))
+        XCTAssertEqual(pacer.take(now: 0), [.text("👨‍👩‍👧‍👦")])
+    }
 }
 
 final class ScreenVideoStreamerTests: XCTestCase {
@@ -90,6 +157,52 @@ final class ScreenVideoStreamerTests: XCTestCase {
         streamer.stop()
         waitUntil("capture stopped") { capture.stopped.get() }
         wait(for: [ended], timeout: 0.2)
+    }
+
+    /// Acks are not enough: while the stream has not taken what was sent
+    /// (a phone that acks but doesn't read), no new frame is encoded, and
+    /// past the hard cap for the stall timeout the phone is dropped.
+    func testAPhoneThatDoesNotReadIsNotBufferedFor() throws {
+        guard (try? VideoEncoder(width: 640, height: 400, bitRate: 2_000_000)) != nil else {
+            throw XCTSkip("no hardware H.264 encoder")
+        }
+        let capture = FakeCapture(width: 640, height: 400)
+        let stalled = StalledStream()
+        let limits = ScreenVideoStreamer.Limits(frames: 2, softBytes: 4 << 20, hardBytes: 1, stallTimeout: 0.5)
+        let streamer = ScreenVideoStreamer(capture: capture, input: { _ in RecordingInput() }, limits: limits)
+        let ended = expectation(description: "dropped")
+        streamer.start(stream: stalled, initialBytes: ScreenVideoWire.encode(.hello(maxWidth: 640, maxHeight: 640))) { ended.fulfill() }
+        waitUntil("capture started") { capture.maxSide.get() == 640 }
+        for shade in 0..<6 {
+            capture.push(shade: UInt8(30 * shade))
+            stalled.deliver(ScreenVideoWire.encode(.ack(number: UInt32(shade + 1))))   // acks for frames it never read
+            Thread.sleep(forTimeInterval: 0.05)
+        }
+        XCTAssertEqual(stalled.frames, 2, "two frames waiting in the stream, whatever the acks say")
+        wait(for: [ended], timeout: 5)
+        XCTAssertTrue(capture.stopped.get())
+    }
+
+    /// Text and keys reach the Mac in the order typed, a long paste included.
+    func testTypingKeepsItsOrder() {
+        let capture = FakeCapture(width: 320, height: 200)
+        let input = RecordingInput()
+        let streamer = ScreenVideoStreamer(capture: capture, input: { _ in input })
+        let (mac, phone) = MemoryPipe.pair()
+        streamer.start(stream: mac, initialBytes: ScreenVideoWire.encode(.hello(maxWidth: 320, maxHeight: 320))) {}
+        addTeardownBlock { streamer.stop() }
+        waitUntil("capture started") { capture.maxSide.get() == 320 }
+        waitUntil("input ready") {
+            phone.send(ScreenVideoWire.encode(.pointer(x: 0, y: 0, buttons: 0)), isComplete: false) { _ in }
+            Thread.sleep(forTimeInterval: 0.02)
+            return !input.log.get().isEmpty
+        }
+        let paste = String(repeating: "x", count: 12_000)
+        for piece in ScreenVideoWire.textPieces(paste) { phone.send(ScreenVideoWire.encode(.text(piece)), isComplete: false) { _ in } }
+        phone.send(ScreenVideoWire.encode(.key(keysym: RFBKeys.returnKey, modifiers: 0)), isComplete: false) { _ in }
+        waitUntil("all typed", timeout: 10) { input.log.get().last == "key \(RFBKeys.returnKey) 0" }
+        let typed = input.log.get().filter { $0.hasPrefix("text ") }.map { $0.dropFirst(5) }.joined()
+        XCTAssertEqual(typed, paste)
     }
 
     /// The phone hanging up ends the stream (and so, upstream, the connection).
@@ -181,6 +294,41 @@ private final class FakeCapture: FrameCapturing, @unchecked Sendable {
         guard let queue = queue.get(), let deliver = deliver.get() else { return }
         queue.sync { deliver(buffer) }
     }
+}
+
+/// A stream the phone writes to but never reads from: sends are taken and never complete.
+private final class StalledStream: ByteStream, @unchecked Sendable {
+    private let lock = NSLock()
+    private var sent: [Data] = []
+    private var inbox = Data()
+    private var reader: (@Sendable (Data?, Bool, Error?) -> Void)?
+    var onTerminated: (@Sendable (Error?) -> Void)?
+
+    var frames: Int { lock.lock(); defer { lock.unlock() }; return sent.filter { $0.first == 2 }.count }
+
+    func deliver(_ data: Data) {
+        lock.lock()
+        inbox.append(data)
+        let reader = self.reader, chunk = inbox
+        if reader != nil { self.reader = nil; inbox = Data() }
+        lock.unlock()
+        reader?(chunk, false, nil)
+    }
+
+    func receive(maximumLength: Int, completion: @escaping @Sendable (Data?, Bool, Error?) -> Void) {
+        lock.lock()
+        if inbox.isEmpty { reader = completion; lock.unlock(); return }
+        let chunk = inbox
+        inbox = Data()
+        lock.unlock()
+        completion(chunk, false, nil)
+    }
+
+    func send(_ data: Data?, isComplete: Bool, completion: @escaping @Sendable (Error?) -> Void) {
+        lock.lock(); if let data { sent.append(data) }; lock.unlock()
+    }
+
+    func cancel() {}
 }
 
 private final class RecordingInput: InputSink, @unchecked Sendable {

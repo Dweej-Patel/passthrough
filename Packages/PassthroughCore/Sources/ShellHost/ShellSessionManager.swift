@@ -34,6 +34,9 @@ public final class ShellSessionManager: @unchecked Sendable {
     private final class Session {
         let id: String
         let startedAt: Date
+        /// The phone that opened it, so revoking that phone ends it; any
+        /// authorized phone may still attach to it meanwhile.
+        let openedBy: String?
         let process: PTYProcess
         let writer: TranscriptWriter
         var scrollback = ScrollbackBuffer(capacity: RemoteShell.scrollbackBytes)
@@ -56,8 +59,8 @@ public final class ShellSessionManager: @unchecked Sendable {
         /// What `attach` returned for `attachment`.
         var generation: UInt64 = 0
 
-        init(id: String, startedAt: Date, process: PTYProcess, writer: TranscriptWriter) {
-            self.id = id; self.startedAt = startedAt; self.process = process; self.writer = writer
+        init(id: String, startedAt: Date, openedBy: String?, process: PTYProcess, writer: TranscriptWriter) {
+            self.id = id; self.startedAt = startedAt; self.openedBy = openedBy; self.process = process; self.writer = writer
             lastOutputAt = startedAt
         }
 
@@ -118,7 +121,8 @@ public final class ShellSessionManager: @unchecked Sendable {
     /// Starts a login shell. The spawn and the transcript's first write happen
     /// outside the manager's queue, so listing or using other sessions never
     /// waits on them; a slot is held meanwhile so the cap still holds.
-    public func open(phoneLabel: String, cols: Int, rows: Int) throws -> String {
+    /// `phoneID` is the phone opening it (`closeSessions(openedBy:)`).
+    public func open(phoneLabel: String, phoneID: String? = nil, cols: Int, rows: Int) throws -> String {
         try queue.sync {
             for id in order where table[id]?.running == false { remove(id) }
             guard table.values.filter(\.running).count + opening < RemoteShell.maxSessions else { throw ShellError.tooManySessions }
@@ -139,7 +143,7 @@ public final class ShellSessionManager: @unchecked Sendable {
             process.terminate()   // never started; dropping it hangs up and reaps
             throw error
         }
-        let session = Session(id: id, startedAt: now, process: process, writer: writer)
+        let session = Session(id: id, startedAt: now, openedBy: phoneID, process: process, writer: writer)
         // Weak: the session owns the process, so a strong capture would be a cycle that leaks every session.
         process.onOutput = { [weak self, weak session] data in
             self?.queue.async { if let session { self?.received(data, session: session) } }
@@ -218,6 +222,17 @@ public final class ShellSessionManager: @unchecked Sendable {
         queue.async { [self] in
             guard let session = table[id], session.running else { return }
             session.process.terminate()
+        }
+    }
+
+    /// Hangs up every running session `phoneID` opened (it was revoked). They
+    /// end through the normal exit path; sessions other phones opened stay,
+    /// even ones this phone was attached to.
+    public func closeSessions(openedBy phoneID: String) {
+        queue.async { [self] in
+            for session in table.values where session.running && session.openedBy == phoneID {
+                session.process.terminate()
+            }
         }
     }
 

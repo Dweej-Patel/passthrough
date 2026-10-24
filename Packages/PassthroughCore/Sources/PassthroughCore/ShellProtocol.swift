@@ -9,6 +9,9 @@ public enum RemoteShell {
     public static let proofLabel = "passthrough-shell-v1"
     /// Most sessions a Mac keeps open at once.
     public static let maxSessions = 8
+    /// Most views of its screen a Mac shows at once, to one phone and in all.
+    public static let maxScreenViewsPerPhone = 2
+    public static let maxScreenViews = 4
     /// Output a session remembers for a phone that attaches later.
     public static let scrollbackBytes = 1_048_576
     /// Largest piece of raw output (before base64) in one `output` line.
@@ -171,6 +174,9 @@ public enum ShellError: String, Error, Sendable {
     /// The Mac can't stream its screen itself (it lacks Screen Recording or
     /// Accessibility); Screen Sharing may still work.
     case screenVideoUnavailable = "screen_video_unavailable"
+    /// The Mac already shows its screen to as many views as it allows
+    /// (`RemoteShell.maxScreenViewsPerPhone`, `maxScreenViews`).
+    case tooManyScreens = "too_many_screens"
 }
 
 /// Which peers may reach the shell, and which of the Mac's addresses a phone
@@ -188,6 +194,34 @@ public enum ShellAddressPolicy {
         if isAllowed(host) { return true }
         guard !onLinkPrefixes.isEmpty, let prefix = globalPrefix(host) else { return false }
         return onLinkPrefixes.contains(prefix)
+    }
+
+    /// In an overlay network's range: 100.64.0.0/10 (Tailscale, NetBird and
+    /// Headscale number their peers there) or Tailscale's fd7a:115c:a1e0::/48.
+    public static func isOverlay(_ host: String) -> Bool { classify(host) == .tailscale }
+
+    /// `isAllowed(host, onLinkPrefixes:)` for a peer reaching this Mac, whose
+    /// own addresses are `localAddresses`, except that an overlay-range peer
+    /// is let in only while the Mac has an overlay address of that family
+    /// itself. 100.64.0.0/10 is also carrier-grade NAT space: without an
+    /// overlay on the Mac, a peer from it is the carrier's network, not the owner's.
+    public static func isAllowedPeer(_ host: String, localAddresses: @autoclosure () -> [String],
+                                     onLinkPrefixes: @autoclosure () -> Set<Data>) -> Bool {
+        if isOverlay(host) {
+            let v4 = IPv4Address(bare(host)) != nil
+            return localAddresses().contains { isOverlay($0) && (IPv4Address(bare($0)) != nil) == v4 }
+        }
+        return isAllowed(host) || isAllowed(host, onLinkPrefixes: onLinkPrefixes())
+    }
+
+    /// Whether a connection from `peer` that arrived on the Mac's address
+    /// `local` may go on: an overlay peer must have come in on one of the
+    /// Mac's overlay addresses (its tunnel interface), not on a LAN address
+    /// where anyone on that network could claim a 100.64.0.0/10 source.
+    /// Unknown `local`: only `isAllowedPeer` applies.
+    public static func arrivedOnItsNetwork(peer: String, local: String?) -> Bool {
+        guard isOverlay(peer), let local else { return true }
+        return isOverlay(local)
     }
 
     /// The /64 prefixes of the global unicast IPv6 addresses (2000::/3) among `addresses`.

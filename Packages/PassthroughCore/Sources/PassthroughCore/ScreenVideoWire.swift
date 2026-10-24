@@ -8,6 +8,16 @@ import Foundation
 public enum ScreenVideoWire {
     /// Largest payload either side accepts (a keyframe of a big screen fits easily).
     public static let maxPayload = 16 << 20
+    /// Largest payloads the Mac takes from a phone (`Reader(from: .phone)`),
+    /// so a phone cannot make it buffer 16 MiB of input: one `text` message
+    /// (longer text goes in several, `textPieces`), one `clipboard`, and
+    /// every fixed-size event.
+    public static let maxTextPayload = 4 << 10
+    public static let maxClipboardPayload = 64 << 10
+    static let maxEventPayload = 64
+
+    /// Who wrote the bytes a `Reader` splits, which sets how large each payload may be.
+    public enum Sender: Sendable { case mac, phone }
 
     public enum Message: Equatable, Sendable {
         // Mac → phone
@@ -93,20 +103,58 @@ public enum ScreenVideoWire {
         return out
     }
 
+    /// `text` split into pieces of at most `maxBytes` of UTF-8 each, on
+    /// character boundaries (a single character longer than that, on scalar
+    /// boundaries), so a long paste still fits `maxTextPayload` per message.
+    public static func textPieces(_ text: String, maxBytes: Int = maxTextPayload) -> [String] {
+        guard text.utf8.count > maxBytes else { return text.isEmpty ? [] : [text] }
+        var pieces: [String] = [], piece = "", pieceBytes = 0
+        func add(_ part: String, _ bytes: Int) {
+            if pieceBytes + bytes > maxBytes, !piece.isEmpty { pieces.append(piece); piece = ""; pieceBytes = 0 }
+            piece += part
+            pieceBytes += bytes
+        }
+        for character in text {
+            let bytes = character.utf8.count
+            if bytes <= maxBytes {
+                add(String(character), bytes)
+            } else {
+                for scalar in character.unicodeScalars { add(String(scalar), String(scalar).utf8.count) }
+            }
+        }
+        if !piece.isEmpty { pieces.append(piece) }
+        return pieces
+    }
+
+    /// The most a payload of message type `type` from `sender` may be.
+    static func maxPayload(of type: UInt8, from sender: Sender) -> Int {
+        guard sender == .phone else { return maxPayload }
+        switch Kind(rawValue: type) {
+        case .text: return maxTextPayload
+        case .clipboard: return maxClipboardPayload
+        case .some: return maxEventPayload
+        // A type added later: skipped, but not buffered without bound either.
+        case nil: return maxClipboardPayload
+        }
+    }
+
     /// Splits a byte stream into messages. Unknown types are skipped, so
     /// either side can add some later.
     public struct Reader: Sendable {
         private var buffer = Data()
-        public init() {}
+        private let sender: Sender
+        /// `sender`: the side that writes the stream; a phone's messages have smaller limits.
+        public init(from sender: Sender = .mac) { self.sender = sender }
 
-        /// The messages complete so far; throws on a payload over `maxPayload` or one that doesn't parse.
+        /// The messages complete so far; throws on a payload over its type's
+        /// limit (`maxPayload(of:from:)`), checked before it is buffered, or one that doesn't parse.
         public mutating func append(_ data: Data) throws -> [Message] {
             buffer.append(data)
             var messages: [Message] = []
             var offset = buffer.startIndex
             while buffer.endIndex - offset >= 5 {
                 let length = Int(buffer.u32(at: offset + 1))
-                guard length <= ScreenVideoWire.maxPayload else { throw Failure.tooLarge }
+                guard length <= ScreenVideoWire.maxPayload(of: buffer[offset], from: sender) else { throw Failure.tooLarge }
                 guard buffer.endIndex - offset >= 5 + length else { break }
                 let type = buffer[offset]
                 let payload = buffer.subdata(in: (offset + 5)..<(offset + 5 + length))

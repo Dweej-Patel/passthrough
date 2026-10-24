@@ -79,8 +79,19 @@ public final class ScreenVideoClient: @unchecked Sendable {
         send(.key(keysym: keysym, modifiers: modifiers.rawValue))
     }
 
-    public func text(_ text: String) { send(.text(text)) }
-    public func clipboard(_ text: String) { send(.clipboard(text)) }
+    /// Typed as is; a long paste goes in pieces the Mac accepts (`ScreenVideoWire.maxTextPayload`).
+    public func text(_ text: String) {
+        for piece in ScreenVideoWire.textPieces(text) { send(.text(piece)) }
+    }
+
+    /// Puts `text` on the Mac's clipboard; false (nothing sent) when it is
+    /// longer than the Mac takes (`ScreenVideoWire.maxClipboardPayload`).
+    @discardableResult
+    public func clipboard(_ text: String) -> Bool {
+        guard text.utf8.count <= ScreenVideoWire.maxClipboardPayload else { return false }
+        send(.clipboard(text))
+        return true
+    }
 
     /// Frame `number` is on screen.
     public func shown(_ number: UInt32) { send(.ack(number: number)) }
@@ -146,6 +157,8 @@ public final class ScreenVideoClient: @unchecked Sendable {
     // MARK: H.264
 
     static func formatDescription(sps: Data, pps: Data) throws -> CMVideoFormatDescription {
+        // Empty parameter sets have no base address to hand over.
+        guard !sps.isEmpty, !pps.isEmpty else { throw Failure.malformed }
         var format: CMVideoFormatDescription?
         let status = sps.withUnsafeBytes { spsBytes in
             pps.withUnsafeBytes { ppsBytes in
@@ -156,12 +169,14 @@ public final class ScreenVideoClient: @unchecked Sendable {
                                                                            nalUnitHeaderLength: 4, formatDescriptionOut: &format)
             }
         }
-        guard status == noErr, let format, !sps.isEmpty, !pps.isEmpty else { throw Failure.malformed }
+        guard status == noErr, let format else { throw Failure.malformed }
         return format
     }
 
     /// One frame's AVCC data as a sample buffer the display shows as soon as it has it.
     static func sampleBuffer(_ data: Data, format: CMVideoFormatDescription, number: UInt32) throws -> CMSampleBuffer {
+        // An empty frame is nothing to show, and has no base address to copy from.
+        guard !data.isEmpty else { throw Failure.malformed }
         var block: CMBlockBuffer?
         guard CMBlockBufferCreateWithMemoryBlock(allocator: nil, memoryBlock: nil, blockLength: data.count, blockAllocator: nil,
                                                  customBlockSource: nil, offsetToData: 0, dataLength: data.count, flags: 0,

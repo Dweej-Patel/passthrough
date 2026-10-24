@@ -5,7 +5,7 @@ import Foundation
 /// encodings use: each rectangle's compressed bytes continue it and end on
 /// a sync flush, so they inflate completely on their own.
 final class Inflater {
-    enum Failure: Error { case corrupt }
+    enum Failure: Error { case corrupt, tooLarge }
 
     private var stream = z_stream()
     private var ready = false
@@ -18,8 +18,9 @@ final class Inflater {
         if ready { inflateEnd(&stream) }
     }
 
-    /// Everything `input` inflates to.
-    func inflated(_ input: Data) throws -> Data {
+    /// Everything `input` inflates to; throws once that passes `limit`
+    /// bytes (what the rectangle it carries can need), before buffering more.
+    func inflated(_ input: Data, limit: Int) throws -> Data {
         guard ready else { throw Failure.corrupt }
         var output = Data()
         var chunk = [UInt8](repeating: 0, count: 64 * 1024)
@@ -35,6 +36,7 @@ final class Inflater {
                     guard status == Z_OK || status == Z_BUF_ERROR || status == Z_STREAM_END else { throw Failure.corrupt }
                     return buffer.count - Int(stream.avail_out)
                 }
+                guard output.count + produced <= limit else { throw Failure.tooLarge }
                 output.append(contentsOf: chunk[0..<produced])
                 if produced == 0 { break }
             } while stream.avail_in > 0 || stream.avail_out == 0

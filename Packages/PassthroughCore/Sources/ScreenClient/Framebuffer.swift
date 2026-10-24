@@ -5,28 +5,56 @@ import Foundation
 /// B, G, R, x (the pixel format `RFBClient` asks for), which CoreGraphics
 /// reads as little-endian "skip first" without converting.
 final class Framebuffer {
-    enum Failure: Error { case outOfBounds, corrupt }
+    enum Failure: Error { case outOfBounds, corrupt, tooLarge }
 
-    private(set) var width: Int
-    private(set) var height: Int
-    private var pixels: [UInt32]
+    /// The largest screen it makes room for. Screen Sharing sends every
+    /// display as one framebuffer, so two 6K displays side by side
+    /// (12032×3384, 41 Mpx) must fit; a server asking for more (up to
+    /// 65535×65535, 17 GB) is refused rather than allocated.
+    static let maxSide = 16384
+    static let maxPixels = 50_000_000
 
-    init(width: Int, height: Int) {
+    private(set) var width = 0
+    private(set) var height = 0
+    private var pixels: [UInt32] = []
+
+    /// Empty until `resize`.
+    init() {}
+
+    /// For tests and fixed sizes; traps on a size `resize` would refuse.
+    convenience init(width: Int, height: Int) {
+        self.init()
+        try! resize(width: width, height: height)
+    }
+
+    static func isAcceptable(width: Int, height: Int) -> Bool {
+        width >= 0 && height >= 0 && width <= maxSide && height <= maxSide && width * height <= maxPixels
+    }
+
+    /// A new, black screen of this size; throws (keeping the old one) for a size past the limits.
+    func resize(width: Int, height: Int) throws {
+        guard Self.isAcceptable(width: width, height: height) else { throw Failure.tooLarge }
         self.width = width
         self.height = height
         pixels = [UInt32](repeating: 0, count: width * height)
     }
 
-    func resize(width: Int, height: Int) {
-        self.width = width
-        self.height = height
-        pixels = [UInt32](repeating: 0, count: width * height)
+    /// The most a valid ZRLE rectangle of `w`×`h` inflates to: per 64×64
+    /// tile a subencoding byte, at most a 127-colour palette, and at most 4
+    /// bytes a pixel (a plain run of one: 3 for the colour, 1 for the length).
+    static func zrleLimit(w: Int, h: Int) -> Int {
+        let tiles = ((w + 63) / 64) * ((h + 63) / 64)
+        return w * h * 4 + tiles * (1 + 127 * 3) + 1024
     }
 
     func pixel(x: Int, y: Int) -> UInt32 { pixels[y * width + x] }
 
+    func contains(x: Int, y: Int, w: Int, h: Int) -> Bool {
+        x >= 0 && y >= 0 && w >= 0 && h >= 0 && x + w <= width && y + h <= height
+    }
+
     private func check(_ x: Int, _ y: Int, _ w: Int, _ h: Int) throws {
-        guard x >= 0, y >= 0, w >= 0, h >= 0, x + w <= width, y + h <= height else { throw Failure.outOfBounds }
+        guard contains(x: x, y: y, w: w, h: h) else { throw Failure.outOfBounds }
     }
 
     /// Raw encoding: `w`·`h` pixels, 4 bytes each, row by row.

@@ -1,3 +1,4 @@
+import CoreMedia
 import CryptoKit
 import Foundation
 import Network
@@ -114,6 +115,59 @@ final class FramebufferTests: XCTestCase {
     }
 }
 
+/// What a server sends the stream client is checked before it is used.
+final class ScreenVideoClientTests: XCTestCase {
+    func testEmptyParameterSetsAndFramesAreMalformed() throws {
+        XCTAssertThrowsError(try ScreenVideoClient.formatDescription(sps: Data(), pps: Data([0x68, 0xCE, 0x3C, 0x80])))
+        XCTAssertThrowsError(try ScreenVideoClient.formatDescription(sps: Data([0x67, 0x42]), pps: Data()))
+        var format: CMVideoFormatDescription?
+        XCTAssertEqual(CMVideoFormatDescriptionCreate(allocator: nil, codecType: kCMVideoCodecType_H264, width: 16, height: 16,
+                                                      extensions: nil, formatDescriptionOut: &format), noErr)
+        XCTAssertThrowsError(try ScreenVideoClient.sampleBuffer(Data(), format: try XCTUnwrap(format), number: 1))
+        XCTAssertNoThrow(try ScreenVideoClient.sampleBuffer(Data([0, 0, 0, 1, 0x65]), format: try XCTUnwrap(format), number: 1))
+    }
+
+    /// A `format` with no parameter sets ends the stream as malformed, rather than crashing.
+    func testAFormatWithoutParameterSetsEndsTheStream() {
+        let (mac, phone) = Pipe.pair()
+        let closed = expectation(description: "closed")
+        let client = ScreenVideoClient(stream: phone, maxSide: 100, queue: DispatchQueue(label: "test")) { event in
+            if case .closed(let error?) = event, case .malformed? = error as? ScreenVideoClient.Failure { closed.fulfill() }
+        }
+        client.start()
+        mac.send(ScreenVideoWire.encode(.format(width: 10, height: 10, sps: Data(), pps: Data())), isComplete: false) { _ in }
+        wait(for: [closed], timeout: 5)
+    }
+
+    /// Two `ByteStream`s joined in memory, each delivery handed to a waiting receive.
+    private final class Pipe: ByteStream, @unchecked Sendable {
+        private let lock = NSLock()
+        private var inbox = Data()
+        private var waiting: (@Sendable (Data?, Bool, Error?) -> Void)?
+        weak var peer: Pipe?
+        var onTerminated: (@Sendable (Error?) -> Void)?
+
+        static func pair() -> (Pipe, Pipe) { let a = Pipe(), b = Pipe(); a.peer = b; b.peer = a; return (a, b) }
+
+        func receive(maximumLength: Int, completion: @escaping @Sendable (Data?, Bool, Error?) -> Void) {
+            lock.lock(); waiting = completion; lock.unlock(); flush()
+        }
+        func send(_ data: Data?, isComplete: Bool, completion: @escaping @Sendable (Error?) -> Void) {
+            peer?.take(data ?? Data()); completion(nil)
+        }
+        func cancel() {}
+        private func take(_ data: Data) { lock.lock(); inbox.append(data); lock.unlock(); flush() }
+        private func flush() {
+            lock.lock()
+            guard let waiting, !inbox.isEmpty else { lock.unlock(); return }
+            let chunk = inbox
+            inbox = Data(); self.waiting = nil
+            lock.unlock()
+            DispatchQueue.global().async { waiting(chunk, false, nil) }
+        }
+    }
+}
+
 /// The client against a fake Screen Sharing over loopback: login, pixel
 /// format and encodings, a ZRLE and a Raw update, then input.
 final class RFBClientTests: XCTestCase {
@@ -175,21 +229,35 @@ final class RFBClientTests: XCTestCase {
         }
     }
 
-    func testSessionWithoutLogin() throws {
+    /// What the client has sent once it has logged in and sent ClientInit:
+    /// the version (12), the security type (1), Apple's login answer for a
+    /// 16-byte prime (128 + 16) and ClientInit (1).
+    private static let loggedIn = 12 + 1 + 144 + 1
+
+    /// The server's side of a login with Apple's method that it accepts
+    /// (the fake server doesn't check the answer), up to ServerInit.
+    private static func acceptLogin(_ connection: NWConnection, _ server: FakeServer) {
+        connection.send(content: Data("RFB 003.008\n".utf8), completion: .idempotent)
+        server.waitFor(12)
+        connection.send(content: Data([1, 30]), completion: .idempotent)
+        server.waitFor(13)
+        let params: [UInt8] = [0, 2, 0, 16] + [UInt8](repeating: 0xFF, count: 16) + [UInt8](repeating: 0x01, count: 16)
+        connection.send(content: Data(params), completion: .idempotent)
+        server.waitFor(13 + 144)
+        connection.send(content: Data([0, 0, 0, 0]), completion: .idempotent)    // OK
+        server.waitFor(loggedIn)
+    }
+
+    func testSession() throws {
         let deflater = Deflater()
         let server = try FakeServer(self) { connection, server in
             DispatchQueue.global().async {
-                connection.send(content: Data("RFB 003.008\n".utf8), completion: .idempotent)
-                server.waitFor(12)
-                connection.send(content: Data([1, 1]), completion: .idempotent)          // one type: None
-                server.waitFor(13)
-                connection.send(content: Data([0, 0, 0, 0]), completion: .idempotent)    // OK
-                server.waitFor(14)                                                         // ClientInit
+                Self.acceptLogin(connection, server)
                 var serverInit: [UInt8] = [0, 70, 0, 2] + [UInt8](repeating: 0, count: 16) + [0, 0, 0, 3]
                 serverInit += Array("Mac".utf8)
                 connection.send(content: Data(serverInit), completion: .idempotent)
                 // SetPixelFormat (20) + SetEncodings (4 + 4·5) + FramebufferUpdateRequest (10).
-                server.waitFor(14 + 20 + 24 + 10)
+                server.waitFor(Self.loggedIn + 20 + 24 + 10)
                 // One update: a ZRLE rect over both tiles (solid, solid) and a 1×1 raw pixel.
                 let zrle = deflater.deflated(Data([1, 0x33, 0x22, 0x11, 1, 0x66, 0x55, 0x44]))
                 var update: [UInt8] = [0, 0, 0, 2]
@@ -200,7 +268,7 @@ final class RFBClientTests: XCTestCase {
         }
         addTeardownBlock { server.stop() }
         let events = Events()
-        let client = RFBClient(stream: dial(server), login: .init(username: "", password: ""), queue: .global()) { events.add($0) }
+        let client = RFBClient(stream: dial(server), login: .init(username: "me", password: "pw"), queue: .global()) { events.add($0) }
         client.start()
         waitUntil("a frame") { events.snapshot.contains { if case .frame = $0 { true } else { false } } }
         guard case .connected(70, 2, "Mac")? = events.snapshot.first else { return XCTFail("\(events.snapshot)") }
@@ -213,16 +281,18 @@ final class RFBClientTests: XCTestCase {
         XCTAssertEqual(pixel(1, 1), [0xCC, 0xBB, 0xAA])
 
         let sent = [UInt8](server.received.get())
+        let base = Self.loggedIn
         XCTAssertEqual(Array(sent[0..<12]), Array("RFB 003.008\n".utf8))
-        XCTAssertEqual(Array(sent[12..<14]), [1, 1], "chose None, then shared ClientInit")
-        XCTAssertEqual(Array(sent[14..<18]), [0, 0, 0, 0])
-        XCTAssertEqual(Array(sent[18..<22]), [32, 24, 0, 1], "32 bpp, depth 24, little-endian, true colour")
+        XCTAssertEqual(sent[12], 30, "chose Apple's login")
+        XCTAssertEqual(sent[base - 1], 1, "shared ClientInit")
+        XCTAssertEqual(Array(sent[base..<(base + 4)]), [0, 0, 0, 0])
+        XCTAssertEqual(Array(sent[(base + 4)..<(base + 8)]), [32, 24, 0, 1], "32 bpp, depth 24, little-endian, true colour")
 
         // After the update: another (incremental) request, then input.
-        server.waitFor(14 + 20 + 24 + 10 + 10)
+        server.waitFor(base + 20 + 24 + 10 + 10)
         client.pointer(x: 5, y: 1, buttons: .left)
         client.key(RFBKeys.returnKey, down: true)
-        server.waitFor(14 + 20 + 24 + 10 + 10 + 6 + 8)
+        server.waitFor(base + 20 + 24 + 10 + 10 + 6 + 8)
         let tail = [UInt8](server.received.get().suffix(14))
         XCTAssertEqual(tail, [5, 1, 0, 5, 0, 1] + [4, 1, 0, 0, 0, 0, 0xFF, 0x0D])
 
@@ -254,20 +324,101 @@ final class RFBClientTests: XCTestCase {
     }
 
     func testAnUnknownMessageIsAProtocolError() throws {
+        let failure = try failure { connection, server in
+            Self.acceptLogin(connection, server)
+            connection.send(content: Data([0, 1, 0, 1] + [UInt8](repeating: 0, count: 16) + [0, 0, 0, 0] + [99]), completion: .idempotent)
+        }
+        XCTAssertEqual(failure, .protocolError("message 99"))
+    }
+
+    /// The Mac's Screen Sharing always asks for a login: a server offering
+    /// to go without one is something else, and nothing is sent to it.
+    func testAServerOfferingNoLoginIsRefused() throws {
         let server = try FakeServer(self) { connection, server in
             DispatchQueue.global().async {
                 connection.send(content: Data("RFB 003.008\n".utf8), completion: .idempotent)
                 server.waitFor(12)
-                connection.send(content: Data([1, 1, 0, 0, 0, 0]), completion: .idempotent)
-                server.waitFor(14)
-                connection.send(content: Data([0, 1, 0, 1] + [UInt8](repeating: 0, count: 16) + [0, 0, 0, 0] + [99]), completion: .idempotent)
+                connection.send(content: Data([1, 1]), completion: .idempotent)          // one type: None
             }
         }
         addTeardownBlock { server.stop() }
         let events = Events()
-        let client = RFBClient(stream: dial(server), login: .init(username: "", password: ""), queue: .global()) { events.add($0) }
+        let client = RFBClient(stream: dial(server), login: .init(username: "me", password: "pw"), queue: .global()) { events.add($0) }
         client.start()
-        waitUntil("failed") { events.snapshot.contains { if case .closed = $0 { true } else { false } } }
-        XCTAssertTrue(events.snapshot.contains { if case .closed(.protocolError("message 99")) = $0 { true } else { false } })
+        waitUntil("refused") { !events.snapshot.isEmpty }
+        guard case .closed(.noLoginOffered)? = events.snapshot.first else { return XCTFail("\(events.snapshot)") }
+        Thread.sleep(forTimeInterval: 0.1)
+        XCTAssertEqual(server.received.get().count, 12, "only the version: no security type chosen")
+    }
+
+    /// A ServerInit asking for a screen past the limits is refused, not allocated;
+    /// two 6K displays side by side still fit.
+    func testAHugeScreenIsRefused() throws {
+        XCTAssertTrue(Framebuffer.isAcceptable(width: 12032, height: 3384))
+        XCTAssertFalse(Framebuffer.isAcceptable(width: 16385, height: 10))
+        XCTAssertFalse(Framebuffer.isAcceptable(width: 10000, height: 10000), "100 Mpx")
+        XCTAssertThrowsError(try Framebuffer().resize(width: 65535, height: 65535))
+        let failure = try failure { connection, server in
+            Self.acceptLogin(connection, server)
+            connection.send(content: Data([0xFF, 0xFF, 0xFF, 0xFF] + [UInt8](repeating: 0, count: 16) + [0, 0, 0, 0]), completion: .idempotent)
+        }
+        guard case .protocolError? = failure else { return XCTFail("\(String(describing: failure))") }
+    }
+
+    /// A DesktopSize past the limits ends the session too.
+    func testAHugeResizeIsRefused() throws {
+        let failure = try failure { connection, server in
+            Self.acceptLogin(connection, server)
+            connection.send(content: Data([0, 4, 0, 4] + [UInt8](repeating: 0, count: 16) + [0, 0, 0, 0]), completion: .idempotent)
+            server.waitFor(Self.loggedIn + 20 + 24 + 10)
+            let resize: [UInt8] = [0, 0, 0, 1] + [0, 0, 0, 0, 0x7F, 0xFF, 0x7F, 0xFF] + RFBClient.bytes(UInt32(bitPattern: -223))
+            connection.send(content: Data(resize), completion: .idempotent)
+        }
+        guard case .protocolError? = failure else { return XCTFail("\(String(describing: failure))") }
+    }
+
+    /// A refusal reason or a screen name longer than 64 KiB is refused
+    /// from its length, before the client waits for (and buffers) it.
+    func testLongReasonsAndNamesAreRefusedFromTheirLength() throws {
+        let reason = try failure { connection, server in
+            connection.send(content: Data("RFB 003.008\n".utf8), completion: .idempotent)
+            server.waitFor(12)
+            connection.send(content: Data([0, 0x7F, 0xFF, 0xFF, 0xFF]), completion: .idempotent)
+        }
+        XCTAssertEqual(reason, .unsupportedServer)
+        let name = try failure { connection, server in
+            Self.acceptLogin(connection, server)
+            connection.send(content: Data([0, 4, 0, 4] + [UInt8](repeating: 0, count: 16) + [0x10, 0, 0, 0]), completion: .idempotent)
+        }
+        XCTAssertEqual(name, .protocolError("name too long"))
+    }
+
+    /// Zlib that inflates past what its rectangle can hold is refused.
+    func testABombIsRefused() throws {
+        let bomb = Deflater().deflated(Data(count: 1 << 20))
+        XCTAssertLessThan(bomb.count, 8 << 10)
+        let failure = try failure { connection, server in
+            Self.acceptLogin(connection, server)
+            connection.send(content: Data([0, 4, 0, 4] + [UInt8](repeating: 0, count: 16) + [0, 0, 0, 0]), completion: .idempotent)
+            server.waitFor(Self.loggedIn + 20 + 24 + 10)
+            var update: [UInt8] = [0, 0, 0, 1] + [0, 0, 0, 0, 0, 4, 0, 4] + RFBClient.bytes(UInt32(6))
+            update += RFBClient.bytes(UInt32(bomb.count)) + [UInt8](bomb)
+            connection.send(content: Data(update), completion: .idempotent)
+        }
+        guard case .protocolError? = failure else { return XCTFail("\(String(describing: failure))") }
+        XCTAssertThrowsError(try Inflater().inflated(bomb, limit: 4 * 4 * 4))
+        XCTAssertEqual(try Inflater().inflated(bomb, limit: 1 << 20).count, 1 << 20)
+    }
+
+    /// Runs `script` as the server and returns how the client's session ended.
+    private func failure(_ script: @escaping @Sendable (NWConnection, FakeServer) -> Void) throws -> RFBClient.Failure? {
+        let server = try FakeServer(self) { connection, server in DispatchQueue.global().async { script(connection, server) } }
+        defer { server.stop() }
+        let events = Events()
+        let client = RFBClient(stream: dial(server), login: .init(username: "me", password: "pw"), queue: .global()) { events.add($0) }
+        client.start()
+        waitUntil("closed") { events.snapshot.contains { if case .closed = $0 { true } else { false } } }
+        for case .closed(let failure) in events.snapshot { return failure }
+        return nil
     }
 }
