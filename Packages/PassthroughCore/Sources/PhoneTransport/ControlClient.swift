@@ -236,7 +236,8 @@ public final class ControlClient: @unchecked Sendable {
             return
         }
         // From the phone: a port it can't have is the default, never a trap.
-        let socksPort = m.socksPort.flatMap { UInt16(exactly: $0) }.flatMap { $0 > 0 ? $0 : nil } ?? PassthroughProtocol.defaultSOCKSPort
+        var socksPort = PassthroughProtocol.defaultSOCKSPort
+        if let sent = m.socksPort, let port = UInt16(exactly: sent), port > 0 { socksPort = port }
         var paired = false
         if m.paired == true {
             if let token = identity.token, let phoneNonce = ControlAuth.decodeNonce(m.nonce),

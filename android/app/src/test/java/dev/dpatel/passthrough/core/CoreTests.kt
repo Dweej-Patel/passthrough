@@ -396,6 +396,9 @@ class ControlTests {
         var lines = 0
         while (mac.receiveOrNull() != null) lines++
         assertTrue("closed after a second or two of silence", lines < 5)
+        // The socket closes before the peer leaves the list; give a slow runner a moment.
+        val deadline = System.currentTimeMillis() + 2000
+        while (control.connectedMacs.isNotEmpty() && System.currentTimeMillis() < deadline) Thread.sleep(20)
         assertTrue(control.connectedMacs.isEmpty())
     }
 
