@@ -38,9 +38,9 @@ enum HotspotGuard {
     static func removeAll() -> [String] {
         var removed: [String] = []
         for (prefixes, v6) in [(v4, false), (v6, true)] {
-            let gateways = RouteTable.gateways(v6: v6)
-            let table = Set(gateways.keys)
-            for p in prefixes where RouteTable.isReject(p, v6: v6, in: gateways) && RouteTable.deleteIfPresent(p, v6: v6, table: table) {
+            let entries = RouteTable.entries(v6: v6)
+            let table = Set(entries.keys)
+            for p in prefixes where RouteTable.isOurs(p, v6: v6, in: entries) && RouteTable.deleteIfPresent(p, v6: v6, table: table) {
                 removed.append(p)
             }
         }

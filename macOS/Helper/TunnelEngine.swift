@@ -93,6 +93,7 @@ final class TunnelEngine {
 
         let child = try EngineChild.spawn(executable: try Self.engineExecutable(), config: Self.yaml(for: config), tunFD: fd)
         self.child = child
+        EnginePIDs.record(child.pid, for: Self.pidName)
         if child.waitForExit(timeout: 0.6) {
             self.child = nil
             throw EngineError.engineExited
@@ -154,6 +155,7 @@ final class TunnelEngine {
                 child.kill()
             }
             self.child = nil
+            EnginePIDs.clear(Self.pidName)
         }
         // The utun goes away once no process holds it: ours here, the
         // engine's when it exited.
@@ -214,12 +216,16 @@ final class TunnelEngine {
     /// Where a stuck engine's thread stacks are saved: the root-only state
     /// directory, never a shared one a local user could plant a link in.
     static let stuckEnginePath = BundledEngines.stateDirectory + "/engine-stuck.txt"
+    /// `EnginePIDs` name of the tun2socks engine process.
+    private static let pidName = "tun2socks"
 
     /// A verified root-only copy of this helper, made once per helper run:
-    /// the engine is never started from the user-writable app bundle.
+    /// the engine is never started from the user-writable app bundle. Reused
+    /// only while it is still exactly the file that was verified; otherwise
+    /// it is copied and verified afresh.
     private static var engineCopy: URL?
     private static func engineExecutable() throws -> URL {
-        if let engineCopy, FileManager.default.isExecutableFile(atPath: engineCopy.path) { return engineCopy }
+        if let engineCopy, BundledEngines.isIntactCopy(engineCopy) { return engineCopy }
         guard let helper = Bundle.main.executableURL else { throw EngineError.engineExited }
         let copy = try BundledEngines.stagedEngine(helper, identifier: Bundle.main.bundleIdentifier ?? "\(HelperConstants.identifier).helper")
         engineCopy = copy

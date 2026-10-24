@@ -10,6 +10,7 @@ let package = Package(
         .library(name: "PhoneTransport", targets: ["PhoneTransport"]),
         .library(name: "PassthroughUI", targets: ["PassthroughUI"]),
         .library(name: "VPNConfig", targets: ["VPNConfig"]),
+        .library(name: "HelperLogic", targets: ["HelperLogic"]),
         .library(name: "ShellHost", targets: ["ShellHost"]),
         .library(name: "IrohTransport", targets: ["IrohTransport"]),
         .library(name: "ScreenClient", targets: ["ScreenClient"]),
@@ -31,6 +32,10 @@ let package = Package(
         // VPN profile parsing and pinning. Linked by the root helper, so it
         // depends on Foundation and CryptoKit only.
         .target(name: "VPNConfig"),
+        // The root helper's pure decisions (XPC input checks, process and
+        // socket ownership), kept out of the helper so they can be tested.
+        // Foundation only, like VPNConfig.
+        .target(name: "HelperLogic"),
         // Mac-only: hosts login-shell sessions on a PTY for phones to attach to.
         .target(name: "ShellHost", dependencies: ["CPTY", "PassthroughCore", "PhoneTransport", "IrohTransport"]),
         // iroh endpoints and streams as `ByteStream`s. Linked by the Mac and
@@ -54,6 +59,7 @@ let package = Package(
         .testTarget(name: "PassthroughCoreTests", dependencies: ["PassthroughCore", "PhoneTransport", "TestSupport"]),
         .testTarget(name: "ShellHostTests", dependencies: ["ShellHost", "IrohTransport", "ScreenClient", "TestSupport"]),
         .testTarget(name: "VPNConfigTests", dependencies: ["VPNConfig"]),
+        .testTarget(name: "HelperLogicTests", dependencies: ["HelperLogic"]),
         .testTarget(name: "ScreenClientTests", dependencies: ["ScreenClient", "PassthroughCore"]),
         .testTarget(name: "ScreenHostTests", dependencies: ["ScreenHost", "ScreenClient", "ShellHost", "PassthroughCore"]),
         .testTarget(name: "IrohTransportTests", dependencies: [

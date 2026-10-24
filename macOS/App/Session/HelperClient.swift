@@ -192,6 +192,7 @@ final class HelperClient {
         var password: String
         var killSwitch: Bool
         var blockIPv6: Bool
+        var allowLocalNetwork: Bool
     }
 
     func startVPN(_ config: VPNConfig) async throws {
@@ -203,6 +204,7 @@ final class HelperClient {
             VPNConfigKey.password: config.password,
             VPNConfigKey.killSwitch: config.killSwitch,
             VPNConfigKey.blockIPv6: config.blockIPv6,
+            VPNConfigKey.allowLocalNetwork: config.allowLocalNetwork,
         ]
         _ = try await start(timeout: 20) { proxy, reply in proxy.startVPN(configuration: dict, reply: reply) }
     }
@@ -217,6 +219,15 @@ final class HelperClient {
 
     func status() async -> [String: Any] {
         await call(timeout: 4, fallback: [:]) { proxy, finish in proxy.getStatus { finish($0) } }
+    }
+
+    /// Who listens on Screen Sharing's port, as the root helper sees it; nil
+    /// when the helper did not answer (not registered, approved or running).
+    func checkScreenSharing() async -> ScreenSharingCheck.Result? {
+        guard availability == .ready else { return nil }
+        return await call(timeout: 4, fallback: nil) { proxy, finish in
+            proxy.checkScreenSharing { finish(ScreenSharingCheck.Result(rawValue: $0)) }
+        }
     }
 
     func quitHelper() {

@@ -629,7 +629,7 @@ final class ShellListenerTests: XCTestCase {
 
     /// Reads from `stream` until `done` holds for everything read so far
     /// (or, with `orEnd`, until the stream ends).
-    private func read(_ stream: ConnectionStream, _ description: String, orEnd: Bool = false,
+    private func read(_ stream: ConnectionStream, _ description: String, orEnd: Bool = false, timeout: TimeInterval = 5,
                       until done: @escaping @Sendable (Data) -> Bool) -> Data {
         let got = expectation(description: description)
         let buffer = Locked(Data())
@@ -642,7 +642,7 @@ final class ShellListenerTests: XCTestCase {
             }
         }
         next()
-        wait(for: [got], timeout: 5)
+        wait(for: [got], timeout: timeout)
         return buffer.get()
     }
 
@@ -705,10 +705,53 @@ final class ShellListenerTests: XCTestCase {
         let listener = startListener()
         listener.screenAllowed = { $0 == "phone-1" }
         listener.gate.screenPort.set(try closedPort())
+        listener.screenSharingVerified = { true }
         let (stream, _) = rawAuthorized(listener)
         stream.send(Data("{\"t\":\"screen\"}\n{\"t\":\"ping\"}\n".utf8), isComplete: false) { _ in }
         let replies = Self.lines(read(stream, "replies") { Self.lines($0).contains { $0.t == "pong" } })
         XCTAssertEqual(replies.filter { $0.t == "error" }.map(\.reason), ["screen_unavailable"])
+    }
+
+    /// A process of the user's can listen on Screen Sharing's port while it
+    /// is off, and the phone would send it the Mac password: nothing is
+    /// relayed until the check says the port is really Screen Sharing's, and
+    /// nothing at all without a check.
+    func testScreenIsNotRelayedToAnUnverifiedListener() throws {
+        let refuses: @Sendable () async -> Bool = { false }
+        let hangs: @Sendable () async -> Bool = { try? await Task.sleep(for: .seconds(30)); return true }
+        for check in [refuses, nil, hangs] {
+            let fake = try FakeScreenSharing(self)
+            addTeardownBlock { fake.stop() }
+            let listener = startListener()
+            listener.screenAllowed = { _ in true }
+            listener.gate.screenPort.set(fake.port)
+            listener.screenSharingVerified = check
+            let (stream, _) = rawAuthorized(listener)
+            stream.send(Data("{\"t\":\"screen\"}\n{\"t\":\"ping\"}\n".utf8), isComplete: false) { _ in }
+            let replies = Self.lines(read(stream, "replies", timeout: 10) { Self.lines($0).contains { $0.t == "pong" } })
+            XCTAssertEqual(replies.filter { $0.t == "error" }.map(\.reason), ["screen_unavailable"])
+            XCTAssertFalse(replies.contains { $0.t == ShellEnvelope.screenReady })
+            XCTAssertNil(fake.connection.get(), "the impostor was never dialled")
+        }
+    }
+
+    /// The check runs before the dial, and once per request.
+    func testScreenSharingIsCheckedBeforeEveryRelay() throws {
+        let fake = try FakeScreenSharing(self)
+        addTeardownBlock { fake.stop() }
+        let checks = Locked(0)
+        let listener = startListener()
+        listener.screenAllowed = { _ in true }
+        listener.gate.screenPort.set(fake.port)
+        listener.screenSharingVerified = {
+            XCTAssertNil(fake.connection.get(), "checked before dialling")
+            checks.set(checks.get() + 1)
+            return true
+        }
+        let (stream, _) = rawAuthorized(listener)
+        stream.send(try ShellEnvelope(t: ShellEnvelope.screen).encodedLine(), isComplete: false) { _ in }
+        _ = read(stream, "screenReady") { $0.firstRange(of: Data("RFB".utf8)) != nil }
+        XCTAssertEqual(checks.get(), 1)
     }
 
     /// After `screenReady` the connection is Screen Sharing's, both ways,
@@ -725,6 +768,7 @@ final class ShellListenerTests: XCTestCase {
             viewers.set(viewers.get() + [viewing])
         }
         listener.gate.screenPort.set(fake.port)
+        listener.screenSharingVerified = { true }
         let (stream, _) = rawAuthorized(listener)
         stream.send(try ShellEnvelope(t: ShellEnvelope.screen).encodedLine(), isComplete: false) { _ in }
         let banner = Data("RFB 003.889\n".utf8)
@@ -854,6 +898,7 @@ final class ShellListenerTests: XCTestCase {
         let listener = startListener()
         listener.screenAllowed = { _ in true }
         listener.gate.screenPort.set(fake.port)
+        listener.screenSharingVerified = { true }
         let (shell, _) = rawAuthorized(listener)
         let (screen, _) = rawAuthorized(listener)
         screen.send(try ShellEnvelope(t: ShellEnvelope.screen).encodedLine(), isComplete: false) { _ in }
@@ -880,6 +925,7 @@ final class ShellListenerTests: XCTestCase {
         let listener = startListener()
         listener.screenAllowed = { _ in true }
         listener.gate.screenPort.set(fake.port)
+        listener.screenSharingVerified = { true }
         let (client, probe) = readyClient(listener)
         client.requestScreen()
         wait(for: [probe.expect(self, "handed over") { $0.contains { if case .screen = $0 { true } else { false } } }], timeout: 5)
@@ -918,6 +964,7 @@ final class ShellListenerTests: XCTestCase {
                           "set PASSTHROUGH_LIVE_SCREEN=1 with Screen Sharing on")
         let listener = startListener()
         listener.screenAllowed = { _ in true }
+        listener.screenSharingVerified = { true }   // the test asserts it is the real one
         let (stream, _) = rawAuthorized(listener)
         stream.send(try ShellEnvelope(t: ShellEnvelope.screen).encodedLine(), isComplete: false) { _ in }
         let got = read(stream, "banner", orEnd: true) { $0.firstRange(of: Data("RFB 003.".utf8)) != nil || Self.lines($0).contains { $0.t == "error" } }
@@ -937,6 +984,7 @@ final class ShellListenerTests: XCTestCase {
         }
         let listener = startListener()
         listener.screenAllowed = { _ in true }
+        listener.screenSharingVerified = { true }
         let (client, probe) = readyClient(listener)
         client.requestScreen()
         wait(for: [probe.expect(self, "handed over") { $0.contains { if case .screen = $0 { true } else { false } } }], timeout: 10)

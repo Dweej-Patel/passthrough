@@ -25,6 +25,7 @@ final class WireGuardRunner: VPNRunner {
     private var startedAt = Date()
     private var lastStats: (Int, Int, Int?) = (0, 0, nil)
     private static let nameFile = BundledEngines.stateDirectory + "/wg.name"
+    private static let pidName = "wireguard-go"
 
     init(configText: String, queue: DispatchQueue) throws {
         do {
@@ -43,11 +44,13 @@ final class WireGuardRunner: VPNRunner {
         let process = Process()
         process.executableURL = binary
         process.arguments = ["-f", "utun"]
-        var env = ProcessInfo.processInfo.environment
-        env["WG_TUN_NAME_FILE"] = Self.nameFile
-        env["WG_PROCESS_FOREGROUND"] = "1"
-        env["LOG_LEVEL"] = "error"
-        process.environment = env
+        // Only what wireguard-go reads, never the helper's own environment
+        // (GODEBUG and friends steer the Go runtime of a root process).
+        process.environment = BundledEngines.environment([
+            "WG_TUN_NAME_FILE": Self.nameFile,
+            "WG_PROCESS_FOREGROUND": "1",
+            "LOG_LEVEL": "error",
+        ])
         let errPipe = Pipe()
         process.standardOutput = FileHandle.nullDevice
         process.standardError = errPipe
@@ -71,8 +74,10 @@ final class WireGuardRunner: VPNRunner {
                 self.onEvent?(.exited(fatal: nil))
             }
         }
+        try BundledEngines.requireIntactCopy(binary)
         try process.run()
         self.process = process
+        EnginePIDs.record(process.processIdentifier, for: Self.pidName)
         startedAt = Date()
         waitForInterface(attempt: 0)
     }
@@ -90,6 +95,7 @@ final class WireGuardRunner: VPNRunner {
         }
         self.process = nil
         try? FileManager.default.removeItem(atPath: Self.nameFile)
+        EnginePIDs.clear(Self.pidName)
     }
 
     private func cancelTimers() {

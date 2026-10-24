@@ -50,6 +50,17 @@ public final class ShellListener: @unchecked Sendable {
         set { gate.screenAccess.set(newValue) }
     }
 
+    /// Whether what listens on Screen Sharing's port is macOS's own Screen
+    /// Sharing, asked before every `screen` relay (off the queue, so it may
+    /// take a while). The phone sends the Mac account's password down the
+    /// relay, and any process of the user's can listen on that port while
+    /// Screen Sharing is off. False, or unset: the phone is told
+    /// `screen_unavailable` and nothing is dialled.
+    public var screenSharingVerified: (@Sendable () async -> Bool)? {
+        get { gate.screenSharingCheck.get() }
+        set { gate.screenSharingCheck.set(newValue) }
+    }
+
     /// Makes the Mac's own screen stream for a phone's `screenVideo` request
     /// (protocol/README.md, "Screen video"), or nil when it can't: then the
     /// phone is told `screen_video_unavailable`. Asked on the listener's
@@ -259,6 +270,8 @@ final class ShellGate: @unchecked Sendable {
     let screenHandler = Locked<(@Sendable (_ phoneID: String, _ label: String, _ viewing: Bool) -> Void)?>(nil)
     let screenVideoFactory = Locked<(@Sendable (String) -> (any ScreenVideoSource)?)?>(nil)
     let screenViews = Locked(ScreenViewLimit())
+    /// `ShellListener.screenSharingVerified`.
+    let screenSharingCheck = Locked<(@Sendable () async -> Bool)?>(nil)
     /// Where `screen` requests are relayed; another port in tests.
     let screenPort = Locked(RemoteShell.screenSharingPort)
     private let shellKeys: @Sendable (String) -> [Data]
@@ -515,6 +528,8 @@ final class ShellConnection: ShellAttachment, @unchecked Sendable {
     private var busy = false
     /// Reading stopped while `busy`, so a phone cannot pile up requests meanwhile.
     private var readPaused = false
+    /// A `screen` request waits for `screenSharingVerified`.
+    private var screenChecking = false
     /// Screen Sharing being dialled for a `screen` request.
     private var screenDial: NWConnection?
     /// The connection is now a byte relay to Screen Sharing; no more lines.
@@ -548,7 +563,7 @@ final class ShellConnection: ShellAttachment, @unchecked Sendable {
     }
 
     /// Asked for the screen: being relayed to Screen Sharing, or about to be.
-    var isScreen: Bool { screenDial != nil || screenRelay != nil || screenVideo != nil }
+    var isScreen: Bool { screenChecking || screenDial != nil || screenRelay != nil || screenVideo != nil }
 
     /// Ends the connection and stops the manager sending to it. Idempotent.
     func close() {
@@ -558,6 +573,7 @@ final class ShellConnection: ShellAttachment, @unchecked Sendable {
         inbox.removeAll()
         manager.detach(client: self)
         attached = nil
+        screenChecking = false
         screenDial?.cancel()
         screenDial = nil
         if let screenRelay {
@@ -795,11 +811,43 @@ final class ShellConnection: ShellAttachment, @unchecked Sendable {
     /// connection leaves its session first, and handles no more lines: the
     /// phone sends nothing after `screen` until `screenReady` (Screen Sharing
     /// speaks first), so anything already waiting is a protocol error.
+    ///
+    /// Before dialling, `screenSharingVerified` must say the port is macOS's
+    /// own Screen Sharing: the phone will send the Mac account's password to
+    /// whatever answers there.
     private func screen() {
         guard let gate, let port = NWEndpoint.Port(rawValue: gate.screenPort.get()) else { return fail(.screenUnavailable) }
         busy = true
         manager.detach(client: self)
         attached = nil
+        screenChecking = true
+        let check = gate.screenSharingCheck.get()
+        var settled = false
+        let settle: (Bool) -> Void = { [weak self] genuine in
+            guard let self, !settled else { return }
+            settled = true
+            guard self.screenChecking, !self.closed else { return }
+            self.screenChecking = false
+            guard genuine else {
+                ptLog(.warning, check == nil
+                      ? "shell: a phone asked for the screen; nothing can check what listens on Screen Sharing's port, so it is not relayed"
+                      : "shell: a phone asked for the screen; what listens on Screen Sharing's port is not Screen Sharing (or could not be checked), so it is not relayed")
+                self.fail(.screenUnavailable)
+                return self.resume()
+            }
+            self.dialScreen(port)
+        }
+        guard let check else { return settle(false) }
+        let queue = self.queue
+        Task {
+            let genuine = await check()
+            queue.async { settle(genuine) }
+        }
+        queue.asyncAfter(deadline: .now() + Self.screenDialTimeout) { settle(false) }
+    }
+
+    /// `screen`, once the port is known to be Screen Sharing's.
+    private func dialScreen(_ port: NWEndpoint.Port) {
         let dial = NWConnection(host: .ipv4(.loopback), port: port, using: .tcp)
         screenDial = dial
         var settled = false

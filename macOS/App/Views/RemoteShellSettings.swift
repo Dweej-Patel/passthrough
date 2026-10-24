@@ -135,6 +135,9 @@ struct RemoteShellSettings: View {
                             : "Optional fallback, slower, for when Passthrough can't stream this screen itself.") {
                 if !on { Button("Open Settings…") { ScreenSharing.openSettings() } }
             }
+            if let problem = shell.screenSharingProblem {
+                Label(problem, systemImage: "exclamationmark.triangle.fill").font(.caption).foregroundStyle(PTTheme.warning)
+            }
         }
     }
 }
