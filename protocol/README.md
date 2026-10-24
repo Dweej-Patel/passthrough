@@ -252,10 +252,11 @@ connection whose `hello` or proof line exceeds 4096 bytes (a hard limit: a
 newline-terminated line over it is refused too) or that has not proved itself
 within 10 seconds, and holds at most 2 unproven connections per address (16 in
 total; over iroh, 8 of them for connections arriving through relays). A public
-IPv4 peer is counted by its /24 and every IPv6 peer (link-local and ULA
-included) by its /64, so taking many addresses does not multiply a stranger's
-share. 4 of the 16 are kept for addresses that proved a shell key within the
-last 30 days (remembered in memory only), which are counted on their own. Over
+IPv4 peer is counted by its /24 and a ULA or global IPv6 peer by its /64, so
+taking many addresses does not multiply a stranger's share; a link-local IPv6
+peer (`fe80::/10`, where every AWDL and LAN neighbour is) is counted by its own
+address. 4 of the 16 are kept for addresses that proved a shell key within the
+last 30 days (remembered across relaunches, at most 256), which are counted on their own. Over
 iroh a slot is taken only once QUIC has validated the peer's address (it is
 sent a retry first), so packets with forged source addresses hold none.
 After `ready` a line over the 262144-byte limit closes the connection.
@@ -404,10 +405,12 @@ The Mac closes a connection from any peer outside these ranges before the TLS
 handshake completes: 10/8, 172.16/12, 192.168/16, 169.254/16, 127/8,
 100.64/10, `fc00::/7`, `fe80::/10`, `::1` and `fd7a:115c:a1e0::/48`
 (Tailscale). 100.64/10 is also carrier-grade NAT space, so a peer from it, or
-from `fd7a:115c:a1e0::/48`, is let in only while one of the Mac's own
-interfaces has an address in that range of the same family (Tailscale,
-NetBird, Headscale), and only when the connection arrived on such an
-address. Hosts may carry a `%zone` suffix, which is ignored. A global
+from `fd7a:115c:a1e0::/48`, is let in only while one of the Mac's own tunnel
+interfaces (a point-to-point `utun`, as Tailscale, NetBird and Headscale set
+up) has an address in that range of the same family, and only when the
+connection arrived on such an address; the same range on Wi-Fi or Ethernet is
+the carrier's network and does not count. A connection from such a peer whose
+arrival address is not known is refused. Hosts may carry a `%zone` suffix, which is ignored. A global
 IPv6 peer (`2000::/3`) is also let in when it shares a /64 with one of the
 Mac's own global addresses, so an IPv6-only LAN works; any other global
 address is refused. Only the Mac listens, so this check has no Kotlin

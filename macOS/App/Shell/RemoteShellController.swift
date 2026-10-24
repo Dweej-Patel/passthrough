@@ -128,6 +128,9 @@ final class RemoteShellController: ObservableObject {
     private var listener: ShellListener?
     /// Shared by both listeners, so the caps on views of the screen hold across them.
     private let screenViews = ScreenViewLimit()
+    /// Phones' addresses that proved a shell key lately, kept across launches
+    /// for the LAN/Tailscale listener's reserved handshake slots.
+    private let provenPeers = FileProvenAddressStore.inApplicationSupport(named: "ProvenShellPeers")
     /// Starts and stops in order, off the main thread (ending sessions waits for them).
     private let lifecycle = DispatchQueue(label: "\(PassthroughProtocol.identifier).shell-lifecycle")
     /// History reads: at most one a second from session changes, and only the latest one's result is kept.
@@ -175,6 +178,7 @@ final class RemoteShellController: ObservableObject {
             shellKeys: { store.candidateKeys(forPhone: $0) },
             keyConfirmed: { store.confirmCurrentKey(phoneID: $0, proven: $1) },
             phoneLabel: { id in store.phones.first { $0.phoneID == id }?.label ?? "Phone" },
+            provenAddresses: provenPeers,
             macInfo: { reach.get().macInfo() })
         listener.onSessionEvent = { text in ptLog(.info, "shell: \(text)") }
         listener.screenAllowed = { store.screenAllowed(forPhone: $0) }

@@ -39,12 +39,15 @@ final class ShellListenerTests: XCTestCase {
     // MARK: Helpers
 
     private func startListener(peerAllowed: @escaping @Sendable (String) -> Bool = ShellAddressPolicy.isAllowed,
+                               arrivalAllowed: @escaping @Sendable (String, String?) -> Bool = ShellListener.defaultArrivalAllowed,
+                               localAddress: (@Sendable (NWPath?) -> String?)? = nil,
                                events: Locked<[String]>? = nil, keys: Locked<[String: Data]>? = nil) -> ShellListener {
         let keys = keys ?? Locked(["phone-1": key])
         let listener = ShellListener(identity: identity, port: 0, advertise: false, manager: manager, transcripts: store,
                                      shellKeys: { keys.get()[$0].map { [$0] } ?? [] },
                                      phoneLabel: { $0 == "phone-1" ? "Test iPhone" : "?" },
-                                     peerAllowed: peerAllowed)
+                                     peerAllowed: peerAllowed, arrivalAllowed: arrivalAllowed)
+        if let localAddress { listener.localAddress = localAddress }
         if let events { listener.onSessionEvent = { events.set(events.get() + [$0]) } }
         let listening = expectation(description: "listening")
         try! listener.start { _ in listening.fulfill() }
@@ -187,6 +190,48 @@ final class ShellListenerTests: XCTestCase {
         XCTAssertFalse(probe.isReady)
         XCTAssertTrue(probe.failures.isEmpty, "no challenge, so no protocol error either")
         XCTAssertEqual(Set(asked.get()), ["127.0.0.1"], "IPv4 peers are checked as plain IPv4")
+    }
+
+    /// A connection that arrived where its peer may not (an overlay source on
+    /// a LAN address) is closed before TLS, as one from a disallowed peer.
+    func testAPeerArrivingOnTheWrongAddressIsClosedBeforeChallenge() {
+        let asked = Locked<[String?]>([])
+        let listener = startListener(arrivalAllowed: { _, local in asked.set(asked.get() + [local]); return false })
+        let (_, probe) = client(listener)
+        wait(for: [probe.expect(self, "disconnected") { _ in probe.disconnected }], timeout: 8)
+        XCTAssertFalse(probe.isReady)
+        XCTAssertTrue(probe.failures.isEmpty, "no challenge")
+        XCTAssertEqual(asked.get(), ["127.0.0.1"], "decided at accept, on the address it arrived on")
+    }
+
+    /// Where the accepted connection does not know yet which address it
+    /// arrived on (and the policy needs it), the listener waits for its path
+    /// and decides then; a peer allowed there goes on as usual.
+    func testAnArrivalUnknownAtAcceptIsCheckedOnceTheConnectionKnowsIt() {
+        let calls = Locked(0)
+        let asked = Locked<[String?]>([])
+        let listener = startListener(
+            arrivalAllowed: { _, local in asked.set(asked.get() + [local]); return local == "127.0.0.1" },
+            localAddress: { path in
+                calls.set(calls.get() + 1)
+                return calls.get() == 1 ? nil : path?.localEndpoint.map(PeerAddress.host(of:))
+            })
+        _ = readyClient(listener)
+        XCTAssertEqual(asked.get(), [nil, "127.0.0.1"])
+    }
+
+    /// An arrival that is still unknown once the connection is up is refused
+    /// before the handshake reads or sends anything, and its slot is freed.
+    func testAnArrivalNeverKnownIsRefused() {
+        let asked = Locked<[String?]>([])
+        let listener = startListener(arrivalAllowed: { _, local in asked.set(asked.get() + [local]); return local != nil },
+                                     localAddress: { _ in nil })
+        let (_, probe) = client(listener)
+        wait(for: [probe.expect(self, "disconnected") { _ in probe.disconnected }], timeout: 8)
+        XCTAssertFalse(probe.isReady)
+        XCTAssertTrue(probe.failures.isEmpty, "no challenge")
+        XCTAssertEqual(asked.get(), [nil, nil], "asked at accept, then once the connection was up")
+        XCTAssertEqual(listener.queue.sync { listener.gate.pendingHandshakes }, 0)
     }
 
     /// Revoking a phone cuts its live connection at once and ends the

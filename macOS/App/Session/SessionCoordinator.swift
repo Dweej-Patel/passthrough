@@ -231,7 +231,8 @@ final class SessionCoordinator: ObservableObject {
         wirelessWatcher = WirelessWatcher(
             macTag: { WirelessLink.macTag(clientID: UserDefaults.standard.string(forKey: "clientID") ?? "") },
             identity: { try MacIdentity.loadOrCreate(label: SessionCoordinator.identityLabel) },
-            phones: { links.phones })
+            phones: { links.phones },
+            provenAddresses: FileProvenAddressStore.inApplicationSupport(named: "ProvenWirelessPeers"))
         directory = DeviceDirectory(watchers: [USBMuxWatcher(), androidWatcher, wirelessWatcher])
         suppressAutoConnect = env["PASSTHROUGH_NO_AUTOCONNECT"] != nil || env["PASSTHROUGH_VPN_TEST"] != nil
         // A snapshot run only draws views: no devices, helper, shell or network,

@@ -180,6 +180,30 @@ final class TranscriptStoreTests: XCTestCase {
         XCTAssertEqual(store.entries().map(\.id), ["live"], "even over the cap, a live session stays")
     }
 
+    /// A prune reads the folder without holding up `begin`: a shell opened
+    /// while it scans opens at once, and its recording, though scanned as a
+    /// file with no end and no writer seen, is not deleted.
+    func testPruneNeitherBlocksNorDeletesASessionBegunMidScan() throws {
+        let store = try TranscriptStore(directory: directory)
+        let old = try makeWriter(store, id: "old", at: Date(timeIntervalSince1970: 1_000))
+        old.finish(exitStatus: 0, at: Date(timeIntervalSince1970: 2_000))
+        let begun = Locked<TranscriptWriter?>(nil)
+        store.afterPruneSnapshot = {
+            let opened = DispatchSemaphore(value: 0)
+            DispatchQueue.global().async {
+                begun.set(try? self.makeWriter(store, id: "new", at: Date(timeIntervalSince1970: 1_500)))
+                opened.signal()
+            }
+            XCTAssertEqual(opened.wait(timeout: .now() + 5), .success, "begin waited on the prune")
+        }
+        XCTAssertEqual(store.prune(endedBefore: Date.distantFuture, maxBytes: 0), 1)
+        store.afterPruneSnapshot = nil
+        let writer = try XCTUnwrap(begun.get())
+        XCTAssertEqual(store.entries().map(\.id), ["new"])
+        writer.append(Data("recorded".utf8), at: Date(timeIntervalSince1970: 1_501))
+        XCTAssertEqual(String(decoding: try store.output(of: "new"), as: UTF8.self), "recorded")
+    }
+
     /// A session the Mac never saw end counts from when it was last written.
     func testPruneTakesAnUnendedLeftoverByItsLastWrite() throws {
         let store = try TranscriptStore(directory: directory)
