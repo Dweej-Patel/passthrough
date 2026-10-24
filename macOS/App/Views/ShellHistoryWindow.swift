@@ -37,7 +37,7 @@ struct ShellHistoryWindow: View {
             .overlay {
                 if shell.history.isEmpty {
                     ContentUnavailableView("No Sessions Yet", systemImage: "apple.terminal",
-                                           description: Text("Shells opened from your phone are recorded here."))
+                                           description: Text("Shells opened from your phone are recorded here, \(shell.historyRetention.keptFor)."))
                 }
             }
             .navigationSplitViewColumnWidth(min: 240, ideal: 290, max: 420)

@@ -79,7 +79,8 @@ public final class WirelessListener: @unchecked Sendable {
     }
 
     private func accept(_ connection: NWConnection) {
-        guard let slot = handshakes.acquire(host: PeerAddress.host(of: connection), onTimeout: { connection.cancel() }) else {
+        let host = PeerAddress.host(of: connection)
+        guard let slot = handshakes.acquire(host: host, onTimeout: { connection.cancel() }) else {
             connection.cancel(); return
         }
         let stream = ConnectionStream(connection, queue: queue)
@@ -102,6 +103,8 @@ public final class WirelessListener: @unchecked Sendable {
                     ptLog(.warning, "wireless: rejected a connection that could not prove a link")
                     finish(nil); return
                 }
+                // Gets past strangers holding the shared slots from now on (`HandshakeLimiter.proven`).
+                self.handshakes.proven(host)
                 self.sessions = self.sessions.filter { !$0.value.mux.isClosed }
                 if let id = message.session, let session = self.sessions[id], session.phoneID == phoneID {
                     // Same phone, same session: carry on over the new connection.

@@ -144,6 +144,58 @@ final class TranscriptStoreTests: XCTestCase {
         XCTAssertTrue(store.entries().isEmpty)
     }
 
+    /// Finished sessions older than the cutoff go; newer ones and live
+    /// ones stay, whatever their age.
+    func testPruneByAge() throws {
+        let store = try TranscriptStore(directory: directory)
+        let old = try makeWriter(store, id: "old", at: Date(timeIntervalSince1970: 1_000))
+        old.finish(exitStatus: 0, at: Date(timeIntervalSince1970: 2_000))
+        let recent = try makeWriter(store, id: "recent", at: Date(timeIntervalSince1970: 1_000))
+        recent.finish(exitStatus: 0, at: Date(timeIntervalSince1970: 9_000))
+        let live = try makeWriter(store, id: "live", at: Date(timeIntervalSince1970: 500))
+        live.append(Data("still here".utf8), at: Date(timeIntervalSince1970: 600))
+        XCTAssertEqual(store.prune(endedBefore: Date(timeIntervalSince1970: 5_000)), 1)
+        XCTAssertEqual(Set(store.entries().map(\.id)), ["recent", "live"])
+        XCTAssertEqual(store.prune(endedBefore: nil), 0, "Forever keeps everything under the size cap")
+        XCTAssertEqual(store.prune(endedBefore: Date.distantFuture), 1, "the live session is never pruned")
+        XCTAssertEqual(store.entries().map(\.id), ["live"])
+        live.append(Data(" and recording".utf8), at: Date(timeIntervalSince1970: 700))
+        XCTAssertTrue(String(decoding: try store.output(of: "live"), as: UTF8.self).hasSuffix("still here and recording"))
+    }
+
+    /// Past the size cap the oldest finished sessions go first, until the folder fits.
+    func testPruneBySize() throws {
+        let store = try TranscriptStore(directory: directory)
+        for (index, id) in ["a", "b", "c"].enumerated() {
+            let writer = try makeWriter(store, id: id, at: Date(timeIntervalSince1970: 1_000))
+            writer.append(Data(repeating: 0x78, count: 10_000), at: Date(timeIntervalSince1970: 1_001))
+            writer.finish(exitStatus: 0, at: Date(timeIntervalSince1970: TimeInterval(2_000 + index)))
+        }
+        let live = try makeWriter(store, id: "live", at: Date(timeIntervalSince1970: 1))
+        live.append(Data(repeating: 0x79, count: 10_000), at: Date(timeIntervalSince1970: 2))
+        let each = store.totalBytes() / 4
+        XCTAssertEqual(store.prune(endedBefore: nil, maxBytes: each * 2 + each / 2), 2)
+        XCTAssertEqual(Set(store.entries().map(\.id)), ["c", "live"], "the two oldest finished ones went")
+        XCTAssertEqual(store.prune(endedBefore: nil, maxBytes: 0), 1)
+        XCTAssertEqual(store.entries().map(\.id), ["live"], "even over the cap, a live session stays")
+    }
+
+    /// A session the Mac never saw end counts from when it was last written.
+    func testPruneTakesAnUnendedLeftoverByItsLastWrite() throws {
+        let store = try TranscriptStore(directory: directory)
+        let writer = try makeWriter(store, id: "crashed", at: Date(timeIntervalSince1970: 1_000))
+        writer.append(Data("x".utf8), at: Date(timeIntervalSince1970: 1_001))
+        writer.cancel()   // as if the Mac had quit: no end recorded, nothing writing
+        XCTAssertEqual(store.prune(endedBefore: Date().addingTimeInterval(-3600)), 0, "written just now")
+        XCTAssertEqual(store.prune(endedBefore: Date().addingTimeInterval(60)), 1)
+    }
+
+    func testTheFolderIsExcludedFromBackups() throws {
+        _ = try TranscriptStore(directory: directory)
+        let values = try directory.resourceValues(forKeys: [.isExcludedFromBackupKey])
+        XCTAssertEqual(values.isExcludedFromBackup, true)
+    }
+
     func testWritesAfterDeleteRecreateNothing() throws {
         let store = try TranscriptStore(directory: directory)
         let a = try makeWriter(store, id: "a")

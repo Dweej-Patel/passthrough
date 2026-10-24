@@ -114,6 +114,31 @@ final class ShellProtocolTests: XCTestCase {
                        ["192.168.1.5", "100.101.1.2"])
     }
 
+    /// 100.64.0.0/10 is carrier NAT space too: a peer from it gets in only
+    /// while the Mac is on an overlay (Tailscale, NetBird, Headscale) itself,
+    /// and only through its overlay address.
+    func testOverlayPeersNeedTheMacOnAnOverlay() {
+        let lan = ["192.168.1.5", "fe80::1%en0"]
+        XCTAssertFalse(ShellAddressPolicy.isAllowedPeer("100.101.1.2", localAddresses: lan, onLinkPrefixes: []))
+        XCTAssertFalse(ShellAddressPolicy.isAllowedPeer("fd7a:115c:a1e0::5", localAddresses: lan, onLinkPrefixes: []))
+        XCTAssertTrue(ShellAddressPolicy.isAllowedPeer("192.168.1.9", localAddresses: lan, onLinkPrefixes: []))
+        XCTAssertTrue(ShellAddressPolicy.isAllowedPeer("fd00::9", localAddresses: lan, onLinkPrefixes: []), "other ULAs are unchanged")
+        XCTAssertFalse(ShellAddressPolicy.isAllowedPeer("8.8.8.8", localAddresses: lan, onLinkPrefixes: []))
+        let tailnet = lan + ["100.90.0.1"]
+        XCTAssertTrue(ShellAddressPolicy.isAllowedPeer("100.101.1.2", localAddresses: tailnet, onLinkPrefixes: []))
+        XCTAssertFalse(ShellAddressPolicy.isAllowedPeer("fd7a:115c:a1e0::5", localAddresses: tailnet, onLinkPrefixes: []),
+                       "an IPv4 overlay address does not admit IPv6 overlay peers")
+        XCTAssertTrue(ShellAddressPolicy.isAllowedPeer("fd7a:115c:a1e0::5", localAddresses: lan + ["fd7a:115c:a1e0::1"], onLinkPrefixes: []))
+        let prefixes = ShellAddressPolicy.onLinkPrefixes(of: ["2001:db8:1:2::10"])
+        XCTAssertTrue(ShellAddressPolicy.isAllowedPeer("2001:db8:1:2::99", localAddresses: lan, onLinkPrefixes: prefixes))
+
+        XCTAssertTrue(ShellAddressPolicy.arrivedOnItsNetwork(peer: "100.101.1.2", local: "100.90.0.1"))
+        XCTAssertFalse(ShellAddressPolicy.arrivedOnItsNetwork(peer: "100.101.1.2", local: "192.168.1.5"),
+                       "an overlay source on the LAN interface")
+        XCTAssertTrue(ShellAddressPolicy.arrivedOnItsNetwork(peer: "100.101.1.2", local: nil))
+        XCTAssertTrue(ShellAddressPolicy.arrivedOnItsNetwork(peer: "192.168.1.9", local: "192.168.1.5"))
+    }
+
     func testErrorReasonsAreWireStrings() {
         XCTAssertEqual(ShellError.notAuthorized.rawValue, "not_authorized")
         XCTAssertEqual(ShellError.tooManySessions.rawValue, "too_many_sessions")

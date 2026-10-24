@@ -193,7 +193,13 @@ Nothing the phone sends is acted on before a valid proof. The Mac closes a
 connection whose `hello` or proof line exceeds 4096 bytes (a hard limit: a
 newline-terminated line over it is refused too) or that has not proved itself
 within 10 seconds, and holds at most 2 unproven connections per address (16 in
-total; over iroh, 8 of them for connections arriving through relays).
+total; over iroh, 8 of them for connections arriving through relays). A public
+IPv4 peer is counted by its /24 and every IPv6 peer (link-local and ULA
+included) by its /64, so taking many addresses does not multiply a stranger's
+share. 4 of the 16 are kept for addresses that proved a shell key within the
+last 30 days (remembered in memory only), which are counted on their own. Over
+iroh a slot is taken only once QUIC has validated the peer's address (it is
+sent a retry first), so packets with forged source addresses hold none.
 After `ready` a line over the 262144-byte limit closes the connection.
 
 A connection is attached to at most one session: `open` attaches it to the
@@ -236,7 +242,7 @@ disconnected; it can attach again and gets the scrollback.
 | `screen` | phone | none | See and control the screen: the connection becomes a relay to Screen Sharing (below). |
 | `screenReady` | Mac | none | Reply to `screen`; every later byte, both ways, is Screen Sharing's. |
 | `ping` / `pong` | either | none | Liveness. |
-| `error` | Mac | `reason`, `session`? | `not_authorized`, `too_many_sessions` (8 at once), `no_such_session`, `bad_request`, `screen_not_allowed` or `screen_unavailable`. |
+| `error` | Mac | `reason`, `session`? | `not_authorized`, `too_many_sessions` (8 at once), `no_such_session`, `bad_request`, `screen_not_allowed`, `screen_unavailable`, `screen_video_unavailable` or `too_many_screens`. |
 
 The Mac keeps 1 MiB of scrollback per session.
 
@@ -267,7 +273,10 @@ does not answer it is `screen_unavailable`. In both cases the connection
 stays a shell connection. The phone sends nothing after `screen` until
 `screenReady`; a line that does arrive meanwhile closes the connection. A
 phone uses its own connection for the screen, beside any shell connection.
-Turning a phone's screen access off ends its screen connections at once.
+Turning a phone's screen access off ends its screen connections at once. A
+Mac shows its screen to at most 2 connections per phone and 4 in all
+(`screen` and `screenVideo` together); past that the reply is `error`
+`too_many_screens` and the connection stays a shell connection.
 
 ### Screen video
 
@@ -281,8 +290,13 @@ and the connection stays a shell connection, so the phone can ask for
 `screen` next; a Mac too old to know `screenVideo` answers `bad_request`,
 read the same way. Otherwise the Mac replies `screenVideoReady`, and from
 the byte after that line both directions carry binary messages: a type
-byte, a 4-byte big-endian payload length (at most 16 MiB), the payload.
-Unknown types are skipped. Numbers are big-endian.
+byte, a 4-byte big-endian payload length (at most 16 MiB from the Mac), the
+payload. Unknown types are skipped. Numbers are big-endian. The Mac takes
+less from a phone, and closes the connection on a payload over it: 4 KiB for
+`text` (the phone sends a longer paste in pieces), 64 KiB for `clipboard` and
+for a type it doesn't know, 64 bytes for every other message. It types text
+at up to 8 KiB a second (keys sent after text wait their turn), and drops
+text once 256 KiB is waiting.
 
 Mac → phone:
 - `1` format: width u16, height u16, SPS length u16, SPS, PPS length u16,
@@ -313,12 +327,29 @@ Phone → Mac:
 When the screen goes still the Mac sends its last frame again, twice, a
 quarter of a second apart, so the encoder sharpens it.
 
+Acks are the phone's word, so the Mac also counts what it has handed the
+connection that the network has not taken yet: it encodes a new frame only
+while fewer than 2 frames and under 4 MiB wait there, and closes the
+connection when more than 8 MiB has waited for 5 seconds (a phone that acks
+without reading).
+
+The phone uses Apple's login (security type 30) with Screen Sharing and
+nothing else: a server offering only None (type 1) is refused. It refuses a
+framebuffer wider or taller than 16384 or of more than 50 million pixels
+(Screen Sharing sends every display as one), a refusal reason or desktop
+name over 64 KiB, and Zlib or ZRLE data that inflates past what its
+rectangle can hold.
+
 ### Address policy
 
 The Mac closes a connection from any peer outside these ranges before the TLS
 handshake completes: 10/8, 172.16/12, 192.168/16, 169.254/16, 127/8,
 100.64/10, `fc00::/7`, `fe80::/10`, `::1` and `fd7a:115c:a1e0::/48`
-(Tailscale). Hosts may carry a `%zone` suffix, which is ignored. A global
+(Tailscale). 100.64/10 is also carrier-grade NAT space, so a peer from it, or
+from `fd7a:115c:a1e0::/48`, is let in only while one of the Mac's own
+interfaces has an address in that range of the same family (Tailscale,
+NetBird, Headscale), and only when the connection arrived on such an
+address. Hosts may carry a `%zone` suffix, which is ignored. A global
 IPv6 peer (`2000::/3`) is also let in when it shares a /64 with one of the
 Mac's own global addresses, so an IPv6-only LAN works; any other global
 address is refused. Only the Mac listens, so this check has no Kotlin

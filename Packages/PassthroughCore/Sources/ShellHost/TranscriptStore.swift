@@ -13,6 +13,8 @@ public final class TranscriptStore: @unchecked Sendable {
     public static let castLimit: Int64 = 64 << 20
     /// Most output a transcript read returns: the end of the session.
     public static let readLimit = 8 << 20
+    /// Most the whole folder keeps (`prune`): past it the oldest finished sessions go.
+    public static let maxTotalBytes: Int64 = 2 << 30
 
     private let directory: URL
     private let castLimit: Int64
@@ -41,6 +43,11 @@ public final class TranscriptStore: @unchecked Sendable {
             at: directory, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
         // A folder that already existed keeps its mode above: tighten it too.
         try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: directory.path)
+        // What a script printed (secrets included) stays on this Mac, not in Time Machine or other backups.
+        var folder = directory
+        var values = URLResourceValues()
+        values.isExcludedFromBackup = true
+        try? folder.setResourceValues(values)
     }
 
     public static func defaultDirectory() -> URL {
@@ -263,6 +270,53 @@ public final class TranscriptStore: @unchecked Sendable {
         }
         live = live.filter { recording.contains($0.key) }
         cached = cached.filter { recording.contains($0.key) }
+    }
+
+    /// Deletes finished sessions' transcripts: every one that ended before
+    /// `cutoff` (nil: none for its age), then, oldest first, as many more as
+    /// it takes to bring the folder to `maxBytes`. A session still being
+    /// recorded, or just opening, is never deleted, whatever its age or size.
+    /// One the Mac never saw end (it quit mid-session) counts as ending when
+    /// it was last written. Returns how many sessions were deleted.
+    @discardableResult
+    public func prune(endedBefore cutoff: Date?, maxBytes: Int64 = TranscriptStore.maxTotalBytes) -> Int {
+        let keys: [URLResourceKey] = [.contentModificationDateKey, .fileSizeKey]
+        let files = (try? FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: keys)) ?? []
+        struct Finished { var files: [URL] = []; var bytes: Int64 = 0; var lastWrite = Date.distantPast; var ended: Date? }
+        // One critical section with `begin`, as `deleteFinished`: a session opening meanwhile is live.
+        lock.lock(); defer { lock.unlock() }
+        let recording = Set(live.compactMap { $0.value.writer?.isRecording == true ? $0.key : nil })
+        var total: Int64 = 0
+        var finished: [String: Finished] = [:]
+        for file in files where file.pathExtension == "cast" || file.pathExtension == "json" {
+            let values = try? file.resourceValues(forKeys: Set(keys))
+            let size = Int64(values?.fileSize ?? 0)
+            total += size
+            let id = file.deletingPathExtension().lastPathComponent
+            guard !recording.contains(id) else { continue }
+            var item = finished[id, default: Finished()]
+            item.files.append(file)
+            item.bytes += size
+            item.lastWrite = max(item.lastWrite, values?.contentModificationDate ?? .distantPast)
+            if file.pathExtension == "json",
+               let entry = (try? Data(contentsOf: file)).flatMap({ try? JSONDecoder().decode(ShellHistoryEntry.self, from: $0) }),
+               let endedAt = entry.endedAt {
+                item.ended = Date(timeIntervalSince1970: endedAt)
+            }
+            finished[id] = item
+        }
+        var deleted = 0
+        // Oldest first: once one is neither expired nor needed for room, no later one is.
+        for (id, item) in finished.sorted(by: { ($0.value.ended ?? $0.value.lastWrite) < ($1.value.ended ?? $1.value.lastWrite) }) {
+            let expired = cutoff.map { (item.ended ?? item.lastWrite) < $0 } ?? false
+            guard expired || total > maxBytes else { break }
+            item.files.forEach { try? FileManager.default.removeItem(at: $0) }
+            total -= item.bytes
+            live[id] = nil
+            cached[id] = nil
+            deleted += 1
+        }
+        return deleted
     }
 
     public func deleteAll() {

@@ -12,7 +12,9 @@ import ScreenClient
 /// protocol/README.md "Screen video"): smooth, and no password. A Mac that
 /// can't stream (it lacks Screen Recording or Accessibility, or predates it)
 /// says so, and the same connection asks for Screen Sharing instead, handed
-/// to an `RFBClient` with the Mac's login ("Screen"). Frames go straight to
+/// to an `RFBClient` with the Mac's login ("Screen"). That fallback sends a
+/// saved login only once the user agrees (`confirmScreenSharing`), or chose
+/// "Always" for that Mac: whatever answers as Screen Sharing gets it. Frames go straight to
 /// the canvas (`onFrame`, `onVideoFrame`; not published: a frame must not
 /// re-render the SwiftUI screen around it); takes pointer and key input.
 @MainActor
@@ -20,6 +22,9 @@ final class ScreenModel: ObservableObject {
     enum Phase: Equatable {
         /// Waiting for the Mac's account name and password; `error` says why again.
         case login(error: String?)
+        /// The Mac's own stream didn't work: asking whether to use Screen
+        /// Sharing, which sends the Mac's login (`useScreenSharing`).
+        case confirmScreenSharing
         case connecting
         case live
         case failed(String)
@@ -104,19 +109,48 @@ final class ScreenModel: ObservableObject {
         dialer = connection.dialer
     }
 
-    /// The Mac can't stream its screen itself: Screen Sharing on the same connection, if a login is saved.
+    /// The Mac can't stream its screen itself: Screen Sharing on the same
+    /// connection with a login typed for this view, or the saved one if the
+    /// user chose "Always" for this Mac; otherwise they are asked first.
     private func fallBackToScreenSharing() {
         wantsVideo = false
         slowReason = "Slower: allow Passthrough Screen Recording and Accessibility on \(macName) for the smooth view."
-        if pendingLogin == nil, let macID, let context, let saved = ScreenLoginStore.read(macID: macID, context: context) {
+        if pendingLogin == nil, let macID, Self.alwaysUsesScreenSharing(macID: macID), let context,
+           let saved = ScreenLoginStore.read(macID: macID, context: context) {
             pendingLogin = (saved, false)
         }
         if pendingLogin != nil {
             client?.requestScreen(video: false)
         } else {
             stop()
+            phase = .confirmScreenSharing
+        }
+    }
+
+    /// The user agreed to Screen Sharing (`always`: from now on for this
+    /// Mac, without asking): with the saved login, else the login form.
+    func useScreenSharing(always: Bool) {
+        guard let macID else { return }
+        if always { Self.setAlwaysUsesScreenSharing(macID: macID) }
+        if let context, let saved = ScreenLoginStore.read(macID: macID, context: context) {
+            connect(saved, remember: false)
+        } else {
             phase = .login(error: nil)
         }
+    }
+
+    private static let screenSharingAlwaysKey = "screenSharingAlwaysMacs"
+
+    /// The user chose "Always" for this Mac: a fallback sends its saved login without asking.
+    static func alwaysUsesScreenSharing(macID: String) -> Bool {
+        UserDefaults.standard.stringArray(forKey: screenSharingAlwaysKey)?.contains(macID) ?? false
+    }
+
+    private static func setAlwaysUsesScreenSharing(macID: String) {
+        var macs = UserDefaults.standard.stringArray(forKey: screenSharingAlwaysKey) ?? []
+        guard !macs.contains(macID) else { return }
+        macs.append(macID)
+        UserDefaults.standard.set(macs, forKey: screenSharingAlwaysKey)
     }
 
     /// Ends the view; the shell sessions are untouched.
@@ -187,10 +221,11 @@ final class ScreenModel: ObservableObject {
             guard worked else {
                 // The Mac said yes but couldn't capture or encode after all.
                 slowReason = "Slower: \(macName) couldn't stream its screen. Reopening Passthrough on it may help."
-                if let macID, let context, let saved = ScreenLoginStore.read(macID: macID, context: context) {
+                if let macID, Self.alwaysUsesScreenSharing(macID: macID), let context,
+                   let saved = ScreenLoginStore.read(macID: macID, context: context) {
                     return connect(saved, remember: false)
                 }
-                phase = .login(error: nil)
+                phase = .confirmScreenSharing
                 return
             }
             phase = .failed("The connection to \(macName) was lost.")
@@ -227,6 +262,8 @@ final class ScreenModel: ObservableObject {
                 phase = .login(error: "Your Mac didn't accept that name and password.")
             case .unsupportedServer?:
                 phase = .failed("Screen Sharing on your Mac answered in a way this app doesn't understand.")
+            case .noLoginOffered?:
+                phase = .failed("What answered as Screen Sharing on \(macName) didn't ask for a login, which your Mac's Screen Sharing always does. Passthrough didn't connect.")
             case .protocolError?:
                 phase = .failed("The screen connection broke. Try again.")
             case .connectionLost?:
@@ -326,7 +363,12 @@ final class ScreenModel: ObservableObject {
     /// Puts the phone's clipboard on the Mac's and pastes it there.
     func pastePhoneClipboard() {
         guard let text = UIPasteboard.general.string, !text.isEmpty else { return }
-        if let video { video.clipboard(text) } else { rfb?.clipboard(text) }
+        if let video {
+            // Longer than the Mac takes: pasting would paste what was there before.
+            guard video.clipboard(text) else { return UINotificationFeedbackGenerator().notificationOccurred(.error) }
+        } else {
+            rfb?.clipboard(text)
+        }
         key(0x76, modifiers: [RFBKeys.command])   // ⌘V
     }
 

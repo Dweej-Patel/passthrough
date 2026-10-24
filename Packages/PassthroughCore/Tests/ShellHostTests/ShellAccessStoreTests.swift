@@ -274,6 +274,57 @@ final class ShellAccessStoreTests: XCTestCase {
         XCTAssertNil(store.key(forPhone: "a"), "still refused after the write failed")
     }
 
+    /// Writes (and deletes) fail while `failing` is set.
+    private final class FlakySecrets: SecretStore, @unchecked Sendable {
+        let inner = InMemorySecrets()
+        let failing = Locked(false)
+        func read(_ account: String) -> Data? { inner.read(account) }
+        func write(_ data: Data, account: String) -> Bool { failing.get() ? false : inner.write(data, account: account) }
+        func delete(_ account: String) { if !failing.get() { inner.delete(account) } }
+    }
+
+    /// Turning Screen off holds even when the Keychain write fails, and
+    /// through later failed writes that make the store read again; the next
+    /// write that works stores it.
+    func testScreenOffHoldsWhenTheWriteFails() {
+        let secrets = FlakySecrets()
+        let store = ShellAccessStore(secrets: secrets)
+        store.record(phone("a"))
+        store.record(phone("b"))
+        XCTAssertTrue(store.setScreenAllowed(true, forPhone: "a"))
+        XCTAssertTrue(store.setScreenAllowed(true, forPhone: "b"))
+        secrets.failing.set(true)
+        XCTAssertFalse(store.setScreenAllowed(false, forPhone: "a"), "the failure is reported")
+        XCTAssertFalse(store.screenAllowed(forPhone: "a"), "but the screen is off at once")
+        XCTAssertTrue(store.screenAllowed(forPhone: "b"))
+        XCTAssertFalse(store.record(phone("b")), "another write fails, so the list is read from the store again")
+        XCTAssertFalse(store.screenAllowed(forPhone: "a"), "the store still says on; memory says off")
+        XCTAssertFalse(store.setScreenAllowed(true, forPhone: "a"), "a failed allow changes nothing")
+        XCTAssertFalse(store.screenAllowed(forPhone: "a"))
+        secrets.failing.set(false)
+        store.confirmCurrentKey(phoneID: "b", proven: Data(repeating: 9, count: 32))   // writes nothing
+        XCTAssertTrue(store.record(phone("b")))
+        XCTAssertFalse(ShellAccessStore(secrets: secrets.inner).screenAllowed(forPhone: "a"), "written with the next write")
+        XCTAssertTrue(ShellAccessStore(secrets: secrets.inner).screenAllowed(forPhone: "b"))
+    }
+
+    /// A revoke whose write and fallback delete both fail stays in force
+    /// through later reads of the store, until a write succeeds.
+    func testFailedRevokeSurvivesARereadOfTheStore() {
+        let secrets = FlakySecrets()
+        let store = ShellAccessStore(secrets: secrets)
+        store.record(phone("a", slot: "s1"))
+        store.record(phone("b", slot: "s2"))
+        secrets.failing.set(true)
+        XCTAssertFalse(store.revoke(phoneID: "a"))
+        XCTAssertFalse(store.record(phone("b", slot: "s2")), "forces the next lookup to read the store")
+        XCTAssertEqual(store.candidateKeys(forPhone: "a"), [], "the store still holds a; memory does not")
+        XCTAssertFalse(store.candidateKeys(forPhone: "b").isEmpty)
+        secrets.failing.set(false)
+        XCTAssertTrue(store.record(phone("c", slot: "s3")))
+        XCTAssertEqual(ShellAccessStore(secrets: secrets.inner).phones.map(\.phoneID).sorted(), ["b", "c"])
+    }
+
     /// The store cannot tell "nothing stored" from "unreadable", so an empty
     /// read is remembered only briefly: a list another writer stores is seen
     /// once `emptyTTL` has passed.

@@ -365,6 +365,12 @@ private struct HistorySection: View {
                 Text("\(shell.history.count) · \(ByteCountFormatter.string(fromByteCount: shell.historyBytes, countStyle: .file))")
                     .monospacedDigit()
             }
+            Picker(selection: $shell.historyRetention) {
+                ForEach(RemoteShellController.HistoryRetention.allCases) { Text($0.title).tag($0) }
+            } label: {
+                Text("Keep shell history")
+                Text("Older finished sessions are deleted, and the oldest go first past \(ByteCountFormatter.string(fromByteCount: TranscriptStore.maxTotalBytes, countStyle: .file)).")
+            }
             HStack {
                 Button("Open History…") {
                     NSApp.activate()
@@ -377,7 +383,7 @@ private struct HistorySection: View {
         } header: {
             Text("History")
         } footer: {
-            Text("Recordings stay on this Mac. Phones with access can read them.")
+            Text("Recordings stay on this Mac, out of backups, \(shell.historyRetention.keptFor). Phones with access can read them.")
         }
         .confirmationDialog("Delete all shell history?", isPresented: $confirmClear) {
             Button("Delete All", role: .destructive) { shell.clearHistory() }
