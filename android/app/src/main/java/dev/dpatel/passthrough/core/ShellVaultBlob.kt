@@ -5,8 +5,11 @@ import java.io.DataInputStream
 import java.io.DataOutputStream
 import java.io.IOException
 import java.security.GeneralSecurityException
+import java.security.InvalidKeyException
 import java.security.SecureRandom
+import javax.crypto.BadPaddingException
 import javax.crypto.Cipher
+import javax.crypto.IllegalBlockSizeException
 import javax.crypto.spec.GCMParameterSpec
 import javax.crypto.spec.SecretKeySpec
 
@@ -138,5 +141,36 @@ object ShellVaultBlob {
             }
         }
         return Migration(keys, lost, migrated)
+    }
+
+    // Reading an older vault's kind of entry (the sealing key's, on Android 10)
+
+    /** What reading a stored entry gave, short of the Keystore's verdicts on its own key. */
+    sealed interface EntryRead<out T> {
+        class Value<T>(val value: T) : EntryRead<T>
+        /** Bad for good (altered or truncated, so it fails its tag): discard it. */
+        data object Corrupt : EntryRead<Nothing>
+        /** Not now (a busy Keystore, a provider error): keep it for a later try. */
+        data object Retry : EntryRead<Nothing>
+    }
+
+    /**
+     * Runs [read] (decrypt and decode a stored entry) without letting it crash
+     * its caller. The Keystore's verdicts on its own key ([InvalidKeyException]:
+     * invalidated, or no recent authentication) are thrown on, for the vault to
+     * act on; anything else becomes [EntryRead.Corrupt] or [EntryRead.Retry].
+     */
+    fun <T> readEntry(read: () -> T): EntryRead<T> = try {
+        EntryRead.Value(read())
+    } catch (e: InvalidKeyException) {
+        throw e
+    } catch (_: BadPaddingException) {   // AEADBadTagException: the entry was altered
+        EntryRead.Corrupt
+    } catch (_: IllegalBlockSizeException) {
+        EntryRead.Corrupt
+    } catch (_: IllegalArgumentException) {   // not Base64, or shorter than its IV
+        EntryRead.Corrupt
+    } catch (_: Exception) {
+        EntryRead.Retry
     }
 }

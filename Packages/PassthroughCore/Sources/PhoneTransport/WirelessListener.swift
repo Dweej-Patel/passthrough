@@ -12,6 +12,8 @@ public final class WirelessListener: @unchecked Sendable {
         public let mux: Mux
         /// What carries the phone's connection ("Hotspot", "Peer-to-peer", …).
         public let carrier: String
+        /// Where the phone dialed from (`PeerAddress.host`).
+        public let peer: String
     }
 
     private let identity: MacIdentity
@@ -32,8 +34,9 @@ public final class WirelessListener: @unchecked Sendable {
     private var sessions: [String: (phoneID: String, mux: Mux)] = [:]
     /// A phone proved itself; on the listener's queue.
     public var onLink: (@Sendable (Link) -> Void)?
-    /// A phone resumed its link, possibly over another carrier; on the listener's queue.
-    public var onResume: (@Sendable (_ phoneID: String, _ carrier: String) -> Void)?
+    /// A phone resumed its link, possibly over another carrier or from another
+    /// address; on the listener's queue.
+    public var onResume: (@Sendable (_ phoneID: String, _ carrier: String, _ peer: String) -> Void)?
     /// The TCP port once listening (tests).
     public private(set) var port: UInt16?
 
@@ -116,7 +119,7 @@ public final class WirelessListener: @unchecked Sendable {
                     session.mux.resume(on: stream, peerStreams: message.streams ?? [], initialBytes: rest) { states in
                         WirelessLink.sendLine(.init(t: "resume", streams: states), on: stream)
                     }
-                    self.onResume?(phoneID, WirelessLink.carrier(of: stream))
+                    self.onResume?(phoneID, WirelessLink.carrier(of: stream), host)
                     slot.release()
                     return
                 }
@@ -125,7 +128,7 @@ public final class WirelessListener: @unchecked Sendable {
                               initialBytes: rest, sessionID: id, resumable: true)
                 self.sessions[id] = (phoneID, mux)
                 WirelessLink.sendLine(.init(t: "fresh", session: id), on: stream)
-                finish(Link(phoneID: phoneID, mux: mux, carrier: WirelessLink.carrier(of: stream)))
+                finish(Link(phoneID: phoneID, mux: mux, carrier: WirelessLink.carrier(of: stream), peer: host))
             }
         }
     }
@@ -167,6 +170,13 @@ public enum PeerAddress {
             }
         }
         return "\(host)"
+    }
+
+    /// `host` as a bare numeric address the kill switch can name: an IPv6
+    /// zone ("%en0") dropped; nil for anything that isn't an address.
+    public static func numeric(_ host: String) -> String? {
+        let bare = host.split(separator: "%", maxSplits: 1).first.map(String.init) ?? host
+        return IPv4Address(bare) != nil || IPv6Address(bare) != nil ? bare : nil
     }
 }
 

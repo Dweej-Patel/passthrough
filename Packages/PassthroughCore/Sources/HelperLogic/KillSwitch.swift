@@ -4,10 +4,15 @@ import Foundation
 ///
 /// Routes alone can't hold the line: the kill switch's reject routes and the
 /// VPN's /2 routes win only by prefix length, so any longer route the network
-/// pushes (DHCP option 121, IPv6 route information, a /8 netmask) carries
-/// traffic past them in the clear. pf filters by where a packet leaves and
-/// where it goes, whatever the routing table says: out through the VPN's
-/// interface, to the VPN server, or to the local network, else dropped.
+/// pushes (DHCP option 121, IPv6 route information, a hostile netmask)
+/// carries traffic past them in the clear. pf filters by where a packet
+/// leaves and where it goes, whatever the routing table says: out through the
+/// VPN's interface (or Tailscale's), to the VPN server, to the phone over
+/// Passthrough's wireless link, or to the local network, else dropped. "The
+/// local network" is private address space only (`LocalNetworks.subnets`):
+/// a network whose netmask claims public addresses as local gets nothing
+/// for them, and a route the network pushes stays blocked whatever its
+/// prefix (`ForeignRoutes` notices both, for the warning).
 ///
 /// Where the rules live: macOS's /etc/pf.conf, loaded at boot by launchd,
 /// evaluates only the anchors under "com.apple/*" (`anchor "com.apple/*"`),
@@ -26,6 +31,39 @@ public enum KillSwitchRules {
         public init(ip: String, port: Int) { self.ip = ip; self.port = port }
     }
 
+    /// Passthrough's wireless link: the phone dials the Mac's listener, and
+    /// the Mac's side of each connection leaves from the listener's port.
+    /// Stateless rules would drop those replies like anything else, so the
+    /// link (and a VPN riding it) could never connect with the local network
+    /// blocked. Only TCP from that port goes, to where the phone is now, or
+    /// to a directly connected private network it may dial in from next (a
+    /// first connection, or a resume from another address, both before the
+    /// app can name the new address).
+    public struct PhoneLink: Equatable, Sendable {
+        /// The Mac's wireless listener's TCP port.
+        public var port: Int
+        /// The phone's address on the link (numeric, no zone).
+        public var peers: [String]
+        /// Directly connected private networks (`LocalNetworks.subnets`).
+        public var subnets: [CIDR]
+        public init(port: Int, peers: [String] = [], subnets: [CIDR] = []) {
+            self.port = port; self.peers = peers; self.subnets = subnets
+        }
+
+        /// Read from an XPC configuration dictionary: nil when `portKey` is
+        /// absent (no wireless link), an error when either value is malformed.
+        public static func read(_ dict: [String: Any], portKey: String, peersKey: String) throws -> PhoneLink? {
+            guard dict[portKey] != nil else { return nil }
+            let port = try XPCInput.port(dict, portKey, default: 1)
+            let peers = try XPCInput.ipAddresses(dict, peersKey, maxCount: 4, default: [])
+            guard peers.allSatisfy(isPeer) else { throw XPCInput.Invalid(peersKey) }
+            return PhoneLink(port: Int(port), peers: peers)
+        }
+
+        /// A numeric address with no zone ("fe80::1%en0" parses, but is no pf address).
+        static func isPeer(_ s: String) -> Bool { XPCInput.isIPAddress(s) && !s.contains("%") }
+    }
+
     public struct Input: Equatable, Sendable {
         /// The VPN's interface while it is connected; nil while it is down.
         public var vpnInterface: String?
@@ -34,18 +72,21 @@ public enum KillSwitchRules {
         public var endpoints: [Endpoint] = []
         /// Directly connected networks, when the local network is allowed.
         public var localSubnets: [CIDR] = []
-        /// Tailscale's interfaces (they hold an address in its ranges).
+        /// Tailscale's interfaces (`LocalNetworks.tailscaleInterfaces`).
         public var tailscaleInterfaces: [String] = []
+        /// Passthrough's wireless link to the phone, while it may carry passthrough.
+        public var phoneLink: PhoneLink?
         /// IPv6 may leave outside the VPN: Block IPv6 is off and the VPN
         /// carries none (the user chose that bypass).
         public var allowIPv6Bypass = false
 
         public init(vpnInterface: String? = nil, endpoints: [Endpoint] = [], localSubnets: [CIDR] = [],
-                    tailscaleInterfaces: [String] = [], allowIPv6Bypass: Bool = false) {
+                    tailscaleInterfaces: [String] = [], phoneLink: PhoneLink? = nil, allowIPv6Bypass: Bool = false) {
             self.vpnInterface = vpnInterface
             self.endpoints = endpoints
             self.localSubnets = localSubnets
             self.tailscaleInterfaces = tailscaleInterfaces
+            self.phoneLink = phoneLink
             self.allowIPv6Bypass = allowIPv6Bypass
         }
     }
@@ -65,7 +106,7 @@ public enum KillSwitchRules {
     public static func ruleset(_ input: Input) -> String {
         var rules = [
             "# Passthrough VPN kill switch: everything this Mac sends goes into the VPN,",
-            "# to the VPN server, or to the local network; the rest is dropped.",
+            "# to the VPN server, to the phone, or to the local network; the rest is dropped.",
             "pass quick on lo0 all no state",
         ]
         if let vpn = input.vpnInterface, isInterfaceName(vpn) {
@@ -75,6 +116,12 @@ public enum KillSwitchRules {
         for endpoint in input.endpoints where XPCInput.isIPAddress(endpoint.ip) && (1...65535).contains(endpoint.port) {
             guard seen.insert("\(endpoint.ip) \(endpoint.port)").inserted else { continue }
             rules.append("pass out quick proto { tcp udp } to \(endpoint.ip) port \(endpoint.port) no state")
+        }
+        if let link = input.phoneLink, (1...65535).contains(link.port) {
+            let targets = link.peers.filter(PhoneLink.isPeer) + link.subnets.filter { $0.prefixLength > 0 }.map(\.description)
+            for target in targets where seen.insert("link \(target)").inserted {
+                rules.append("pass out quick proto tcp from any port \(link.port) to \(target) no state")
+            }
         }
         rules += [
             // Getting an address at all: DHCP, DHCPv6, and IPv6 neighbour
@@ -98,11 +145,10 @@ public enum KillSwitchRules {
         for subnet in input.localSubnets where subnet.prefixLength > 0 {
             rules.append("pass out quick \(subnet.isIPv6 ? "inet6" : "inet") to \(subnet) no state")
         }
+        // Tailscale's own interfaces only: its ranges are not let through
+        // on their own, since any network can hand those out too.
         for interface in input.tailscaleInterfaces where isInterfaceName(interface) && interface != input.vpnInterface {
             rules.append("pass out quick on \(interface) all no state")
-        }
-        for range in tailscaleRanges {
-            rules.append("pass out quick \(range.isIPv6 ? "inet6" : "inet") to \(range) no state")
         }
         if input.allowIPv6Bypass { rules.append("pass out quick inet6 all no state") }
         rules.append("block drop out quick all")

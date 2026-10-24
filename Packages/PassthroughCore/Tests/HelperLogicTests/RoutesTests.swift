@@ -144,6 +144,29 @@ final class ForeignRoutesTests: XCTestCase {
                        "public, more specific than /2, not into the VPN, not ours, not a neighbour or private")
     }
 
+    /// A hostile netmask (TunnelCrack's LocalNet) makes public addresses look
+    /// directly connected: reported, like a pushed route. A LAN's own global
+    /// IPv6 /64 is how IPv6 works, and is not.
+    func testConnectedPublicNetworksAreReported() {
+        let v4 = RouteEntry.parse("""
+        8/7                link#15            UCS                   en0
+        8/7                link#15            UCSI                  en0
+        203.0.113          link#16            UCS                   en1
+        10.0.0             link#15            UCS                   en0
+        172.20.10.0/28     link#15            UCS                   en0
+        100.64/10          link#17            UCS                 utun9
+        203.0.113.40       link#16            UHLWIi                en1
+        """)
+        XCTAssertEqual(ForeignRoutes.find(v4, vpnInterface: "utun12", ownInterfaces: ["utun9"]).map(\.destination), ["8/7", "203.0.113"],
+                       "public, once each; private, Tailscale's and neighbours are not")
+        let v6 = RouteEntry.parse("""
+        2001:db8:1::/64                         link#15                                 UC                    en0
+        2000::/3                                link#15                                 UC                    en0
+        fd24:a08f:a670:1::/64                   link#15                                 UC                    en0
+        """)
+        XCTAssertEqual(ForeignRoutes.find(v6, vpnInterface: "utun12").map(\.destination), ["2000::/3"])
+    }
+
     func testIPv6RouteInformation() {
         let entries = RouteEntry.parse("""
         2000::/3                                fe80::1%en0                             UGc                   en0

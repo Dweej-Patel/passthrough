@@ -182,9 +182,10 @@ public enum RejectRoutes {
 /// Routes more specific than the VPN's /2s that send public addresses
 /// somewhere other than the VPN: a network pushing routes around it (DHCP
 /// option 121, "TunnelVision"; IPv6 router advertisements' route
-/// information; a hostile netmask). Longest prefix wins, so they would carry
-/// that traffic in the clear even while the VPN is connected; the kill
-/// switch's packet filter drops it, and this is how it is noticed.
+/// information), or claiming public addresses as directly connected (a
+/// hostile netmask, TunnelCrack's "LocalNet"). Longest prefix wins, so they
+/// would carry that traffic in the clear even while the VPN is connected;
+/// the kill switch's packet filter drops it, and this is how it is noticed.
 public enum ForeignRoutes {
     /// - Parameters:
     ///   - vpnInterface: the VPN's interface; routes into it are fine.
@@ -197,10 +198,20 @@ public enum ForeignRoutes {
             guard let prefix = entry.prefix, prefix.prefixLength > 2, prefix.isPublic,
                   !entry.isReject, entry.interface != vpnInterface, !entry.interface.hasPrefix("lo"),
                   !ownInterfaces.contains(entry.interface),
-                  // Connected networks and their neighbours are the network itself.
-                  !entry.gateway.hasPrefix("link#"), !entry.flags.contains("L"), !entry.flags.contains("W")
+                  // Neighbours are the network itself; its own route says enough.
+                  !entry.flags.contains("L"), !entry.flags.contains("W")
             else { return false }
+            if entry.gateway.hasPrefix("link#") && !isHostileConnected(entry, prefix) { return false }
             return !ownHosts.contains(prefix.address) || prefix.prefixLength != (prefix.isIPv6 ? 128 : 32)
         }
+    }
+
+    /// A directly connected network that claims public addresses: any public
+    /// IPv4 one, and an IPv6 one wider than the usual /64 (a LAN's own
+    /// global /64 is how IPv6 normally works, and its devices are reachable
+    /// only through the VPN anyway, as `LocalNetworks.subnets` keeps public
+    /// space out). Scoped copies are left to the unscoped route.
+    static func isHostileConnected(_ entry: RouteEntry, _ prefix: CIDR) -> Bool {
+        !entry.isScoped && (!prefix.isIPv6 || prefix.prefixLength < 64)
     }
 }

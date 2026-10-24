@@ -20,6 +20,10 @@ import Foundation
     /// network is current (the passthrough tunnel when it is up).
     func startVPN(configuration: [String: Any], reply: @escaping (Bool, String) -> Void)
     func stopVPN(reply: @escaping () -> Void)
+    /// The wireless link to the phone changed (`VPNConfigKey.phoneLinkPort`
+    /// and `phoneLinkPeers`; neither: no link). The kill switch always lets
+    /// it through, so a VPN can ride a wireless passthrough.
+    func setPhoneLink(configuration: [String: Any], reply: @escaping () -> Void)
     /// Who holds the listening socket on Screen Sharing's port: a
     /// `ScreenSharingCheck.Result` raw value. Only root can see every
     /// process's sockets, so the app asks before it relays a phone there.
@@ -63,7 +67,7 @@ public enum HelperConstants {
     public static let machService = "\(HelperConstants.identifier).helper"
     public static let plistName = "\(HelperConstants.identifier).helper.plist"
     /// Bump together with the helper binary so the app can detect stale daemons.
-    public static let version = "1.2.28"
+    public static let version = "1.2.29"
 }
 
 /// Keys of the configuration dictionary handed to `startTunnel`.
@@ -105,6 +109,11 @@ public enum VPNConfigKey {
     public static let blockIPv6 = "blockIPv6"
     /// The kill switch lets traffic to directly connected networks through (LAN, hotspot, AirPlay).
     public static let allowLocalNetwork = "allowLocalNetwork"
+    /// The Mac's wireless listener port, while a phone may carry passthrough
+    /// over the wireless link; absent otherwise. Also for `setPhoneLink`.
+    public static let phoneLinkPort = "phoneLinkPort"
+    /// Where the phone is on that link: numeric addresses, at most 4.
+    public static let phoneLinkPeers = "phoneLinkPeers"
 }
 
 /// Keys of the `vpn` sub-dictionary in `getStatus`.

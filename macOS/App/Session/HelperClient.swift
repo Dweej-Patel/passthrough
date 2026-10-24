@@ -193,10 +193,23 @@ final class HelperClient {
         var killSwitch: Bool
         var blockIPv6: Bool
         var allowLocalNetwork: Bool
+        var phoneLink: PhoneLink?
+    }
+
+    /// The wireless link to the phone, for the kill switch to let through.
+    struct PhoneLink: Equatable {
+        /// The Mac's wireless listener port.
+        var port: UInt16
+        /// Where the phone is on the link, if known.
+        var peers: [String]
+
+        var configuration: [String: Any] {
+            [VPNConfigKey.phoneLinkPort: Int(port), VPNConfigKey.phoneLinkPeers: peers]
+        }
     }
 
     func startVPN(_ config: VPNConfig) async throws {
-        let dict: [String: Any] = [
+        var dict: [String: Any] = [
             VPNConfigKey.engine: config.engine,
             VPNConfigKey.name: config.name,
             VPNConfigKey.config: config.config,
@@ -206,7 +219,14 @@ final class HelperClient {
             VPNConfigKey.blockIPv6: config.blockIPv6,
             VPNConfigKey.allowLocalNetwork: config.allowLocalNetwork,
         ]
-        _ = try await start(timeout: 20) { proxy, reply in proxy.startVPN(configuration: dict, reply: reply) }
+        if let link = config.phoneLink { dict.merge(link.configuration) { _, new in new } }
+        let configuration = dict
+        _ = try await start(timeout: 20) { proxy, reply in proxy.startVPN(configuration: configuration, reply: reply) }
+    }
+
+    func setPhoneLink(_ link: PhoneLink?) async {
+        let configuration = link?.configuration ?? [:]
+        await call(timeout: 4, fallback: ()) { proxy, finish in proxy.setPhoneLink(configuration: configuration) { finish(()) } }
     }
 
     func stopVPN() async {

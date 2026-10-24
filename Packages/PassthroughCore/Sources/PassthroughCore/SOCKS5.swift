@@ -758,10 +758,9 @@ private final class Session: @unchecked Sendable {
 
     private func peer(for address: SOCKS5.Address) -> UDPPeer {
         if let existing = udpPeers[address] {
-            if !existing.dead {
-                existing.lastActivity = Date()
-                return existing
-            }
+            // Its activity is the datagram's to note (`send`), so a refused
+            // peer still idles out.
+            if !existing.dead { return existing }
             // The old socket failed or never became viable (radio asleep, cell
             // handoff): replace it, otherwise every later datagram would queue
             // on a corpse forever and e.g. DNS would silently stop working.
@@ -812,7 +811,7 @@ private final class Session: @unchecked Sendable {
     private func pruneIdlePeers() {
         udpPeers.values.forEach { $0.report(interval: Self.udpCheckInterval, queuedToMac: udpBacklog) }
         let cutoff = Date().addingTimeInterval(-server.configuration.udpIdleTimeout)
-        for (key, peer) in udpPeers where peer.lastActivity < cutoff {
+        for (key, peer) in udpPeers where peer.isIdle(since: cutoff) {
             peer.cancel()
             udpPeers[key] = nil
         }
@@ -837,6 +836,34 @@ private final class Session: @unchecked Sendable {
     }
 }
 
+/// When a UDP peer last did something, for the session's idle sweep. A peer
+/// refused because its destination resolved to a private address drops what
+/// the Mac keeps sending, and that is not activity: were it, a flow the Mac
+/// never stops (a VPN's keepalives, an app retrying) would keep the refused
+/// peer forever, and the name would never be resolved again. Left idle, it
+/// is swept, and the next datagram gets a fresh peer that resolves anew.
+struct UDPPeerActivity {
+    private(set) var last: Date
+    private(set) var refused = false
+
+    init(now: Date = Date()) { last = now }
+
+    /// A datagram from the Mac: whether it may go on.
+    mutating func fromMac(now: Date = Date()) -> Bool {
+        guard !refused else { return false }
+        last = now
+        return true
+    }
+
+    /// A datagram from the far end.
+    mutating func fromServer(now: Date = Date()) { last = now }
+
+    mutating func refuse() { refused = true }
+
+    /// Idle since `cutoff`: the sweep may drop it.
+    func isIdle(since cutoff: Date) -> Bool { last < cutoff }
+}
+
 /// One outbound UDP "socket" for a given destination inside a forwarding session.
 private final class UDPPeer: @unchecked Sendable {
     private let connection: NWConnection
@@ -847,11 +874,13 @@ private final class UDPPeer: @unchecked Sendable {
     private let waitTimeout: TimeInterval
     /// Set once the socket failed or never became viable; the session replaces it.
     private(set) var dead = false
-    /// The destination's name resolved to a private address: its datagrams
-    /// are dropped until the flow goes idle (replacing the peer would only
-    /// resolve the same answer again).
-    private var refused = false
-    var lastActivity = Date()
+    /// Its last activity, and whether its destination's name resolved to a
+    /// private address: then its datagrams are dropped until the flow goes
+    /// idle (replacing the peer at once would only resolve the same answer
+    /// again; `UDPPeerActivity`).
+    private var activity = UDPPeerActivity()
+    var lastActivity: Date { activity.last }
+    func isIdle(since cutoff: Date) -> Bool { activity.isIdle(since: cutoff) }
     var onDead: (() -> Void)?
     private let onDatagram: (Data) -> Void
     // Datagrams since the last `report`: from the Mac (sent on), from the
@@ -885,7 +914,7 @@ private final class UDPPeer: @unchecked Sendable {
                 self.waitTimer?.cancel(); self.waitTimer = nil
                 if checkReached, SOCKS5.Address.isLocal(endpoint: self.connection.currentPath?.remoteEndpoint) {
                     ptLog(.debug, "UDP to \(ptPrivate(self.label)) dropped: resolves to a private/local address")
-                    self.refused = true
+                    self.activity.refuse()
                     self.pending = []
                     self.connection.stateUpdateHandler = nil
                     self.connection.cancel()
@@ -933,8 +962,7 @@ private final class UDPPeer: @unchecked Sendable {
     }
 
     func send(_ datagram: Data) {
-        lastActivity = Date()
-        guard !dead, !refused else { return }
+        guard activity.fromMac(), !dead else { return }
         guard ready else {
             if pending.count < 64 { pending.append(datagram) }
             return
@@ -971,7 +999,7 @@ private final class UDPPeer: @unchecked Sendable {
                 return
             }
             if let data, !data.isEmpty {
-                self.lastActivity = Date()
+                self.activity.fromServer()
                 self.receivedSinceCheck += 1
                 self.onDatagram(data)
             }

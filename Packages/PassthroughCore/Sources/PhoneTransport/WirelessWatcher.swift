@@ -26,10 +26,15 @@ public final class WirelessWatcher: DeviceWatcher {
     public private(set) var status = WatchStatus() { didSet { if status != oldValue { onStatusChange?(status) } } }
     public var onDevicesChange: (([PhoneDevice]) -> Void)?
     public var onStatusChange: ((WatchStatus) -> Void)?
-    /// A linked phone's connection is now carried differently.
+    /// A linked phone's connection is now carried differently (another
+    /// carrier, another address), or the listener's port is known.
     public var onCarrierChange: (() -> Void)?
     /// What carries each linked phone's connection ("Hotspot", "Peer-to-peer", …).
     public private(set) var carriers: [String: String] = [:]
+    /// Where each linked phone dialed from, by phoneID (`PeerAddress.host`).
+    public private(set) var peers: [String: String] = [:]
+    /// The listener's TCP port while it listens.
+    public private(set) var listenerPort: UInt16?
 
     private let macTag: @Sendable () -> String
     private let identity: () throws -> MacIdentity
@@ -61,14 +66,21 @@ public final class WirelessWatcher: DeviceWatcher {
                 phones().first { $0.phoneID == id }?.linkKey
             }
             listener.onLink = { [weak self] link in Task { @MainActor in self?.linked(link) } }
-            listener.onResume = { [weak self] id, carrier in
+            listener.onResume = { [weak self] id, carrier, peer in
                 Task { @MainActor in
-                    guard let self else { return }
+                    guard let self, self.links[id] != nil else { return }
                     self.carriers[id] = carrier
+                    self.peers[id] = peer
                     self.onCarrierChange?()
                 }
             }
-            try listener.start()
+            try listener.start { [weak self, weak listener] port in
+                Task { @MainActor in
+                    guard let self, let listener, self.listener === listener else { return }
+                    self.listenerPort = port
+                    self.onCarrierChange?()
+                }
+            }
             self.listener = listener
             status = WatchStatus(state: .watching)
         } catch {
@@ -83,6 +95,8 @@ public final class WirelessWatcher: DeviceWatcher {
         links.values.forEach { $0.mux.close() }
         links.removeAll()
         carriers.removeAll()
+        peers.removeAll()
+        listenerPort = nil
         order.removeAll()
         status = WatchStatus()
         publish()
@@ -93,6 +107,7 @@ public final class WirelessWatcher: DeviceWatcher {
     public func drop(phoneID: String) {
         guard let link = links.removeValue(forKey: phoneID) else { return }
         carriers[phoneID] = nil
+        peers[phoneID] = nil
         order.removeAll { $0 == phoneID }
         link.mux.close()
         publish()
@@ -117,6 +132,7 @@ public final class WirelessWatcher: DeviceWatcher {
                 ptLog(.info, "wireless: \(phone.label) went out of reach (\(error?.localizedDescription ?? "closed"))")
                 self.links[id] = nil
                 self.carriers[id] = nil
+                self.peers[id] = nil
                 self.order.removeAll { $0 == id }
                 self.publish()
             }
@@ -128,6 +144,7 @@ public final class WirelessWatcher: DeviceWatcher {
                                           pairingSlot: phone.pairingSlot, link: MuxLink(mux: mux))
         links[id] = (mux, device)
         carriers[id] = link.carrier
+        peers[id] = link.peer
         if !order.contains(id) { order.append(id) }
         mux.start()
         ptLog(.info, "wireless: \(phone.label) linked")

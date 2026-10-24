@@ -61,7 +61,7 @@ struct VPNSettings: View {
                 .disabled(vpnLayer.isWanted)
                 Toggle(isOn: $vpnLayer.allowLocalNetwork) {
                     Text("Allow local network")
-                    Text("The kill switch lets this Mac reach its own network: printers, AirPlay, the remote shell nearby, and Passthrough's wireless link to the phone.")
+                    Text("The kill switch lets this Mac reach its own network: printers, AirPlay and the remote shell nearby. Passthrough's wireless link to the phone always goes through.")
                 }
                 .disabled(vpnLayer.isWanted || !vpnLayer.killSwitch)
                 Toggle(isOn: $vpnLayer.blockIPv6) {
