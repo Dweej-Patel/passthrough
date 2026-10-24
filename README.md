@@ -296,6 +296,8 @@ swift run passthrough-devserver  # then:
 curl --socks5-hostname 127.0.0.1:7890 --proxy-user dev:dev-token https://example.com
 ```
 
+`passthrough-devserver` is for development only. It accepts a fixed credential (`dev` / `dev-token` unless given on the command line), allows local destinations (loopback, the LAN) that the phone refuses, and with `noauth` takes connections with no credential at all. Keep it on loopback and never leave it running.
+
 With an Android phone or emulator running Passthrough (proxy started, *Pair* sheet open), an opt-in test pairs over adb and fetches a page through the phone:
 
 ```

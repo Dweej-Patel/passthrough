@@ -138,6 +138,46 @@ class Socks5Tests {
         } finally { prod.stop() }
     }
 
+    @Test fun refusesNamesThatResolveToLocalAddresses() {
+        // A rebinding DNS answer: an ordinary-looking name that points at loopback.
+        val rebinding = object : Egress {
+            override fun resolve(host: String): List<java.net.InetAddress> = listOf(InetAddress.getLoopbackAddress())
+            override fun bind(socket: Socket) {}
+            override fun bind(socket: DatagramSocket) {}
+            override val label = "rebinding"
+        }
+        val prod = Socks5Server(Socks5Server.Config(port = 0), null, EgressProvider { rebinding })
+        prod.start()
+        try {
+            for (name in listOf("rebind.example.com", "127.1", "[::1]")) {
+                val s = Socket(InetAddress.getLoopbackAddress(), prod.boundPort).apply { soTimeout = 3000 }
+                val (i, o) = s.io()
+                o.write(ints(5, 1, 0)); i.bytes(2)
+                o.write(ints(5, 1, 0) + Socks5.Address.domain(name, echo.localPort))
+                assertEquals(name, Socks5.Reply.NETWORK_UNREACHABLE, i.bytes(10)[1].toInt())
+                s.close()
+            }
+        } finally { prod.stop() }
+        // With local destinations allowed (passthrough-devserver), the same answer is used.
+        val dev = Socks5Server(Socks5Server.Config(port = 0, refuseLocalDestinations = false), null, EgressProvider { rebinding })
+        dev.start()
+        try {
+            val s = Socket(InetAddress.getLoopbackAddress(), dev.boundPort).apply { soTimeout = 3000 }
+            val (i, o) = s.io()
+            o.write(ints(5, 1, 0)); i.bytes(2)
+            o.write(ints(5, 1, 0) + Socks5.Address.domain("rebind.example.com", echo.localPort))
+            assertEquals(Socks5.Reply.SUCCEEDED, i.bytes(10)[1].toInt())
+            s.close()
+        } finally { dev.stop() }
+    }
+
+    @Test fun redactsPrivatePartsOfLogLines() {
+        val marked = "connect to ${ptPrivate("example.com:443")} failed: ${ptPrivate(42)}"
+        assertEquals("connect to example.com:443 failed: 42", PtLog.render(marked, redacting = false))
+        assertEquals("connect to <private> failed: <private>", PtLog.render(marked, redacting = true))
+        assertEquals("plain", PtLog.render("plain", redacting = true))
+    }
+
     @Test fun classifiesLocalAddresses() {
         fun v4(vararg b: Int) = Socks5.Address.parse(Socks5.Address.ipv4(ints(*b), 80))!!.isLocalOnly
         assertTrue(v4(10, 0, 0, 1)); assertTrue(v4(192, 168, 0, 1)); assertTrue(v4(100, 64, 0, 1)); assertTrue(v4(224, 0, 0, 251))
