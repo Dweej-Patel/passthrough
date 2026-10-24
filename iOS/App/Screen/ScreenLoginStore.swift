@@ -58,3 +58,17 @@ enum ScreenLoginStore {
         SecItemDelete(query(macID) as CFDictionary)
     }
 }
+
+/// "Copy the Mac's clipboard to this iPhone", per Mac, for Screen Sharing.
+/// Off unless the user turns it on: the Mac's clipboard (passwords from its
+/// password manager included) would otherwise land on this iPhone's for any
+/// app to read. The phone's clipboard still goes to the Mac on Paste.
+enum ScreenClipboardSetting {
+    private static let prefix = "screen.copyMacClipboard."
+
+    static func isOn(macID: String) -> Bool { UserDefaults.standard.bool(forKey: prefix + macID) }
+
+    static func set(_ on: Bool, macID: String) {
+        if on { UserDefaults.standard.set(true, forKey: prefix + macID) } else { UserDefaults.standard.removeObject(forKey: prefix + macID) }
+    }
+}

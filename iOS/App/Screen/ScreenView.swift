@@ -32,6 +32,9 @@ struct ScreenView: View {
             }
         }
         .preferredColorScheme(.dark)
+        .hiddenWhileCaptured { covered in
+            if covered { keyboard = false }
+        }
         .persistentSystemOverlays(landscape ? .hidden : .automatic)
         .task { model.begin(shell: shell, context: lock.context) }
         .onAppear { AppOrientation.allowed = .allButUpsideDown }

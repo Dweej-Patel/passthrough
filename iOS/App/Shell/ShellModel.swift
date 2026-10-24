@@ -200,6 +200,7 @@ final class ShellModel: ObservableObject {
     func forget(macID: String) {
         ShellKeyVault.delete(macID: macID, context: lock?.isUnlocked == true ? lock?.context : nil)
         UserDefaults.standard.removeObject(forKey: Self.manualAddressPrefix + macID)
+        ScreenClipboardSetting.set(false, macID: macID)
         granted[macID] = nil
         if clientMacID == macID { dropConnection(); resetSessions() }
         applyingRefresh = true
@@ -211,7 +212,10 @@ final class ShellModel: ObservableObject {
 
     func forgetAll() {
         ShellKeyVault.deleteAll()
-        for id in macs.map(\.macID) + granted.keys { UserDefaults.standard.removeObject(forKey: Self.manualAddressPrefix + id) }
+        for id in macs.map(\.macID) + granted.keys {
+            UserDefaults.standard.removeObject(forKey: Self.manualAddressPrefix + id)
+            ScreenClipboardSetting.set(false, macID: id)
+        }
         granted = [:]
         clear(.noAccess)
     }
