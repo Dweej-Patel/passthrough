@@ -119,14 +119,19 @@ public final class PairingRegistry: @unchecked Sendable {
     }
 
     /// Records the shell key a paired Mac sent over the cable. The key waits
-    /// in the secret store until the app moves it to the shell client's own
-    /// keychain item. False if the Mac isn't paired or the key could not be stored.
+    /// in the secret store, sealed to the app's sealing key (`ShellKeySeal`),
+    /// until the app opens it and moves it to the shell client's own keychain
+    /// item. False if the Mac isn't paired, the app hasn't published its
+    /// sealing key yet (`shellSealingKey`: the key is then not kept at all),
+    /// or the key could not be stored.
     @discardableResult
     public func grantShell(clientID: String, grant: ShellGrant, shellKey: Data, relayToken: String? = nil) -> Bool {
+        guard let recipient = shellSealingKey,
+              let sealed = try? ShellKeySeal.seal(shellKey, to: recipient, clientID: clientID) else { return false }
         lock.lock()
         var list = loadClients()
         guard let i = list.firstIndex(where: { $0.id == clientID }),
-              secrets.write(shellKey, account: Self.pendingShellAccount + clientID),
+              secrets.write(sealed, account: Self.pendingShellAccount + clientID),
               storeRelayToken(relayToken, clientID: clientID) else { lock.unlock(); return false }
         list[i].shell = grant
         save(list)
@@ -170,9 +175,24 @@ public final class PairingRegistry: @unchecked Sendable {
 
     private static let relayTokenAccount = "shell.relayToken."
 
-    public func pendingShellKey(clientID: String) -> Data? {
+    /// What waits for the app from `clientID`'s grant: sealed (`ShellKeySeal`),
+    /// or a bare key an older build stored, which the app discards.
+    public func sealedPendingShellKey(clientID: String) -> Data? {
         secrets.read(Self.pendingShellAccount + clientID)
     }
+
+    /// The public half of the app's sealing key (X9.63), which the app
+    /// publishes once it has one; nil until the app has been opened.
+    public var shellSealingKey: P256.KeyAgreement.PublicKey? {
+        defaults.data(forKey: Self.shellSealingKeyKey).flatMap { try? P256.KeyAgreement.PublicKey(x963Representation: $0) }
+    }
+
+    /// The app only: publishes (or, with nil, withdraws) its sealing key.
+    public func publishShellSealingKey(_ key: P256.KeyAgreement.PublicKey?) {
+        if let key { defaults.set(key.x963Representation, forKey: Self.shellSealingKeyKey) } else { defaults.removeObject(forKey: Self.shellSealingKeyKey) }
+    }
+
+    public static let shellSealingKeyKey = "shell.sealingKey"
 
     public func clearPendingShellKey(clientID: String) {
         secrets.delete(Self.pendingShellAccount + clientID)

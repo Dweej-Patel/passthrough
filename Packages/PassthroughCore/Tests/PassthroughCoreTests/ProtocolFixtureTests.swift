@@ -1,4 +1,5 @@
 import XCTest
+import CryptoKit
 import Network
 @testable import PassthroughCore
 
@@ -115,6 +116,22 @@ final class ProtocolFixtureTests: XCTestCase {
         }
         // Reads the real resolver configuration without crashing; the list depends on the machine.
         _ = DNSRedirect.systemServers()
+    }
+
+    /// The Android app seals and opens with the same format: both open this vector.
+    func testShellKeySealVector() throws {
+        let f = try XCTUnwrap(fixtures()["shellKeySeal"] as? [String: String])
+        func hex(_ s: String?) throws -> Data {
+            let s = try XCTUnwrap(s)
+            return Data(stride(from: 0, to: s.count, by: 2).map { UInt8(s.dropFirst($0).prefix(2), radix: 16)! })
+        }
+        let recipient = try P256.KeyAgreement.PrivateKey(rawRepresentation: hex(f["recipientPrivateKey"]))
+        XCTAssertEqual(recipient.publicKey.x963Representation, try hex(f["recipientPublicKey"]))
+        let clientID = try XCTUnwrap(f["clientID"])
+        let opened = ShellKeySeal.open(try hex(f["sealed"]), clientID: clientID, recipient: recipient.publicKey) {
+            try recipient.sharedSecretFromKeyAgreement(with: $0)
+        }
+        XCTAssertEqual(try opened.get(), try hex(f["key"]))
     }
 
     func testLocalDestinations() throws {

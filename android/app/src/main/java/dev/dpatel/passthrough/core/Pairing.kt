@@ -4,6 +4,7 @@ import kotlinx.serialization.Serializable
 import kotlinx.serialization.builtins.ListSerializer
 import java.security.MessageDigest
 import java.security.SecureRandom
+import java.security.interfaces.ECPublicKey
 import java.util.Base64
 import java.util.Locale
 import java.util.UUID
@@ -115,13 +116,17 @@ class PairingRegistry(
 
     /**
      * Records the shell key a paired Mac sent over the cable. The key waits in
-     * the secret store until the app moves it elsewhere. False if the Mac isn't
-     * paired or the key could not be stored; nothing is recorded then.
+     * the secret store, sealed to the app's sealing key ([ShellKeySeal]), until
+     * the app opens it into its vault. False if the Mac isn't paired, the app
+     * hasn't published its sealing key yet ([shellSealingKey]: the key is then
+     * not kept at all) or the key could not be stored; nothing is recorded then.
      */
     fun grantShell(clientID: String, grant: ShellGrant, shellKey: ByteArray, relayToken: String? = null): Boolean {
+        val recipient = shellSealingKey ?: return false
+        val sealed = runCatching { ShellKeySeal.seal(shellKey, recipient, clientID) }.getOrNull() ?: return false
         val stored = synchronized(lock) {
             val list = loadClients()
-            if (list.none { it.id == clientID } || !secrets.write(PENDING_SHELL + clientID, shellKey) ||
+            if (list.none { it.id == clientID } || !secrets.write(PENDING_SHELL + clientID, sealed) ||
                 !storeRelayToken(clientID, relayToken)) return@synchronized false
             save(list.map { if (it.id == clientID) it.copy(shell = grant) else it })
             true
@@ -164,7 +169,17 @@ class PairingRegistry(
         return secrets.write(RELAY_TOKEN + clientID, token.toByteArray(Charsets.UTF_8))
     }
 
-    fun pendingShellKey(clientID: String): ByteArray? = secrets.read(PENDING_SHELL + clientID)
+    /** What waits for the app from [clientID]'s grant: sealed ([ShellKeySeal]), or a bare key an older build stored. */
+    fun sealedPendingShellKey(clientID: String): ByteArray? = secrets.read(PENDING_SHELL + clientID)
+
+    /** The public half of the app's sealing key, once the app has published one. */
+    val shellSealingKey: ECPublicKey?
+        get() = store.getString(SHELL_SEALING_KEY)?.let { runCatching { Base64.getDecoder().decode(it) }.getOrNull() }?.let(ShellKeySeal::publicKey)
+
+    /** The app only: publishes (or, with null, withdraws) its sealing key's public half (X9.63). */
+    fun publishShellSealingKey(x963: ByteArray?) {
+        store.putString(SHELL_SEALING_KEY, x963?.let { Base64.getEncoder().encodeToString(it) })
+    }
 
     fun clearPendingShellKey(clientID: String) = secrets.delete(PENDING_SHELL + clientID)
 
@@ -266,6 +281,8 @@ class PairingRegistry(
         const val PHONE_ID_KEY = "pairing.phoneID"
         private const val PENDING_SHELL = "shell.pending."
         private const val RELAY_TOKEN = "shell.relayToken."
+        /** Same key as the iOS app's shared defaults; base64 X9.63 here (the store holds strings). */
+        const val SHELL_SEALING_KEY = "shell.sealingKey"
         private fun constantTimeEquals(a: String, b: String): Boolean =
             MessageDigest.isEqual(a.toByteArray(Charsets.UTF_8), b.toByteArray(Charsets.UTF_8))
     }

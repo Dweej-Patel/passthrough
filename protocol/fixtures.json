@@ -199,6 +199,14 @@
       }
     ]
   },
+  "shellKeySeal": {
+    "_comment": "A shell key waiting for the app, sealed to the app's P-256 sealing key (ShellKeySeal): [1][ephemeral public key X9.63, 65][AES-GCM nonce 12][ciphertext][tag 16]. ECDH, then HKDF-SHA256 with no salt and info 'passthrough.shell.pending.v1' + ephemeral public key + sealing public key, 32 bytes; associated data 'passthrough.shell.key:' + clientID. Hex throughout.",
+    "recipientPrivateKey": "0a6962486883c33dd12e5adc698a1403caba4a6755d7235a0e7d63591211d987",
+    "recipientPublicKey": "046dff6eb01a3c7d1c04feddf4721ef1c5e14ab36f8a9a15eafe688ff6aa14a4de0e9d49b10bb56245858492219a66b782abbd57d25f24bec5a319b7f2e9836694",
+    "clientID": "4F1C2B9E-6A57-4D3B-9C1E-0B7A2D5E8F10",
+    "key": "00070e151c232a31383f464d545b626970777e858c939aa1a8afb6bdc4cbd2d9",
+    "sealed": "010400ba839eeacc39a3dc1c810040be122323f4fdb822c7168d2ce159b4e2c03890922ad76f98162e4666784d42adf95693c8f68c94adb4f862bdfe2ee15325f17967edba1594d7dd9e381dfeff26a1f0d89d9f1abdf5f5f50103fa20df053383be70d22a53060b1520010c2436eafaa72aae4fce303709e9b7936b7944"
+  },
   "localDestinations": {
     "_comment": "Destinations the phone refuses (refuseLocalDestinations): nothing on its uplink can answer them. Each address is checked as an IP and spelled as a name, and is also the rule for what a name resolved to. NAT64 (64:ff9b::/96) and IPv4-mapped/compatible addresses are judged by the IPv4 inside. Names are checked as sent.",
     "addresses": [

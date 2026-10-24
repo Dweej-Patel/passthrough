@@ -226,6 +226,8 @@ class ShellViewModel(app: Application) : AndroidViewModel(app) {
     /** Off the main thread: adopts pending keys and reads the ones not already in memory. */
     private fun load(known: Map<String, ByteArray>): Loaded {
         val registry = Runtime.registry
+        // At every unlock, so even a phone no Mac has granted yet can take the first grant sealed.
+        if (vault.supported && vault.deviceSecure) vault.prepareSealing(registry)
         val clients = registry.clients
         val granting = clients.filter { it.shell != null }
         if (!vault.supported || !vault.deviceSecure || granting.isEmpty()) {
@@ -233,7 +235,7 @@ class ShellViewModel(app: Application) : AndroidViewModel(app) {
         }
         vault.migrateLegacyLost(registry)
         var anyLocked = false
-        val pending = granting.filter { registry.pendingShellKey(it.id) != null }.map { it.id }.toSet()
+        val pending = granting.filter { registry.sealedPendingShellKey(it.id) != null }.map { it.id }.toSet()
         if (pending.isNotEmpty()) {
             vault.adoptPending(registry)
             if (vault.status.value == ShellKeyStatus.LOCKED) anyLocked = true

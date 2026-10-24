@@ -247,7 +247,7 @@ class PairingTests {
 
 class ControlTests {
     private var now = System.currentTimeMillis()
-    private val registry = PairingRegistry(MemoryStore(), clock = { now })
+    private val registry = PairingRegistry(MemoryStore(), clock = { now }).apply { withSealing() }
     private var control = ControlServer(0, 7890, registry, ByteCounter()) { DeviceStatus("Pixel", "5G", "Carrier", 0.8, "background") }
 
     @Before fun setUp() = control.start()
@@ -336,7 +336,7 @@ class ControlTests {
             certSHA256 = "b".repeat(64), shellPort = 7893, addresses = emptyList(), macName = "M")
         mac.send(grant)
         assertEquals("no shellGranted or status before auth", emptyList<String>(), mac.sync().map { it.t })
-        assertNull(registry.pendingShellKey("mac1"))
+        assertNull(registry.sealedPendingShellKey("mac1"))
         assertTrue(control.connectedMacs.isEmpty())
 
         mac.auth(PairingToken.generate(), welcome)
@@ -349,7 +349,7 @@ class ControlTests {
         good.auth(token, good.hello())
         good.send(grant)
         assertTrue(good.sync().any { it.t == ControlEnvelope.SHELL_GRANTED })
-        assertNotNull(registry.pendingShellKey("mac1"))
+        assertNotNull(registry.sealedPendingShellKey("mac1"))
         good.socket.close()
     }
 

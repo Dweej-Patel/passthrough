@@ -11,6 +11,7 @@ import android.security.keystore.UserNotAuthenticatedException
 import android.util.Base64
 import dev.dpatel.passthrough.core.PairingRegistry
 import dev.dpatel.passthrough.core.PtLog
+import dev.dpatel.passthrough.core.ShellKeySeal
 import dev.dpatel.passthrough.core.ShellKeyStatus
 import dev.dpatel.passthrough.core.ShellLostKeys
 import dev.dpatel.passthrough.core.ShellVaultBlob
@@ -44,6 +45,10 @@ import javax.crypto.spec.GCMParameterSpec
  *
  * Android 10: one entry per Mac behind a key usable for 60 seconds after any
  * authentication, as before (it can't take a device credential per use).
+ *
+ * The vault also keeps the private half of the sealing key ([ShellKeySeal],
+ * [prepareSealing]): the service seals each key a Mac grants to its public
+ * half, so a pending key opens only with this vault, at an unlock.
  *
  * Blocking (Keystore and disk): call off the main thread. Keys are never logged.
  */
@@ -86,14 +91,16 @@ class ShellKeyVault(context: Context) {
     private var authorized: Cipher? = null
     /** Whether [authorized] wraps a new data key (no blob yet) rather than unwrapping the stored one. */
     private var authorizedWraps = false
+    /** The sealing key pair as the blob holds it ([ShellKeySeal.encodeKeyPair]); read with the blob, kept by every write. */
+    private var blobSealing: ByteArray? = null
 
     // Unlock (Android 11+)
 
     /**
      * The cipher the app's unlock prompt should carry in its CryptoObject, or
-     * null when the vault needs none: Android 10, no lock screen, or nothing
-     * stored and nothing to store. Unwraps the stored data key, or wraps a new
-     * one when keys wait to be stored (a pending grant, older entries).
+     * null when the vault needs none: Android 10 or no lock screen. Unwraps
+     * the stored data key, or wraps a new one for a new vault (which at least
+     * holds the sealing key pending grants are sealed to).
      */
     @Synchronized
     fun unlockCipher(registry: PairingRegistry): Cipher? {
@@ -112,8 +119,10 @@ class ShellKeyVault(context: Context) {
         } catch (_: KeyPermanentlyInvalidatedException) {
             ptLog(PtLog.Level.WARNING, "shell: vault key invalidated; keys deleted")
             wipeBlob()
+            // Its sealing key went with it: the service must not seal to it any more.
+            registry.publishShellSealingKey(null)
             _status.value = baseStatus()
-            // A pending grant can still go into a new vault with this same prompt.
+            // A new vault, with a new sealing key, comes with this same prompt.
             runCatching { wrapCipher(registry) }.getOrNull()
         } catch (e: Exception) {
             ptLog(PtLog.Level.ERROR, "shell: vault cipher unavailable (${e.javaClass.simpleName})")
@@ -121,10 +130,9 @@ class ShellKeyVault(context: Context) {
         }
     }
 
-    /** A cipher to wrap a new data key with, when there is anything to store. */
+    /** A cipher to wrap a new vault's data key with. */
+    @Suppress("UNUSED_PARAMETER")
     private fun wrapCipher(registry: PairingRegistry): Cipher? {
-        val pending = registry.clients.any { it.shell != null && registry.pendingShellKey(it.id) != null }
-        if (!pending && legacyEntries().isEmpty()) return null
         authorizedWraps = true
         return Cipher.getInstance(TRANSFORM).apply { init(Cipher.ENCRYPT_MODE, existingKey(ALIAS) ?: newKey(ALIAS, perUse = true)) }
     }
@@ -138,7 +146,29 @@ class ShellKeyVault(context: Context) {
     fun lock() {
         dataKey?.fill(0)
         dataKey = null
+        blobSealing?.fill(0)
+        blobSealing = null
         authorized = null
+    }
+
+    /**
+     * Makes sure the vault holds a sealing key and the service has its public
+     * half to seal grants with; creates one on first use. Quiet when the vault
+     * can't be opened right now (the next unlock does it).
+     */
+    @Synchronized
+    fun prepareSealing(registry: PairingRegistry) {
+        if (!supported || !deviceSecure) return
+        val pair = try {
+            if (perUse) blobSealingPair(create = true) else entrySealingPair(create = true)
+        } catch (_: UserNotAuthenticatedException) {
+            null
+        }
+        val publicHalf = pair?.second?.let(ShellKeySeal::x963) ?: return
+        if (registry.shellSealingKey?.let(ShellKeySeal::x963)?.contentEquals(publicHalf) != true) {
+            registry.publishShellSealingKey(publicHalf)
+            ptLog(PtLog.Level.INFO, "shell: sealing key published")
+        }
     }
 
     // Keys
@@ -154,9 +184,28 @@ class ShellKeyVault(context: Context) {
         migrateLegacyLost(registry)
         if (perUse) return adoptIntoBlob(registry)
         var moved = 0
+        // Its 60 s window passed: what is sealed waits for the next unlock.
+        var locked = false
+        val sealing = try {
+            entrySealingPair(create = false)
+        } catch (_: UserNotAuthenticatedException) {
+            locked = true
+            null
+        }
         for (client in registry.clients) {
             if (client.shell == null) continue
-            val key = registry.pendingShellKey(client.id) ?: continue
+            val stored = registry.sealedPendingShellKey(client.id) ?: continue
+            val key = when (val adoption = ShellKeySeal.adopt(stored, client.id, sealing)) {
+                is ShellKeySeal.Adoption.Key -> adoption.bytes
+                ShellKeySeal.Adoption.Keep -> if (locked) {
+                    _status.value = ShellKeyStatus.LOCKED
+                    return moved
+                } else {
+                    // No sealing key here to open it with: it can never open.
+                    discarded(registry, client.id, stored); continue
+                }
+                ShellKeySeal.Adoption.Discard -> { discarded(registry, client.id, stored); continue }
+            }
             var result = store(client.id, key)
             if (result == Stored.INVALIDATED) {
                 wipeEntries()
@@ -164,7 +213,7 @@ class ShellKeyVault(context: Context) {
             }
             when (result) {
                 Stored.OK -> {
-                    adopted(registry, client.id, key)
+                    adopted(registry, client.id, stored)
                     moved++
                 }
                 Stored.LOCKED -> {
@@ -180,27 +229,49 @@ class ShellKeyVault(context: Context) {
     }
 
     private fun adoptIntoBlob(registry: PairingRegistry): Int {
-        val pending = registry.clients.filter { it.shell != null }
-            .mapNotNull { client -> registry.pendingShellKey(client.id)?.let { client.id to it } }
+        var pending = registry.clients.filter { it.shell != null }
+            .mapNotNull { client -> registry.sealedPendingShellKey(client.id)?.let { client.id to it } }
+        // An older build's bare key goes whether or not the vault opens.
+        pending.filter { (_, stored) -> ShellKeySeal.format(stored) != ShellKeySeal.Format.SEALED }
+            .forEach { (id, stored) -> discarded(registry, id, stored) }
+        pending = pending.filter { (_, stored) -> ShellKeySeal.format(stored) == ShellKeySeal.Format.SEALED }
         if (pending.isEmpty()) return 0.also { _status.value = baseStatus() }
         val keys = when (val open = openBlob()) {
             is Opened.Keys -> open.keys
             Opened.Locked -> return 0.also { _status.value = ShellKeyStatus.LOCKED }
             Opened.Invalidated, Opened.Failed -> return 0.also { _status.value = baseStatus() }
         }
-        if (!writeBlob(keys + pending)) return 0.also { _status.value = baseStatus() }
-        pending.forEach { (id, key) -> adopted(registry, id, key) }
+        val sealing = blobSealingPair(create = false)
+        val opened = HashMap<String, ByteArray>()
+        for ((id, stored) in pending) {
+            when (val adoption = ShellKeySeal.adopt(stored, id, sealing)) {
+                is ShellKeySeal.Adoption.Key -> opened[id] = adoption.bytes
+                ShellKeySeal.Adoption.Discard, ShellKeySeal.Adoption.Keep -> discarded(registry, id, stored)
+            }
+        }
+        if (opened.isEmpty() || !writeBlob(keys + opened)) return 0.also { _status.value = baseStatus() }
+        pending.filter { it.first in opened }.forEach { (id, stored) -> adopted(registry, id, stored) }
         _status.value = baseStatus()
-        ptLog(PtLog.Level.INFO, "shell: adopted ${pending.size} key(s)")
-        return pending.size
+        ptLog(PtLog.Level.INFO, "shell: adopted ${opened.size} key(s)")
+        return opened.size
     }
 
-    /** [macID]'s [key] is in the vault: clear its pending copy and its loss. */
-    private fun adopted(registry: PairingRegistry, macID: String, key: ByteArray) {
+    /** [macID]'s key, pending as [stored], is in the vault: clear that pending entry and the Mac's loss. */
+    private fun adopted(registry: PairingRegistry, macID: String, stored: ByteArray) {
         // A newer grant may have landed meanwhile: leave that one for the next unlock.
-        if (registry.pendingShellKey(macID)?.contentEquals(key) == true) registry.clearPendingShellKey(macID)
+        if (registry.sealedPendingShellKey(macID)?.contentEquals(stored) == true) registry.clearPendingShellKey(macID)
         // Only this Mac's loss is over: others' keys stay lost until they grant again.
         setLost(ShellLostKeys.afterAdopt(lost(), macID))
+    }
+
+    /**
+     * [macID]'s pending entry can never be opened (an older build's bare key, sealed to a
+     * sealing key since replaced, altered): delete it. The Mac grants again on its next
+     * cable connection.
+     */
+    private fun discarded(registry: PairingRegistry, macID: String, stored: ByteArray) {
+        if (registry.sealedPendingShellKey(macID)?.contentEquals(stored) == true) registry.clearPendingShellKey(macID)
+        ptLog(PtLog.Level.INFO, "shell: discarded a pending key this version can't open; the Mac grants again over the cable")
     }
 
     /** Whether [macID]'s key was lost when the vault's key was invalidated (until that Mac grants again). */
@@ -356,13 +427,15 @@ class ShellKeyVault(context: Context) {
         // Written back when it isn't exactly what is stored.
         var rewrite = sealed == null || removed.isNotEmpty()
         var keys = if (sealed == null) emptyMap() else {
-            ShellVaultBlob.open(key, Base64.decode(sealed, Base64.NO_WRAP)) ?: run {
+            val contents = ShellVaultBlob.open(key, Base64.decode(sealed, Base64.NO_WRAP))
+            if (contents == null) {
                 // Unreadable with its own data key: nothing in it can come back.
                 ptLog(PtLog.Level.ERROR, "shell: vault unreadable; keys deleted")
                 setLost(ShellLostKeys.afterWipe(lost(), blobMacs()))
                 rewrite = true
-                emptyMap()
             }
+            blobSealing = contents?.sealingKey
+            contents?.keys ?: emptyMap()
         }
         keys = keys - removed
         val legacy = legacyEntries()
@@ -379,10 +452,10 @@ class ShellKeyVault(context: Context) {
         return Opened.Keys(migration.keys)
     }
 
-    /** Seals [keys] as the whole blob with the held data key. */
+    /** Seals [keys] (and the sealing key) as the whole blob with the held data key. */
     private fun writeBlob(keys: Map<String, ByteArray>): Boolean {
         val key = dataKey ?: return false
-        val sealed = ShellVaultBlob.seal(key, keys)
+        val sealed = ShellVaultBlob.seal(key, ShellVaultBlob.Contents(keys, blobSealing))
         return prefs.edit().putString(BLOB, Base64.encodeToString(sealed, Base64.NO_WRAP))
             .putStringSet(BLOB_MACS, keys.keys.toSet()).remove(BLOB_REMOVED).commit()
     }
@@ -402,6 +475,18 @@ class ShellKeyVault(context: Context) {
 
     /** The Macs with a key in the blob: kept in the clear (Mac IDs aren't secret) to say what was lost. */
     private fun blobMacs(): Set<String> = prefs.getStringSet(BLOB_MACS, null)?.toSet() ?: emptySet()
+
+    /** The blob's sealing key pair, made (and written) on first use when [create]; null while the blob is locked. */
+    private fun blobSealingPair(create: Boolean): Pair<java.security.PrivateKey, java.security.interfaces.ECPublicKey>? {
+        val keys = (openBlob() as? Opened.Keys)?.keys ?: return null
+        blobSealing?.let(ShellKeySeal::decodeKeyPair)?.let { return it }
+        if (!create) return null
+        val fresh = ShellKeySeal.encodeKeyPair(ShellKeySeal.newKeyPair())
+        val previous = blobSealing
+        blobSealing = fresh
+        if (!writeBlob(keys)) { blobSealing = previous; return null }
+        return ShellKeySeal.decodeKeyPair(fresh)
+    }
 
     /** The vault key was invalidated: the blob can never be read again, so its Macs' keys are lost. */
     private fun wipeBlob() {
@@ -446,12 +531,31 @@ class ShellKeyVault(context: Context) {
         ShellVaultBlob.LegacyRead.Retry
     }
 
-    private fun store(macID: String, key: ByteArray): Stored = try {
+    /**
+     * Android 10: the sealing key pair, an entry like a Mac's key (usable for 60 s after an
+     * authentication), made on first use when [create]. Throws [UserNotAuthenticatedException]
+     * when that window has passed.
+     */
+    private fun entrySealingPair(create: Boolean): Pair<java.security.PrivateKey, java.security.interfaces.ECPublicKey>? {
+        val raw = prefs.getString(SEALING_ENTRY, null)
+        if (raw != null) {
+            try {
+                decryptEntry(raw)?.let(ShellKeySeal::decodeKeyPair)?.let { return it }
+            } catch (_: KeyPermanentlyInvalidatedException) {
+                wipeEntries()
+            }
+        }
+        if (!create) return null
+        val fresh = ShellKeySeal.encodeKeyPair(ShellKeySeal.newKeyPair())
+        return if (store(SEALING_ENTRY, fresh, prefsKey = SEALING_ENTRY) == Stored.OK) ShellKeySeal.decodeKeyPair(fresh) else null
+    }
+
+    private fun store(macID: String, key: ByteArray, prefsKey: String = entry(macID)): Stored = try {
         val cipher = Cipher.getInstance(TRANSFORM).apply {
             init(Cipher.ENCRYPT_MODE, existingKey(LEGACY_ALIAS) ?: newKey(LEGACY_ALIAS, perUse = false))
         }
         val blob = cipher.iv + cipher.doFinal(key)
-        if (prefs.edit().putString(entry(macID), Base64.encodeToString(blob, Base64.NO_WRAP)).commit()) Stored.OK else Stored.FAILED
+        if (prefs.edit().putString(prefsKey, Base64.encodeToString(blob, Base64.NO_WRAP)).commit()) Stored.OK else Stored.FAILED
     } catch (_: KeyPermanentlyInvalidatedException) {
         Stored.INVALIDATED
     } catch (_: UserNotAuthenticatedException) {
@@ -465,7 +569,7 @@ class ShellKeyVault(context: Context) {
     private fun wipeEntries() {
         val stale = prefs.all.keys.filter { it.startsWith(ENTRY_PREFIX) }
         val lost = ShellLostKeys.afterWipe(lost(), stale.map { it.removePrefix(ENTRY_PREFIX) })
-        prefs.edit().apply { stale.forEach { remove(it) } }.putStringSet(LOST_MACS, lost).commit()
+        prefs.edit().apply { stale.forEach { remove(it) } }.remove(SEALING_ENTRY).putStringSet(LOST_MACS, lost).commit()
         deleteAlias(LEGACY_ALIAS)
     }
 
@@ -535,6 +639,8 @@ class ShellKeyVault(context: Context) {
         const val IV_SIZE = 12
         const val AUTH_WINDOW_SECONDS = 60
         const val ENTRY_PREFIX = "shell."
+        /** Android 10: the sealing key pair, encrypted like a Mac's entry. Not under [ENTRY_PREFIX]. */
+        const val SEALING_ENTRY = "vault.sealing"
         const val WRAPPED_KEY = "vault2.wrappedKey"
         const val BLOB = "vault2.blob"
         const val BLOB_MACS = "vault2.macs"
