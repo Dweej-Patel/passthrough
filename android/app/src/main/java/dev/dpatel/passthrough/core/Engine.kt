@@ -35,7 +35,7 @@ class PassthroughEngine(
     fun start() {
         if (isRunning) return
         val registry = registry
-        val auth: ((String, String) -> Boolean)? = if (options.disableAuth) null else { user, pass -> registry.verify(user, pass) }
+        val auth: ((String, String) -> Boolean)? = if (options.disableAuth) null else { user, pass -> registry.verifySocks(user, pass) }
         val socks = Socks5Server(
             Socks5Server.Config(port = options.socksPort, allowUDP = options.allowUDP, refuseLocalDestinations = options.refuseLocalDestinations),
             auth, egress,

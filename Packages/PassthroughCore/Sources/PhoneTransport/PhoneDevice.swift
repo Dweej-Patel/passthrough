@@ -42,9 +42,12 @@ public struct PhoneDevice: Identifiable, Hashable, Sendable {
         case iPhone, android
         /// "iPhone" or "Android phone", for UI copy.
         public var name: String { self == .android ? "Android phone" : "iPhone" }
-        /// The keychain slot every iPhone shares (the one used before Android support).
-        public var defaultPairingSlot: String { "token" }
     }
+
+    /// The keychain slot every iPhone shared before each got its own. Still
+    /// read for an iPhone whose own slot is empty, until it proves the token
+    /// there and the token moves (`PairingSlots`).
+    public static let sharediPhonePairingSlot = "token"
 
     /// How the Mac reaches the phone.
     public enum Medium: Sendable { case usb, wireless }
@@ -55,8 +58,9 @@ public struct PhoneDevice: Identifiable, Hashable, Sendable {
     public let medium: Medium
     /// Short hardware label for logs ("00008110…", "Pixel 8").
     public let label: String
-    /// Names the stored pairing token for this phone. Every iPhone shares the
-    /// original slot; each Android phone gets its own, keyed by serial.
+    /// Names the stored pairing token for this phone: one per phone, keyed
+    /// by the iPhone's UDID or the Android phone's serial. A wireless device
+    /// takes its slot from the cable pairing it was linked through.
     public let pairingSlot: String
     public let link: any PhoneLink
 
@@ -71,14 +75,21 @@ public struct PhoneDevice: Identifiable, Hashable, Sendable {
 
     public static func iPhone(deviceID: Int, udid: String) -> PhoneDevice {
         PhoneDevice(id: "usbmux:\(deviceID)", kind: .iPhone, label: String(udid.prefix(8)) + "…",
-                    pairingSlot: Kind.iPhone.defaultPairingSlot, link: USBMuxLink(deviceID: deviceID))
+                    pairingSlot: "token.iphone." + slotSafe(udid), link: USBMuxLink(deviceID: deviceID))
     }
 
     public static func android(serial: String, model: String?) -> PhoneDevice {
-        let safe = serial.filter { $0.isLetter || $0.isNumber || $0 == "-" || $0 == "_" || $0 == "." }
-        return PhoneDevice(id: "adb:\(serial)", kind: .android, label: model ?? serial,
-                           pairingSlot: "token.android." + safe, link: ADBLink(serial: serial))
+        PhoneDevice(id: "adb:\(serial)", kind: .android, label: model ?? serial,
+                    pairingSlot: "token.android." + slotSafe(serial), link: ADBLink(serial: serial))
     }
+
+    /// A hardware ID as it may appear in a keychain account name.
+    private static func slotSafe(_ id: String) -> String {
+        id.filter { $0.isLetter || $0.isNumber || $0 == "-" || $0 == "_" || $0 == "." }
+    }
+
+    /// An iPhone on the cable whose pairing may still be in the slot every iPhone once shared.
+    public var mayUseSharedSlot: Bool { kind == .iPhone && medium == .usb && pairingSlot != Self.sharediPhonePairingSlot }
 
     /// "iPhone" or "Android phone", for UI copy.
     public var kindName: String { kind.name }

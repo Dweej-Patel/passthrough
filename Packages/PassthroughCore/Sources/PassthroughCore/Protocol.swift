@@ -17,8 +17,9 @@ public enum PassthroughProtocol {
         }
         return "passthrough.local"
     }()
-    /// Bump when the wire protocol changes incompatibly.
-    public static let version = 1
+    /// Bump when the wire protocol changes incompatibly. 2: the pairing is
+    /// proved with HMACs (`ControlAuth`), never by sending the token.
+    public static let version = 2
     /// SOCKS5 port the iPhone listens on (loopback only, reached over usbmuxd).
     public static let defaultSOCKSPort: UInt16 = 7890
     /// Control channel port (pairing, heartbeat, device status).
@@ -28,6 +29,16 @@ public enum PassthroughProtocol {
     /// App Group shared between the iOS app and its tunnel extension.
     public static let appGroup = "group.\(PassthroughProtocol.identifier)"
     public static let pairingCodeLifetime: TimeInterval = 300
+    /// Wrong codes in a row that lock code entry, and for how long.
+    public static let pairingMaxAttempts = 5
+    public static let pairingLockout: TimeInterval = 30
+    /// The phone closes a control connection that has not proved a pairing
+    /// within this long, unless a pairing code is showing (then it waits for
+    /// as long as the code is valid).
+    public static let unauthenticatedTimeout: TimeInterval = 10
+    /// The phone drops an authenticated Mac silent this long over the cable
+    /// (the Mac pings every 5 s and itself gives up after 20 s).
+    public static let cableSilenceLimit: TimeInterval = 30
 }
 
 /// Newline-delimited JSON envelope used on the control channel.
@@ -38,7 +49,12 @@ public struct ControlEnvelope: Codable, Equatable, Sendable {
     public var clientID: String?
     public var name: String?
     public var code: String?
+    /// paired: the new pairing token. Never sent anywhere else.
     public var token: String?
+    /// hello, welcome: 32 random bytes, base64, fresh for every connection.
+    public var nonce: String?
+    /// welcome (the phone's) and auth (the Mac's): the HMAC proving the pairing, base64 (see `ControlAuth`).
+    public var proof: String?
     public var reason: String?
     public var paired: Bool?
     public var socksPort: Int?
@@ -83,6 +99,7 @@ public struct ControlEnvelope: Codable, Equatable, Sendable {
 
     public static let hello = "hello"
     public static let welcome = "welcome"
+    public static let auth = "auth"
     public static let pair = "pair"
     public static let paired = "paired"
     public static let error = "error"
@@ -111,6 +128,8 @@ public enum PairingFailure: String, Sendable, Error {
     case expired = "expired"
     case notAuthenticated = "not_authenticated"
     case unsupportedVersion = "unsupported_version"
+    /// Too many wrong codes: code entry is locked for a while.
+    case locked = "locked"
 }
 
 /// Snapshot the tunnel extension hands the iOS app on request.

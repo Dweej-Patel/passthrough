@@ -252,69 +252,235 @@ final class PairingTests: XCTestCase {
     }
 
     /// The iOS app issues codes and the tunnel extension checks them: two
-    /// registries on one set of defaults. Wrong guesses count per code.
-    func testWrongGuessesCountPerCodeAcrossProcesses() {
+    /// registries on one set of defaults. Five wrong guesses lock code entry
+    /// for 30 s, even for the right code; the code itself stays.
+    func testWrongGuessesLockCodeEntryAcrossProcesses() {
         let app = registry!
         let tunnel = PairingRegistry(defaults: defaults)
         func wrong(_ code: String) -> String { code == "000000" ? "111111" : "000000" }
 
-        var code = app.issueCode().code
+        let code = app.issueCode().code
         for _ in 0..<4 { XCTAssertEqual(tunnel.pair(code: wrong(code), clientID: "m", name: "Mac"), .failure(.badCode)) }
-        XCTAssertEqual(tunnel.pair(code: wrong(code), clientID: "m", name: "Mac"), .failure(.expired), "the fifth wrong guess withdraws it")
-        XCTAssertNil(app.activeCode)
+        XCTAssertEqual(tunnel.pair(code: wrong(code), clientID: "m", name: "Mac"), .failure(.locked), "the fifth wrong guess locks code entry")
+        XCTAssertEqual(defaults.double(forKey: PairingRegistry.lockedUntilKey), Date().timeIntervalSince1970 + PassthroughProtocol.pairingLockout, accuracy: 2)
+        XCTAssertEqual(app.activeCode?.code, code, "the code is not withdrawn")
+        XCTAssertEqual(tunnel.pair(code: code, clientID: "m", name: "Mac"), .failure(.locked), "not even the right code while locked")
+        XCTAssertEqual(app.pair(code: code, clientID: "m", name: "Mac"), .failure(.locked))
 
-        code = app.issueCode().code
-        XCTAssertEqual(tunnel.pair(code: wrong(code), clientID: "m", name: "Mac"), .failure(.badCode), "a new code starts a new count")
+        // The lock runs out: the count starts over and the right code works.
+        defaults.set(Date().timeIntervalSince1970 - 1, forKey: PairingRegistry.lockedUntilKey)
+        XCTAssertEqual(tunnel.pair(code: wrong(code), clientID: "m", name: "Mac"), .failure(.badCode))
         guard case .success = tunnel.pair(code: code, clientID: "m", name: "Mac") else { return XCTFail() }
+    }
+
+    /// The SOCKS5 password is derived from the pairing, never the token itself.
+    func testSOCKSPasswordIsDerivedFromThePairing() {
+        let (code, _) = registry.issueCode()
+        guard case .success(let token) = registry.pair(code: code, clientID: "m1", name: "Mac") else { return XCTFail() }
+        XCTAssertTrue(registry.verifySOCKS(clientID: "m1", password: ControlAuth.socksPassword(token: token)))
+        XCTAssertFalse(registry.verifySOCKS(clientID: "m1", password: token), "the token is not the password")
+        XCTAssertFalse(registry.verifySOCKS(clientID: "m2", password: ControlAuth.socksPassword(token: token)))
+        XCTAssertFalse(registry.verifySOCKS(clientID: "m1", password: ControlAuth.socksPassword(token: PairingToken.generate())))
     }
 }
 
 final class ControlServerTests: XCTestCase {
-    func testHelloPairAndStatus() throws {
-        let suite = "\(PassthroughProtocol.identifier).tests.\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: suite)!
-        defer { defaults.removePersistentDomain(forName: suite) }
-        let registry = PairingRegistry(defaults: defaults)
+    private var defaults: UserDefaults!
+    private var registry: PairingRegistry!
+    private var server: ControlServer!
+    private var port: UInt16 = 0
+    private let suite = "\(PassthroughProtocol.identifier).tests.\(UUID().uuidString)"
+
+    override func tearDown() {
+        server?.stop()
+        defaults?.removePersistentDomain(forName: suite)
+    }
+
+    private func start(unauthenticatedTimeout: TimeInterval = PassthroughProtocol.unauthenticatedTimeout,
+                       cableSilenceLimit: TimeInterval = PassthroughProtocol.cableSilenceLimit) throws {
+        defaults = UserDefaults(suiteName: suite)!
+        registry = PairingRegistry(defaults: defaults, secrets: InMemorySecrets())
         let counter = ByteCounter()
         counter.addRx(100)
-        let port = freePort()
-        let server = ControlServer(port: port, socksPort: 7890, registry: registry, counter: counter) {
+        port = freePort()
+        server = ControlServer(port: port, socksPort: 7890, registry: registry, counter: counter,
+                               unauthenticatedTimeout: unauthenticatedTimeout, cableSilenceLimit: cableSilenceLimit) {
             DeviceStatus(deviceName: "Test iPhone", radio: "5G", hosting: "test")
         }
         try server.start()
-        defer { server.stop() }
+    }
 
+    private func send(_ m: ControlEnvelope, on client: TestClient) throws { client.send(try m.encodedLine()) }
+    private func receive(_ client: TestClient) throws -> ControlEnvelope { try ControlEnvelope.decode(client.readLine()) }
+
+    /// Says hello as the Mac would; returns the welcome and the nonce sent.
+    private func hello(_ client: TestClient, clientID: String = "mac1") throws -> (welcome: ControlEnvelope, macNonce: Data) {
+        let nonce = ControlAuth.nonce()
+        var hello = ControlEnvelope(t: "hello"); hello.protocolVersion = 2; hello.clientID = clientID; hello.name = "MacBook"
+        hello.nonce = nonce.base64EncodedString()
+        try send(hello, on: client)
+        return (try receive(client), nonce)
+    }
+
+    private func paired(_ clientID: String = "mac1") -> String {
+        let (code, _) = registry.issueCode()
+        guard case .success(let token) = registry.pair(code: code, clientID: clientID, name: "MacBook") else { XCTFail(); return "" }
+        return token
+    }
+
+    private func auth(_ client: TestClient, token: String, welcome: ControlEnvelope, macNonce: Data, clientID: String = "mac1") throws {
+        var auth = ControlEnvelope(t: "auth")
+        auth.proof = ControlAuth.macProof(key: ControlAuth.key(token: token), clientID: clientID, macNonce: macNonce,
+                                          phoneNonce: try XCTUnwrap(ControlAuth.decodeNonce(welcome.nonce))).base64EncodedString()
+        try send(auth, on: client)
+    }
+
+    /// Everything sent before it has been handled; returns what came first.
+    private func sync(_ client: TestClient) throws -> [ControlEnvelope] {
+        try send(ControlEnvelope(t: "ping"), on: client)
+        var seen: [ControlEnvelope] = []
+        while true {
+            let m = try receive(client)
+            if m.t == "pong" { return seen }
+            seen.append(m)
+        }
+    }
+
+    func testHelloPairAndStatus() throws {
+        try start()
         let client = TestClient(port: port)
-        var hello = ControlEnvelope(t: "hello"); hello.protocolVersion = 1; hello.clientID = "mac1"; hello.name = "MacBook"
-        client.send(try hello.encodedLine())
-        var welcome = try ControlEnvelope.decode(client.readLine())
+        let (welcome, _) = try hello(client)
         XCTAssertEqual(welcome.t, "welcome")
         XCTAssertEqual(welcome.paired, false)
+        XCTAssertNil(welcome.proof)
+        XCTAssertNotNil(ControlAuth.decodeNonce(welcome.nonce), "a nonce even when unpaired")
         XCTAssertEqual(welcome.deviceName, "Test iPhone")
 
         var pair = ControlEnvelope(t: "pair"); pair.clientID = "mac1"; pair.name = "MacBook"; pair.code = "nope"
-        client.send(try pair.encodedLine())
-        XCTAssertEqual(try ControlEnvelope.decode(client.readLine()).reason, "expired")
+        try send(pair, on: client)
+        XCTAssertEqual(try receive(client).reason, "expired")
 
         let (code, _) = registry.issueCode()
         pair.code = code
-        client.send(try pair.encodedLine())
-        let paired = try ControlEnvelope.decode(client.readLine())
+        try send(pair, on: client)
+        let paired = try receive(client)
         XCTAssertEqual(paired.t, "paired")
         let token = try XCTUnwrap(paired.token)
         XCTAssertTrue(registry.verify(clientID: "mac1", token: token))
-        let status = try ControlEnvelope.decode(client.readLine())
+        let status = try receive(client)
         XCTAssertEqual(status.t, "status")
         XCTAssertEqual(status.rxBytes, 100)
         XCTAssertEqual(server.connectedMacs.map(\.name), ["MacBook"])
         client.close()
 
-        // Reconnect with the token: welcome says paired.
+        // Reconnect: the phone proves the pairing first, then the Mac does.
         let client2 = TestClient(port: port)
-        hello.token = token
-        client2.send(try hello.encodedLine())
-        welcome = try ControlEnvelope.decode(client2.readLine())
-        XCTAssertEqual(welcome.paired, true)
+        let (again, macNonce) = try hello(client2)
+        XCTAssertEqual(again.paired, true)
+        XCTAssertNil(again.token)
+        let phoneNonce = try XCTUnwrap(ControlAuth.decodeNonce(again.nonce))
+        XCTAssertTrue(ControlAuth.isValidPhoneProof(again.proof, key: ControlAuth.key(token: token), clientID: "mac1", macNonce: macNonce, phoneNonce: phoneNonce))
+        XCTAssertFalse(ControlAuth.isValidPhoneProof(again.proof, key: ControlAuth.key(token: token), clientID: "mac1", macNonce: ControlAuth.nonce(), phoneNonce: phoneNonce),
+                       "the proof is bound to this connection's nonce")
+        try auth(client2, token: token, welcome: again, macNonce: macNonce)
+        XCTAssertEqual(try receive(client2).t, "status", "authenticated: status flows")
         client2.close()
+    }
+
+    /// A Mac from before version 2 (token in hello) is refused, with our version so it knows who to update.
+    func testRefusesOldProtocolVersion() throws {
+        try start()
+        let token = paired()
+        let client = TestClient(port: port)
+        var hello = ControlEnvelope(t: "hello"); hello.protocolVersion = 1; hello.clientID = "mac1"; hello.name = "MacBook"; hello.token = token
+        try send(hello, on: client)
+        let reply = try receive(client)
+        XCTAssertEqual(reply.t, "error")
+        XCTAssertEqual(reply.reason, "unsupported_version")
+        XCTAssertEqual(reply.protocolVersion, 2)
+        XCTAssertTrue(client.readLine().isEmpty, "and the connection is closed")
+        XCTAssertTrue(server.connectedMacs.isEmpty)
+    }
+
+    /// Before the Mac proves the pairing, nothing privileged is acted on; a wrong proof ends the connection.
+    func testPrivilegedMessagesNeedTheMacsProof() throws {
+        try start()
+        let token = paired()
+        let client = TestClient(port: port)
+        let (welcome, macNonce) = try hello(client)
+        XCTAssertEqual(welcome.paired, true)
+
+        var link = ControlEnvelope(t: "link"); link.linkKey = WirelessLink.randomBytes(32).base64EncodedString(); link.certSHA256 = String(repeating: "b", count: 64)
+        var grant = ControlEnvelope(t: "shellGrant"); grant.shellKey = WirelessLink.randomBytes(32).base64EncodedString()
+        grant.certSHA256 = String(repeating: "b", count: 64); grant.shellPort = 7893; grant.addresses = []; grant.macName = "M"
+        try send(link, on: client)
+        try send(grant, on: client)
+        XCTAssertEqual(try sync(client).map(\.t), [], "no linked, shellGranted or status before auth")
+        XCTAssertTrue(registry.linkCredentials().isEmpty)
+        XCTAssertNil(registry.pendingShellKey(clientID: "mac1"))
+        XCTAssertTrue(server.connectedMacs.isEmpty)
+
+        // A proof made with another token (or over other nonces) is refused.
+        try auth(client, token: PairingToken.generate(), welcome: welcome, macNonce: macNonce)
+        let refused = try receive(client)
+        XCTAssertEqual(refused.t, "error")
+        XCTAssertEqual(refused.reason, "not_authenticated")
+        XCTAssertTrue(client.readLine().isEmpty, "and the connection is closed")
+        XCTAssertTrue(server.connectedMacs.isEmpty)
+
+        // The right proof lets the same messages through.
+        let good = TestClient(port: port)
+        let (w, n) = try hello(good)
+        try auth(good, token: token, welcome: w, macNonce: n)
+        try send(link, on: good)
+        XCTAssertTrue(try sync(good).contains { $0.t == "linked" })
+        XCTAssertEqual(registry.linkCredentials().count, 1)
+        good.close()
+    }
+
+    /// A connection that proves nothing is closed after the timeout, unless a
+    /// code is showing; once it goes, so does the extra time.
+    func testUnauthenticatedConnectionsAreClosed() throws {
+        try start(unauthenticatedTimeout: 1)
+        let silent = TestClient(port: port)
+        let start = Date()
+        XCTAssertTrue(silent.readLine(timeout: 5).isEmpty)
+        XCTAssertLessThan(Date().timeIntervalSince(start), 4)
+
+        registry.issueCode()
+        let pairing = TestClient(port: port)
+        _ = try hello(pairing, clientID: "mac2")
+        Thread.sleep(forTimeInterval: 2.5)
+        XCTAssertEqual(try sync(pairing).count, 0, "still open while the code shows")
+        registry.clearCode()
+        XCTAssertTrue(pairing.readLine(timeout: 5).isEmpty)
+    }
+
+    /// An authenticated Mac that stops talking is dropped.
+    func testSilentMacIsDropped() throws {
+        try start(cableSilenceLimit: 1)
+        let token = paired()
+        let client = TestClient(port: port)
+        let (welcome, macNonce) = try hello(client)
+        try auth(client, token: token, welcome: welcome, macNonce: macNonce)
+        _ = try sync(client)
+        XCTAssertEqual(server.connectedMacs.count, 1)
+        var lines = 0
+        while !client.readLine(timeout: 5).isEmpty { lines += 1 }
+        XCTAssertLessThan(lines, 5, "closed after a second or two of silence")
+        XCTAssertTrue(server.connectedMacs.isEmpty)
+    }
+
+    /// A pair before hello (which checks the version) is not taken.
+    func testPairNeedsHello() throws {
+        try start()
+        let (code, _) = registry.issueCode()
+        let client = TestClient(port: port)
+        var pair = ControlEnvelope(t: "pair"); pair.clientID = "mac1"; pair.name = "MacBook"; pair.code = code
+        try send(pair, on: client)
+        XCTAssertEqual(try receive(client).reason, "not_authenticated")
+        XCTAssertTrue(registry.clients.isEmpty)
+        XCTAssertNotNil(registry.activeCode)
+        client.close()
     }
 }

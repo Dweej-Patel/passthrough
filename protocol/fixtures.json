@@ -1,16 +1,20 @@
 {
   "_comment": "Shared by the Swift tests (Packages/PassthroughCore) and the Kotlin tests (android/). Change it and both suites must agree. See protocol/README.md.",
-  "protocolVersion": 1,
+  "protocolVersion": 2,
   "ports": {
     "socks": 7890,
     "control": 7891
   },
   "pairingCodeLifetimeSeconds": 300,
+  "pairingMaxAttempts": 5,
+  "pairingLockoutSeconds": 30,
+  "unauthenticatedTimeoutSeconds": 10,
   "pairingFailures": [
     "bad_code",
     "expired",
     "not_authenticated",
-    "unsupported_version"
+    "unsupported_version",
+    "locked"
   ],
   "tokens": [
     {
@@ -29,12 +33,34 @@
       "wellFormed": false
     }
   ],
+  "controlAuth": {
+    "_comment": "K = SHA-256(token). phoneProof = HMAC-SHA256(K, phoneLabel || clientID || macNonce || phoneNonce), macProof = HMAC-SHA256(K, macLabel || clientID || phoneNonce || macNonce), both base64; socksPassword = HMAC-SHA256(K, socksLabel) as unpadded URL-safe base64. See protocol/README.md.",
+    "phoneLabel": "passthrough-control-v2 phone",
+    "macLabel": "passthrough-control-v2 mac",
+    "socksLabel": "passthrough-socks-v2",
+    "nonceLength": 32,
+    "vectors": [
+      {
+        "token": "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8",
+        "tokenSHA256": "ea866a757e4c38babfa8127cbe9a409d3e1f93a00ff1488ff735fcf917afffd0",
+        "clientID": "8F0C2A51-4C8E-4D3B-9B1E-2F5C8A7D6E10",
+        "macNonce": "QEFCQ0RFRkdISUpLTE1OT1BRUlNUVVZXWFlaW1xdXl8=",
+        "phoneNonce": "YGFiY2RlZmdoaWprbG1ub3BxcnN0dXZ3eHl6e3x9fn8=",
+        "phoneProof": "KG8T1+HX19LNtQHrj3YohbhZc9EpLvPb90zFcqaGHek=",
+        "macProof": "zC5fd9NGXIKwv4lYJrFtQt+R/GV5de9PjT/xd0T2bIw=",
+        "socksPassword": "zO8xzREvPyEXtzz-VhlDx5TlYpObH2tZrB9fbLxGkiQ"
+      }
+    ]
+  },
   "messages": [
     {
-      "line": "{\"t\":\"hello\",\"protocolVersion\":1,\"clientID\":\"8F0C2A51-4C8E-4D3B-9B1E-2F5C8A7D6E10\",\"name\":\"MacBook Pro\",\"token\":\"AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8\"}"
+      "line": "{\"t\":\"hello\",\"protocolVersion\":2,\"clientID\":\"8F0C2A51-4C8E-4D3B-9B1E-2F5C8A7D6E10\",\"name\":\"MacBook Pro\",\"nonce\":\"QEFCQ0RFRkdISUpLTE1OT1BRUlNUVVZXWFlaW1xdXl8=\",\"via\":\"usb\"}"
     },
     {
-      "line": "{\"t\":\"welcome\",\"protocolVersion\":1,\"paired\":false,\"socksPort\":7890,\"deviceName\":\"Pixel 8\",\"radio\":\"5G\",\"carrier\":\"T-Mobile\",\"battery\":0.82,\"hosting\":\"background\"}"
+      "line": "{\"t\":\"welcome\",\"protocolVersion\":2,\"paired\":false,\"nonce\":\"YGFiY2RlZmdoaWprbG1ub3BxcnN0dXZ3eHl6e3x9fn8=\",\"socksPort\":7890,\"deviceName\":\"Pixel 8\",\"radio\":\"5G\",\"carrier\":\"T-Mobile\",\"battery\":0.82,\"hosting\":\"background\"}"
+    },
+    {
+      "line": "{\"t\":\"auth\",\"proof\":\"zC5fd9NGXIKwv4lYJrFtQt+R/GV5de9PjT/xd0T2bIw=\"}"
     },
     {
       "line": "{\"t\":\"pair\",\"clientID\":\"8F0C2A51-4C8E-4D3B-9B1E-2F5C8A7D6E10\",\"name\":\"MacBook Pro\",\"code\":\"042917\"}"
@@ -44,6 +70,12 @@
     },
     {
       "line": "{\"t\":\"error\",\"reason\":\"bad_code\"}"
+    },
+    {
+      "line": "{\"t\":\"error\",\"reason\":\"locked\"}"
+    },
+    {
+      "line": "{\"t\":\"error\",\"reason\":\"unsupported_version\",\"protocolVersion\":2}"
     },
     {
       "line": "{\"t\":\"ping\"}"
@@ -58,7 +90,7 @@
       "line": "{\"t\":\"status\",\"deviceName\":\"iPhone\",\"radio\":\"Wi-Fi\",\"hosting\":\"background\",\"ipv6\":false,\"activeConnections\":1,\"rxBytes\":10,\"txBytes\":20,\"timestamp\":1758062400.5}"
     },
     {
-      "line": "{\"t\":\"welcome\",\"protocolVersion\":1,\"paired\":true,\"socksPort\":7890,\"deviceName\":\"Pixel 8\",\"hosting\":\"background\",\"ipv6\":true}"
+      "line": "{\"t\":\"welcome\",\"protocolVersion\":2,\"paired\":true,\"nonce\":\"YGFiY2RlZmdoaWprbG1ub3BxcnN0dXZ3eHl6e3x9fn8=\",\"proof\":\"KG8T1+HX19LNtQHrj3YohbhZc9EpLvPb90zFcqaGHek=\",\"socksPort\":7890,\"deviceName\":\"Pixel 8\",\"hosting\":\"background\",\"ipv6\":true}"
     },
     {
       "line": "{\"t\":\"shellGrant\",\"shellKey\":\"AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=\",\"certSHA256\":\"abababababababababababababababababababababababababababababababab\",\"shellPort\":7893,\"addresses\":[\"192.168.1.20\",\"100.101.102.103\"],\"macName\":\"MacBook Pro\"}"

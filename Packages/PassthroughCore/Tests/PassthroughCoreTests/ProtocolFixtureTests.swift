@@ -24,6 +24,9 @@ final class ProtocolFixtureTests: XCTestCase {
         XCTAssertEqual(ports["socks"], Int(PassthroughProtocol.defaultSOCKSPort))
         XCTAssertEqual(ports["control"], Int(PassthroughProtocol.defaultControlPort))
         XCTAssertEqual(f["pairingCodeLifetimeSeconds"] as? Double, PassthroughProtocol.pairingCodeLifetime)
+        XCTAssertEqual(f["pairingMaxAttempts"] as? Int, PassthroughProtocol.pairingMaxAttempts)
+        XCTAssertEqual(f["pairingLockoutSeconds"] as? Double, PassthroughProtocol.pairingLockout)
+        XCTAssertEqual(f["unauthenticatedTimeoutSeconds"] as? Double, PassthroughProtocol.unauthenticatedTimeout)
         let failures = try XCTUnwrap(f["pairingFailures"] as? [String])
         XCTAssertEqual(failures.compactMap(PairingFailure.init(rawValue:)).count, failures.count)
     }
@@ -35,6 +38,36 @@ final class ProtocolFixtureTests: XCTestCase {
             XCTAssertEqual(PairingToken.isWellFormed(token), t["wellFormed"] as? Bool, token)
         }
         XCTAssertTrue(PairingToken.isWellFormed(PairingToken.generate()))
+    }
+
+    /// The same proofs and SOCKS5 password as the Kotlin side computes, from the same vectors.
+    func testControlAuthVectors() throws {
+        let f = try XCTUnwrap(fixtures()["controlAuth"] as? [String: Any])
+        XCTAssertEqual(f["phoneLabel"] as? String, ControlAuth.phoneLabel)
+        XCTAssertEqual(f["macLabel"] as? String, ControlAuth.macLabel)
+        XCTAssertEqual(f["socksLabel"] as? String, ControlAuth.socksLabel)
+        XCTAssertEqual(f["nonceLength"] as? Int, ControlAuth.nonceLength)
+        for v in try XCTUnwrap(f["vectors"] as? [[String: String]]) {
+            let token = try XCTUnwrap(v["token"]), clientID = try XCTUnwrap(v["clientID"])
+            let macNonce = try XCTUnwrap(ControlAuth.decodeNonce(v["macNonce"])), phoneNonce = try XCTUnwrap(ControlAuth.decodeNonce(v["phoneNonce"]))
+            XCTAssertEqual(PairingToken.hash(token), v["tokenSHA256"])
+            // The Mac's K (from the token) and the phone's (from the hash it keeps) agree.
+            let macKey = ControlAuth.key(token: token), phoneKey = try XCTUnwrap(ControlAuth.key(tokenHash: try XCTUnwrap(v["tokenSHA256"])))
+            XCTAssertEqual(ControlAuth.phoneProof(key: phoneKey, clientID: clientID, macNonce: macNonce, phoneNonce: phoneNonce).base64EncodedString(), v["phoneProof"])
+            XCTAssertEqual(ControlAuth.macProof(key: macKey, clientID: clientID, macNonce: macNonce, phoneNonce: phoneNonce).base64EncodedString(), v["macProof"])
+            XCTAssertTrue(ControlAuth.isValidPhoneProof(v["phoneProof"], key: macKey, clientID: clientID, macNonce: macNonce, phoneNonce: phoneNonce))
+            XCTAssertTrue(ControlAuth.isValidMacProof(v["macProof"], key: phoneKey, clientID: clientID, macNonce: macNonce, phoneNonce: phoneNonce))
+            // Each proof is bound to its own label and to the order of the nonces.
+            XCTAssertFalse(ControlAuth.isValidMacProof(v["phoneProof"], key: phoneKey, clientID: clientID, macNonce: macNonce, phoneNonce: phoneNonce))
+            XCTAssertFalse(ControlAuth.isValidPhoneProof(v["phoneProof"], key: macKey, clientID: clientID, macNonce: phoneNonce, phoneNonce: macNonce))
+            XCTAssertFalse(ControlAuth.isValidPhoneProof(v["phoneProof"], key: macKey, clientID: clientID + "x", macNonce: macNonce, phoneNonce: phoneNonce))
+            XCTAssertEqual(ControlAuth.socksPassword(token: token), v["socksPassword"])
+            XCTAssertEqual(ControlAuth.socksPassword(key: phoneKey), v["socksPassword"])
+            XCTAssertTrue(PairingToken.isWellFormed(ControlAuth.socksPassword(token: token)), "the password has a token's shape")
+        }
+        XCTAssertNil(ControlAuth.key(tokenHash: "zz"))
+        XCTAssertNil(ControlAuth.key(tokenHash: String(repeating: "g", count: 64)))
+        XCTAssertNil(ControlAuth.decodeNonce(Data(count: 31).base64EncodedString()))
     }
 
     /// Every field survives a decode and re-encode, and nothing extra (like nulls) is added.

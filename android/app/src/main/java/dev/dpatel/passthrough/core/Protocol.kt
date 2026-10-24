@@ -5,13 +5,20 @@ import kotlinx.serialization.json.Json
 
 /** Constants shared with the Mac client. Must match PassthroughCore/Protocol.swift. */
 object PassthroughProtocol {
-    /** Bump when the wire protocol changes incompatibly. */
-    const val VERSION = 1
+    /** Bump when the wire protocol changes incompatibly. 2: the pairing is proved with HMACs ([ControlAuth]), never by sending the token. */
+    const val VERSION = 2
     /** SOCKS5 port the phone listens on (loopback only, reached over adb). */
     const val DEFAULT_SOCKS_PORT = 7890
     /** Control channel port (pairing, heartbeat, device status). */
     const val DEFAULT_CONTROL_PORT = 7891
     const val PAIRING_CODE_LIFETIME_MS = 300_000L
+    /** Wrong codes in a row that lock code entry, and for how long. */
+    const val PAIRING_MAX_ATTEMPTS = 5
+    const val PAIRING_LOCKOUT_MS = 30_000L
+    /** A control connection that has not proved a pairing is closed after this, unless a pairing code is showing. */
+    const val UNAUTHENTICATED_TIMEOUT_MS = 10_000L
+    /** An authenticated Mac silent this long is dropped (it pings every 5 s and gives up itself after 20 s). */
+    const val SILENCE_LIMIT_MS = 30_000L
 }
 
 /**
@@ -26,7 +33,12 @@ data class ControlEnvelope(
     var clientID: String? = null,
     var name: String? = null,
     var code: String? = null,
+    /** paired: the new pairing token. Never sent anywhere else. */
     var token: String? = null,
+    /** hello, welcome: 32 random bytes, base64, fresh for every connection. */
+    var nonce: String? = null,
+    /** welcome (the phone's) and auth (the Mac's): the HMAC proving the pairing, base64 (see [ControlAuth]). */
+    var proof: String? = null,
     var reason: String? = null,
     var paired: Boolean? = null,
     var socksPort: Int? = null,
@@ -41,6 +53,8 @@ data class ControlEnvelope(
     var rxBytes: Long? = null,
     var txBytes: Long? = null,
     var timestamp: Double? = null,
+    /** hello: how the Mac reaches the phone, "usb" or "wireless" (always the cable for Android). */
+    var via: String? = null,
     // Granting remote shell access (protocol/README.md, "Remote shell").
     var certSHA256: String? = null,
     var phoneID: String? = null,
@@ -61,6 +75,7 @@ data class ControlEnvelope(
     companion object {
         const val HELLO = "hello"
         const val WELCOME = "welcome"
+        const val AUTH = "auth"
         const val PAIR = "pair"
         const val PAIRED = "paired"
         const val ERROR = "error"
@@ -88,6 +103,8 @@ enum class PairingFailure(val wire: String) {
     EXPIRED("expired"),
     NOT_AUTHENTICATED("not_authenticated"),
     UNSUPPORTED_VERSION("unsupported_version"),
+    /** Too many wrong codes: code entry is locked for a while. */
+    LOCKED("locked"),
 }
 
 /** Facts about the phone the Mac likes to display. */

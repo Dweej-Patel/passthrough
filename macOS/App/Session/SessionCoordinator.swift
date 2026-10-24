@@ -148,6 +148,7 @@ final class SessionCoordinator: ObservableObject {
     private let androidWatcher: ADBWatcher
     private let wirelessWatcher: WirelessWatcher
     private let links = LinkStore()
+    private let tokens = KeychainPairingTokens()
     private var forwarder: LocalForwarder?
     /// The control channel to the current phone. Opened by a connect, or on
     /// its own over the cable with Remote shell on (pairing, wireless link and
@@ -158,6 +159,9 @@ final class SessionCoordinator: ObservableObject {
     private var controlGeneration = 0
     private enum ControlState { case opening, paired, needsPairing }
     private var controlState = ControlState.opening
+    /// The token the open control channel proves, and the slot it came from.
+    private var controlPairing: PairingSlots.Stored?
+    private var controlOpenedAt = Date.distantPast
     /// The connect attempt that reached the control step and waits on it.
     private var tunnelGen: Int?
     private var tunnelRequested = false
@@ -190,9 +194,10 @@ final class SessionCoordinator: ObservableObject {
         return storedClientID
     }
     var macName: String { Host.current().localizedName ?? "Mac" }
-    /// Keychain slot of the attached phone's pairing token (the iPhone slot when none is attached).
-    private var pairingSlot: String { device?.pairingSlot ?? PhoneDevice.Kind.iPhone.defaultPairingSlot }
-    var hasToken: Bool { Keychain.read(pairingSlot) != nil }
+    /// Keychain slot of the attached phone's pairing token (the slot iPhones
+    /// once shared when none is attached).
+    private var pairingSlot: String { device?.pairingSlot ?? PhoneDevice.sharediPhonePairingSlot }
+    var hasToken: Bool { device.map { PairingSlots.lookup(for: $0, in: tokens) != nil } ?? (Keychain.read(pairingSlot) != nil) }
     var linkedPhoneCount: Int { links.phones.count }
     /// "over USB" or "over Hotspot" (the wireless carrier), for status copy.
     var linkName: String { device?.medium == .wireless ? "over \(wirelessCarrier ?? "Wi-Fi")" : "over USB" }
@@ -376,6 +381,25 @@ final class SessionCoordinator: ObservableObject {
     }
     private var pendingLink: (key: Data, device: PhoneDevice)?
 
+    /// The phone proved the token from the slot iPhones once shared, so the
+    /// token is its own: move it, and the link key, into the phone's own slot.
+    private func adoptSharedPairing(_ device: PhoneDevice) {
+        guard let stored = controlPairing, stored.isShared, PairingSlots.adopt(stored, for: device, in: tokens) else { return }
+        links.moveKey(fromSlot: stored.slot, toSlot: device.pairingSlot)
+        controlPairing = PairingSlots.Stored(token: stored.token, slot: device.pairingSlot)
+        ptLog(.info, "Moved the \(device.kindName)'s pairing to its own keychain slot")
+    }
+
+    /// An iPhone answering on the cable after proving its pairing: shell
+    /// access it was granted through the slot iPhones once shared moves to
+    /// its own slot, as its pairing did, so the grant now on its way can
+    /// replace it. (Any iPhone could renew such access before, through the
+    /// shared slot; access granted through any other slot never moves.)
+    private func moveSharedShellAccess(phoneID: String, device: PhoneDevice) {
+        guard device.mayUseSharedSlot else { return }
+        shell.movePairing(phoneID: phoneID, fromSlot: PhoneDevice.sharediPhonePairingSlot, toSlot: device.pairingSlot)
+    }
+
     private func startShell() {
         do {
             shell.start(identity: try MacIdentity.loadOrCreate(label: Self.identityLabel))
@@ -455,13 +479,16 @@ final class SessionCoordinator: ObservableObject {
         closeControl()
         controlGeneration += 1
         let cgen = controlGeneration
-        let identity = ControlClient.Identity(clientID: clientID, name: macName, token: Keychain.read(device.pairingSlot))
+        let stored = PairingSlots.lookup(for: device, in: tokens)
+        controlPairing = stored
+        let identity = ControlClient.Identity(clientID: clientID, name: macName, token: stored?.token, tokenIsGuess: stored?.isShared ?? false)
         let control = ControlClient(device: device, identity: identity) { [weak self] event in
             Task { @MainActor in self?.handleControl(event, control: cgen) }
         }
         self.control = control
         controlDeviceID = device.id
         controlState = .opening
+        controlOpenedAt = Date()
         shellGrants.channelOpened(deviceID: device.id)
         control.connect()
     }
@@ -474,6 +501,7 @@ final class SessionCoordinator: ObservableObject {
         controlDeviceID = nil
         controlGeneration += 1
         controlState = .opening
+        controlPairing = nil
         pairingInFlight = false
         pendingLink = nil
         pendingShellGrant = nil
@@ -598,6 +626,7 @@ final class SessionCoordinator: ObservableObject {
             syncTunnelIPv6()
             if paired {
                 controlState = .paired
+                adoptSharedPairing(device)
                 sendLink()
                 sendShellGrant()
                 continueTunnel()
@@ -613,12 +642,18 @@ final class SessionCoordinator: ObservableObject {
                 }
             }
         case .paired(let token):
+            // Only the answer to a code the user entered on this channel, once.
+            guard pairingInFlight else {
+                ptLog(.warning, "Ignoring a pairing the \(phoneKindName) sent unasked")
+                return
+            }
             pairingInFlight = false
             guard PairingToken.isWellFormed(token) else {
                 fail("The \(phoneKindName) sent a malformed pairing token")
                 return
             }
             Keychain.write(token, account: device.pairingSlot)
+            controlPairing = PairingSlots.Stored(token: token, slot: device.pairingSlot)
             pairingError = nil
             controlState = .paired
             shellGrants.paired(deviceID: device.id)
@@ -641,6 +676,7 @@ final class SessionCoordinator: ObservableObject {
         case .linked(let phoneID, let network, let passphrase):
             guard let pending = pendingLink else { return }
             pendingLink = nil
+            moveSharedShellAccess(phoneID: phoneID, device: pending.device)
             links.record(WirelessPhone(phoneID: phoneID, linkKey: pending.key, isAndroid: pending.device.kind == .android,
                                        label: phoneStatus?.deviceName ?? pending.device.kindName,
                                        pairingSlot: pending.device.pairingSlot, network: network, passphrase: passphrase))
@@ -655,6 +691,7 @@ final class SessionCoordinator: ObservableObject {
                 return
             }
             pendingShellGrant = nil
+            moveSharedShellAccess(phoneID: phoneID, device: pending.device)
             guard shellGrants.confirmed(deviceID: pending.device.id, grantID: pending.grantID) else {
                 // A stale answer: still make sure the phone gets what it should hold now.
                 if !shellGrants.isHeld(deviceID: pending.device.id) { sendShellGrant() }
@@ -671,6 +708,7 @@ final class SessionCoordinator: ObservableObject {
             case .expired: pairingError = "The code expired or wasn't generated yet. Tap Pair on the \(phoneKindName) and try again."
             case .notAuthenticated: pairingError = "Not authenticated."
             case .unsupportedVersion: pairingError = "The \(phoneKindName) app is a different version. Update both apps."
+            case .locked: pairingError = "Too many wrong codes. Wait \(Int(PassthroughProtocol.pairingLockout)) seconds, then try again."
             }
         case .status(let status, _, _, let active):
             phoneStatus = status
@@ -680,7 +718,22 @@ final class SessionCoordinator: ObservableObject {
         case .disconnected(let error):
             let why = error?.localizedDescription ?? "The \(phoneKindName) closed the connection"
             let forTunnel = tunnelUsesControl
+            // The phone closes a channel that has not paired within seconds
+            // unless a code is showing. A user still reading the code off the
+            // phone gets a fresh channel to type it into (not in a tight loop
+            // if something closes channels at once).
+            if error == nil, controlState == .needsPairing, !pairingInFlight, phase == .pairingRequired,
+               Date().timeIntervalSince(controlOpenedAt) >= PassthroughProtocol.unauthenticatedTimeout / 2 {
+                closeControl()
+                openControl(for: device)
+                return
+            }
             closeControl()
+            if let refused = error as? ControlClient.ControlError {
+                // Retrying can't help until the user acts: say what to do.
+                ptLog(.error, refused.localizedDescription)
+                if !forTunnel, !phase.isConnected { phase = .error(refused.localizedDescription) }
+            }
             if !forTunnel {
                 // Only open for the shell: try again later, backing off while the phone keeps refusing.
                 let retry = shellControlBackoff.failed()
@@ -698,12 +751,14 @@ final class SessionCoordinator: ObservableObject {
 
     private func bringTunnelUp(generation gen: Int) async {
         guard gen == generation else { return }
-        guard let device, let token = Keychain.read(device.pairingSlot) else { phase = .pairingRequired; return }
+        guard let device, let stored = PairingSlots.lookup(for: device, in: tokens) else { phase = .pairingRequired; return }
         phase = .connecting("Routing the Mac through the \(phoneKindName)")
         tunnelStartInFlight = true
         defer { if gen == generation { tunnelStartInFlight = false } }
         do {
-            let iface = try await helper.startTunnel(tunnelConfig(socksPort: UInt16(localPort), username: clientID, password: token, ipv6: ipv6Enabled))
+            // The phone checks a password derived from the token, never the token itself.
+            let password = ControlAuth.socksPassword(token: stored.token)
+            let iface = try await helper.startTunnel(tunnelConfig(socksPort: UInt16(localPort), username: clientID, password: password, ipv6: ipv6Enabled))
             // Torn down meanwhile: teardown already queued a stop behind this start.
             guard gen == generation else { return }
             tunnelInterface = iface
@@ -837,11 +892,16 @@ final class SessionCoordinator: ObservableObject {
         // The open channel was authenticated with the forgotten token; a fresh one asks to pair.
         closeControl()
         if phase == .pairingRequired { phase = device == nil ? .noDevice : .deviceFound }
-        Keychain.delete(pairingSlot)
-        let forgotten = links.phones.filter { $0.pairingSlot == pairingSlot }.map(\.phoneID)
-        links.forget(slot: pairingSlot)
-        forgotten.forEach { wirelessWatcher.drop(phoneID: $0) }
-        shell.revoke(pairingSlot: pairingSlot)
+        // An iPhone still on the slot iPhones once shared forgets that one too.
+        var slots = [pairingSlot]
+        if let device, let stored = PairingSlots.lookup(for: device, in: tokens), stored.slot != pairingSlot { slots.append(stored.slot) }
+        for slot in slots {
+            Keychain.delete(slot)
+            let forgotten = links.phones.filter { $0.pairingSlot == slot }.map(\.phoneID)
+            links.forget(slot: slot)
+            forgotten.forEach { wirelessWatcher.drop(phoneID: $0) }
+            shell.revoke(pairingSlot: slot)
+        }
         // The fresh channel below grants again once the phone is paired anew.
         shellGrants.reset()
         shellControlRetryAt = .distantPast
@@ -1064,4 +1124,11 @@ final class SessionCoordinator: ObservableObject {
             ])
         }
     }
+}
+
+/// Pairing tokens by keychain slot, for `PairingSlots`.
+private struct KeychainPairingTokens: PairingTokenStore {
+    func read(_ slot: String) -> String? { Keychain.read(slot) }
+    @discardableResult func write(_ token: String, slot: String) -> Bool { Keychain.write(token, account: slot) }
+    func delete(_ slot: String) { Keychain.delete(slot) }
 }
