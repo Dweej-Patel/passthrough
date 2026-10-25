@@ -47,7 +47,7 @@ struct MacSnapshot: Codable, Equatable {
     static func removeLegacy() { UserDefaults(suiteName: PassthroughProtocol.appGroup)?.removeObject(forKey: key) }
 }
 
-/// The Live Activity a Step away starts: the Mac's awake time counts down on
+/// The Live Activity turning Keep awake on from this phone starts: the Mac's awake time counts down on
 /// its own; shells and "needs you" are as of the app's last look. No session
 /// title or output: it shows on the Lock Screen.
 struct MacActivityAttributes: ActivityAttributes {

@@ -227,8 +227,7 @@ public struct MacState: Codable, Equatable, Sendable {
     public var killSwitch: Bool?
     /// This phone may change Keep awake and the VPN (`setAwake`, `setVPN`).
     public var control: Bool?
-    /// The Mac is online through a phone, or on its way there: the Internet
-    /// part of a moment. Absent from older Macs.
+    /// The Mac is online through a phone, or on its way there. Absent from older Macs.
     public var internet: Bool?
 
     public init(awake: Bool? = nil, awakeStopped: String? = nil, battery: Double? = nil, charging: Bool? = nil,

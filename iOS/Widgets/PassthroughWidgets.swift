@@ -11,7 +11,6 @@ struct PassthroughWidgets: WidgetBundle {
         if #available(iOS 18.0, *) {
             KeepMacAwakeControl()
             MacVPNOnControl()
-            StepAwayControl()
         }
     }
 }
@@ -45,18 +44,5 @@ struct MacVPNOnControl: ControlWidget {
         }
         .displayName("Mac VPN on")
         .description("Opens Passthrough and turns on your Mac's VPN.")
-    }
-}
-
-@available(iOS 18.0, *)
-struct StepAwayControl: ControlWidget {
-    var body: some ControlWidgetConfiguration {
-        StaticControlConfiguration(kind: "StepAway") {
-            ControlWidgetButton(action: OpenURLIntent(AppLink.stepAway.url)) {
-                Label("Step away", systemImage: "figure.walk")
-            }
-        }
-        .displayName("Step away")
-        .description("Opens Passthrough's checklist before you leave your Mac.")
     }
 }

@@ -9,19 +9,19 @@ final class ShellRouter: ObservableObject {
     @Published var terminal: TerminalIntent?
     @Published var showHistory = false
     @Published var showScreen = false
-    @Published var showStepAway = false
+    /// The Mac tab's "This iPhone" screen is pushed.
+    @Published var showThisPhone = false
 
     func dismissAll() {
         terminal = nil
         showHistory = false
         showScreen = false
-        showStepAway = false
     }
 }
 
-enum RootTab: Hashable { case mac, shells, activity, phone }
+enum RootTab: Hashable { case mac, shells, activity }
 
-/// The app's sections: the Mac first, its shells, then this iPhone's own sharing.
+/// The app's sections: the Mac (with this iPhone's own sharing one tap in), its shells, what happened.
 struct RootView: View {
     @EnvironmentObject private var model: AppModel
     @EnvironmentObject private var lock: AppLock
@@ -43,9 +43,6 @@ struct RootView: View {
             ActivityTab(shell: model.shell)
                 .tabItem { Label("Activity", systemImage: "clock") }
                 .tag(RootTab.activity)
-            HomeView(showPairing: $showPairing, showSettings: $showSettings)
-                .tabItem { Label("iPhone", systemImage: "iphone") }
-                .tag(RootTab.phone)
         }
         .environmentObject(router)
         .fullScreenCover(item: $router.terminal) { intent in
@@ -90,9 +87,13 @@ struct RootView: View {
             if env["PASSTHROUGH_AUTOSTART"] == "1" { model.start() }
             if env["PASSTHROUGH_SHOW_PAIRING"] == "1" { DispatchQueue.main.asyncAfter(deadline: .now() + 1) { showPairing = true } }
             if env["PASSTHROUGH_SHOW_SETTINGS"] == "1" { DispatchQueue.main.asyncAfter(deadline: .now() + 1) { showSettings = true } }
-            if let start = env["PASSTHROUGH_TAB"] { tab = ["shells": .shells, "activity": .activity, "phone": .phone][start] ?? .mac }
+            // "phone": the Mac tab with This iPhone pushed, where the iPhone tab's content now lives.
+            if let start = env["PASSTHROUGH_TAB"] {
+                tab = ["shells": .shells, "activity": .activity][start] ?? .mac
+                if start == "phone" { router.showThisPhone = true }
+            }
             if env["PASSTHROUGH_START_ACTIVITY"] == "1" {
-                DispatchQueue.main.asyncAfter(deadline: .now() + 2) { MacActivityController.shared.stepAway(seen(reachable: true)) }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 2) { MacActivityController.shared.keepAwakeAsked(seen(reachable: true)) }
             }
             #endif
         }
@@ -115,10 +116,7 @@ extension RootView {
         switch link {
         case .mac:
             tab = .mac
-            links.done()
-        case .stepAway:
-            tab = .mac
-            router.showStepAway = true
+            router.showThisPhone = false
             links.done()
         case .session(let id):
             router.terminal = .attach(id)
@@ -131,7 +129,12 @@ extension RootView {
                 links.note = ShellError.notAllowed.message
                 return
             }
-            shell.control(link == .keepAwake ? .awake(true) : .vpn(true))
+            if link == .keepAwake {
+                shell.control(.awake(true))
+                MacActivityController.shared.keepAwakeAsked(seen(reachable: true))
+            } else {
+                shell.control(.vpn(true))
+            }
         }
     }
 

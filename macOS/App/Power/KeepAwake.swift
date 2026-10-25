@@ -8,8 +8,10 @@ import PassthroughCore
 /// runs hot, so a closed laptop can sleep instead. Off by default.
 @MainActor
 final class KeepAwakeController: ObservableObject {
-    @Published private(set) var isOn: Bool = UserDefaults.standard.bool(forKey: "keepAwake") {
+    /// Off in snapshot runs, which only draw: they mustn't read or hold the real Mac's.
+    @Published private(set) var isOn: Bool = !SessionCoordinator.isSnapshotRun && UserDefaults.standard.bool(forKey: "keepAwake") {
         didSet {
+            guard !SessionCoordinator.isSnapshotRun else { return }
             UserDefaults.standard.set(isOn, forKey: "keepAwake")
             power.apply(isOn)
             applyLidClose(isOn)
@@ -31,6 +33,8 @@ final class KeepAwakeController: ObservableObject {
     private enum Cause { case battery, heat }
     /// What `blockedReason` is about, so each check clears only its own.
     @Published private var blockedBy: Cause?
+    /// Keep awake turned itself off, or refused to turn on, for low battery (else for heat).
+    var blockedByBattery: Bool { blockedBy == .battery }
     /// Why keep-awake last turned itself off or refused to turn on: `MacState.stoppedBattery` or `stoppedHeat`.
     var stoppedBy: String? {
         switch blockedBy {
@@ -56,6 +60,17 @@ final class KeepAwakeController: ObservableObject {
                                                                  object: nil, queue: .main) { [weak self] _ in
             Task { @MainActor in self?.checkThermal() }
         }
+    }
+
+    /// Puts Keep awake into a synthetic state for snapshots: on, or refused for low battery (`battery`) or heat.
+    func debugApply(on: Bool, battery percent: Int? = nil, hot: Bool = false) {
+        isOn = on
+        lidCloseHeld = on
+        if let percent {
+            battery = BatteryReading(percent: percent, isOnAC: false, hasBattery: true)
+            blockedBy = .battery; blockedReason = "battery"
+        }
+        if hot { thermal = .serious; blockedBy = .heat; blockedReason = "heat" }
     }
 
     /// Re-asserts lid-close sleep once the helper is known to be current.

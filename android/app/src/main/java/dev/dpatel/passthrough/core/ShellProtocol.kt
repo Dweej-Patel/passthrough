@@ -230,7 +230,7 @@ data class MacState(
     val killSwitch: Boolean? = null,
     /** This phone may change Keep awake and the VPN (`setAwake`, `setVPN`). */
     val control: Boolean? = null,
-    /** The Mac is online through a phone, or on its way there: the Internet part of a moment. Absent from older Macs. */
+    /** The Mac is online through a phone, or on its way there. Absent from older Macs. */
     val internet: Boolean? = null,
 )
 

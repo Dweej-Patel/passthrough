@@ -4,7 +4,7 @@ import XCTest
 final class AppLinkTests: XCTestCase {
     func testEachLinkRoundTrips() {
         let id = UUID().uuidString
-        for link in [AppLink.mac, .stepAway, .keepAwake, .vpnOn, .session(id)] {
+        for link in [AppLink.mac, .keepAwake, .vpnOn, .session(id)] {
             XCTAssertEqual(AppLink(url: link.url), link, link.url.absoluteString)
         }
     }

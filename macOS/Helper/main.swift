@@ -77,7 +77,18 @@ enum CodeSigning {
     }
 
     /// The Team ID this helper is signed with, or nil for unsigned dev builds.
-    static func ownTeamIdentifier() -> String? {
+    /// Read once, at launch: an app update replaces the bundle under a helper
+    /// that keeps running, and reading its signature off the new files then
+    /// fails, which refused every VPN engine until the helper restarted.
+    static func ownTeamIdentifier() -> String? { launchTeam }
+
+    private static let launchTeam: String? = readOwnTeamIdentifier()
+
+    /// Reads it now; `main` calls this at launch so the lazy `launchTeam` is set before any update.
+    @discardableResult
+    static func cacheOwnTeam() -> String? { launchTeam }
+
+    private static func readOwnTeamIdentifier() -> String? {
         var code: SecCode?
         guard SecCodeCopySelf([], &code) == errSecSuccess, let code else { return nil }
         var staticCode: SecStaticCode?
@@ -105,6 +116,7 @@ guard getuid() == 0 else {
     exit(1)
 }
 
+CodeSigning.cacheOwnTeam()
 RecoverySweep.run()
 let delegate = ListenerDelegate()
 let listener = NSXPCListener(machServiceName: HelperConstants.machService)

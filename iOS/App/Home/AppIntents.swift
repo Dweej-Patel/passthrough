@@ -59,24 +59,11 @@ struct MacVPNOnIntent: AppIntent {
     }
 }
 
-struct StepAwayIntent: AppIntent {
-    static let title: LocalizedStringResource = "Step away from Mac"
-    static let description = IntentDescription("Opens Passthrough's checklist before you leave your Mac.")
-    static let openAppWhenRun = true
-
-    @MainActor func perform() async throws -> some IntentResult {
-        PendingLinks.shared.open(.stepAway)
-        return .result()
-    }
-}
-
 struct PassthroughShortcuts: AppShortcutsProvider {
     static var appShortcuts: [AppShortcut] {
         AppShortcut(intent: KeepMacAwakeIntent(), phrases: ["Keep my Mac awake with \(.applicationName)"],
                     shortTitle: "Keep Mac awake", systemImageName: "cup.and.saucer.fill")
         AppShortcut(intent: MacVPNOnIntent(), phrases: ["Turn on my Mac's VPN with \(.applicationName)"],
                     shortTitle: "Mac VPN on", systemImageName: "lock.shield.fill")
-        AppShortcut(intent: StepAwayIntent(), phrases: ["Step away from my Mac with \(.applicationName)"],
-                    shortTitle: "Step away", systemImageName: "figure.walk")
     }
 }

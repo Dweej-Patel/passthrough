@@ -20,7 +20,6 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.Laptop
-import androidx.compose.material.icons.filled.PhoneAndroid
 import androidx.compose.material.icons.filled.Terminal
 import androidx.compose.material3.Icon
 import androidx.compose.material3.NavigationBar
@@ -37,7 +36,7 @@ import dev.dpatel.passthrough.ui.mac.MacScreen
 import dev.dpatel.passthrough.ui.shell.RemoteShellCard
 import dev.dpatel.passthrough.ui.shell.ShellViewModel
 
-enum class MainTab { MAC, SHELLS, ACTIVITY, PHONE }
+enum class MainTab { MAC, SHELLS, ACTIVITY }
 
 /**
  * A tab's content insets: the status bar and any cutout or side bars (landscape),
@@ -47,9 +46,10 @@ enum class MainTab { MAC, SHELLS, ACTIVITY, PHONE }
 fun tabInsets(): WindowInsets = WindowInsets.safeDrawing.only(WindowInsetsSides.Horizontal + WindowInsetsSides.Top)
 
 /**
- * The app's sections, as on iOS: the Mac first, its shells, what happened, then
- * this phone's own sharing. [tab] is held by the caller, so it survives the
- * terminal, history and Settings screens that replace this one.
+ * The app's sections, as on iOS: the Mac (with this phone's own sharing as its
+ * Internet switch, and the phone itself one tap in), its shells, and what
+ * happened. [tab] and [macScroll] are held by the caller, so they survive the
+ * terminal, history, This phone and Settings screens that replace this one.
  */
 @Composable
 fun MainTabs(
@@ -60,9 +60,10 @@ fun MainTabs(
     onPower: () -> Unit,
     onPair: () -> Unit,
     onSettings: () -> Unit,
+    onThisPhone: () -> Unit,
     onOpenTerminal: (String?) -> Unit,
     onShellHistory: () -> Unit,
-    phoneScroll: ScrollState,
+    macScroll: ScrollState,
 ) {
     val c = LocalPT.current
     Scaffold(
@@ -74,7 +75,6 @@ fun MainTabs(
                     Triple(MainTab.MAC, "Mac", Icons.Filled.Laptop),
                     Triple(MainTab.SHELLS, "Shells", Icons.Filled.Terminal),
                     Triple(MainTab.ACTIVITY, "Activity", Icons.Filled.History),
-                    Triple(MainTab.PHONE, "Phone", Icons.Filled.PhoneAndroid),
                 ).forEach { (t, label, icon) ->
                     NavigationBarItem(
                         selected = tab == t, onClick = { onTab(t) },
@@ -90,10 +90,12 @@ fun MainTabs(
     ) { padding ->
         Box(Modifier.fillMaxSize().background(c.background).padding(padding)) {
             when (tab) {
-                MainTab.MAC -> MacScreen(vm, shell, onPower, onPair, onSettings, onOpenTerminal, onShells = { onTab(MainTab.SHELLS) })
+                MainTab.MAC -> MacScreen(
+                    vm, shell, onPower = onPower, onPair = onPair, onSettings = onSettings, onThisPhone = onThisPhone,
+                    onOpenTerminal = onOpenTerminal, onShells = { onTab(MainTab.SHELLS) }, scroll = macScroll,
+                )
                 MainTab.SHELLS -> ShellsTab(shell, onOpenTerminal, onShellHistory)
-                MainTab.ACTIVITY -> ActivityScreen(vm, shell, onOpenTerminal = { onOpenTerminal(it) }, onHistory = onShellHistory)
-                MainTab.PHONE -> HomeScreen(vm, onPower = onPower, onPair = onPair, onSettings = onSettings, scroll = phoneScroll)
+                MainTab.ACTIVITY -> ActivityScreen(shell, onOpenTerminal = { onOpenTerminal(it) }, onHistory = onShellHistory)
             }
         }
     }

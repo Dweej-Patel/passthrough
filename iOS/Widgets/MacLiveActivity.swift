@@ -4,7 +4,7 @@ import WidgetKit
 import PassthroughUI
 import PassthroughCore
 
-/// The Live Activity a Step away starts: the Mac's awake time counting down
+/// The Live Activity turning Keep awake on from this phone starts: the Mac's awake time counting down
 /// (on its own, without the app), and what the app last saw: running shells,
 /// the VPN, and that a shell is waiting on a question (never which: it's on
 /// the Lock Screen). Tapping it opens that shell. Once the Mac stops answering
@@ -112,7 +112,7 @@ private struct LockScreenActivity: View {
         VStack(alignment: .leading, spacing: 10) {
             HStack(spacing: 8) {
                 Image(systemName: "cup.and.saucer.fill").foregroundStyle(PTColor.tintText)
-                Text("\(context.attributes.macName) · away since \(Summary.time(context.attributes.startedAt))")
+                Text("\(context.attributes.macName) · awake since \(Summary.time(context.attributes.startedAt))")
                     .font(.subheadline.weight(.semibold))
                     .lineLimit(1)
                 Spacer(minLength: 0)

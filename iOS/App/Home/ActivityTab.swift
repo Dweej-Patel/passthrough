@@ -3,15 +3,13 @@ import SwiftUI
 import PassthroughCore
 import PassthroughUI
 
-/// What happened on the Mac: since you stepped away (within a day), else the
-/// last 24 hours. A summary up top, the battery meanwhile, then each event.
+/// What happened on the Mac in the last 24 hours: a summary up top, the
+/// battery meanwhile, then each event.
 struct ActivityTab: View {
     @ObservedObject var shell: ShellModel
     @EnvironmentObject private var router: ShellRouter
 
-    /// Step away records when it happened; older than a day, the timeline shows the last 24 hours.
-    private var steppedAway: Date? { StepAwayStore.steppedAway }
-    private var since: Date { steppedAway ?? .now - 86_400 }
+    private var since: Date { .now - 86_400 }
 
     var body: some View {
         NavigationStack {
@@ -63,16 +61,14 @@ struct ActivityTab: View {
     // MARK: Summary
 
     private func summary(_ timeline: MacTimeline) -> some View {
-        let away = steppedAway != nil
         let answered = timeline.events.filter { $0.kind == MacEvent.kindAnswered }.count
         let drops = timeline.events.filter { $0.warning == true && ($0.kind == MacEvent.kindVPN || $0.kind == MacEvent.kindLink) }.count
         let finished = timeline.events.filter { $0.kind == MacEvent.kindShell }.count
         return PTSurface {
             VStack(alignment: .leading, spacing: 12) {
                 VStack(alignment: .leading, spacing: 2) {
-                    Text(away ? "While you were away" : "Last 24 hours").font(.headline)
-                    Text(away ? "Since \(timeline.since.formatted(date: .omitted, time: .shortened)), \(Self.span(from: timeline.since))"
-                              : "\(timeline.events.count) events")
+                    Text("Last 24 hours").font(.headline)
+                    Text(timeline.events.count == 1 ? "1 event" : "\(timeline.events.count) events")
                         .font(.subheadline).foregroundStyle(.secondary)
                 }
                 HStack(spacing: 0) {
@@ -93,11 +89,6 @@ struct ActivityTab: View {
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .accessibilityElement(children: .combine)
-    }
-
-    /// "2 h 14 m ago".
-    static func span(from date: Date) -> String {
-        MacFormat.duration(minutes: max(0, Int(Date.now.timeIntervalSince(date) / 60))) + " ago"
     }
 
     // MARK: Events

@@ -3,9 +3,9 @@ import Foundation
 import WidgetKit
 import PassthroughCore
 
-/// Keeps the system surfaces in step with what the app sees: the Step away
-/// Live Activity (started by Step away, ended when Keep awake goes off or you
-/// end it) and the widget's snapshot. Only the app can reach the Mac, so both
+/// Keeps the system surfaces in step with what the app sees: the Keep awake
+/// Live Activity (started when this phone turns Keep awake on, ended when it
+/// goes off or you end it) and the widget's snapshot. Only the app can reach the Mac, so both
 /// are as of its last look; the awake time counts down on its own until
 /// `MacSnapshot.staleAfter`, then they say when they last heard.
 @MainActor
@@ -23,8 +23,8 @@ final class MacActivityController {
         var sessions: [ShellSessionInfo]
     }
 
-    /// Step away asked for Keep awake: a state still saying it's off doesn't
-    /// end the activity until it turns on or this passes.
+    /// This phone just asked for Keep awake: a state still saying it's off
+    /// doesn't end the activity until it turns on or this passes.
     static let awakeGrace: TimeInterval = 15
 
     private var lastSnapshot = MacSnapshot.load()
@@ -35,9 +35,10 @@ final class MacActivityController {
 
     private init() { MacSnapshot.removeLegacy() }
 
-    /// Step away: start the Live Activity (or refresh the one running). Not
+    /// This phone turned Keep awake on (the switch, Control Center, a
+    /// Shortcut): start the Live Activity (or refresh the one running). Not
     /// without the Mac's state: there'd be nothing true to show.
-    func stepAway(_ seen: Seen) {
+    func keepAwakeAsked(_ seen: Seen) {
         guard seen.reachable, let state = seen.state else { return }
         lastSeen = seen
         awaitingAwakeUntil = state.awake == true ? nil : .now + Self.awakeGrace

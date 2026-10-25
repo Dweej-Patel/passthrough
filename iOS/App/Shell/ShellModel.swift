@@ -69,9 +69,11 @@ final class ShellModel: ObservableObject {
     /// The selected Mac's state as it last said (kept while it can't be
     /// reached, as "last known"); nil from a Mac too old to send it.
     @Published private(set) var macState: MacState?
-    /// Keep awake and VPN changes sent and not yet answered, per switch, so
-    /// a moment that changes both shows both waiting.
+    /// Keep awake and VPN changes sent and not yet answered, per switch.
     @Published private(set) var pendingControls: [MacSwitch: PendingControl] = [:]
+    /// Changes that didn't take, per switch: the Mac answered without making
+    /// it, or never answered. Cleared once the switch gets there, or on the next try.
+    @Published private(set) var controlMisses: [MacSwitch: ControlMiss] = [:]
     /// Why the Mac refused the last Keep awake or VPN change.
     @Published private(set) var controlError: ShellError?
     /// The last Keep awake or VPN change wasn't sent: the Mac wasn't connected.
@@ -397,8 +399,9 @@ final class ShellModel: ObservableObject {
         #if DEBUG
         if Self.demoState != nil { return demoControl(change) }
         #endif
-        guard reach == .ready, let client else { return controlUnsent = true }
         let (key, on) = change.parts
+        controlMisses[key] = nil
+        guard reach == .ready, let client else { return controlUnsent = true }
         let sent = Date()
         pendingControls[key] = PendingControl(on: on, sent: sent)
         switch change {
@@ -410,6 +413,7 @@ final class ShellModel: ObservableObject {
             try? await Task.sleep(for: .seconds(Self.controlTimeout))
             guard let self, self.pendingControls[key]?.sent == sent else { return }
             self.pendingControls[key] = nil
+            self.controlMisses[key] = ControlMiss(on: on, answered: false)
         }
     }
 
@@ -419,18 +423,29 @@ final class ShellModel: ObservableObject {
     /// this long after sending is that answer, whatever it says.
     static let controlAnswerAfter: TimeInterval = 0.8
 
-    /// Ends the waits this state answers: the switch got there, or it's the Mac's reply.
+    /// Ends the waits this state answers: the switch got there, or it's the
+    /// Mac's reply without it (a refusal, kept as a miss).
     private func settlePending(_ state: MacState) {
         let now = Date()
+        for (key, miss) in controlMisses where Self.reached(key, on: miss.on, in: state) { controlMisses[key] = nil }
         for (key, pending) in pendingControls {
-            let reached = switch key {
-            case .awake: (state.awake == true) == pending.on
-            case .vpn: pending.on ? state.vpnUp : state.vpn == MacState.vpnOff
+            let reached = Self.reached(key, on: pending.on, in: state)
+            if reached {
+                pendingControls[key] = nil
+            } else if now.timeIntervalSince(pending.sent) >= Self.controlAnswerAfter {
+                pendingControls[key] = nil
+                controlMisses[key] = ControlMiss(on: pending.on, answered: true)
             }
-            if reached || now.timeIntervalSince(pending.sent) >= Self.controlAnswerAfter { pendingControls[key] = nil }
         }
         if state.control == true, controlError == .notAllowed { controlError = nil }
         if state.vpn != nil, controlError == .vpnNotSetUp { controlError = nil }
+    }
+
+    private static func reached(_ key: MacSwitch, on: Bool, in state: MacState) -> Bool {
+        switch key {
+        case .awake: (state.awake == true) == on
+        case .vpn: on ? state.vpnUp : state.vpn == MacState.vpnOff
+        }
     }
 
     /// The saved transcript of a session, with the terminal sizes it was drawn
@@ -524,6 +539,7 @@ final class ShellModel: ObservableObject {
             timelineUnsupported = true
         case let .failed(error, _) where error == .notAllowed || error == .vpnNotSetUp:
             if error == .notAllowed { pendingControls = [:] } else { pendingControls[.vpn] = nil }
+            controlMisses = [:]
             controlError = error
         case let .failed(error, session):
             lastError = error
@@ -535,6 +551,7 @@ final class ShellModel: ObservableObject {
             client = nil
             path = nil
             pendingControls = [:]
+            controlMisses = [:]
             timelineLoading = false
             finishTranscript(nil)
             guard error != nil, reach != .noAccess else { return }
@@ -583,6 +600,7 @@ final class ShellModel: ObservableObject {
         client = nil
         path = nil
         pendingControls = [:]
+        controlMisses = [:]
         timelineLoading = false
         finishTranscript(nil)
     }
@@ -593,6 +611,7 @@ final class ShellModel: ObservableObject {
         timelineLoading = false
         timelineUnsupported = false
         pendingControls = [:]
+        controlMisses = [:]
         controlError = nil
         controlUnsent = false
         sessions = []
@@ -819,6 +838,14 @@ enum MacSwitch: Hashable { case awake, vpn }
 struct PendingControl: Equatable {
     var on: Bool
     var sent: Date
+}
+
+/// A change to one switch that didn't take.
+struct ControlMiss: Equatable {
+    /// What was asked for.
+    var on: Bool
+    /// The Mac answered with the switch unchanged (it refused); false: no answer came.
+    var answered: Bool
 }
 
 extension MacControl {

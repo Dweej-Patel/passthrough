@@ -10,20 +10,31 @@ enum PanelSnapshots {
     @MainActor
     static func render(to directory: String) {
         try? FileManager.default.createDirectory(atPath: directory, withIntermediateDirectories: true)
+        let phone = DeviceStatus(deviceName: "My iPhone", radio: "5G", battery: 0.82, hosting: "background")
+        let notRunning = "Passthrough isn't running on the iPhone. Start it there, then connect."
         let states: [(String, (SessionCoordinator) -> Void)] = [
-            ("1-no-device", { $0.debugApply(phase: .noDevice) }),
-            ("2-ready", { $0.debugApply(phase: .deviceFound, device: true, status: DeviceStatus(deviceName: "My iPhone", radio: "5G", battery: 0.82, hosting: "background")) }),
-            ("3-pairing", { $0.debugApply(phase: .pairingRequired, device: true, status: DeviceStatus(deviceName: "My iPhone", radio: "5G", battery: 0.82, hosting: "background")) }),
-            ("4-connected", { $0.debugApply(phase: .connected, device: true, status: DeviceStatus(deviceName: "My iPhone", radio: "5G", battery: 0.82, hosting: "background"), traffic: true) }),
-            ("5-helper", { $0.debugApply(phase: .helperRequired, device: true) }),
-            ("6-vpn", { $0.debugApply(phase: .connected, device: true, status: DeviceStatus(deviceName: "My iPhone", radio: "5G", battery: 0.82, hosting: "background"), traffic: true, vpn: "connected") }),
-            ("8-vpn-over-wifi", { $0.debugApply(phase: .deviceFound, device: true, status: DeviceStatus(deviceName: "My iPhone", radio: "5G", battery: 0.82, hosting: "background"), traffic: true, vpn: "connected", underlay: "Wi-Fi") }),
-            ("7-vpn-blocked", { $0.debugApply(phase: .connected, device: true, status: DeviceStatus(deviceName: "My iPhone", radio: "5G", battery: 0.82, hosting: "background"), traffic: true, vpn: "blocked") }),
-            ("9-shell", { $0.debugApply(phase: .connected, device: true, status: DeviceStatus(deviceName: "My iPhone", radio: "5G", battery: 0.82, hosting: "background"), traffic: true); applyShell($0, .ready) }),
-            ("10-asking", { $0.debugApply(phase: .connected, device: true, status: DeviceStatus(deviceName: "My iPhone", radio: "5G", battery: 0.82, hosting: "background"), traffic: true); applyShell($0, .ready, asking: true) }),
+            ("1-off", { $0.debugApply(phase: .deviceFound, device: true, status: phone) }),
+            ("2-online", { $0.debugApply(phase: .connected, device: true, status: phone, traffic: true); $0.keepAwake.debugApply(on: true) }),
+            ("3-online-vpn", { $0.debugApply(phase: .connected, device: true, status: phone, traffic: true, vpn: "connected"); $0.keepAwake.debugApply(on: true) }),
+            ("4-vpn-own-network", { $0.debugApply(phase: .deviceFound, device: true, status: phone, traffic: true, vpn: "connected", underlay: "Wi-Fi", heldOff: true) }),
+            ("5-why-no-phone", { $0.debugApply(phase: .noDevice) }),
+            ("6-why-phone-app", { $0.debugApply(phase: .error(notRunning), device: true, retrying: true) }),
+            ("7-why-helper", { $0.debugApply(phase: .helperRequired, device: true) }),
+            ("8-why-battery", { $0.debugApply(phase: .connected, device: true, status: phone, traffic: true); $0.keepAwake.debugApply(on: false, battery: 18) }),
+            ("9-why-heat", { $0.debugApply(phase: .deviceFound, device: true, status: phone); $0.keepAwake.debugApply(on: false, hot: true) }),
+            ("10-why-vpn-setup", { $0.debugApply(phase: .deviceFound, device: true, status: phone); $0.vpnLayer.debugApply(profile: false) }),
+            ("11-why-vpn-error", { $0.debugApply(phase: .connected, device: true, status: phone, traffic: true)
+                $0.vpnLayer.debugApply(profile: true, error: "The VPN server didn't answer. Check the profile, or try another server.") }),
+            ("12-vpn-blocking", { $0.debugApply(phase: .connected, device: true, status: phone, traffic: true, vpn: "failed")
+                $0.vpnLayer.debugApply(profile: true, error: "The VPN server stopped answering. Traffic stays blocked until you turn the VPN off.") }),
+            ("13-pairing", { $0.debugApply(phase: .pairingRequired, device: true, status: phone) }),
+            ("14-shell", { $0.debugApply(phase: .connected, device: true, status: phone, traffic: true); applyShell($0, .ready) }),
+            ("15-asking", { $0.debugApply(phase: .connected, device: true, status: phone, traffic: true); $0.keepAwake.debugApply(on: true); applyShell($0, .ready, asking: true) }),
         ]
         for (name, configure) in states {
             let session = SessionCoordinator()
+            // Never the Mac's own VPN profiles: these images may end up in the README.
+            session.vpnLayer.debugApply(profile: true)
             configure(session)
             for scheme in [ColorScheme.dark, .light] {
                 let view = MenuPanelView().environmentObject(session).environmentObject(session.vpnLayer).environmentObject(session.keepAwake).environmentObject(session.shell)
@@ -46,30 +57,32 @@ enum PanelSnapshots {
         }
     }
 
-    /// Every icon state on a light and a dark menu bar, at 4x.
+    /// Every icon state on a light and a dark menu bar, each at its own width, at 4x.
     @MainActor
     private static func renderMenuBarIcons(to directory: String) {
         let states: [MenuBarIcon.State] = [
             .init(), .init(online: true), .init(online: true, awake: true), .init(online: true, vpn: true),
-            .init(online: true, needsYou: true), .init(awake: true, needsYou: true), .init(problem: true),
+            .init(online: true, awake: true, vpn: true), .init(awake: true),
+            .init(online: true, needsYou: true), .init(awake: true, needsYou: true), .init(problem: true), .init(online: true, vpn: true, problem: true),
         ]
+        let gap: CGFloat = 14, scale: CGFloat = 4, height: CGFloat = 24
+        let width = states.map { MenuBarIcon.size($0).width + gap }.reduce(gap, +)
         for (name, appearance) in [("dark", NSAppearance.Name.darkAqua), ("light", .aqua)] {
-            let cell = MenuBarIcon.size, gap: CGFloat = 14, scale: CGFloat = 4
-            let width = CGFloat(states.count) * (cell.width + gap) + gap
-            let rep = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: Int(width * scale), pixelsHigh: Int((cell.height + 12) * scale),
+            let rep = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: Int(width * scale), pixelsHigh: Int(height * scale),
                                        bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false, colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0)!
-            rep.size = NSSize(width: width, height: cell.height + 12)
+            rep.size = NSSize(width: width, height: height)
             NSGraphicsContext.saveGraphicsState()
             NSGraphicsContext.current = NSGraphicsContext(bitmapImageRep: rep)
             NSAppearance(named: appearance)!.performAsCurrentDrawingAppearance {
                 (appearance == .darkAqua ? NSColor(white: 0.16, alpha: 1) : NSColor(white: 0.93, alpha: 1)).setFill()
                 NSRect(origin: .zero, size: rep.size).fill()
-                for (i, state) in states.enumerated() {
-                    let rect = NSRect(x: gap + CGFloat(i) * (cell.width + gap), y: 6, width: cell.width, height: cell.height)
-                    NSGraphicsContext.saveGraphicsState()
-                    let shift = NSAffineTransform(); shift.translateX(by: rect.minX, yBy: rect.minY); shift.concat()
-                    MenuBarIcon.draw(state, in: NSRect(origin: .zero, size: cell), ink: .labelColor)
-                    NSGraphicsContext.restoreGraphicsState()
+                var x = gap
+                for state in states {
+                    let cell = MenuBarIcon.size(state)
+                    // Drawn into its own image, as the menu bar does, so the dot's cut-out stays inside it.
+                    let image = NSImage(size: cell, flipped: false) { rect in MenuBarIcon.draw(state, in: rect, ink: .labelColor); return true }
+                    image.draw(at: NSPoint(x: x, y: (height - cell.height) / 2), from: .zero, operation: .sourceOver, fraction: 1)
+                    x += cell.width + gap
                 }
             }
             NSGraphicsContext.restoreGraphicsState()
@@ -77,8 +90,7 @@ enum PanelSnapshots {
         }
     }
 
-    /// Through a real (offscreen) window, so native controls (segmented
-    /// pickers, switches) draw as they do on screen; `ImageRenderer` can't.
+    /// Through a real (offscreen) window, so native controls (switches) draw as they do on screen; `ImageRenderer` can't.
     @MainActor
     private static func capture<V: View>(_ view: V, width: CGFloat, scheme: ColorScheme, to directory: String, name: String) {
         let appearance = NSAppearance(named: scheme == .dark ? .darkAqua : .aqua)

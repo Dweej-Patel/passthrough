@@ -72,7 +72,7 @@ final class MacStateBridge {
         switch change {
         case .awake(let on):
             ptLog(.info, "\(label) turned Keep awake \(on ? "on" : "off")")
-            // Nothing to change (a moment resending what's already so): no notice, no log.
+            // Nothing to change (a phone resending what's already so): no notice.
             guard on != keepAwake.isOn else { return publish() }
             keepAwake.set(on)
             if on, let refused = keepAwake.blockedReason {

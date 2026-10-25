@@ -7,12 +7,12 @@ For iPhone and Android. No accounts, no Passthrough server.</p>
 <p align="center">
   <picture>
     <source media="(prefers-color-scheme: light)" srcset="docs/images/iphone-mac-light.png">
-    <img src="docs/images/iphone-mac-dark.png" width="250" alt="The iPhone app's Mac tab: the Mac staying awake with 3 hours 10 minutes left, a shell asking a question, the Desk, Away and Public moments, and the Internet, Keep awake and VPN switches">
+    <img src="docs/images/iphone-mac-dark.png" width="250" alt="The iPhone app's Mac tab: the Mac staying awake with 3 hours 10 minutes left, a shell asking a question, and the Internet, Keep awake and VPN switches">
   </picture>
   &nbsp;
   <picture>
     <source media="(prefers-color-scheme: light)" srcset="docs/images/mac-panel-light.png">
-    <img src="docs/images/mac-panel-dark.png" width="290" alt="The Mac's menu-bar panel: online through the iPhone, the moments, three switches, the route and live speeds, and what the phone is doing on the Mac">
+    <img src="docs/images/mac-panel-dark.png" width="290" alt="The Mac's menu-bar panel: online through the iPhone, three switches, the route and live speeds, and what the phone is doing on the Mac">
   </picture>
   &nbsp;
   <img src="docs/images/iphone-activity.png" width="250" alt="The Activity tab: shells finished, questions answered and connection drops, the Mac's battery as a line, and a timeline of what happened">
@@ -27,22 +27,19 @@ For iPhone and Android. No accounts, no Passthrough server.</p>
 | **Its shell, from anywhere** | A real terminal on your Mac from the phone: on the same Wi-Fi, over Tailscale, or from anywhere through a built-in end-to-end encrypted connection. Sessions survive disconnects and are recorded. On iPhone you can also see and control the screen. [More](docs/GUIDE.md#remote-shell) |
 | **A VPN on top** | WireGuard or OpenVPN (NordVPN built in) with a kill switch, over the phone's connection or any other network. [More](docs/GUIDE.md#vpn-layer) |
 
-## Built around where you are
+## Your Mac from the phone
 
-Instead of four switches, pick a **moment**. **Desk**: online through the phone, the Mac sleeps as usual. **Away**: the Mac stays awake on its own Wi-Fi, reachable from anywhere. **Public**: everything through the VPN. The moment is read off the Mac's switches, so the phone and the Mac always show the same one.
+The phone apps open on your Mac: three switches, **Internet through this phone**, **Keep Mac awake** and **VPN**, its battery and how long it stays awake, and any shell waiting on you. A switch that can't turn on right now says why, with the fix.
 
 <p align="center">
-  <img src="docs/images/iphone-step-away.png" width="250" alt="Step away: a checklist before leaving the Mac, with a warning that it's only reachable on this network">
-  &nbsp;
   <img src="docs/images/iphone-vpn-off.png" width="250" alt="Turning the VPN off from the phone asks first and names what changes">
   &nbsp;
   <img src="docs/images/android-mac.png" width="250" alt="The same Mac tab on Android">
 </p>
 
-* **Step away** checks what would bite once you're gone (asleep with the lid shut, battery, the Mac still online through the phone you're taking, reachable from anywhere) and fixes what it can before switching to Away.
 * **Needs you**: when a shell goes quiet on a question, like Claude asking to make an edit, the phone shows it and opens the terminal right there.
-* **While you were away**: a timeline of what happened on the Mac, from the VPN reconnecting to a long-running shell finishing, with its battery as a line.
-* **Without opening the app** (iPhone): a Live Activity counts down the Mac's awake time in the Dynamic Island and on the Lock Screen; a widget, Control Center buttons and Shortcuts cover the rest.
+* **Activity**: a timeline of what happened on the Mac, from the VPN reconnecting to a long-running shell finishing, with its battery as a line.
+* **Without opening the app** (iPhone): turning Keep awake on starts a Live Activity that counts down the Mac's awake time in the Dynamic Island and on the Lock Screen; a widget, Control Center buttons and Shortcuts cover the rest.
 
 ## On the Mac
 
@@ -55,7 +52,7 @@ Instead of four switches, pick a **moment**. **Desk**: online through the phone,
   <img src="docs/images/mac-menubar.png" width="560" alt="The menu-bar icon's states: off, online, awake, VPN on, a shell needs you, and a problem">
 </p>
 
-A menu-bar app with the same moments and switches. When the phone changes something, a notice grows out of the notch (or drops in under the menu bar on screens without one), and anything that lowers protection stays until someone at the Mac sees it. The icon says it all at a glance: online, awake, VPN on, a shell waiting on you, or something wrong. On first launch it asks what you want the phone to do and only asks for permissions when each one is first needed.
+A menu-bar app with the same three switches; one that can't turn on says why and offers the fix. When the phone changes something, a notice grows out of the notch (or drops in under the menu bar on screens without one), and anything that lowers protection stays until someone at the Mac sees it. The icon says it all at a glance: online, awake, VPN on, a shell waiting on you, or something wrong. On first launch it asks what you want the phone to do and only asks for permissions when each one is first needed.
 
 <p align="center"><img src="docs/images/mac-welcome.png" width="680" alt="First run: What should your phone do for this Mac? Four choices and what each one needs, now or later"></p>
 

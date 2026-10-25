@@ -1,10 +1,11 @@
 import AppKit
 
-/// The menu-bar icon: one phone glyph and a few clear marks. Radio waves while
-/// online through the phone, an underline while Keep awake holds the Mac, a
-/// shield while the VPN is connected, an amber dot when a shell is waiting on
-/// a question, and the glyph turns amber with a "!" when something is wrong
-/// (the VPN failed and is blocking traffic).
+/// The menu-bar icon: the phone alone when nothing is on, radio waves while
+/// online through it, and a badge beside it for each thing that is on (a lock
+/// while the VPN is connected, a cup while Keep awake holds the Mac), so it
+/// widens only as they appear. An amber dot on the phone's corner when a shell
+/// is waiting on a question, and an amber phone with a "!" when something is
+/// wrong (the VPN failed and is blocking traffic).
 enum MenuBarIcon {
     struct State: Equatable {
         var online = false
@@ -14,7 +15,7 @@ enum MenuBarIcon {
         var problem = false
     }
 
-    static let size = NSSize(width: 33, height: 18)
+    private static let gap: CGFloat = 3
     private static let amber = NSColor(srgbRed: 1, green: 0.72, blue: 0.30, alpha: 1)
     private static let deepAmber = NSColor(srgbRed: 0.64, green: 0.37, blue: 0, alpha: 1)
     /// Drawing on a dark menu bar. The bright amber is faint on a light one: deep amber there.
@@ -23,7 +24,7 @@ enum MenuBarIcon {
     static func image(_ state: State) -> NSImage {
         // Amber can't be a template: then draw at display time in the menu bar's own text colour.
         let colored = state.needsYou || state.problem
-        let image = NSImage(size: size, flipped: false) { rect in
+        let image = NSImage(size: size(state), flipped: false) { rect in
             draw(state, in: rect, ink: colored ? .labelColor : .black)
             return true
         }
@@ -32,38 +33,61 @@ enum MenuBarIcon {
         return image
     }
 
+    /// Just wide enough for the phone and the badges that are on.
+    static func size(_ state: State) -> NSSize {
+        let parts = [phone(state, ink: .black)] + badges(state, ink: .black)
+        let width = parts.map(\.size.width).reduce(0, +) + gap * CGFloat(parts.count - 1)
+        return NSSize(width: ceil(width), height: ceil(parts.map(\.size.height).max() ?? 16))
+    }
+
     static func draw(_ state: State, in rect: NSRect, ink: NSColor) {
         let dark = onDarkBar
         let amber = dark ? amber : deepAmber
-        let phoneInk = state.problem ? amber : ink
-        let name = state.problem ? "iphone.gen3" : state.online ? "iphone.gen3.radiowaves.left.and.right" : "iphone.gen3"
-        let config = NSImage.SymbolConfiguration(pointSize: 14, weight: .regular).applying(.init(paletteColors: [phoneInk]))
-        if let phone = NSImage(systemSymbolName: name, accessibilityDescription: nil)?.withSymbolConfiguration(config) {
-            let origin = NSPoint(x: state.online && !state.problem ? 0 : 4, y: (rect.height - phone.size.height) / 2 + 1)
-            phone.draw(at: origin, from: .zero, operation: .sourceOver, fraction: state.online || state.problem ? 1 : 0.85)
-            if state.problem {
-                let mark = NSImage(systemSymbolName: "exclamationmark", accessibilityDescription: nil)?
-                    .withSymbolConfiguration(NSImage.SymbolConfiguration(pointSize: 7, weight: .black).applying(.init(paletteColors: [dark ? NSColor(white: 0.12, alpha: 1) : .white])))
-                mark?.draw(at: NSPoint(x: origin.x + phone.size.width / 2 - 2, y: origin.y + phone.size.height / 2 - 4),
-                           from: .zero, operation: .sourceOver, fraction: 1)
-            }
-        }
-        if state.awake {
-            ink.setFill()
-            NSBezierPath(roundedRect: NSRect(x: 4, y: 0, width: 14, height: 1.6), xRadius: 0.8, yRadius: 0.8).fill()
-        }
-        if state.vpn, let shield = NSImage(systemSymbolName: "lock.shield.fill", accessibilityDescription: nil)?
-            .withSymbolConfiguration(NSImage.SymbolConfiguration(pointSize: 8, weight: .semibold).applying(.init(paletteColors: [ink]))) {
-            shield.draw(at: NSPoint(x: rect.maxX - shield.size.width, y: 1), from: .zero, operation: .sourceOver, fraction: 1)
+        let phone = phone(state, ink: state.problem ? amber : ink)
+        let phoneOrigin = NSPoint(x: 0, y: (rect.height - phone.size.height) / 2)
+        phone.draw(at: phoneOrigin, from: .zero, operation: .sourceOver, fraction: 1)
+        // The plain phone glyph's body; the radio-waves one has it in the middle.
+        let body = NSRect(x: phoneOrigin.x + (phone.size.width - 10) / 2, y: phoneOrigin.y + 1, width: 10, height: phone.size.height - 2)
+        if state.problem, let mark = symbol("exclamationmark", 8, .black, dark ? NSColor(white: 0.12, alpha: 1) : .white) {
+            mark.draw(at: NSPoint(x: body.midX - mark.size.width / 2, y: body.midY - mark.size.height / 2), from: .zero, operation: .sourceOver, fraction: 1)
         }
         if state.needsYou {
+            // Cut a ring out of the phone's corner so the dot reads on any bar.
+            // Inside the image: it hugs the phone, so nothing past it is drawn.
+            let dot = NSRect(x: min(body.maxX - 4, phone.size.width - 6.5), y: rect.maxY - 6.5, width: 6.5, height: 6.5)
+            NSGraphicsContext.current?.compositingOperation = .clear
+            NSBezierPath(ovalIn: dot.insetBy(dx: -1.5, dy: -1.5)).fill()
+            NSGraphicsContext.current?.compositingOperation = .sourceOver
             amber.setFill()
-            NSBezierPath(ovalIn: NSRect(x: rect.maxX - 7, y: rect.maxY - 7, width: 6, height: 6)).fill()
+            NSBezierPath(ovalIn: dot).fill()
+        }
+        var x = phone.size.width
+        for badge in badges(state, ink: ink) {
+            x += gap
+            badge.draw(at: NSPoint(x: x, y: (rect.height - badge.size.height) / 2), from: .zero, operation: .sourceOver, fraction: 1)
+            x += badge.size.width
         }
     }
 
+    private static func phone(_ state: State, ink: NSColor) -> NSImage {
+        let name = state.online && !state.problem ? "iphone.gen3.radiowaves.left.and.right" : "iphone.gen3"
+        return symbol(name, 15, .regular, ink) ?? NSImage(size: NSSize(width: 12, height: 16))
+    }
+
+    private static func badges(_ state: State, ink: NSColor) -> [NSImage] {
+        var names: [String] = []
+        if state.vpn { names.append("lock.fill") }
+        if state.awake { names.append("cup.and.saucer.fill") }
+        return names.compactMap { symbol($0, 11, .semibold, ink) }
+    }
+
+    private static func symbol(_ name: String, _ size: CGFloat, _ weight: NSFont.Weight, _ ink: NSColor) -> NSImage? {
+        NSImage(systemSymbolName: name, accessibilityDescription: nil)?
+            .withSymbolConfiguration(NSImage.SymbolConfiguration(pointSize: size, weight: weight).applying(.init(paletteColors: [ink])))
+    }
+
     private static func description(_ s: State) -> String {
-        var parts = ["Passthrough", s.online ? "online through the phone" : "off"]
+        var parts = ["Passthrough", s.online ? "online through the phone" : "not using the phone"]
         if s.awake { parts.append("keeping the Mac awake") }
         if s.vpn { parts.append("VPN on") }
         if s.needsYou { parts.append("a shell needs you") }

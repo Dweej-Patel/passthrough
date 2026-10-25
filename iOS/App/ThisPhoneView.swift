@@ -2,34 +2,33 @@ import SwiftUI
 import PassthroughCore
 import PassthroughUI
 
-/// The iPhone tab: this phone's own sharing, its traffic and data use, and the Macs it's paired with.
-struct HomeView: View {
+/// This phone's own side, one tap in from the Mac tab: its sharing, its
+/// traffic and data use, and the Macs it's paired with.
+struct ThisPhoneView: View {
     @EnvironmentObject private var model: AppModel
     @Binding var showPairing: Bool
     @Binding var showSettings: Bool
 
     var body: some View {
-        NavigationStack {
-            ScrollView {
-                VStack(spacing: 14) {
-                    HeroCard(showPairing: $showPairing)
-                    FlowCard()
-                    ThroughputCard()
-                    UsageCard()
-                    MacsCard(showPairing: $showPairing)
-                    footer
-                }
-                .padding(.horizontal, 16)
-                .padding(.top, 4)
-                .padding(.bottom, 24)
+        ScrollView {
+            VStack(spacing: 14) {
+                HeroCard(showPairing: $showPairing)
+                MacsCard(showPairing: $showPairing)
+                FlowCard()
+                ThroughputCard()
+                UsageCard()
+                footer
             }
-            .background(PTColor.background)
-            .navigationTitle("This iPhone")
-            .toolbar {
-                ToolbarItem(placement: .topBarTrailing) {
-                    Button { showSettings = true } label: { Image(systemName: "gearshape") }
-                        .accessibilityLabel("Settings")
-                }
+            .padding(.horizontal, 16)
+            .padding(.top, 4)
+            .padding(.bottom, 24)
+        }
+        .background(PTColor.background)
+        .navigationTitle("This iPhone")
+        .toolbar {
+            ToolbarItem(placement: .topBarTrailing) {
+                Button { showSettings = true } label: { Image(systemName: "gearshape") }
+                    .accessibilityLabel("Settings")
             }
         }
     }
@@ -131,13 +130,13 @@ struct HeroCard: View {
 
     private var statusLine: String {
         switch model.state {
-        case .stopped: return "Tap to start sharing this iPhone's connection"
-        case .starting: return "Bringing the proxy up"
-        case .stopping: return "Shutting down"
-        case .failed: return "Could not start"
+        case .stopped: return "Off. Tap to share this iPhone's internet with your Mac"
+        case .starting: return "Turning on…"
+        case .stopping: return "Turning off…"
+        case .failed: return "Couldn't turn on"
         case .running:
             if let mac = model.stats.macs.first { return "\(mac.name) is online through this iPhone" }
-            return "Ready. Plug in your Mac and connect from the menu bar."
+            return "Sharing. Plug in your Mac and connect from its menu bar."
         }
     }
 
@@ -175,7 +174,7 @@ struct PowerButton: View {
         .buttonStyle(.plain)
         .disabled(busy)
         .simultaneousGesture(DragGesture(minimumDistance: 0).onChanged { _ in pressed = true }.onEnded { _ in pressed = false })
-        .accessibilityLabel(isOn ? "Stop passthrough" : "Start passthrough")
+        .accessibilityLabel(isOn ? "Stop sharing this iPhone's internet" : "Share this iPhone's internet")
         .sensoryFeedback(.impact(weight: .medium), trigger: isOn)
     }
 }
@@ -291,7 +290,7 @@ struct MacsCard: View {
                     .controlSize(.small)
                 }
                 if model.pairedClients.isEmpty {
-                    Text("No Mac paired yet. Start the proxy, then tap Pair and enter the code in Passthrough on your Mac.")
+                    Text("No Mac paired yet. Tap Pair and enter the code in Passthrough on your Mac, with the cable plugged in.")
                         .font(.subheadline).foregroundStyle(.secondary)
                 } else {
                     ForEach(model.pairedClients) { client in

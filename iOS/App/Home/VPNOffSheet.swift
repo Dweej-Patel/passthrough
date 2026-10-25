@@ -8,8 +8,6 @@ import PassthroughUI
 struct VPNOffSheet: View {
     let macName: String
     let killSwitch: Bool
-    /// Why it's asking: a moment that turns the VPN off says which.
-    var reason = "Lowers protection, so it asks first"
     let turnOff: () -> Void
     @Environment(\.dismiss) private var dismiss
     @State private var checking = false
@@ -36,7 +34,7 @@ struct VPNOffSheet: View {
                     .background(PTColor.attention.opacity(0.16), in: Circle())
                 VStack(alignment: .leading, spacing: 2) {
                     Text("Turn VPN off?").font(.title3.weight(.bold))
-                    Text(reason).font(.subheadline.weight(.semibold)).foregroundStyle(PTColor.attentionText)
+                    Text("Lowers protection, so it asks first").font(.subheadline.weight(.semibold)).foregroundStyle(PTColor.attentionText)
                 }
             }
             Text("\(macName)'s traffic will leave without the VPN\(killSwitch ? ", and the kill switch turns off too" : "").")

@@ -13,7 +13,7 @@ class MacControlsTests {
     private val awakeOn = MacControl.Awake(true)
     private val vpnOff = MacControl.Vpn(false)
 
-    /** A moment sends two changes: the first landing leaves the second's spinner. */
+    /** Two changes in flight: the first landing leaves the second's spinner. */
     @Test fun eachSwitchClearsOnItsOwn() {
         val c = MacControls()
         c.request(awakeOn, ready = true, now = 0)

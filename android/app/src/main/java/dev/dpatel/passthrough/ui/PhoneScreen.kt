@@ -1,5 +1,6 @@
 package dev.dpatel.passthrough.ui
 
+import android.content.Context
 import android.content.Intent
 import android.provider.Settings
 import android.text.format.DateUtils
@@ -19,6 +20,8 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
@@ -73,38 +76,53 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 
+/**
+ * This phone, one tap in from the Mac tab: its sharing and connection,
+ * data used, the Macs paired with it, and Settings.
+ */
 @Composable
-fun HomeScreen(
+fun PhoneScreen(
     vm: AppViewModel,
     onPower: () -> Unit,
     onPair: () -> Unit,
     onSettings: () -> Unit,
+    onDone: () -> Unit,
     scroll: ScrollState = rememberScrollState(),
 ) {
     val state by vm.state.collectAsStateWithLifecycle()
     PTBackground(glow = if (state == ServiceState.Running) 1f else 0.45f) {
-        Column(
-            Modifier
-                .windowInsetsPadding(tabInsets())
-                .verticalScroll(scroll)
-                // Phone-width column on tablets and in landscape, centred.
-                .fillMaxWidth().wrapContentWidth().widthIn(max = 640.dp)
-                .padding(horizontal = 18.dp)
-                .padding(top = 8.dp, bottom = 32.dp),
-            verticalArrangement = Arrangement.spacedBy(18.dp),
-        ) {
-            Header(vm, onSettings)
-            HeroCard(vm, onPower, onPair)
-            FlowCard(vm)
-            ThroughputCard(vm)
-            UsageCard(vm)
-            MacsCard(vm, onPair)
-            Text(
-                "Traffic between the Mac and this phone travels only over the USB cable. The Mac's connections are opened by this phone's own network stack.",
-                style = PT.display(12.sp, FontWeight.Normal), color = LocalPT.current.tertiary, textAlign = TextAlign.Center,
-                modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp),
-            )
+        Column(Modifier.windowInsetsPadding(WindowInsets.safeDrawing)) {
+            PTTopBar("This phone", onBack = onDone, backLabel = "Mac")
+            Column(
+                Modifier
+                    .verticalScroll(scroll)
+                    // Phone-width column on tablets and in landscape, centred.
+                    .fillMaxWidth().wrapContentWidth().widthIn(max = 640.dp)
+                    .padding(horizontal = 18.dp)
+                    .padding(bottom = 32.dp),
+                verticalArrangement = Arrangement.spacedBy(18.dp),
+            ) {
+                Header(vm, onSettings)
+                HeroCard(vm, onPower, onPair)
+                FlowCard(vm)
+                ThroughputCard(vm)
+                UsageCard(vm)
+                MacsCard(vm, onPair)
+                Text(
+                    "Traffic between the Mac and this phone travels only over the USB cable. The Mac's connections are opened by this phone's own network stack.",
+                    style = PT.display(12.sp, FontWeight.Normal), color = LocalPT.current.tertiary, textAlign = TextAlign.Center,
+                    modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp),
+                )
+            }
         }
+    }
+}
+
+/** Android's Developer options, where USB debugging is (About phone if they're hidden). */
+internal fun openDeveloperOptions(context: Context) {
+    val dev = Intent(Settings.ACTION_APPLICATION_DEVELOPMENT_SETTINGS).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+    runCatching { context.startActivity(dev) }.onFailure {
+        runCatching { context.startActivity(Intent(Settings.ACTION_DEVICE_INFO_SETTINGS).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)) }
     }
 }
 
@@ -113,6 +131,7 @@ private fun Header(vm: AppViewModel, onSettings: () -> Unit) {
     val c = LocalPT.current
     val state by vm.state.collectAsStateWithLifecycle()
     val stats by vm.stats.collectAsStateWithLifecycle()
+    val name by vm.settings.deviceName.collectAsStateWithLifecycle()
     val subtitle = when (state) {
         ServiceState.Running -> stats.macs.size.let { n -> if (n == 0) "Waiting for a Mac on USB" else "Serving ${if (n == 1) "1 Mac" else "$n Macs"} over USB" }
         ServiceState.Starting -> "Starting…"
@@ -120,9 +139,9 @@ private fun Header(vm: AppViewModel, onSettings: () -> Unit) {
         is ServiceState.Failed -> "Something went wrong"
         ServiceState.Stopped -> "USB internet for your Mac"
     }
-    Row(Modifier.fillMaxWidth().padding(top = 6.dp), verticalAlignment = Alignment.CenterVertically) {
+    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
         Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-            Text("Passthrough", style = PT.display(30.sp), color = c.primary)
+            Text(name, style = PT.display(30.sp), color = c.primary, maxLines = 1, overflow = TextOverflow.Ellipsis)
             Text(subtitle, style = PT.display(15.sp, FontWeight.Normal), color = c.secondary)
         }
         PTCircleIconButton(Icons.Filled.Settings, "Settings", onSettings)
@@ -177,12 +196,7 @@ private fun HeroCard(vm: AppViewModel, onPower: () -> Unit, onPair: () -> Unit) 
                     detail = "The Mac reaches this phone through Android's USB debugging bridge. Turn it on in Developer options " +
                         "(tap Build number seven times in About phone to reveal them).",
                     action = "Open Developer options",
-                    onAction = {
-                        val dev = Intent(Settings.ACTION_APPLICATION_DEVELOPMENT_SETTINGS).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                        runCatching { context.startActivity(dev) }.onFailure {
-                            runCatching { context.startActivity(Intent(Settings.ACTION_DEVICE_INFO_SETTINGS).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)) }
-                        }
-                    },
+                    onAction = { openDeveloperOptions(context) },
                 )
             }
             if (paired.isEmpty() && state == ServiceState.Running) {
@@ -318,7 +332,7 @@ private fun MacsCard(vm: AppViewModel, onPair: () -> Unit) {
             if (clients.isEmpty()) {
                 Text("No Mac paired yet. To pair one:", style = PT.display(15.sp, FontWeight.Normal), color = c.secondary)
                 PTSteps(listOf(
-                    "Start the proxy with the power button above.",
+                    "Start sharing with the power button above.",
                     "Plug this phone into your Mac with a USB cable.",
                     "Tap Pair and type the code into Passthrough on the Mac.",
                 ))

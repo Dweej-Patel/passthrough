@@ -5,7 +5,6 @@ import Foundation
 /// ones that change the Mac run once it's reachable.
 public enum AppLink: Equatable, Sendable {
     case mac
-    case stepAway
     case keepAwake
     case vpnOn
     case session(String)
@@ -15,7 +14,6 @@ public enum AppLink: Equatable, Sendable {
     public var url: URL {
         switch self {
         case .mac: URL(string: "\(Self.scheme)://mac")!
-        case .stepAway: URL(string: "\(Self.scheme)://step-away")!
         case .keepAwake: URL(string: "\(Self.scheme)://keep-awake")!
         case .vpnOn: URL(string: "\(Self.scheme)://vpn-on")!
         case .session(let id):
@@ -27,7 +25,6 @@ public enum AppLink: Equatable, Sendable {
         guard url.scheme == Self.scheme, let host = url.host() else { return nil }
         switch host {
         case "mac": self = .mac
-        case "step-away": self = .stepAway
         case "keep-awake": self = .keepAwake
         case "vpn-on": self = .vpnOn
         case "session":

@@ -364,7 +364,7 @@ what it doesn't know or doesn't have, and a phone ignores fields it doesn't know
 | `vpn` | `off`, `connecting`, `on` or `failed`; absent when the Mac has no VPN set up. |
 | `vpnName`, `killSwitch` | The VPN profile in use, and whether its kill switch is on. |
 | `control` | This phone may send `setAwake` and `setVPN`. |
-| `internet` | The Mac is online through a phone, or on its way there: the Internet part of a moment, read the same by the Mac and every phone. A phone falls back to whether it is sharing itself when a Mac leaves it out. |
+| `internet` | The Mac is online through a phone, or on its way there. A phone falls back to whether it is sharing itself when a Mac leaves it out. |
 
 Whether a phone may change Keep awake and the VPN is a per-phone setting on
 the Mac, on unless the owner turns it off (a phone with shell access can

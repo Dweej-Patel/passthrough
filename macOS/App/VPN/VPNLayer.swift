@@ -319,10 +319,17 @@ final class VPNLayer: ObservableObject {
     }
 
     func debugApply(state: String, underlay: String) {
-        isWanted = true
+        isWanted = state != "off"
         var v = VPNStatus(state: state, name: "NordVPN · us9591", engine: "openvpn")
         v.interface = "utun9"; v.underlay = underlay; v.since = Date().addingTimeInterval(-612)
-        status = v
+        status = isWanted ? v : VPNStatus()
+    }
+
+    /// Snapshots: one made-up profile (or none), never the Mac's own, and an error to show.
+    func debugApply(profile: Bool, error: String? = nil) {
+        // `activeProfile` falls back to the first: no need to write the stored choice.
+        profiles = profile ? [VPNProfile(name: "NordVPN · us9591", engine: .openvpn)] : []
+        self.error = error
     }
 }
 

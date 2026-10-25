@@ -64,7 +64,6 @@ import dev.dpatel.passthrough.core.BatterySample
 import dev.dpatel.passthrough.core.MacEvent
 import dev.dpatel.passthrough.core.MacFormat
 import dev.dpatel.passthrough.core.MacTimeline
-import dev.dpatel.passthrough.ui.AppViewModel
 import dev.dpatel.passthrough.ui.LocalPT
 import dev.dpatel.passthrough.ui.PT
 import dev.dpatel.passthrough.ui.PTCard
@@ -75,19 +74,18 @@ import java.text.DateFormat
 import java.util.Date
 
 /**
- * What happened on the Mac: since you stepped away (within a day), else the
- * last 24 hours. A summary, the battery meanwhile, then each event.
+ * What happened on the Mac in the last 24 hours: a summary, the battery
+ * meanwhile, then each event.
  */
 @Composable
-fun ActivityScreen(vm: AppViewModel, shell: ShellViewModel, onOpenTerminal: (String) -> Unit, onHistory: () -> Unit) {
+fun ActivityScreen(shell: ShellViewModel, onOpenTerminal: (String) -> Unit, onHistory: () -> Unit) {
     val c = LocalPT.current
     val reach by shell.reach.collectAsStateWithLifecycle()
     val timeline by shell.timeline.collectAsStateWithLifecycle()
     val unsupported by shell.timelineUnsupported.collectAsStateWithLifecycle()
     val sessions by shell.sessions.collectAsStateWithLifecycle()
     val state by shell.macState.collectAsStateWithLifecycle()
-    val stepped = StepAway.since(vm.settings.prefs)
-    val since = stepped ?: (System.currentTimeMillis() / 1000.0 - 86_400)
+    val since = System.currentTimeMillis() / 1000.0 - 86_400
     LaunchedEffect(reach) { if (reach == ShellReach.READY) shell.loadTimeline(since) }
 
     Column(
@@ -104,7 +102,7 @@ fun ActivityScreen(vm: AppViewModel, shell: ShellViewModel, onOpenTerminal: (Str
         when {
             unsupported -> Notice("Update Passthrough on your Mac to see what happened on it.")
             t != null -> {
-                Summary(t, stepped != null)
+                Summary(t)
                 if (t.battery.size > 1) BatteryChart(t.battery, state?.batteryFloor)
                 if (reach != ShellReach.READY) Text("As of ${time(t.loadedAt)}. Your Mac can't be reached right now.",
                     style = PT.display(13.sp, FontWeight.Normal), color = c.secondary)
@@ -134,15 +132,14 @@ private fun Notice(text: String) {
 private fun time(seconds: Double): String = DateFormat.getTimeInstance(DateFormat.SHORT).format(Date((seconds * 1000).toLong()))
 
 @Composable
-private fun Summary(t: MacTimeline, away: Boolean) {
+private fun Summary(t: MacTimeline) {
     val c = LocalPT.current
     val answered = t.events.count { it.kind == MacEvent.KIND_ANSWERED }
     val drops = t.events.count { it.warning == true && (it.kind == MacEvent.KIND_VPN || it.kind == MacEvent.KIND_LINK) }
     val finished = t.events.count { it.kind == MacEvent.KIND_SHELL }
     PTCard {
-        Text(if (away) "While you were away" else "Last 24 hours", style = PT.display(17.sp), color = c.primary)
-        val minutes = ((System.currentTimeMillis() / 1000.0 - t.since) / 60).toInt().coerceAtLeast(0)
-        Text(if (away) "Since ${time(t.since)}, ${MacFormat.duration(minutes)} ago" else "${t.events.size} events",
+        Text("The last 24 hours", style = PT.display(17.sp), color = c.primary)
+        Text(if (t.events.size == 1) "1 event" else "${t.events.size} events",
             style = PT.display(14.sp, FontWeight.Normal), color = c.secondary)
         Row(Modifier.fillMaxWidth().padding(top = 12.dp)) {
             Stat("$finished", if (finished == 1) "shell finished" else "shells finished", Modifier.weight(1f))
