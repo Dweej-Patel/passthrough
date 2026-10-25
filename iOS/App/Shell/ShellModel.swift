@@ -800,8 +800,13 @@ extension ShellModel {
             MacEvent(t: at(67), kind: MacEvent.kindAnswered, title: "claude got an answer", session: Self.demoAskingID),
             MacEvent(t: at(131), kind: MacEvent.kindPower, title: "Plugged in at 41%"),
         ]
-        let battery = stride(from: 0.0, through: 134, by: 5).map { m in
-            BatterySample(t: at(m), level: m < 131 ? 0.64 - 0.23 * m / 131 : 0.41 + 0.004 * (m - 131), charging: m >= 131 ? true : nil)
+        // Spelled out: as one expression it outran the type checker's time limit.
+        func level(_ m: Double) -> Double {
+            if m < 131 { return 0.64 - 0.23 * m / 131 }
+            return 0.41 + 0.004 * (m - 131)
+        }
+        let battery: [BatterySample] = stride(from: 0.0, through: 134, by: 5).map { (m: Double) -> BatterySample in
+            BatterySample(t: at(m), level: level(m), charging: m >= 131 ? true : nil)
         }
         timeline = MacTimeline(since: since, events: events.filter { $0.t >= since.timeIntervalSince1970 }, battery: battery, loadedAt: .now)
     }
