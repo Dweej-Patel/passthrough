@@ -10,6 +10,8 @@ struct MacHomeView: View {
     @Binding var tab: RootTab
     @Binding var showPairing: Bool
     @Binding var showSettings: Bool
+    @State private var confirmSleep = false
+    @State private var confirmVPNOff = false
 
     /// The Mac on screen: the shell's selection, else the first paired Mac.
     private var macID: String? { shell.selectedMacID ?? model.pairedClients.first?.id }
@@ -50,25 +52,122 @@ struct MacHomeView: View {
                 }
             }
         }
+        #if DEBUG
+        .onAppear {
+            if ProcessInfo.processInfo.environment["PASSTHROUGH_SHOW_VPN_OFF"] == "1" {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1) { confirmVPNOff = true }
+            }
+        }
+        #endif
     }
 
     // MARK: Tiles
 
-    private var tiles: some View {
-        LazyVGrid(columns: [GridItem(.flexible(), spacing: 10), GridItem(.flexible(), spacing: 10)], spacing: 10) {
-            Button { model.toggle() } label: {
-                MacTile(title: "Internet", detail: internetDetail, symbol: "wifi", on: model.state.isActive)
-            }
-            .disabled(model.state == .starting || model.state == .stopping)
-            .accessibilityHint(model.state.isActive ? "Stops sharing this iPhone's connection" : "Shares this iPhone's connection with the Mac")
+    /// Keep awake and the VPN appear once the Mac says how they are; they only work while it's reachable.
+    private var state: MacState? { shell.macState }
+    private var canControl: Bool { shell.reach == .ready && state?.control == true }
 
-            Button { router.showScreen = true } label: {
-                MacTile(title: "Screen", detail: shell.reach == .ready ? "See and control" : "When it's reachable", symbol: "display", on: false)
+    private var tiles: some View {
+        VStack(spacing: 10) {
+            LazyVGrid(columns: [GridItem(.flexible(), spacing: 10), GridItem(.flexible(), spacing: 10)], spacing: 10) {
+                Button { model.toggle() } label: {
+                    MacTile(title: "Internet", detail: internetDetail, symbol: "wifi", on: model.state.isActive)
+                }
+                .disabled(model.state == .starting || model.state == .stopping)
+                .accessibilityHint(model.state.isActive ? "Stops sharing this iPhone's connection" : "Shares this iPhone's connection with the Mac")
+
+                if let state {
+                    Button { tapAwake(state) } label: {
+                        MacTile(title: "Keep awake", detail: awakeDetail(state), symbol: "cup.and.saucer",
+                                on: state.awake == true, pending: shell.pendingControl.map { if case .awake = $0 { true } else { false } } ?? false)
+                    }
+                    .disabled(!canControl)
+
+                    Button { tapVPN(state) } label: {
+                        MacTile(title: "VPN", detail: vpnDetail(state), symbol: "lock.shield",
+                                on: state.vpn == MacState.vpnOn || state.vpn == MacState.vpnConnecting,
+                                pending: shell.pendingControl.map { if case .vpn = $0 { true } else { false } } ?? false,
+                                warning: state.vpn == MacState.vpnFailed)
+                    }
+                    .disabled(!canControl || state.vpn == nil)
+                }
+
+                Button { router.showScreen = true } label: {
+                    MacTile(title: "Screen", detail: shell.reach == .ready ? "See and control" : "When it's reachable", symbol: "display", on: false)
+                }
+                .disabled(shell.reach != .ready)
             }
-            .disabled(shell.reach != .ready)
+            .buttonStyle(MacTileButtonStyle())
+            .sensoryFeedback(.selection, trigger: model.state.isActive)
+            .sensoryFeedback(.selection, trigger: state?.awake)
+            .sensoryFeedback(.selection, trigger: state?.vpn)
+
+            if let message = shell.controlError?.message ?? controlNote {
+                Label(message, systemImage: "info.circle")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, 4)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
         }
-        .buttonStyle(MacTileButtonStyle())
-        .sensoryFeedback(.selection, trigger: model.state.isActive)
+        .confirmationDialog("Let \(macName) sleep?", isPresented: $confirmSleep, titleVisibility: .visible) {
+            Button("Let it sleep") { shell.control(.awake(false)) }
+        } message: {
+            Text(runningShells == 1 ? "1 running shell pauses until it wakes." : "\(runningShells) running shells pause until it wakes.")
+        }
+        .sheet(isPresented: $confirmVPNOff) {
+            VPNOffSheet(macName: macName, killSwitch: state?.killSwitch == true) { shell.control(.vpn(false)) }
+        }
+    }
+
+    private var runningShells: Int { shell.sessions.filter(\.running).count }
+
+    /// Why Keep awake and the VPN can't be changed right now, if the Mac said so.
+    private var controlNote: String? {
+        guard shell.reach == .ready, let state, state.control != true else { return nil }
+        return "Keep awake and the VPN can be changed from \(macName) only. To change them from here, turn on Awake & VPN for this iPhone in Passthrough's Remote Shell settings on the Mac."
+    }
+
+    private func tapAwake(_ state: MacState) {
+        if state.awake == true {
+            if runningShells > 0 { confirmSleep = true } else { shell.control(.awake(false)) }
+        } else {
+            shell.control(.awake(true))
+        }
+    }
+
+    private func tapVPN(_ state: MacState) {
+        // Turning protection on never asks; turning it off asks for Face ID, in the app only.
+        if state.vpn == MacState.vpnOff { shell.control(.vpn(true)) } else { confirmVPNOff = true }
+    }
+
+    private func awakeDetail(_ state: MacState) -> String {
+        if state.awake == true {
+            if state.charging == true { return "On, plugged in" }
+            if let minutes = state.minutesLeft { return Self.duration(minutes) + " left" }
+            return "On, even lid closed"
+        }
+        switch state.awakeStopped {
+        case "battery": return "Stopped at battery limit"
+        case "heat": return "Stopped: running hot"
+        default: return "Sleeps as usual"
+        }
+    }
+
+    private func vpnDetail(_ state: MacState) -> String {
+        switch state.vpn {
+        case MacState.vpnOn: state.vpnName ?? "On"
+        case MacState.vpnConnecting: "Connecting…"
+        case MacState.vpnFailed: state.killSwitch == true ? "Failed, traffic blocked" : "Failed"
+        case MacState.vpnOff: "Off"
+        default: "Not set up on the Mac"
+        }
+    }
+
+    /// "3 h 10 m", "45 m".
+    static func duration(_ minutes: Int) -> String {
+        minutes >= 60 ? "\(minutes / 60) h \(minutes % 60) m" : "\(minutes) m"
     }
 
     private var internetDetail: String {
@@ -177,11 +276,11 @@ struct MacHeroCard: View {
         PTSurface(stroke: shell.reach == .unreachable ? PTColor.attention.opacity(0.4) : PTColor.hairline) {
             VStack(alignment: .leading, spacing: 14) {
                 HStack(spacing: 16) {
-                    MacFigure(asleep: shell.reach == .unreachable, live: shell.reach == .ready || online)
+                    MacFigure(asleep: shell.reach == .unreachable, awake: awake, live: shell.reach == .ready || online)
                     VStack(alignment: .leading, spacing: 4) {
                         Text(title).font(.title3.weight(.bold))
                             .contentTransition(.opacity)
-                        if let detail { Text(detail).font(.subheadline).foregroundStyle(.secondary) }
+                        if let detail { Text(detail).font(.subheadline).foregroundStyle(.secondary).contentTransition(.opacity) }
                         if online, shell.reach == .ready {
                             Label("Online through this iPhone", systemImage: "cable.connector")
                                 .font(.caption.weight(.semibold))
@@ -197,10 +296,13 @@ struct MacHeroCard: View {
         .accessibilityElement(children: .contain)
     }
 
+    /// Keep awake is on and the Mac says so now.
+    private var awake: Bool { shell.reach == .ready && shell.macState?.awake == true }
+
     private var title: String {
         if !paired { return "Set up your Mac" }
         switch shell.reach {
-        case .ready: return "Reachable"
+        case .ready: return awake ? "Staying awake" : "Reachable"
         case .connecting: return shell.isRedialing ? "Reconnecting…" : "Connecting…"
         case .unreachable: return "Can't reach it"
         case .noAccess: return online ? "Online through this iPhone" : "Paired"
@@ -212,6 +314,11 @@ struct MacHeroCard: View {
         if !paired { return "Pair once over USB." }
         switch shell.reach {
         case .ready:
+            if awake, let state = shell.macState {
+                if state.charging == true { return "Plugged in" }
+                if let minutes = state.minutesLeft { return MacHomeView.duration(minutes) + " left" }
+                return "Even with the lid closed"
+            }
             switch shell.path {
             case .direct: return "From anywhere, directly"
             case .relay: return "From anywhere, through a relay"
@@ -229,6 +336,9 @@ struct MacHeroCard: View {
     }
 
     @ViewBuilder private var extra: some View {
+        if paired, shell.reach == .ready, let state = shell.macState, let battery = state.battery {
+            BatteryLine(state: state, battery: battery, awake: awake)
+        }
         if !paired {
             Text("Then it's online through this iPhone whenever they're connected, and you can reach its shell from anywhere.")
                 .font(.subheadline).foregroundStyle(.secondary)
@@ -239,9 +349,15 @@ struct MacHeroCard: View {
             switch shell.reach {
             case .unreachable:
                 VStack(alignment: .leading, spacing: 4) {
-                    Text("It may be asleep, off, or offline").font(.subheadline.weight(.semibold)).foregroundStyle(PTColor.attentionText)
-                    if let message = shell.reachMessage {
-                        Text(message).font(.subheadline).fixedSize(horizontal: false, vertical: true)
+                    if shell.macState?.awakeStopped == "battery" {
+                        Text("It most likely went to sleep").font(.subheadline.weight(.semibold)).foregroundStyle(PTColor.attentionText)
+                        Text("Its battery reached your \(Self.percent(shell.macState?.batteryFloor ?? 0.2)) limit, so Keep awake let it sleep. Plug it in and it wakes for the next connection.")
+                            .font(.subheadline).fixedSize(horizontal: false, vertical: true)
+                    } else {
+                        Text("It may be asleep, off, or offline").font(.subheadline.weight(.semibold)).foregroundStyle(PTColor.attentionText)
+                        if let message = shell.reachMessage {
+                            Text(message).font(.subheadline).fixedSize(horizontal: false, vertical: true)
+                        }
                     }
                 }
                 .padding(12)
@@ -261,6 +377,45 @@ struct MacHeroCard: View {
             }
         }
     }
+
+    static func percent(_ fraction: Double) -> String { "\(Int((fraction * 100).rounded()))%" }
+}
+
+/// The Mac's battery, with Keep awake's limit marked on it.
+private struct BatteryLine: View {
+    let state: MacState
+    let battery: Double
+    let awake: Bool
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            GeometryReader { geo in
+                ZStack(alignment: .leading) {
+                    Capsule().fill(Color.primary.opacity(0.08))
+                    Capsule().fill(awake ? PTColor.tint : Color.secondary.opacity(0.5))
+                        .frame(width: max(6, geo.size.width * battery))
+                    if let floor = state.batteryFloor, state.charging != true {
+                        Rectangle().fill(PTColor.surface).frame(width: 2).offset(x: geo.size.width * floor - 1)
+                    }
+                }
+            }
+            .frame(height: 6)
+            .animation(.easeOut(duration: 0.4), value: battery)
+            Text(caption).font(.caption).foregroundStyle(.secondary)
+        }
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("Battery \(MacHeroCard.percent(battery)). \(caption)")
+    }
+
+    private var caption: String {
+        let level = MacHeroCard.percent(battery)
+        if state.charging == true { return "\(level), charging" }
+        guard awake else { return "\(level) on battery" }
+        var limits: [String] = []
+        if let floor = state.batteryFloor { limits.append("at \(MacHeroCard.percent(floor))") }
+        limits.append("if it gets hot")
+        return "\(level) now · sleeps " + limits.joined(separator: " or ")
+    }
 }
 
 // MARK: - Tiles
@@ -270,15 +425,25 @@ struct MacTile: View {
     let detail: String
     let symbol: String
     let on: Bool
+    /// Sent to the Mac and not yet answered.
+    var pending = false
+    /// On, but not working (a failed VPN).
+    var warning = false
     @Environment(\.isEnabled) private var enabled
 
     var body: some View {
         VStack(alignment: .leading) {
-            Image(systemName: symbol)
-                .font(.system(size: 17, weight: .semibold))
-                .foregroundStyle(on ? PTColor.onTint : Color.primary)
-                .frame(width: 36, height: 36)
-                .background(on ? PTColor.tint : Color.primary.opacity(0.08), in: Circle())
+            ZStack {
+                if pending {
+                    ProgressView().controlSize(.small)
+                } else {
+                    Image(systemName: warning ? "exclamationmark.triangle.fill" : symbol)
+                        .font(.system(size: 17, weight: .semibold))
+                        .foregroundStyle(warning ? PTColor.onAttention : on ? PTColor.onTint : Color.primary)
+                }
+            }
+            .frame(width: 36, height: 36)
+            .background(warning ? PTColor.attention : on ? PTColor.tint : Color.primary.opacity(0.08), in: Circle())
             Spacer(minLength: 10)
             Text(title).font(.subheadline.weight(.semibold))
             Text(detail).font(.caption).foregroundStyle(.secondary).lineLimit(1)
@@ -305,23 +470,39 @@ struct MacTileButtonStyle: ButtonStyle {
 
 // MARK: - Figure
 
-/// A laptop: lid open while it's reachable or online, shut and dozing when it can't be reached.
+/// A laptop: lid open while it's reachable or online, shut and dozing when it
+/// can't be reached, shut and glowing while Keep awake holds it awake. The lid
+/// shutting is the app's one authored moment; Reduce Motion skips it.
 struct MacFigure: View {
     let asleep: Bool
+    var awake = false
     let live: Bool
+    @State private var lidDown = false
+    @State private var glow = false
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
         ZStack(alignment: .bottom) {
-            if asleep {
+            if asleep || awake {
                 closed.transition(.opacity)
             } else {
                 open.transition(.opacity)
             }
         }
         .frame(width: 104, height: 76)
-        .animation(.easeOut(duration: 0.35), value: asleep)
+        .animation(.easeOut(duration: 0.35), value: asleep || awake)
+        .onChange(of: awake, initial: true) { _, now in shut(now) }
         .accessibilityElement()
-        .accessibilityLabel(asleep ? "Mac, not answering" : "Mac")
+        .accessibilityLabel(asleep ? "Mac, not answering" : awake ? "Mac, staying awake" : "Mac")
+    }
+
+    private func shut(_ now: Bool) {
+        guard now else { lidDown = false; glow = false; return }
+        guard !reduceMotion else { lidDown = true; glow = true; return }
+        lidDown = false
+        glow = false
+        withAnimation(.easeOut(duration: 0.55)) { lidDown = true }
+        withAnimation(.easeOut(duration: 0.6).delay(0.35)) { glow = true }
     }
 
     private var base: some View {
@@ -354,16 +535,28 @@ struct MacFigure: View {
 
     private var closed: some View {
         ZStack(alignment: .topTrailing) {
+            if awake {
+                Ellipse()
+                    .fill(PTColor.tint.opacity(glow ? 0.35 : 0))
+                    .frame(width: 104, height: 26)
+                    .blur(radius: 10)
+                    .frame(maxHeight: .infinity, alignment: .bottom)
+                    .offset(y: 8)
+            }
             VStack(spacing: 0) {
                 Spacer()
                 LidShape()
                     .fill(Color.primary.opacity(0.14))
                     .frame(width: 104, height: 12)
+                    // Shutting: tall (open, seen edge-on) to flat.
+                    .scaleEffect(x: 1, y: awake && !lidDown ? 4.2 : 1, anchor: .bottom)
                 base
             }
-            Text("z").font(.system(size: 13, weight: .bold, design: .rounded))
-                .foregroundStyle(.secondary)
-                .offset(x: -6, y: 22)
+            if asleep {
+                Text("z").font(.system(size: 13, weight: .bold, design: .rounded))
+                    .foregroundStyle(.secondary)
+                    .offset(x: -6, y: 22)
+            }
         }
     }
 }

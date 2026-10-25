@@ -6,6 +6,8 @@ struct BatteryReading: Equatable {
     var percent: Int      // 0...100, or -1 if unknown (e.g. desktop Mac)
     var isOnAC: Bool
     var hasBattery: Bool
+    /// macOS's estimate of minutes until empty, on battery; nil while it is still working it out.
+    var minutesToEmpty: Int? = nil
 }
 
 /// Reads battery level and power source via IOKit power sources.
@@ -25,7 +27,9 @@ enum BatteryMonitor {
             let pct = Swift.max(0, Swift.min(100, raw))
             // Treat anything not explicitly on AC as "on battery".
             let onAC = (state == (kIOPSACPowerValue as String))
-            return BatteryReading(percent: pct, isOnAC: onAC, hasBattery: true)
+            // -1 while macOS is still calculating.
+            let toEmpty = (desc[kIOPSTimeToEmptyKey as String] as? Int).flatMap { $0 > 0 ? $0 : nil }
+            return BatteryReading(percent: pct, isOnAC: onAC, hasBattery: true, minutesToEmpty: onAC ? nil : toEmpty)
         }
         return BatteryReading(percent: -1, isOnAC: true, hasBattery: false)
     }

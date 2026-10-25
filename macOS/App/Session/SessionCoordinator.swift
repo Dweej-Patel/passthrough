@@ -142,6 +142,8 @@ final class SessionCoordinator: ObservableObject {
     let appUsage = NettopSampler()
     let keepAwake: KeepAwakeController
     let shell = RemoteShellController()
+    /// What phones see of Keep awake and the VPN, and their requests to change them.
+    private var macStateBridge: MacStateBridge?
 
     private let helper = HelperClient()
     private let directory: DeviceDirectory
@@ -279,6 +281,7 @@ final class SessionCoordinator: ObservableObject {
             guard let self, !self.phase.isConnected else { return }
             self.phase = .helperRequired
         }
+        macStateBridge = MacStateBridge(shell: shell, keepAwake: keepAwake, vpn: vpnLayer)
         directory.onChange = { [weak self] change in self?.devicesChanged(change) }
         helper.onInterrupted = { [weak self] in Task { @MainActor in self?.syncHotspotGuard() } }
         androidWatcher.onStatusChange = { [weak self] status in self?.androidWatch = status }

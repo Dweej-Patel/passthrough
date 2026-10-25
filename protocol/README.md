@@ -327,8 +327,10 @@ disconnected; it can attach again and gets the scrollback.
 | `transcriptData` | Mac | `session`, `data`, `cols`?, `rows`?, `done`? | A piece of the transcript (same chunk size); `done: true` on the last. `cols`/`rows`, when present, are the size the recorded terminal had from this piece on: set it before feeding `data` (which may be empty when a size change ends the transcript). The first piece always carries the size its first byte was drawn at; older Macs send none. |
 | `screen` | phone | none | See and control the screen: the connection becomes a relay to Screen Sharing (below). |
 | `screenReady` | Mac | none | Reply to `screen`; every later byte, both ways, is Screen Sharing's. |
+| `macState` | Mac | `state` | How the Mac is doing (below): sent after `macInfo` and before `sessions`, then whenever it changes, on every connection that isn't carrying the screen. A Mac that has nothing to say sends none. |
+| `setAwake` / `setVPN` | phone | `on` | Turn Keep awake or the Mac's VPN on or off. Accepted silently: the new state follows as `macState`. |
 | `ping` / `pong` | either | none | Liveness; each side answers `ping` with `pong`. A phone pings after 5 s without hearing from the Mac and gives the connection up after 15 s of silence and then dials again. The iPhone also gives it up 2 s after a ping it sent because the system said the connection's path failed (the cable it used unplugged, Wi-Fi lost) and nothing came back; Android closes the sockets of a network it lost by itself. |
-| `error` | Mac | `reason`, `session`? | `not_authorized`, `too_many_sessions` (8 at once), `no_such_session`, `bad_request`, `screen_not_allowed`, `screen_unavailable`, `screen_video_unavailable` or `too_many_screens`. |
+| `error` | Mac | `reason`, `session`? | `not_authorized`, `too_many_sessions` (8 at once), `no_such_session`, `bad_request`, `screen_not_allowed`, `screen_unavailable`, `screen_video_unavailable`, `too_many_screens`, `not_allowed` (the owner hasn't let this phone change Keep awake and the VPN) or `vpn_not_set_up`. |
 
 The Mac keeps 1 MiB of scrollback per session.
 
@@ -342,6 +344,35 @@ once the font is as small as it goes). The Mac records sizes in the cast file
 as asciicast v2 resize events (`[t, "r", "COLSxROWS"]`) whenever the phone
 resizes the session, and restates the size every 1 MiB of cast so a tail read
 finds the size its start was drawn at; the header keeps the initial size.
+
+### Mac state and control
+
+`macState` carries an object whose fields are all optional; a Mac leaves out
+what it doesn't know or doesn't have, and a phone ignores fields it doesn't know:
+
+| Field | Meaning |
+|-------|---------|
+| `awake` | Keep awake is on. |
+| `awakeStopped` | Why Keep awake turned itself off or refused to turn on: `battery` or `heat`. |
+| `battery` | 0 to 1; absent on a Mac without a battery. |
+| `charging` | On power, not the battery. |
+| `minutesLeft` | Minutes until Keep awake's battery limit, on battery, from macOS's own estimate (rounded to 5). |
+| `batteryFloor` | The level (0 to 1) where Keep awake turns itself off; absent when that limit is off. |
+| `hot` | macOS reports the Mac running hot. |
+| `vpn` | `off`, `connecting`, `on` or `failed`; absent when the Mac has no VPN set up. |
+| `vpnName`, `killSwitch` | The VPN profile in use, and whether its kill switch is on. |
+| `control` | This phone may send `setAwake` and `setVPN`. |
+
+Whether a phone may change Keep awake and the VPN is a per-phone setting on
+the Mac, on unless the owner turns it off (a phone with shell access can
+already run commands as the owner). Requests from a phone without it get
+`not_allowed`; `setVPN` with `on` on a Mac without a VPN gets
+`vpn_not_set_up`. The Mac's own limits still apply: Keep awake stays off at
+the battery limit or while hot, whoever asked. Phones ask for Face ID (or the
+passcode) before sending `setVPN` with `on: false`, and the Mac shows a notice
+that stays until dismissed whenever a phone turns its VPN off. A Mac that
+predates these messages answers them `bad_request` and sends no `macState`,
+so a phone offers neither until it has heard one.
 
 ### Screen
 

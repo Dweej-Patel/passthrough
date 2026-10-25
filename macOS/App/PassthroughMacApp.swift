@@ -54,7 +54,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             let dir = CommandLine.arguments[index + 1]
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
                 PanelSnapshots.render(to: dir)
-                NSApp.terminate(nil)
+                // Nothing to tear down in a snapshot run; `terminate` from this
+                // main-queue block would wait on a reply queued behind it.
+                exit(0)
             }
         }
     }

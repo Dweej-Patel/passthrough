@@ -36,6 +36,32 @@ enum PanelSnapshots {
             }
         }
         renderShellSettings(to: directory)
+        renderNotices(to: directory)
+    }
+
+    /// The notice from the notch, and the capsule on a screen without one.
+    @MainActor
+    private static func renderNotices(to directory: String) {
+        let kinds: [(String, NotchNotice.Kind)] = [
+            ("quiet", .quiet(title: "iPhone turned Keep awake on", detail: nil, symbol: "cup.and.saucer")),
+            ("lowered", .lowered(title: "iPhone turned the VPN off", detail: "Kill switch off too", action: "Turn back on") {}),
+        ]
+        for (name, kind) in kinds {
+            for notch in [CGFloat(32), 0] {
+                for scheme in [ColorScheme.dark, .light] {
+                    let view = NotchNoticeView(kind: kind, notchHeight: notch, snapshot: true) {}
+                        .environment(\.colorScheme, scheme)
+                        .background(Color(red: 0.35, green: 0.42, blue: 0.55))
+                    let renderer = ImageRenderer(content: view)
+                    renderer.scale = 2
+                    if let image = renderer.nsImage, let tiff = image.tiffRepresentation,
+                       let png = NSBitmapImageRep(data: tiff)?.representation(using: .png, properties: [:]) {
+                        let shape = notch > 0 ? "notch" : "capsule"
+                        try? png.write(to: URL(fileURLWithPath: directory).appendingPathComponent("notice-\(name)-\(shape)-\(scheme == .dark ? "dark" : "light").png"))
+                    }
+                }
+            }
+        }
     }
 
     enum ShellState { case off, setup, ready }

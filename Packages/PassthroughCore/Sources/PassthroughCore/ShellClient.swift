@@ -101,6 +101,8 @@ public final class ShellClient: @unchecked Sendable {
         /// The Mac's current iroh details and addresses (sent after `ready`),
         /// for the phone to keep with its grant.
         case macInfo(ShellEnvelope)
+        /// How the Mac is doing (after `ready`, and whenever it changes).
+        case macState(MacState)
         case sessions([ShellSessionInfo])
         /// A session this client opened; it is attached to it.
         case opened(String)
@@ -315,6 +317,21 @@ public final class ShellClient: @unchecked Sendable {
     }
 
     public func requestHistory() { command(ShellEnvelope(t: ShellEnvelope.history)) }
+
+    /// Asks the Mac to turn Keep awake on or off. The new state comes back as
+    /// `.macState`, or `.failed` says why not.
+    public func setAwake(_ on: Bool) {
+        var m = ShellEnvelope(t: ShellEnvelope.setAwake)
+        m.on = on
+        command(m)
+    }
+
+    /// As `setAwake`, for the Mac's VPN.
+    public func setVPN(_ on: Bool) {
+        var m = ShellEnvelope(t: ShellEnvelope.setVPN)
+        m.on = on
+        command(m)
+    }
 
     /// Asks to see the screen (protocol/README.md, "Screen"): `.screen` when
     /// the Mac hands the connection over, or `.failed` with the reason it
@@ -566,6 +583,9 @@ public final class ShellClient: @unchecked Sendable {
         switch message.t {
         case ShellEnvelope.macInfo:
             emit(.macInfo(message))
+        case ShellEnvelope.macState:
+            guard let state = message.state else { return }
+            emit(.macState(state))
         case ShellEnvelope.sessions:
             emit(.sessions(message.sessions ?? []))
         case ShellEnvelope.opened:

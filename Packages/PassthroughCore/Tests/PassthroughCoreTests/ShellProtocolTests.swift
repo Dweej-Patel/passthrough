@@ -67,6 +67,19 @@ final class ShellProtocolTests: XCTestCase {
         XCTAssertEqual(info.addresses, ["192.168.1.20", "100.101.102.103"])
     }
 
+    /// The Mac's state and a phone's requests to change it; absent fields stay absent.
+    func testMacStateAndControlFields() throws {
+        let messages = try XCTUnwrap(shell()["messages"] as? [[String: Any]])
+        let lines = try messages.compactMap { $0["line"] as? String }.map { try ShellEnvelope.decode(Data($0.utf8)) }
+        let states = lines.filter { $0.t == ShellEnvelope.macState }.compactMap(\.state)
+        XCTAssertEqual(states.first, MacState(awake: true, battery: 0.64, charging: false, minutesLeft: 190, batteryFloor: 0.2, hot: false,
+                                              vpn: MacState.vpnOn, vpnName: "NordVPN Germany", killSwitch: true, control: true))
+        XCTAssertEqual(states.last, MacState(awake: false, awakeStopped: "battery", battery: 0.19, charging: false, batteryFloor: 0.2, control: false))
+        XCTAssertEqual(lines.first { $0.t == ShellEnvelope.setAwake }?.on, false)
+        XCTAssertEqual(lines.first { $0.t == ShellEnvelope.setVPN }?.on, true)
+        XCTAssertTrue(lines.contains { $0.t == ShellEnvelope.error && $0.reason == ShellError.notAllowed.rawValue })
+    }
+
     /// A replay's sizes: the entry's starting size, and a size on the transcript line it applies from.
     func testReplaySizeFields() throws {
         let messages = try XCTUnwrap(shell()["messages"] as? [[String: Any]])

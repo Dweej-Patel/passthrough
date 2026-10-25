@@ -47,6 +47,21 @@ class ShellProtocolTests {
         }
     }
 
+    /** The Mac's state and a phone's requests to change it; absent fields stay absent. */
+    @Test fun macStateAndControlFields() {
+        val lines = shell["messages"]!!.jsonArray.map { ShellEnvelope.decode(it.jsonObject["line"]!!.jsonPrimitive.content) }
+        val states = lines.filter { it.t == ShellEnvelope.MAC_STATE }.mapNotNull { it.state }
+        assertEquals(
+            MacState(awake = true, battery = 0.64, charging = false, minutesLeft = 190, batteryFloor = 0.2, hot = false,
+                vpn = "on", vpnName = "NordVPN Germany", killSwitch = true, control = true),
+            states.first(),
+        )
+        assertEquals(MacState(awake = false, awakeStopped = "battery", battery = 0.19, charging = false, batteryFloor = 0.2, control = false), states.last())
+        assertEquals(false, lines.first { it.t == ShellEnvelope.SET_AWAKE }.on)
+        assertEquals(true, lines.first { it.t == ShellEnvelope.SET_VPN }.on)
+        assertTrue(lines.any { it.t == ShellEnvelope.ERROR && it.reason == ShellError.NOT_ALLOWED.wire })
+    }
+
     /** A replay's sizes: the entry's starting size, and a size on the transcript line it applies from. */
     @Test fun replaySizeFields() {
         val lines = shell["messages"]!!.jsonArray.map { ShellEnvelope.decode(it.jsonObject["line"]!!.jsonPrimitive.content) }

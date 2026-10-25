@@ -53,6 +53,10 @@ public struct ShellEnvelope: Codable, Equatable, Sendable {
     public var irohRelay: String?
     public var relayToken: String?
     public var addresses: [String]?
+    /// macState: how the Mac is doing, as this phone may see it.
+    public var state: MacState?
+    /// setAwake / setVPN: what the phone asks for.
+    public var on: Bool?
 
     public init(t: String) { self.t = t }
 
@@ -82,6 +86,11 @@ public struct ShellEnvelope: Codable, Equatable, Sendable {
     /// The Mac's own H.264 stream of its screen (`ScreenVideoWire`), rather than Screen Sharing.
     public static let screenVideo = "screenVideo"
     public static let screenVideoReady = "screenVideoReady"
+    /// The Mac's state (`MacState`), after `ready` and whenever it changes.
+    public static let macState = "macState"
+    /// A phone turning Keep awake or the VPN on or off (`on`).
+    public static let setAwake = "setAwake"
+    public static let setVPN = "setVPN"
     public static let ping = "ping"
     public static let pong = "pong"
     public static let error = "error"
@@ -177,6 +186,55 @@ public enum ShellError: String, Error, Sendable {
     /// The Mac already shows its screen to as many views as it allows
     /// (`RemoteShell.maxScreenViewsPerPhone`, `maxScreenViews`).
     case tooManyScreens = "too_many_screens"
+    /// The owner hasn't let this phone change Keep awake and the VPN.
+    case notAllowed = "not_allowed"
+    /// The VPN can't turn on: the Mac has no VPN set up.
+    case vpnNotSetUp = "vpn_not_set_up"
+}
+
+/// How the Mac is doing, sent to a phone in `macState`. Every field is
+/// optional: a Mac leaves out what it doesn't know or doesn't have.
+public struct MacState: Codable, Equatable, Sendable {
+    /// Keep awake is on.
+    public var awake: Bool?
+    /// Why Keep awake turned itself off or refused to turn on: `battery` or `heat`.
+    public var awakeStopped: String?
+    /// 0 to 1; absent on a Mac without a battery.
+    public var battery: Double?
+    /// On power, not the battery.
+    public var charging: Bool?
+    /// Minutes until Keep awake's battery limit, on battery, when macOS has an estimate.
+    public var minutesLeft: Int?
+    /// The battery level (0 to 1) where Keep awake turns itself off; absent when that limit is off.
+    public var batteryFloor: Double?
+    /// macOS says the Mac is running hot.
+    public var hot: Bool?
+    /// `off`, `connecting`, `on` or `failed`; absent when the Mac has no VPN set up.
+    public var vpn: String?
+    /// The VPN profile in use, as the Mac names it.
+    public var vpnName: String?
+    public var killSwitch: Bool?
+    /// This phone may change Keep awake and the VPN (`setAwake`, `setVPN`).
+    public var control: Bool?
+
+    public init(awake: Bool? = nil, awakeStopped: String? = nil, battery: Double? = nil, charging: Bool? = nil,
+                minutesLeft: Int? = nil, batteryFloor: Double? = nil, hot: Bool? = nil, vpn: String? = nil,
+                vpnName: String? = nil, killSwitch: Bool? = nil, control: Bool? = nil) {
+        self.awake = awake; self.awakeStopped = awakeStopped; self.battery = battery; self.charging = charging
+        self.minutesLeft = minutesLeft; self.batteryFloor = batteryFloor; self.hot = hot; self.vpn = vpn
+        self.vpnName = vpnName; self.killSwitch = killSwitch; self.control = control
+    }
+
+    public static let vpnOff = "off"
+    public static let vpnConnecting = "connecting"
+    public static let vpnOn = "on"
+    public static let vpnFailed = "failed"
+}
+
+/// A change a phone asked the Mac for.
+public enum MacControl: Equatable, Sendable {
+    case awake(Bool)
+    case vpn(Bool)
 }
 
 /// Which peers may reach the shell, and which of the Mac's addresses a phone

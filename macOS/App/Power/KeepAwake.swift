@@ -28,7 +28,15 @@ final class KeepAwakeController: ObservableObject {
     @Published private(set) var blockedReason: String?
     private enum Cause { case battery, heat }
     /// What `blockedReason` is about, so each check clears only its own.
-    private var blockedBy: Cause?
+    @Published private var blockedBy: Cause?
+    /// Why keep-awake last turned itself off or refused to turn on: "battery" or "heat".
+    var stoppedBy: String? {
+        switch blockedBy {
+        case .battery: "battery"
+        case .heat: "heat"
+        case nil: nil
+        }
+    }
     private var thermalObserver: NSObjectProtocol?
 
     private let helper: HelperClient

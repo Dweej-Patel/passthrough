@@ -292,6 +292,21 @@
         "line": "{\"t\":\"macInfo\",\"irohID\":\"3f2a9c5e7b1d4a60c8e2f9b4d7a1035e6c8b2d4f9a1e3c5b7d0f2a4c6e8b1d3f\",\"irohRelay\":\"https://relay.example.com/\",\"relayToken\":\"relay-token-123\",\"addresses\":[\"192.168.1.20\",\"100.101.102.103\"]}"
       },
       {
+        "line": "{\"t\":\"macState\",\"state\":{\"awake\":true,\"battery\":0.64,\"charging\":false,\"minutesLeft\":190,\"batteryFloor\":0.2,\"hot\":false,\"vpn\":\"on\",\"vpnName\":\"NordVPN Germany\",\"killSwitch\":true,\"control\":true}}"
+      },
+      {
+        "line": "{\"t\":\"macState\",\"state\":{\"awake\":false,\"awakeStopped\":\"battery\",\"battery\":0.19,\"charging\":false,\"batteryFloor\":0.2,\"control\":false}}"
+      },
+      {
+        "line": "{\"t\":\"setAwake\",\"on\":false}"
+      },
+      {
+        "line": "{\"t\":\"setVPN\",\"on\":true}"
+      },
+      {
+        "line": "{\"t\":\"error\",\"reason\":\"not_allowed\"}"
+      },
+      {
         "line": "{\"t\":\"challenge\",\"nonce\":\"ICEiIyQlJicoKSorLC0uLzAxMjM0NTY3ODk6Ozw9Pj8=\"}"
       },
       {

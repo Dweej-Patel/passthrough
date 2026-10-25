@@ -66,6 +66,13 @@ final class ShellModel: ObservableObject {
     @Published private(set) var detachedSession: String?
     /// How the ready connection is carried, when known.
     @Published private(set) var path: ShellPath?
+    /// The selected Mac's state as it last said (kept while it can't be
+    /// reached, as "last known"); nil from a Mac too old to send it.
+    @Published private(set) var macState: MacState?
+    /// A Keep awake or VPN change sent and not yet answered.
+    @Published private(set) var pendingControl: MacControl?
+    /// Why the Mac refused the last Keep awake or VPN change.
+    @Published private(set) var controlError: ShellError?
     /// "Connect using": this device's choice, kept in the app's own defaults.
     @Published var connectMode: ShellConnectMode {
         didSet {
@@ -346,6 +353,21 @@ final class ShellModel: ObservableObject {
 
     func loadHistory() { client?.requestHistory() }
 
+    /// Asks the Mac to turn Keep awake or its VPN on or off; `macState` follows.
+    /// The caller has already asked for Face ID before turning the VPN off.
+    func control(_ change: MacControl) {
+        controlError = nil
+        #if DEBUG
+        if Self.demoState != nil { return demoControl(change) }
+        #endif
+        guard reach == .ready, let client else { return }
+        pendingControl = change
+        switch change {
+        case .awake(let on): client.setAwake(on)
+        case .vpn(let on): client.setVPN(on)
+        }
+    }
+
     /// The saved transcript of a session, with the terminal sizes it was drawn
     /// at (none from an older Mac), or nil when there's no connection, the Mac
     /// refused, or nothing arrived within 30 seconds.
@@ -385,6 +407,9 @@ final class ShellModel: ObservableObject {
             }
         case let .macInfo(info):
             apply(info)
+        case let .macState(state):
+            macState = state
+            pendingControl = nil
         case let .sessions(list):
             sessions = list
             let ids = Set(list.map(\.id))
@@ -424,6 +449,9 @@ final class ShellModel: ObservableObject {
             guard pendingTranscript?.id == session else { return }
             pendingTranscript?.replay.add(data)
             if done { finishTranscript(pendingTranscript?.replay.chunks) }
+        case let .failed(error, _) where error == .notAllowed || error == .vpnNotSetUp:
+            pendingControl = nil
+            controlError = error
         case let .failed(error, session):
             lastError = error
             if error == .notAuthorized { reach = .noAccess }
@@ -483,6 +511,9 @@ final class ShellModel: ObservableObject {
     }
 
     private func resetSessions() {
+        macState = nil
+        pendingControl = nil
+        controlError = nil
         sessions = []
         history = []
         historyLoaded = false
@@ -575,6 +606,8 @@ extension ShellError {
         case .screenUnavailable: "Your Mac can't show its screen yet. In Passthrough's Remote Shell settings on your Mac, allow Screen Recording and Accessibility, or turn on Screen Sharing."
         case .screenVideoUnavailable: "Your Mac can't stream its screen itself yet. In Passthrough's Remote Shell settings on your Mac, allow Screen Recording and Accessibility."
         case .tooManyScreens: "Your Mac is already showing its screen as often as it allows (\(RemoteShell.maxScreenViewsPerPhone) views per phone, \(RemoteShell.maxScreenViews) in all). Close one to open another."
+        case .notAllowed: "Your Mac doesn't let this iPhone change Keep awake and the VPN. Turn on Awake & VPN for it in Passthrough's Remote Shell settings on your Mac."
+        case .vpnNotSetUp: "Your Mac has no VPN set up yet. Add one in Passthrough's VPN settings on the Mac."
         case .notAuthorized: nil
         }
     }
@@ -624,6 +657,13 @@ extension ShellModel {
             reach = .ready
             path = .relay
         }
+        if state == "ready", macState == nil {
+            macState = MacState(awake: true, battery: 0.64, charging: false, minutesLeft: 190, batteryFloor: 0.2, hot: false,
+                                vpn: MacState.vpnOn, vpnName: "NordVPN Germany", killSwitch: true, control: true)
+        }
+        if state == "unreachable", macState == nil {
+            macState = MacState(awake: false, awakeStopped: "battery", battery: 0.2, charging: false, batteryFloor: 0.2, control: true)
+        }
         if state == "ready", sessions.isEmpty {
             sessions = [
                 ShellSessionInfo(id: "demo-1", title: "zsh — ~/dev/passthrough", startedAt: now - 760, lastOutputAt: now - 20, running: true),
@@ -639,6 +679,13 @@ extension ShellModel {
                 ShellHistoryEntry(id: "demo-4", title: "ssh build-box", phoneLabel: "iPhone", startedAt: now - 260_000, bytes: 3_000),
             ]
             historyLoaded = true
+        }
+    }
+
+    fileprivate func demoControl(_ change: MacControl) {
+        switch change {
+        case .awake(let on): macState?.awake = on
+        case .vpn(let on): macState?.vpn = on ? MacState.vpnOn : MacState.vpnOff
         }
     }
 
