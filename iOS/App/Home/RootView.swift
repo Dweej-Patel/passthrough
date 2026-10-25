@@ -35,6 +35,7 @@ struct RootView: View {
         TabView(selection: $tab) {
             MacHomeView(shell: model.shell, tab: $tab, showPairing: $showPairing, showSettings: $showSettings)
                 .tabItem { Label("Mac", systemImage: "laptopcomputer") }
+                .badge(asking)
                 .tag(RootTab.mac)
             ShellsTab(shell: model.shell)
                 .tabItem { Label("Shells", systemImage: "terminal") }
@@ -74,24 +75,24 @@ struct RootView: View {
                 model.endPairing()
             }
         }
-        .onOpenURL { links.open(AppLink(url: $0)) }
-        // A link waits for the unlock, and a change to the Mac for the Mac.
+        // Links arrive at the app's root (`PassthroughApp`), even before this is
+        // built; one waits for the unlock, and a change to the Mac for the Mac.
         .onChange(of: links.pending) { _, _ in runPendingLink() }
         .onChange(of: lock.isUnlocked) { _, _ in runPendingLink() }
         .onChange(of: model.shell.reach) { _, _ in runPendingLink(); refreshSurfaces() }
         .onChange(of: model.shell.macState) { _, _ in runPendingLink(); refreshSurfaces() }
         .onChange(of: model.shell.sessions) { _, _ in refreshSurfaces() }
         .onAppear {
+            // A link that came in before the first unlock built this.
+            runPendingLink()
+            #if DEBUG
             let env = ProcessInfo.processInfo.environment
             if env["PASSTHROUGH_AUTOSTART"] == "1" { model.start() }
             if env["PASSTHROUGH_SHOW_PAIRING"] == "1" { DispatchQueue.main.asyncAfter(deadline: .now() + 1) { showPairing = true } }
             if env["PASSTHROUGH_SHOW_SETTINGS"] == "1" { DispatchQueue.main.asyncAfter(deadline: .now() + 1) { showSettings = true } }
             if let start = env["PASSTHROUGH_TAB"] { tab = ["shells": .shells, "activity": .activity, "phone": .phone][start] ?? .mac }
-            #if DEBUG
             if env["PASSTHROUGH_START_ACTIVITY"] == "1" {
-                DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
-                    MacActivityController.shared.stepAway(macName: macName, state: model.shell.macState, sessions: model.shell.sessions)
-                }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 2) { MacActivityController.shared.stepAway(seen(reachable: true)) }
             }
             #endif
         }
@@ -99,9 +100,13 @@ struct RootView: View {
 }
 
 extension RootView {
-    private var macName: String {
+    /// Shells waiting on a question: the Mac tab's badge.
+    private var asking: Int { model.shell.sessions.filter(\.isAsking).count }
+
+    private func seen(reachable: Bool) -> MacActivityController.Seen {
         let shell = model.shell
-        return shell.macs.first { $0.macID == shell.selectedMacID }?.macName ?? model.pairedClients.first?.name ?? "Your Mac"
+        return .init(macID: shell.selectedMacID, macName: shell.selectedMacName, reachable: reachable,
+                     lastHeard: shell.lastHeard, state: shell.macState, sessions: shell.sessions)
     }
 
     private func runPendingLink() {
@@ -130,12 +135,17 @@ extension RootView {
         }
     }
 
-    /// The Live Activity and the widget show what the app last saw.
+    /// The Live Activity and the widget show what the app last saw. Locked or
+    /// connecting, they keep it (and go stale on their own); unreachable, they
+    /// say when they last heard.
     private func refreshSurfaces() {
         let shell = model.shell
         guard !shell.macs.isEmpty || !model.pairedClients.isEmpty else { return MacActivityController.shared.clear() }
-        MacActivityController.shared.refresh(macName: macName, reachable: shell.reach == .ready,
-                                              state: shell.macState, sessions: shell.sessions)
+        switch shell.reach {
+        case .ready: MacActivityController.shared.refresh(seen(reachable: true))
+        case .unreachable, .noAccess: MacActivityController.shared.refresh(seen(reachable: false))
+        case .connecting, .locked, .needsPasscode, .keyUnavailable: break
+        }
     }
 }
 

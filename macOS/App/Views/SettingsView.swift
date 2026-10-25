@@ -73,17 +73,20 @@ struct GeneralSettings: View {
             Section {
                 Toggle(isOn: Binding(get: { keepAwake.isOn }, set: { keepAwake.set($0) })) {
                     Text("Keep this Mac awake")
-                    Text("Even with the lid closed, so long sessions survive. The screen still turns off and locks.")
+                    Text(keepAwake.hasLid ? "Even with the lid closed, so long sessions survive. The screen still turns off and locks."
+                                          : "So long sessions survive. The screen still turns off and locks.")
                 }
                 if let reason = keepAwake.blockedReason {
                     Label(reason, systemImage: "exclamationmark.triangle.fill")
                         .font(.caption).foregroundStyle(PTTheme.warning)
                 }
-                Toggle(isOn: $keepAwake.batteryAutoOff) {
-                    Text("Turn off at low battery")
-                    Text("So a closed laptop sleeps instead of draining.")
+                if keepAwake.hasLid {
+                    Toggle(isOn: $keepAwake.batteryAutoOff) {
+                        Text("Turn off at low battery")
+                        Text("So a closed laptop sleeps instead of draining.")
+                    }
                 }
-                if keepAwake.batteryAutoOff {
+                if keepAwake.hasLid, keepAwake.batteryAutoOff {
                     Stepper(value: $keepAwake.batteryAutoOffThreshold, in: 5...80, step: 5) {
                         HStack {
                             Text("Battery level")
@@ -102,7 +105,8 @@ struct GeneralSettings: View {
             } header: {
                 Text("Keep awake")
             } footer: {
-                Text("Turns itself off when you quit Passthrough. A closed, running Mac in a bag can overheat: keep it on power or in open air.")
+                Text(keepAwake.hasLid ? "Turns itself off when you quit Passthrough. A closed, running Mac in a bag can overheat: keep it on power or in open air."
+                                      : "Turns itself off when you quit Passthrough.")
             }
             Section {
                 Picker(selection: $session.connectionMode) {

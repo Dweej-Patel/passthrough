@@ -10,12 +10,7 @@ struct ActivityTab: View {
     @EnvironmentObject private var router: ShellRouter
 
     /// Step away records when it happened; older than a day, the timeline shows the last 24 hours.
-    static let steppedAwayKey = "PTSteppedAwayAt"
-    private var steppedAway: Date? {
-        let at = UserDefaults.standard.double(forKey: Self.steppedAwayKey)
-        guard at > 0, Date.now.timeIntervalSince1970 - at < 86_400 else { return nil }
-        return Date(timeIntervalSince1970: at)
-    }
+    private var steppedAway: Date? { StepAwayStore.steppedAway }
     private var since: Date { steppedAway ?? .now - 86_400 }
 
     var body: some View {
@@ -69,9 +64,9 @@ struct ActivityTab: View {
 
     private func summary(_ timeline: MacTimeline) -> some View {
         let away = steppedAway != nil
-        let answered = timeline.events.filter { $0.kind == "answered" }.count
-        let dropouts = timeline.events.filter { $0.warning == true && ($0.kind == "vpn" || $0.kind == "link") }.count
-        let finished = timeline.events.filter { $0.kind == "shell" }.count
+        let answered = timeline.events.filter { $0.kind == MacEvent.kindAnswered }.count
+        let drops = timeline.events.filter { $0.warning == true && ($0.kind == MacEvent.kindVPN || $0.kind == MacEvent.kindLink) }.count
+        let finished = timeline.events.filter { $0.kind == MacEvent.kindShell }.count
         return PTSurface {
             VStack(alignment: .leading, spacing: 12) {
                 VStack(alignment: .leading, spacing: 2) {
@@ -83,7 +78,7 @@ struct ActivityTab: View {
                 HStack(spacing: 0) {
                     stat("\(finished)", finished == 1 ? "shell finished" : "shells finished")
                     stat("\(answered)", "answered")
-                    stat("\(dropouts)", dropouts == 1 ? "dropout" : "dropouts", warning: dropouts > 0)
+                    stat("\(drops)", drops == 1 ? "connection drop" : "connection drops", warning: drops > 0)
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -102,7 +97,7 @@ struct ActivityTab: View {
 
     /// "2 h 14 m ago".
     static func span(from date: Date) -> String {
-        MacHomeView.duration(max(0, Int(Date.now.timeIntervalSince(date) / 60))) + " ago"
+        MacFormat.duration(minutes: max(0, Int(Date.now.timeIntervalSince(date) / 60))) + " ago"
     }
 
     // MARK: Events
@@ -148,7 +143,7 @@ private struct EventRow: View {
                 Text(event.title).font(.subheadline.weight(.semibold))
                 if let detail = event.detail {
                     Text(detail)
-                        .font(event.kind == "asked" ? .system(.caption, design: .monospaced) : .caption)
+                        .font(event.kind == MacEvent.kindAsked ? .system(.caption, design: .monospaced) : .caption)
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
                 }
@@ -172,14 +167,14 @@ private struct EventRow: View {
 
     private var symbol: String {
         switch event.kind {
-        case "awake": "cup.and.saucer.fill"
-        case "vpn": event.warning == true ? "exclamationmark.shield.fill" : "lock.shield.fill"
-        case "link": "cable.connector"
-        case "power": "bolt.fill"
-        case "sleep": "moon.zzz.fill"
-        case "shell": event.warning == true ? "xmark" : "checkmark"
-        case "asked": "questionmark"
-        case "answered": "arrowshape.turn.up.left.fill"
+        case MacEvent.kindAwake: "cup.and.saucer.fill"
+        case MacEvent.kindVPN: event.warning == true ? "exclamationmark.shield.fill" : "lock.shield.fill"
+        case MacEvent.kindLink: "cable.connector"
+        case MacEvent.kindPower: "bolt.fill"
+        case MacEvent.kindSleep: "moon.zzz.fill"
+        case MacEvent.kindShell: event.warning == true ? "xmark" : "checkmark"
+        case MacEvent.kindAsked: "questionmark"
+        case MacEvent.kindAnswered: "arrowshape.turn.up.left.fill"
         default: "circle.fill"
         }
     }
@@ -230,7 +225,7 @@ private struct BatteryChart: View {
                 .chartYAxis {
                     AxisMarks(values: [0, 0.5, 1]) { value in
                         AxisGridLine().foregroundStyle(Color.primary.opacity(0.06))
-                        AxisValueLabel { Text("\(Int((value.as(Double.self) ?? 0) * 100))%") }
+                        AxisValueLabel { Text(MacFormat.percent(value.as(Double.self) ?? 0)) }
                     }
                 }
                 .chartXAxis {
@@ -250,14 +245,14 @@ private struct BatteryChart: View {
 
     private var caption: String {
         if let s = pickedSample {
-            return "\(Int((s.level * 100).rounded()))% at \(date(s).formatted(date: .omitted, time: .shortened))"
+            return "\(MacFormat.percent(s.level)) at \(date(s).formatted(date: .omitted, time: .shortened))"
         }
-        return floor.map { "Keep awake stops at \(Int(($0 * 100).rounded()))%" } ?? ""
+        return floor.map { "Keep awake stops at \(MacFormat.percent($0))" } ?? ""
     }
 
     private var summary: String {
         guard let first = samples.first, let last = samples.last else { return "" }
         let low = samples.map(\.level).min() ?? first.level
-        return "From \(Int(first.level * 100))% to \(Int(last.level * 100))%, lowest \(Int(low * 100))%."
+        return "From \(MacFormat.percent(first.level)) to \(MacFormat.percent(last.level)), lowest \(MacFormat.percent(low))."
     }
 }

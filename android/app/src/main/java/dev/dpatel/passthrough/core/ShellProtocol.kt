@@ -180,7 +180,18 @@ data class MacEvent(
     val session: String? = null,
     /** Something went wrong or less safe. */
     val warning: Boolean? = null,
-)
+) {
+    companion object {
+        const val KIND_AWAKE = "awake"
+        const val KIND_VPN = "vpn"
+        const val KIND_LINK = "link"
+        const val KIND_POWER = "power"
+        const val KIND_SLEEP = "sleep"
+        const val KIND_SHELL = "shell"
+        const val KIND_ASKED = "asked"
+        const val KIND_ANSWERED = "answered"
+    }
+}
 
 /** The Mac's battery at a moment, for the timeline's battery line. */
 @Serializable
@@ -219,7 +230,21 @@ data class MacState(
     val killSwitch: Boolean? = null,
     /** This phone may change Keep awake and the VPN (`setAwake`, `setVPN`). */
     val control: Boolean? = null,
+    /** The Mac is online through a phone, or on its way there: the Internet part of a moment. Absent from older Macs. */
+    val internet: Boolean? = null,
 )
+
+/** The `vpn` and `awakeStopped` values in [MacState]. */
+object MacStates {
+    const val VPN_OFF = "off"
+    const val VPN_CONNECTING = "connecting"
+    const val VPN_ON = "on"
+    const val VPN_FAILED = "failed"
+
+    /** `awakeStopped`: the battery limit, or the Mac running hot. */
+    const val STOPPED_BATTERY = "battery"
+    const val STOPPED_HEAT = "heat"
+}
 
 /**
  * Which peers may reach the shell, and which of the Mac's addresses a phone

@@ -16,6 +16,9 @@ enum MenuBarIcon {
 
     static let size = NSSize(width: 33, height: 18)
     private static let amber = NSColor(srgbRed: 1, green: 0.72, blue: 0.30, alpha: 1)
+    private static let deepAmber = NSColor(srgbRed: 0.64, green: 0.37, blue: 0, alpha: 1)
+    /// Drawing on a dark menu bar. The bright amber is faint on a light one: deep amber there.
+    private static var onDarkBar: Bool { NSAppearance.currentDrawing().bestMatch(from: [.darkAqua, .aqua]) == .darkAqua }
 
     static func image(_ state: State) -> NSImage {
         // Amber can't be a template: then draw at display time in the menu bar's own text colour.
@@ -30,6 +33,8 @@ enum MenuBarIcon {
     }
 
     static func draw(_ state: State, in rect: NSRect, ink: NSColor) {
+        let dark = onDarkBar
+        let amber = dark ? amber : deepAmber
         let phoneInk = state.problem ? amber : ink
         let name = state.problem ? "iphone.gen3" : state.online ? "iphone.gen3.radiowaves.left.and.right" : "iphone.gen3"
         let config = NSImage.SymbolConfiguration(pointSize: 14, weight: .regular).applying(.init(paletteColors: [phoneInk]))
@@ -38,7 +43,7 @@ enum MenuBarIcon {
             phone.draw(at: origin, from: .zero, operation: .sourceOver, fraction: state.online || state.problem ? 1 : 0.85)
             if state.problem {
                 let mark = NSImage(systemSymbolName: "exclamationmark", accessibilityDescription: nil)?
-                    .withSymbolConfiguration(NSImage.SymbolConfiguration(pointSize: 7, weight: .black).applying(.init(paletteColors: [NSColor(white: 0.12, alpha: 1)])))
+                    .withSymbolConfiguration(NSImage.SymbolConfiguration(pointSize: 7, weight: .black).applying(.init(paletteColors: [dark ? NSColor(white: 0.12, alpha: 1) : .white])))
                 mark?.draw(at: NSPoint(x: origin.x + phone.size.width / 2 - 2, y: origin.y + phone.size.height / 2 - 4),
                            from: .zero, operation: .sourceOver, fraction: 1)
             }

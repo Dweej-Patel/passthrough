@@ -23,9 +23,9 @@ public enum PTColor {
     public static let attention = Color(hex: 0xFFB84D)
     public static let attentionText = dynamic(light: 0x8A5300, dark: 0xFFCE85)
     public static let onAttention = Color(hex: 0x2A1A00)
-    public static let problem = dynamic(light: 0xE5483B, dark: 0xFF7A6B)
+    public static let problem = dynamic(light: 0xC8352A, dark: 0xFF7A6B)
 
-    private static func dynamic(light: UInt32, dark: UInt32) -> Color {
+    static func dynamic(light: UInt32, dark: UInt32) -> Color {
         #if canImport(UIKit)
         Color(UIColor { $0.userInterfaceStyle == .dark ? UIColor(hex: dark) : UIColor(hex: light) })
         #else

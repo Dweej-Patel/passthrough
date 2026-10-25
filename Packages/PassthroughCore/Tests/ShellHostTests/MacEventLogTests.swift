@@ -58,5 +58,18 @@ final class MacEventLogTests: XCTestCase {
         let second = log(file: file)
         XCTAssertEqual(second.since(0).events.map(\.title), ["Mac slept"])
         XCTAssertEqual(second.since(0).battery.map(\.level), [0.5])
+        let mode = try FileManager.default.attributesOfItem(atPath: file.path)[.posixPermissions] as? Int
+        XCTAssertEqual(mode, 0o600, "shell titles and questions: this user only")
+    }
+
+    /// A flood of plain events can't push a warning out of the log.
+    func testWarningsOutlastTheCap() {
+        let log = log()
+        log.record(MacEvent.kindVPN, "My iPhone turned the VPN off", warning: true)
+        for i in 0..<(MacEventLog.maxEvents + 10) { log.record(MacEvent.kindAwake, "Keep awake on \(i)") }
+        let events = log.since(0).events
+        XCTAssertEqual(events.count, MacEventLog.maxEvents)
+        XCTAssertEqual(events.first?.title, "My iPhone turned the VPN off")
+        XCTAssertEqual(events.last?.title, "Keep awake on \(MacEventLog.maxEvents + 9)")
     }
 }

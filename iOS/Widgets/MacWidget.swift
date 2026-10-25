@@ -4,13 +4,12 @@ import PassthroughCore
 import PassthroughUI
 
 /// The Mac at a glance, as the app last saw it: awake time counting down,
-/// battery, and shells waiting on a question. Tapping it opens the Mac tab.
+/// battery, and shells waiting on a question; once the Mac stops answering,
+/// or after `MacSnapshot.staleAfter`, when it was last heard. Tapping it opens the Mac tab.
 struct MacWidget: Widget {
-    static let kind = "MacWidget"
-
     var body: some WidgetConfiguration {
-        StaticConfiguration(kind: Self.kind, provider: Provider()) { entry in
-            MacWidgetView(snapshot: entry.snapshot)
+        StaticConfiguration(kind: MacSnapshot.widgetKind, provider: Provider()) { entry in
+            MacWidgetView(snapshot: entry.snapshot, stale: entry.stale)
                 .containerBackground(for: .widget) { PTColor.surface }
                 .widgetURL(AppLink.mac.url)
         }
@@ -22,29 +21,40 @@ struct MacWidget: Widget {
     struct Entry: TimelineEntry {
         let date: Date
         let snapshot: MacSnapshot?
+
+        /// Out of reach, or too long without word: say when it was last heard.
+        var stale: Bool {
+            guard let snapshot else { return false }
+            return !snapshot.reachable || date >= snapshot.updatedAt + MacSnapshot.staleAfter
+        }
     }
 
     struct Provider: TimelineProvider {
-        private var snapshot: MacSnapshot? { MacSnapshot.load(from: UserDefaults(suiteName: PassthroughProtocol.appGroup)) }
-
         func placeholder(in context: Context) -> Entry {
             Entry(date: .now, snapshot: MacSnapshot(macName: "MacBook Pro", reachable: true, awake: true, awakeUntil: .now + 11_400,
                                                     battery: 0.64, charging: false, vpnOn: false, runningShells: 2, waiting: 0, updatedAt: .now))
         }
 
         func getSnapshot(in context: Context, completion: @escaping (Entry) -> Void) {
-            completion(context.isPreview ? placeholder(in: context) : Entry(date: .now, snapshot: snapshot))
+            completion(context.isPreview ? placeholder(in: context) : Entry(date: .now, snapshot: MacSnapshot.load()))
         }
 
         func getTimeline(in context: Context, completion: @escaping (Timeline<Entry>) -> Void) {
-            // The app reloads this whenever it learns something; the countdown runs by itself meanwhile.
-            completion(Timeline(entries: [Entry(date: .now, snapshot: snapshot)], policy: .never))
+            // The app reloads this whenever it learns something; the countdown
+            // runs by itself meanwhile, until the snapshot goes stale.
+            let snapshot = MacSnapshot.load()
+            var entries = [Entry(date: .now, snapshot: snapshot)]
+            if let snapshot, snapshot.updatedAt + MacSnapshot.staleAfter > .now {
+                entries.append(Entry(date: snapshot.updatedAt + MacSnapshot.staleAfter, snapshot: snapshot))
+            }
+            completion(Timeline(entries: entries, policy: .never))
         }
     }
 }
 
 private struct MacWidgetView: View {
     let snapshot: MacSnapshot?
+    let stale: Bool
 
     var body: some View {
         if let snapshot {
@@ -59,7 +69,9 @@ private struct MacWidgetView: View {
                 }
                 Spacer(minLength: 0)
                 Group {
-                    if snapshot.awake, !snapshot.charging, let until = snapshot.awakeUntil, until > .now {
+                    if stale {
+                        Text("Last heard \(snapshot.updatedAt.formatted(date: .omitted, time: .shortened))")
+                    } else if snapshot.awake, !snapshot.charging, let until = snapshot.awakeUntil, until > .now {
                         Text(timerInterval: snapshot.updatedAt...until, countsDown: true, showsHours: true).monospacedDigit()
                     } else {
                         Text(snapshot.awake ? (snapshot.charging ? "Plugged in" : "Awake") : "Sleeps as usual")
@@ -85,8 +97,9 @@ private struct MacWidgetView: View {
     private func detail(_ s: MacSnapshot) -> String {
         if s.waiting > 0 { return s.waiting == 1 ? "A shell needs you" : "\(s.waiting) shells need you" }
         var parts: [String] = []
-        if let battery = s.battery { parts.append("\(Int((battery * 100).rounded()))%") }
+        if let battery = s.battery { parts.append(MacFormat.percent(battery)) }
         parts.append(s.runningShells == 1 ? "1 shell" : "\(s.runningShells) shells")
+        if stale { return parts.joined(separator: " · ") + (s.reachable ? "" : " · not answering") }
         return parts.joined(separator: " · ") + " · \(s.updatedAt.formatted(date: .omitted, time: .shortened))"
     }
 }

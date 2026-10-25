@@ -45,6 +45,8 @@ import androidx.core.content.ContextCompat
 import androidx.fragment.app.FragmentActivity
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import dev.dpatel.passthrough.core.MacControl
+import dev.dpatel.passthrough.core.MacFormat
+import dev.dpatel.passthrough.core.hasLid
 import dev.dpatel.passthrough.ui.LocalPT
 import dev.dpatel.passthrough.ui.PT
 import dev.dpatel.passthrough.ui.shell.ShellReach
@@ -65,12 +67,13 @@ internal object StepAway {
 
 /**
  * Before leaving the Mac: what would bite once you're gone, each with a fix
- * where this phone can make one. "Step away" then switches to Away.
+ * where this phone can make one. "Step away" then switches to Away; it's
+ * disabled, with the reason, when this phone can't change the Mac.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 internal fun StepAwaySheet(
-    shell: ShellViewModel, macName: String, online: Boolean,
+    shell: ShellViewModel, online: Boolean,
     onDismiss: () -> Unit, onSwitchNow: () -> Unit, onStepAway: () -> Unit,
 ) {
     val c = LocalPT.current
@@ -80,11 +83,13 @@ internal fun StepAwaySheet(
     val macs by shell.macs.collectAsStateWithLifecycle()
     val selected by shell.selectedMacID.collectAsStateWithLifecycle()
     val canControl = reach == ShellReach.READY && state?.control == true
+    val fromAnywhere = macs.firstOrNull { it.macID == selected }?.irohID != null
 
     data class Check(val ok: Boolean, val title: String, val detail: String, val fix: Pair<String, () -> Unit>? = null)
     val checks = buildList {
         val s = state
-        if (s?.awake == true) add(Check(true, "Stays awake, even with the lid closed", "It still sleeps at its battery limit or if it gets hot."))
+        if (s?.awake == true) add(Check(true, if (s.hasLid) "Stays awake, even with the lid closed" else "Stays awake",
+            if (s.hasLid) "It still sleeps at its battery limit or if it gets hot." else "It still sleeps if it gets hot."))
         else add(Check(false, "It will sleep",
             if (canControl) "Keep awake is off, so shells pause once it sleeps." else "Keep awake is off. Turn it on at the Mac, or allow Awake & VPN for this phone there.",
             if (canControl) "Turn on" to { shell.control(MacControl.Awake(true)) } else null))
@@ -92,19 +97,20 @@ internal fun StepAwaySheet(
         if (s != null && battery != null) {
             val minutes = s.minutesLeft
             when {
-                s.charging == true -> add(Check(true, "Plugged in", "${percent(battery)} and charging."))
-                minutes != null -> add(Check(minutes >= 120, duration(minutes) + " on battery",
-                    if (minutes < 120) "Plug it in if you'll be gone longer." else "Until its ${percent(s.batteryFloor ?: 0.0)} limit, at the current rate."))
-                else -> add(Check(battery > 0.5, "${percent(battery)} on battery", "Plug it in if you'll be gone a while."))
+                s.charging == true -> add(Check(true, "Plugged in", "${MacFormat.percent(battery)} and charging."))
+                minutes != null -> add(Check(minutes >= 120, MacFormat.duration(minutes) + " on battery",
+                    if (minutes < 120) "Plug it in if you'll be gone longer." else "Until its ${MacFormat.percent(s.batteryFloor ?: 0.0)} limit, at the current rate."))
+                else -> add(Check(battery > 0.5, "${MacFormat.percent(battery)} on battery", "Plug it in if you'll be gone a while."))
             }
         }
         if (online) add(Check(false, "Online through this phone",
             "When you take it, the Mac falls back to its own Wi-Fi. Switch now to be sure it's online before you go.", "Switch now" to onSwitchNow))
         else add(Check(true, "On its own connection", "It doesn't need this phone to stay online."))
-        if (macs.firstOrNull { it.macID == selected }?.irohID != null) add(Check(true, "Reachable from anywhere", "Its shell, from any network."))
-        else add(Check(false, "Reachable on this network only", "Turn on Reach from anywhere in Passthrough's Remote Shell settings on the Mac."))
+        if (fromAnywhere) add(Check(true, "Reachable from anywhere", "Its shell, from any network."))
+        else add(Check(false, "Reachable on this network only", "Turn on Reach this Mac from anywhere in Passthrough's Remote Shell settings on the Mac."))
         val running = sessions.count { it.running }
-        if (running > 0) add(Check(true, if (running == 1) "1 shell keeps running" else "$running shells keep running", "Pick them up from here, or from anywhere."))
+        if (running > 0) add(Check(true, if (running == 1) "1 shell keeps running" else "$running shells keep running",
+            if (fromAnywhere) "Pick them up from here, or from anywhere." else "Pick them up from here, from this network."))
     }
     val issues = checks.count { !it.ok }
 
@@ -115,7 +121,7 @@ internal fun StepAwaySheet(
             checks.forEachIndexed { i, check ->
                 Row(Modifier.fillMaxWidth().padding(vertical = 12.dp), horizontalArrangement = Arrangement.spacedBy(14.dp)) {
                     Box(Modifier.size(26.dp).background(if (check.ok) c.tint else PT.attention, CircleShape), contentAlignment = Alignment.Center) {
-                        Icon(if (check.ok) Icons.Filled.Check else Icons.Filled.PriorityHigh, null,
+                        Icon(if (check.ok) Icons.Filled.Check else Icons.Filled.PriorityHigh, if (check.ok) "OK" else "Needs attention",
                             tint = if (check.ok) PT.onTint else PT.onAttention, modifier = Modifier.size(15.dp))
                     }
                     Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
@@ -129,11 +135,13 @@ internal fun StepAwaySheet(
                 if (i < checks.size - 1) HorizontalDivider(Modifier.padding(start = 40.dp), color = c.cardBorder)
             }
             Spacer(Modifier.height(16.dp))
-            PrimaryButton("Step away", onStepAway, Icons.AutoMirrored.Filled.DirectionsWalk)
+            PrimaryButton("Step away", onStepAway, Icons.AutoMirrored.Filled.DirectionsWalk, enabled = canControl)
             Text(
-                when (issues) {
-                    0 -> "Switches to Away: Keep awake on, off this phone's connection."
-                    1 -> "1 thing above may stop it working while you're gone."
+                when {
+                    reach != ShellReach.READY -> "Can't reach your Mac right now, so this phone can't switch it to Away."
+                    !canControl -> "Your Mac doesn't let this phone change Keep awake. Turn on Awake & VPN for it in Passthrough's Remote Shell settings on the Mac."
+                    issues == 0 -> "Switches to Away: Keep awake on, off this phone's connection."
+                    issues == 1 -> "1 thing above may stop it working while you're gone."
                     else -> "$issues things above may stop it working while you're gone."
                 },
                 style = PT.display(12.sp, FontWeight.Normal), color = c.secondary,

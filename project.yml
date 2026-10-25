@@ -80,7 +80,8 @@ targets:
       path: iOS/App/Passthrough.entitlements
       properties:
         com.apple.developer.networking.networkextension: [packet-tunnel-provider]
-        com.apple.security.application-groups: [group.$(PASSTHROUGH_ID)]
+        # The second group is the widget's (MacSnapshot.appGroup): it holds no secrets.
+        com.apple.security.application-groups: [group.$(PASSTHROUGH_ID), group.$(PASSTHROUGH_ID).widget]
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: $(PASSTHROUGH_ID).ios
@@ -120,7 +121,8 @@ targets:
         PRODUCT_NAME: PassthroughTunnel
 
   # The Live Activity, the Home Screen widget and the Control Center buttons.
-  # It never reaches the Mac: it shows what the app last saw (app group) and opens the app.
+  # It never reaches the Mac: it shows what the app last saw (an app group of its
+  # own, not the one whose Keychain holds the pairing secrets) and opens the app.
   PassthroughWidgets:
     type: app-extension
     platform: iOS
@@ -143,7 +145,7 @@ targets:
     entitlements:
       path: iOS/Widgets/PassthroughWidgets.entitlements
       properties:
-        com.apple.security.application-groups: [group.$(PASSTHROUGH_ID)]
+        com.apple.security.application-groups: [group.$(PASSTHROUGH_ID).widget]
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: $(PASSTHROUGH_ID).ios.widgets

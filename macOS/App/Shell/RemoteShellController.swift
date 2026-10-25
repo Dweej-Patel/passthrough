@@ -202,7 +202,7 @@ final class RemoteShellController: ObservableObject {
         listener.onScreenViewer = screenViewerHandler()
         listener.macState = macStateProvider()
         listener.onMacControl = macControlHandler()
-        listener.macEvents = { [events] _, since in events.since(since) }
+        listener.macEvents = macEventsProvider()
         listener.onFailure = { [weak self, weak listener] error in
             Task { @MainActor in
                 guard let self, let listener, self.listener === listener else { return }
@@ -279,7 +279,7 @@ final class RemoteShellController: ObservableObject {
         irohStatus = IrohStatus(state: .starting)
         let store = self.store, reach = self.reach, relay = self.relay, onScreenViewer = screenViewerHandler()
         let screenViews = self.screenViews
-        let macState = macStateProvider(), onMacControl = macControlHandler(), events = self.events
+        let macState = macStateProvider(), onMacControl = macControlHandler(), macEvents = macEventsProvider()
         let screenSharingVerified = screenSharingVerifier()
         lifecycle.async { [weak self] in
             let host: IrohEndpointHost
@@ -320,7 +320,7 @@ final class RemoteShellController: ObservableObject {
             listener.onScreenViewer = onScreenViewer
             listener.macState = macState
             listener.onMacControl = onMacControl
-            listener.macEvents = { _, since in events.since(since) }
+            listener.macEvents = macEvents
             listener.onFailure = { [weak self] error in
                 Task { @MainActor in
                     guard let self, self.iroh === run else { return }
@@ -569,6 +569,13 @@ final class RemoteShellController: ObservableObject {
             state.control = store.controlAllowed(forPhone: phoneID)
             return state
         }
+    }
+
+    /// The timeline since a time. Every phone with shell access reads the
+    /// same one, so the listeners' phone ID goes unused.
+    private func macEventsProvider() -> @Sendable (String, Double) -> (events: [MacEvent], battery: [BatterySample]) {
+        let events = self.events
+        return { _, since in events.since(since) }
     }
 
     private func macControlHandler() -> @Sendable (String, String, MacControl) -> ShellError? {

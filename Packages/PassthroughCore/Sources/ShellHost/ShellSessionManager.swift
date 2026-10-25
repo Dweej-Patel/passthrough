@@ -53,12 +53,16 @@ public final class ShellSessionManager: @unchecked Sendable {
         /// the text, where its output starts, and until when it may show up.
         var pendingTitle: (text: String, from: Int, until: Int)?
         var lastOutputAt: Date
-        /// The last few KB of output, to look for a question once it goes quiet.
+        /// The last few KB of output since the last input, to look for a
+        /// question once it goes quiet. Input empties it: an answered
+        /// question must not be found again on the screen above the prompt.
         var tail = Data()
-        /// The question it seems to be waiting on (`ShellQuestion`); nil once output or input moves on.
+        /// The question it seems to be waiting on (`ShellQuestion`); nil once input answers it.
         var waiting: String?
         /// Looked for a question since the last output.
         var checkedSinceOutput = true
+        /// A look is already scheduled; output meanwhile pushes it back.
+        var lookScheduled = false
         var exitStatus: Int32?
         var running = true
         var attachment: ShellAttachment?
@@ -219,7 +223,9 @@ public final class ShellSessionManager: @unchecked Sendable {
             guard let session = table[id], session.running else { return }
             session.process.write(data)
             if !session.titleKnown { learnTitle(from: data, session: session) }
-            // Someone answered: it isn't waiting any more.
+            // Someone answered: it isn't waiting any more, and only what
+            // comes next can ask again.
+            session.tail.removeAll(keepingCapacity: true)
             if session.waiting != nil {
                 session.waiting = nil
                 notifyChange()
@@ -287,16 +293,25 @@ public final class ShellSessionManager: @unchecked Sendable {
         }
     }
 
-    /// Keeps the tail, clears a question the output moved past, and looks
-    /// again once the output has been quiet for `quietBeforeAsking`.
+    /// Keeps the tail and looks for a question once the output has been
+    /// quiet for `quietBeforeAsking`.
     private func noteOutput(_ data: Data, session: Session) {
         session.tail.append(data)
         if session.tail.count > Self.tailBytes { session.tail = session.tail.suffix(Self.tailBytes) }
         session.checkedSinceOutput = false
-        let count = session.outputCount
-        queue.asyncAfter(deadline: .now() + quietBeforeAsking) { [weak self, weak session] in
-            // A later output scheduled its own look.
-            guard let self, let session, session.outputCount == count else { return }
+        scheduleLook(session, after: quietBeforeAsking)
+    }
+
+    /// One pending look per session, however much output streams in: when it
+    /// fires early it waits out the rest of the quiet time.
+    private func scheduleLook(_ session: Session, after delay: TimeInterval) {
+        guard !session.lookScheduled else { return }
+        session.lookScheduled = true
+        queue.asyncAfter(deadline: .now() + delay) { [weak self, weak session] in
+            guard let self, let session else { return }
+            session.lookScheduled = false
+            let quiet = Date().timeIntervalSince(session.lastOutputAt)
+            if quiet < quietBeforeAsking { return scheduleLook(session, after: quietBeforeAsking - quiet) }
             lookForQuestion(session)
         }
     }

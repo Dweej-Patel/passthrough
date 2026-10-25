@@ -20,11 +20,11 @@ enum PanelSnapshots {
             ("8-vpn-over-wifi", { $0.debugApply(phase: .deviceFound, device: true, status: DeviceStatus(deviceName: "My iPhone", radio: "5G", battery: 0.82, hosting: "background"), traffic: true, vpn: "connected", underlay: "Wi-Fi") }),
             ("7-vpn-blocked", { $0.debugApply(phase: .connected, device: true, status: DeviceStatus(deviceName: "My iPhone", radio: "5G", battery: 0.82, hosting: "background"), traffic: true, vpn: "blocked") }),
             ("9-shell", { $0.debugApply(phase: .connected, device: true, status: DeviceStatus(deviceName: "My iPhone", radio: "5G", battery: 0.82, hosting: "background"), traffic: true); applyShell($0, .ready) }),
+            ("10-asking", { $0.debugApply(phase: .connected, device: true, status: DeviceStatus(deviceName: "My iPhone", radio: "5G", battery: 0.82, hosting: "background"), traffic: true); applyShell($0, .ready, asking: true) }),
         ]
         for (name, configure) in states {
             let session = SessionCoordinator()
             configure(session)
-            session.keepAwake.showAsHeldForSnapshot()
             for scheme in [ColorScheme.dark, .light] {
                 let view = MenuPanelView().environmentObject(session).environmentObject(session.vpnLayer).environmentObject(session.keepAwake).environmentObject(session.shell)
                     .background(Color(nsColor: .windowBackgroundColor))
@@ -84,10 +84,12 @@ enum PanelSnapshots {
         let appearance = NSAppearance(named: scheme == .dark ? .darkAqua : .aqua)
         let host = NSHostingView(rootView: view.frame(width: width))
         host.appearance = appearance
-        let height = host.fittingSize.height
-        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: width, height: height), styleMask: [.borderless], backing: .buffered, defer: false)
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: width, height: host.fittingSize.height), styleMask: [.borderless], backing: .buffered, defer: false)
         window.appearance = appearance
         window.contentView = host
+        // Let views that size themselves from a measurement (the panel's scrolling middle) settle first.
+        RunLoop.main.run(until: Date().addingTimeInterval(0.2))
+        let height = host.fittingSize.height
         host.frame = NSRect(x: 0, y: 0, width: width, height: height)
         host.layoutSubtreeIfNeeded()
         guard let rep = host.bitmapImageRepForCachingDisplay(in: host.bounds) else { return }
@@ -100,12 +102,12 @@ enum PanelSnapshots {
     private static func renderNotices(to directory: String) {
         let kinds: [(String, NotchNotice.Kind)] = [
             ("quiet", .quiet(title: "iPhone turned Keep awake on", detail: nil, symbol: "cup.and.saucer")),
-            ("lowered", .lowered(title: "iPhone turned the VPN off", detail: "Kill switch off too", action: "Turn back on") {}),
+            ("lowered", .lowered(title: "VPN turned off", detail: "by iPhone · kill switch off too", action: "Turn back on") {}),
         ]
         for (name, kind) in kinds {
             for notch in [CGFloat(32), 0] {
                 for scheme in [ColorScheme.dark, .light] {
-                    let view = NotchNoticeView(kind: kind, notchHeight: notch, snapshot: true) {}
+                    let view = NotchNoticeView(kind: kind, notchHeight: notch) {}
                         .environment(\.colorScheme, scheme)
                         .background(Color(red: 0.35, green: 0.42, blue: 0.55))
                     let renderer = ImageRenderer(content: view)
@@ -155,7 +157,7 @@ enum PanelSnapshots {
     }
 
     @MainActor
-    static func applyShell(_ session: SessionCoordinator, _ state: ShellState) {
+    static func applyShell(_ session: SessionCoordinator, _ state: ShellState, asking: Bool = false) {
         session.remoteShellEnabled = state != .off
         let now = Date().timeIntervalSince1970
         let phones = state == .ready ? [
@@ -163,7 +165,8 @@ enum PanelSnapshots {
             ShellPhone(phoneID: "p2", label: "Pixel 9", pairingSlot: "token.android.x", key: Data(count: 32), grantedAt: Date().addingTimeInterval(-86_400 * 12)),
         ] : []
         let sessions = state == .ready ? [
-            ShellSessionInfo(id: "s1", title: "~/dev/passthrough — npm run build", startedAt: now - 640, lastOutputAt: now - 2, running: true),
+            ShellSessionInfo(id: "s1", title: "~/dev/passthrough — npm run build", startedAt: now - 640, lastOutputAt: now - 2, running: true,
+                             waiting: asking ? "Overwrite package-lock.json? [y/N]" : nil),
         ] : []
         let history = state == .off ? [] : [
             ShellHistoryEntry(id: "s1", title: "~/dev/passthrough — npm run build", phoneLabel: "My iPhone", startedAt: now - 640, bytes: 182_000),

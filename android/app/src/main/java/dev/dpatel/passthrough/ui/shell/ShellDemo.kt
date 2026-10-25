@@ -23,6 +23,8 @@ import dev.dpatel.passthrough.core.ShellSessionInfo
  */
 internal object ShellDemo {
     const val EXTRA = "pt.demo.shell"
+    /** The session waiting on a question, which the timeline's asked and answered point at. */
+    private const val ASKING = "8F3A1C2E-5B7D-4E60-8F21-3C4D5E6F7A8B"
 
     fun reach(value: String): ShellReach = when (value) {
         "connecting" -> ShellReach.CONNECTING
@@ -43,7 +45,7 @@ internal object ShellDemo {
     fun sessions(extra: List<String> = emptyList()): List<ShellSessionInfo> {
         val t = now()
         return listOf(
-            ShellSessionInfo("8F3A1C2E-5B7D-4E60-8F21-3C4D5E6F7A8B", "claude", startedAt = t - 1900, lastOutputAt = t - 40, running = true,
+            ShellSessionInfo(ASKING, "claude", startedAt = t - 1900, lastOutputAt = t - 40, running = true,
                 waiting = "Do you want to make this edit to HomeView.swift?"),
             ShellSessionInfo("demo-1", "zsh — ~/dev/passthrough", startedAt = t - 4 * 60, lastOutputAt = t - 5, running = true),
             ShellSessionInfo("demo-2", "htop", startedAt = t - 3 * 3600, lastOutputAt = t - 60, running = true),
@@ -58,14 +60,14 @@ internal object ShellDemo {
         val start = now() - (2 * 3600 + 14 * 60)
         fun at(minutes: Double) = start + minutes * 60
         val events = listOf(
-            MacEvent(at(0.0), "awake", "Pixel 9 turned Keep awake on"),
-            MacEvent(at(0.2), "link", "Off Pixel 9's connection"),
-            MacEvent(at(18.0), "vpn", "VPN dropped", "Reconnecting", warning = true),
-            MacEvent(at(18.05), "vpn", "VPN reconnected after 2 s", "Kill switch held: nothing left without it"),
-            MacEvent(at(38.0), "shell", "npm run build finished", "exit 0 · 34 min", session = "demo-3"),
-            MacEvent(at(66.0), "asked", "claude asked", "Do you want to make this edit to HomeView.swift?", session = "demo-1"),
-            MacEvent(at(67.0), "answered", "claude got an answer", session = "demo-1"),
-            MacEvent(at(131.0), "power", "Plugged in at 41%"),
+            MacEvent(at(0.0), MacEvent.KIND_AWAKE, "Pixel 9 turned Keep awake on"),
+            MacEvent(at(0.2), MacEvent.KIND_LINK, "Off Pixel 9's connection"),
+            MacEvent(at(18.0), MacEvent.KIND_VPN, "VPN dropped", "Reconnecting", warning = true),
+            MacEvent(at(18.05), MacEvent.KIND_VPN, "VPN reconnected after 2 s", "Kill switch held: nothing left without it"),
+            MacEvent(at(38.0), MacEvent.KIND_SHELL, "npm run build finished", "exit 0 · 34 min", session = "demo-3"),
+            MacEvent(at(66.0), MacEvent.KIND_ASKED, "claude asked", "Do you want to make this edit to HomeView.swift?", session = ASKING),
+            MacEvent(at(67.0), MacEvent.KIND_ANSWERED, "claude got an answer", session = ASKING),
+            MacEvent(at(131.0), MacEvent.KIND_POWER, "Plugged in at 41%"),
         )
         val battery = (0..26).map { i ->
             val m = i * 5.0

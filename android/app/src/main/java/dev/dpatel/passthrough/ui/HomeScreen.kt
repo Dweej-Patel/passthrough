@@ -16,11 +16,8 @@ import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.safeDrawing
-import androidx.compose.foundation.layout.statusBars
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.rememberScrollState
@@ -88,7 +85,7 @@ fun HomeScreen(
     PTBackground(glow = if (state == ServiceState.Running) 1f else 0.45f) {
         Column(
             Modifier
-                .windowInsetsPadding(WindowInsets.statusBars)
+                .windowInsetsPadding(tabInsets())
                 .verticalScroll(scroll)
                 // Phone-width column on tablets and in landscape, centred.
                 .fillMaxWidth().wrapContentWidth().widthIn(max = 640.dp)

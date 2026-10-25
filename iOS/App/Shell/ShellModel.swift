@@ -69,10 +69,13 @@ final class ShellModel: ObservableObject {
     /// The selected Mac's state as it last said (kept while it can't be
     /// reached, as "last known"); nil from a Mac too old to send it.
     @Published private(set) var macState: MacState?
-    /// A Keep awake or VPN change sent and not yet answered.
-    @Published private(set) var pendingControl: MacControl?
+    /// Keep awake and VPN changes sent and not yet answered, per switch, so
+    /// a moment that changes both shows both waiting.
+    @Published private(set) var pendingControls: [MacSwitch: PendingControl] = [:]
     /// Why the Mac refused the last Keep awake or VPN change.
     @Published private(set) var controlError: ShellError?
+    /// The last Keep awake or VPN change wasn't sent: the Mac wasn't connected.
+    @Published private(set) var controlUnsent = false
     /// What happened on the selected Mac, as of the last `loadTimeline`.
     @Published private(set) var timeline: MacTimeline?
     @Published private(set) var timelineLoading = false
@@ -209,6 +212,22 @@ final class ShellModel: ObservableObject {
     /// What `.unreachable` says for the selected Mac.
     var reachMessage: String? { reach.message(fromAnywhere: clientTriesIroh) }
 
+    /// The selected Mac's shell grant, if it has one.
+    var selectedMac: ShellCredential? { macs.first { $0.macID == selectedMacID } }
+
+    /// The Mac on screen: the selected shell Mac, else the first paired one.
+    var selectedMacName: String { selectedMac?.macName ?? registry?.clients.first?.name ?? "Your Mac" }
+
+    /// The selected Mac's shell can be reached off its own network (iroh).
+    var selectedReachesFromAnywhere: Bool { selectedMac?.irohID != nil }
+
+    func isPending(_ change: MacSwitch) -> Bool { pendingControls[change] != nil }
+
+    /// Why the last Keep awake or VPN change didn't happen, if it didn't.
+    var controlMessage: String? {
+        controlError?.message ?? (controlUnsent ? "Your Mac isn't connected right now, so nothing changed. Try again once it shows as reachable." : nil)
+    }
+
     /// When the selected Mac last answered, if it ever has on this phone.
     var lastHeard: Date? {
         guard let mac = selectedMacID, let at = Self.lastHeardStore[mac] else { return nil }
@@ -291,9 +310,10 @@ final class ShellModel: ObservableObject {
             MainActor.assumeIsolated { self?.handle(event, generation: gen) }
         }
         self.client = client
-        clientMacID = credential.macID
         lastError = nil
+        // Before the new Mac's ID: a drop from `.ready` is "last heard" for the old one.
         reach = .connecting
+        clientMacID = credential.macID
         let discovered = ShellCredentials.discovered(among: browseResults, macName: credential.macName, shellMacCount: macs.count)
         dialedDiscovered = discovered
         client.connect(discovered: discovered)
@@ -363,24 +383,54 @@ final class ShellModel: ObservableObject {
         #if DEBUG
         if Self.demoState != nil { return demoTimeline(since: since) }
         #endif
-        guard reach == .ready, let client else { return }
+        guard reach == .ready, let client else { return timelineLoading = false }
         timelineLoading = true
         client.requestEvents(since: since)
     }
 
-    /// Asks the Mac to turn Keep awake or its VPN on or off; `macState` follows.
-    /// The caller has already asked for Face ID before turning the VPN off.
+    /// Asks the Mac to turn Keep awake or its VPN on or off; `macState` follows
+    /// (the Mac answers every accepted change). Not connected: says so in
+    /// `controlMessage`. The caller has already asked for Face ID before turning the VPN off.
     func control(_ change: MacControl) {
         controlError = nil
+        controlUnsent = false
         #if DEBUG
         if Self.demoState != nil { return demoControl(change) }
         #endif
-        guard reach == .ready, let client else { return }
-        pendingControl = change
+        guard reach == .ready, let client else { return controlUnsent = true }
+        let (key, on) = change.parts
+        let sent = Date()
+        pendingControls[key] = PendingControl(on: on, sent: sent)
         switch change {
         case .awake(let on): client.setAwake(on)
         case .vpn(let on): client.setVPN(on)
         }
+        // An answer that never comes (a dropped reply, an older Mac) doesn't spin forever.
+        Task { [weak self] in
+            try? await Task.sleep(for: .seconds(Self.controlTimeout))
+            guard let self, self.pendingControls[key]?.sent == sent else { return }
+            self.pendingControls[key] = nil
+        }
+    }
+
+    /// How long a change waits for the Mac before the switch stops spinning.
+    static let controlTimeout: TimeInterval = 8
+    /// The Mac answers an accepted change about a second later; a `macState`
+    /// this long after sending is that answer, whatever it says.
+    static let controlAnswerAfter: TimeInterval = 0.8
+
+    /// Ends the waits this state answers: the switch got there, or it's the Mac's reply.
+    private func settlePending(_ state: MacState) {
+        let now = Date()
+        for (key, pending) in pendingControls {
+            let reached = switch key {
+            case .awake: (state.awake == true) == pending.on
+            case .vpn: pending.on ? state.vpnUp : state.vpn == MacState.vpnOff
+            }
+            if reached || now.timeIntervalSince(pending.sent) >= Self.controlAnswerAfter { pendingControls[key] = nil }
+        }
+        if state.control == true, controlError == .notAllowed { controlError = nil }
+        if state.vpn != nil, controlError == .vpnNotSetUp { controlError = nil }
     }
 
     /// The saved transcript of a session, with the terminal sizes it was drawn
@@ -413,6 +463,7 @@ final class ShellModel: ObservableObject {
         case let .ready(path):
             reach = .ready
             redialsMade = nil
+            controlUnsent = false
             self.path = path
             // No `list`: the Mac sends `sessions` right after `ready`.
             // An ended session's log is already on screen; it has nothing more to send.
@@ -424,7 +475,7 @@ final class ShellModel: ObservableObject {
             apply(info)
         case let .macState(state):
             macState = state
-            pendingControl = nil
+            settlePending(state)
         case let .events(since, events, battery):
             timeline = MacTimeline(since: Date(timeIntervalSince1970: since), events: events, battery: battery, loadedAt: .now)
             timelineLoading = false
@@ -472,7 +523,7 @@ final class ShellModel: ObservableObject {
             timelineLoading = false
             timelineUnsupported = true
         case let .failed(error, _) where error == .notAllowed || error == .vpnNotSetUp:
-            pendingControl = nil
+            if error == .notAllowed { pendingControls = [:] } else { pendingControls[.vpn] = nil }
             controlError = error
         case let .failed(error, session):
             lastError = error
@@ -483,6 +534,8 @@ final class ShellModel: ObservableObject {
             let dropped = reach == .ready
             client = nil
             path = nil
+            pendingControls = [:]
+            timelineLoading = false
             finishTranscript(nil)
             guard error != nil, reach != .noAccess else { return }
             if dropped { redialsMade = 0 }
@@ -529,6 +582,8 @@ final class ShellModel: ObservableObject {
         client?.disconnect()
         client = nil
         path = nil
+        pendingControls = [:]
+        timelineLoading = false
         finishTranscript(nil)
     }
 
@@ -537,8 +592,9 @@ final class ShellModel: ObservableObject {
         timeline = nil
         timelineLoading = false
         timelineUnsupported = false
-        pendingControl = nil
+        pendingControls = [:]
         controlError = nil
+        controlUnsent = false
         sessions = []
         history = []
         historyLoaded = false
@@ -665,6 +721,9 @@ extension ShellModel {
         return Data(lines.joined(separator: "\r\n").utf8)
     }()
 
+    /// The demo session waiting on a question.
+    fileprivate static let demoAskingID = "8F3A1C2E-5B7D-4E60-8F21-3C4D5E6F7A8B"
+
     fileprivate func applyDemo(_ state: String) {
         let now = Date().timeIntervalSince1970
         guard state != "noAccess" else { return clear(.noAccess) }
@@ -684,14 +743,14 @@ extension ShellModel {
         }
         if state == "ready", macState == nil {
             macState = MacState(awake: true, battery: 0.64, charging: false, minutesLeft: 190, batteryFloor: 0.2, hot: false,
-                                vpn: MacState.vpnOn, vpnName: "NordVPN Germany", killSwitch: true, control: true)
+                                vpn: MacState.vpnOn, vpnName: "NordVPN Germany", killSwitch: true, control: true, internet: false)
         }
         if state == "unreachable", macState == nil {
-            macState = MacState(awake: false, awakeStopped: "battery", battery: 0.2, charging: false, batteryFloor: 0.2, control: true)
+            macState = MacState(awake: false, awakeStopped: MacState.stoppedBattery, battery: 0.2, charging: false, batteryFloor: 0.2, control: true)
         }
         if state == "ready", sessions.isEmpty {
             sessions = [
-                ShellSessionInfo(id: "8F3A1C2E-5B7D-4E60-8F21-3C4D5E6F7A8B", title: "claude", startedAt: now - 1900, lastOutputAt: now - 40, running: true,
+                ShellSessionInfo(id: Self.demoAskingID, title: "claude", startedAt: now - 1900, lastOutputAt: now - 40, running: true,
                                  waiting: "Do you want to make this edit to HomeView.swift?"),
                 ShellSessionInfo(id: "demo-1", title: "zsh — ~/dev/passthrough", startedAt: now - 760, lastOutputAt: now - 20, running: true),
                 ShellSessionInfo(id: "demo-2", title: "npm run build", startedAt: now - 5400, lastOutputAt: now - 3600, running: false, exitStatus: 0),
@@ -713,14 +772,14 @@ extension ShellModel {
         let start = Date.now - 2 * 3600 - 14 * 60
         func at(_ minutes: Double) -> Double { start.timeIntervalSince1970 + minutes * 60 }
         let events = [
-            MacEvent(t: at(0), kind: "awake", title: "iPhone turned Keep awake on"),
-            MacEvent(t: at(0.2), kind: "link", title: "Off iPhone's connection"),
-            MacEvent(t: at(18), kind: "vpn", title: "VPN dropped", detail: "Reconnecting", warning: true),
-            MacEvent(t: at(18.05), kind: "vpn", title: "VPN reconnected after 2 s", detail: "Kill switch held: nothing left without it"),
-            MacEvent(t: at(38), kind: "shell", title: "npm run build finished", detail: "exit 0 · 34 min", session: "demo-2"),
-            MacEvent(t: at(66), kind: "asked", title: "claude asked", detail: "Do you want to make this edit to HomeView.swift?", session: "demo-1"),
-            MacEvent(t: at(67), kind: "answered", title: "claude got an answer", session: "demo-1"),
-            MacEvent(t: at(131), kind: "power", title: "Plugged in at 41%"),
+            MacEvent(t: at(0), kind: MacEvent.kindAwake, title: "iPhone turned Keep awake on"),
+            MacEvent(t: at(0.2), kind: MacEvent.kindLink, title: "Off iPhone's connection"),
+            MacEvent(t: at(18), kind: MacEvent.kindVPN, title: "VPN dropped", detail: "Reconnecting", warning: true),
+            MacEvent(t: at(18.05), kind: MacEvent.kindVPN, title: "VPN reconnected after 2 s", detail: "Kill switch held: nothing left without it"),
+            MacEvent(t: at(38), kind: MacEvent.kindShell, title: "npm run build finished", detail: "exit 0 · 34 min", session: "demo-2"),
+            MacEvent(t: at(66), kind: MacEvent.kindAsked, title: "claude asked", detail: "Do you want to make this edit to HomeView.swift?", session: Self.demoAskingID),
+            MacEvent(t: at(67), kind: MacEvent.kindAnswered, title: "claude got an answer", session: Self.demoAskingID),
+            MacEvent(t: at(131), kind: MacEvent.kindPower, title: "Plugged in at 41%"),
         ]
         let battery = stride(from: 0.0, through: 134, by: 5).map { m in
             BatterySample(t: at(m), level: m < 131 ? 0.64 - 0.23 * m / 131 : 0.41 + 0.004 * (m - 131), charging: m >= 131 ? true : nil)
@@ -752,6 +811,24 @@ extension ShellModel {
     }
 }
 #endif
+
+/// Keep awake or the VPN: a switch on the Mac this phone can change.
+enum MacSwitch: Hashable { case awake, vpn }
+
+/// A change to one switch, sent and not yet answered.
+struct PendingControl: Equatable {
+    var on: Bool
+    var sent: Date
+}
+
+extension MacControl {
+    var parts: (MacSwitch, Bool) {
+        switch self {
+        case .awake(let on): (.awake, on)
+        case .vpn(let on): (.vpn, on)
+        }
+    }
+}
 
 /// What happened on a Mac since a time, as it last said.
 struct MacTimeline: Equatable {

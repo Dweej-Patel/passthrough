@@ -10,18 +10,16 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.statusBars
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.layout.wrapContentWidth
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.selection.toggleable
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
@@ -63,6 +61,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -71,12 +70,15 @@ import androidx.compose.ui.unit.sp
 import androidx.fragment.app.FragmentActivity
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import dev.dpatel.passthrough.core.MacControl
+import dev.dpatel.passthrough.core.MacFormat
 import dev.dpatel.passthrough.core.MacState
 import dev.dpatel.passthrough.core.MacStates
 import dev.dpatel.passthrough.core.Moment
-import dev.dpatel.passthrough.core.ShellError
 import dev.dpatel.passthrough.core.ShellPath
 import dev.dpatel.passthrough.core.ShellSessionInfo
+import dev.dpatel.passthrough.core.hasLid
+import dev.dpatel.passthrough.core.isAsking
+import dev.dpatel.passthrough.core.moment
 import dev.dpatel.passthrough.core.vpnUp
 import dev.dpatel.passthrough.service.ServiceState
 import dev.dpatel.passthrough.ui.AppViewModel
@@ -84,6 +86,8 @@ import dev.dpatel.passthrough.ui.LocalPT
 import dev.dpatel.passthrough.ui.PT
 import dev.dpatel.passthrough.ui.PTCard
 import dev.dpatel.passthrough.ui.PTCircleIconButton
+import dev.dpatel.passthrough.ui.tabInsets
+import dev.dpatel.passthrough.ui.shell.MacControlError
 import dev.dpatel.passthrough.ui.shell.ShellFormat
 import dev.dpatel.passthrough.ui.shell.ShellReach
 import dev.dpatel.passthrough.ui.shell.ShellViewModel
@@ -126,41 +130,49 @@ fun MacScreen(
     val macName = macs.firstOrNull { it.macID == selected }?.macName ?: paired.firstOrNull()?.name ?: "Your Mac"
     val online = macID != null && stats.macs.any { it.id == macID }
     val canControl = reach == ShellReach.READY && state?.control == true
+    val fromAnywhere = macs.firstOrNull { it.macID == selected }?.irohID != null
     val internetOn = service.isActive
     val running = sessions.filter { it.running }
 
     var picked by remember { mutableStateOf<Moment?>(null) }
     var momentNote by remember { mutableStateOf<String?>(null) }
+    // Saved across rotation; the moment by name (null: the switch itself was tapped).
     var confirmSleep by rememberSaveable { mutableStateOf(false) }
-    var vpnOffFor by remember { mutableStateOf<Moment?>(null) }
+    var sleepFor by rememberSaveable { mutableStateOf<String?>(null) }
     var askVpnOff by rememberSaveable { mutableStateOf(false) }
+    var vpnOffFor by rememberSaveable { mutableStateOf<String?>(null) }
     var showStepAway by rememberSaveable { mutableStateOf(false) }
 
+    fun planFor(moment: Moment) = state?.let { moment.plan(it.internet ?: internetOn, it.awake == true, it.vpnUp) }
+
     fun apply(moment: Moment) {
-        val target = moment.switches ?: return
-        val s = state ?: return
+        val plan = planFor(moment) ?: return
         picked = moment
-        if (target.internet != internetOn) onPower()
-        if (target.awake != (s.awake == true)) shell.control(MacControl.Awake(target.awake))
-        target.vpn?.let { if (it != s.vpnUp) shell.control(MacControl.Vpn(it)) }
+        // Only this phone's own sharing can change from here.
+        plan.internet?.let { if (it != internetOn) onPower() }
+        plan.awake?.let { shell.control(MacControl.Awake(it)) }
+        plan.vpn?.let { shell.control(MacControl.Vpn(it)) }
         scope.launch { delay(8_000); if (picked == moment) picked = null }
+    }
+
+    /** Past the sleep warning: lowering protection asks first; raising it never does. */
+    fun afterSleep(moment: Moment) {
+        if (planFor(moment)?.lowersVpn == true) { vpnOffFor = moment.name; askVpnOff = true } else apply(moment)
     }
 
     fun pick(moment: Moment) {
         momentNote = null
-        val target = moment.switches ?: return
-        val s = state ?: return
-        if (target.vpn == true && s.vpn == null) {
+        val plan = planFor(moment) ?: return
+        if (plan.needsVpn && state?.vpn == null) {
             momentNote = "${moment.title} needs a VPN set up on $macName. Add one in Passthrough's VPN settings on the Mac."
             return
         }
-        // Lowering protection asks first; raising it never does.
-        if (target.vpn == false && s.vpnUp) { vpnOffFor = moment; askVpnOff = true } else apply(moment)
+        if (plan.letsSleep && running.isNotEmpty()) { sleepFor = moment.name; confirmSleep = true } else afterSleep(moment)
     }
 
     Column(
         Modifier
-            .windowInsetsPadding(WindowInsets.statusBars)
+            .windowInsetsPadding(tabInsets())
             .verticalScroll(rememberScrollState())
             .fillMaxWidth().wrapContentWidth().widthIn(max = 640.dp)
             .padding(horizontal = 16.dp)
@@ -179,12 +191,12 @@ fun MacScreen(
         )
 
         if (reach == ShellReach.READY) {
-            running.filter { it.waiting != null }.forEach { s -> NeedsYouCard(s) { onOpenTerminal(s.id) } }
+            running.filter { it.isAsking }.forEach { s -> NeedsYouCard(s) { onOpenTerminal(s.id) } }
         }
 
         val s = state
         if (s != null && canControl) {
-            val current = Moment.current(internetOn, s.awake == true, s.vpnUp)
+            val current = s.moment(phoneSharing = internetOn)
             LaunchedEffect(current) { if (current == picked) picked = null }
             val shown = picked ?: current
             Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
@@ -197,24 +209,11 @@ fun MacScreen(
                         ) { Text(m.title) }
                     }
                 }
-                Text(momentNote ?: shown.caption, style = PT.display(13.sp, FontWeight.Normal), color = c.secondary, modifier = Modifier.padding(horizontal = 4.dp))
-                Row(
-                    Modifier.fillMaxWidth().heightIn(min = 56.dp)
-                        .background(c.card, RoundedCornerShape(18.dp)).border(1.dp, c.cardBorder, RoundedCornerShape(18.dp))
-                        .clickable(role = Role.Button) { showStepAway = true }.padding(12.dp),
-                    verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp),
-                ) {
-                    Box(Modifier.size(32.dp).background(c.tint.copy(alpha = 0.16f), CircleShape), contentAlignment = Alignment.Center) {
-                        Icon(Icons.AutoMirrored.Filled.DirectionsWalk, null, tint = c.tintText, modifier = Modifier.size(18.dp))
-                    }
-                    Column(Modifier.weight(1f)) {
-                        Text("Step away", style = PT.display(15.sp, FontWeight.SemiBold), color = c.primary)
-                        Text("Check what would stop it working while you're gone", style = PT.display(12.sp, FontWeight.Normal), color = c.secondary)
-                    }
-                    Icon(Icons.Filled.ChevronRight, null, tint = c.tertiary)
-                }
+                Text(momentNote ?: shown.caption("this phone", fromAnywhere), style = PT.display(13.sp, FontWeight.Normal), color = c.secondary, modifier = Modifier.padding(horizontal = 4.dp))
             }
         }
+        // Shown even without control: the sheet says what this phone can't do.
+        if (paired.isNotEmpty() || macs.isNotEmpty()) StepAwayRow { showStepAway = true }
 
         // Internet, Keep awake, VPN.
         Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
@@ -233,10 +232,10 @@ fun MacScreen(
                 if (s != null) {
                     Tile(
                         "Keep awake", awakeDetail(s), Icons.Filled.Coffee, on = s.awake == true, enabled = canControl,
-                        pending = pending is MacControl.Awake, modifier = Modifier.weight(1f),
+                        pending = pending.any { it is MacControl.Awake }, modifier = Modifier.weight(1f),
                     ) {
                         if (s.awake == true) {
-                            if (running.isNotEmpty()) confirmSleep = true else shell.control(MacControl.Awake(false))
+                            if (running.isNotEmpty()) { sleepFor = null; confirmSleep = true } else shell.control(MacControl.Awake(false))
                         } else shell.control(MacControl.Awake(true))
                     }
                 } else Spacer(Modifier.weight(1f))
@@ -245,14 +244,14 @@ fun MacScreen(
                 Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                     Tile(
                         "VPN", vpnDetail(s), Icons.Filled.Shield, on = s.vpnUp, enabled = canControl && s.vpn != null,
-                        pending = pending is MacControl.Vpn, warning = s.vpn == MacStates.VPN_FAILED, modifier = Modifier.weight(1f),
+                        pending = pending.any { it is MacControl.Vpn }, warning = s.vpn == MacStates.VPN_FAILED, modifier = Modifier.weight(1f),
                     ) {
                         if (s.vpn == MacStates.VPN_OFF) shell.control(MacControl.Vpn(true)) else { vpnOffFor = null; askVpnOff = true }
                     }
                     Spacer(Modifier.weight(1f))
                 }
             }
-            val note = controlError?.let(::controlMessage)
+            val note = controlError?.let { controlMessage(it, macName) }
                 ?: if (reach == ShellReach.READY && s != null && s.control != true)
                     "Keep awake and the VPN can be changed from $macName only. To change them from here, turn on Awake & VPN for this phone in Passthrough's Remote Shell settings on the Mac."
                 else null
@@ -263,16 +262,23 @@ fun MacScreen(
     }
 
     if (confirmSleep) {
+        val moment = sleepFor?.let(Moment::valueOf)
         AlertDialog(
-            onDismissRequest = { confirmSleep = false },
+            onDismissRequest = { confirmSleep = false; sleepFor = null },
             title = { Text("Let $macName sleep?") },
             text = { Text(if (running.size == 1) "1 running shell pauses until it wakes." else "${running.size} running shells pause until it wakes.") },
-            confirmButton = { TextButton(onClick = { confirmSleep = false; shell.control(MacControl.Awake(false)) }) { Text("Let it sleep") } },
-            dismissButton = { TextButton(onClick = { confirmSleep = false }) { Text("Cancel") } },
+            confirmButton = {
+                TextButton(onClick = {
+                    confirmSleep = false
+                    sleepFor = null
+                    if (moment != null) afterSleep(moment) else shell.control(MacControl.Awake(false))
+                }) { Text("Let it sleep") }
+            },
+            dismissButton = { TextButton(onClick = { confirmSleep = false; sleepFor = null }) { Text("Cancel") } },
         )
     }
     if (askVpnOff) {
-        val moment = vpnOffFor
+        val moment = vpnOffFor?.let(Moment::valueOf)
         VpnOffDialog(
             macName = macName,
             killSwitch = state?.killSwitch == true,
@@ -281,14 +287,14 @@ fun MacScreen(
             onDismiss = { askVpnOff = false; vpnOffFor = null },
             onConfirmed = {
                 askVpnOff = false
-                if (moment != null) apply(moment) else shell.control(MacControl.Vpn(false))
                 vpnOffFor = null
+                if (moment != null) apply(moment) else shell.control(MacControl.Vpn(false))
             },
         )
     }
     if (showStepAway) {
         StepAwaySheet(
-            shell = shell, macName = macName, online = online, onDismiss = { showStepAway = false },
+            shell = shell, online = online, onDismiss = { showStepAway = false },
             onSwitchNow = { if (internetOn) onPower() },
             onStepAway = {
                 showStepAway = false
@@ -299,26 +305,21 @@ fun MacScreen(
     }
 }
 
-internal fun controlMessage(error: ShellError): String? = when (error) {
-    ShellError.NOT_ALLOWED -> "Your Mac doesn't let this phone change Keep awake and the VPN. Turn on Awake & VPN for it in Passthrough's Remote Shell settings on your Mac."
-    ShellError.VPN_NOT_SET_UP -> "Your Mac has no VPN set up yet. Add one in Passthrough's VPN settings on the Mac."
-    else -> null
+internal fun controlMessage(error: MacControlError, macName: String): String = when (error) {
+    MacControlError.NOT_ALLOWED -> "Your Mac doesn't let this phone change Keep awake and the VPN. Turn on Awake & VPN for it in Passthrough's Remote Shell settings on your Mac."
+    MacControlError.VPN_NOT_SET_UP -> "Your Mac has no VPN set up yet. Add one in Passthrough's VPN settings on the Mac."
+    MacControlError.NOT_SENT -> "Couldn't reach $macName, so nothing changed. Try again once it's reachable."
 }
-
-/** "3 h 10 m", "45 m". */
-internal fun duration(minutes: Int): String = if (minutes >= 60) "${minutes / 60} h ${minutes % 60} m" else "$minutes m"
-
-internal fun percent(fraction: Double): String = "${Math.round(fraction * 100)}%"
 
 private fun awakeDetail(s: MacState): String {
     if (s.awake == true) {
         if (s.charging == true) return "On, plugged in"
-        s.minutesLeft?.let { return duration(it) + " left" }
-        return "On, even lid closed"
+        s.minutesLeft?.let { return MacFormat.duration(it) + " left" }
+        return if (s.hasLid) "On, even lid closed" else "On"
     }
     return when (s.awakeStopped) {
-        "battery" -> "Stopped at battery limit"
-        "heat" -> "Stopped: running hot"
+        MacStates.STOPPED_BATTERY -> "Stopped at battery limit"
+        MacStates.STOPPED_HEAT -> "Stopped: running hot"
         else -> "Sleeps as usual"
     }
 }
@@ -344,18 +345,24 @@ private fun HeroCard(
         reach == ShellReach.CONNECTING -> if (redialing) "Reconnecting…" else "Connecting…"
         reach == ShellReach.UNREACHABLE -> "Can't reach it"
         reach == ShellReach.NO_ACCESS -> if (online) "Online through this phone" else "Paired"
-        else -> "Needs you"
+        // "Needs you" is kept for a shell waiting on a question.
+        reach == ShellReach.LOCKED -> "Unlock to continue"
+        reach == ShellReach.NEEDS_PASSCODE -> "Set a screen lock"
+        reach == ShellReach.KEY_UNAVAILABLE -> "Plug in to renew access"
+        else -> "Not on this phone"
+    }
+    val pathDetail = when (path) {
+        ShellPath.DIRECT -> "From anywhere, directly"
+        ShellPath.RELAY -> "From anywhere, through a relay"
+        ShellPath.LOCAL -> "On this network"
+        else -> "Connected"
     }
     val detail = when {
         !paired -> "Pair once over USB."
         reach == ShellReach.READY && awake && state != null ->
-            if (state.charging == true) "Plugged in" else state.minutesLeft?.let { duration(it) + " left" } ?: "Even with the lid closed"
-        reach == ShellReach.READY -> when (path) {
-            ShellPath.DIRECT -> "From anywhere, directly"
-            ShellPath.RELAY -> "From anywhere, through a relay"
-            ShellPath.LOCAL -> "On this network"
-            else -> "Connected"
-        }
+            if (state.charging == true) "Plugged in"
+            else state.minutesLeft?.let { MacFormat.duration(it) + " left" } ?: if (state.hasLid) "Even with the lid closed" else pathDetail
+        reach == ShellReach.READY -> pathDetail
         reach == ShellReach.NO_ACCESS && online -> "Plugged in over USB"
         else -> null
     }
@@ -385,10 +392,10 @@ private fun HeroCard(
                     Modifier.fillMaxWidth().background(PT.attention.copy(alpha = 0.1f), RoundedCornerShape(16.dp)).padding(12.dp),
                     verticalArrangement = Arrangement.spacedBy(4.dp),
                 ) {
-                    if (state?.awakeStopped == "battery") {
+                    if (state?.awakeStopped == MacStates.STOPPED_BATTERY) {
                         Text("It most likely went to sleep", style = PT.display(14.sp, FontWeight.SemiBold), color = c.attentionText)
                         Text(
-                            "Its battery reached your ${percent(state.batteryFloor ?: 0.2)} limit, so Keep awake let it sleep. Plug it in and it wakes for the next connection.",
+                            "Its battery reached your ${MacFormat.percent(state.batteryFloor ?: 0.2)} limit, so Keep awake let it sleep. Plug it in and it wakes for the next connection.",
                             style = PT.display(14.sp, FontWeight.Normal), color = c.primary,
                         )
                     } else {
@@ -409,11 +416,11 @@ private fun HeroCard(
 private fun BatteryLine(state: MacState, battery: Double, awake: Boolean) {
     val c = LocalPT.current
     val caption = when {
-        state.charging == true -> "${percent(battery)}, charging"
-        !awake -> "${percent(battery)} on battery"
-        else -> "${percent(battery)} now · sleeps " + listOfNotNull(state.batteryFloor?.let { "at ${percent(it)}" }, "if it gets hot").joinToString(" or ")
+        state.charging == true -> "${MacFormat.percent(battery)}, charging"
+        !awake -> "${MacFormat.percent(battery)} on battery"
+        else -> "${MacFormat.percent(battery)} now · sleeps " + listOfNotNull(state.batteryFloor?.let { "at ${MacFormat.percent(it)}" }, "if it gets hot").joinToString(" or ")
     }
-    Column(Modifier.semantics { contentDescription = "Battery ${percent(battery)}. $caption" }, verticalArrangement = Arrangement.spacedBy(6.dp)) {
+    Column(Modifier.semantics { contentDescription = "Battery ${MacFormat.percent(battery)}. $caption" }, verticalArrangement = Arrangement.spacedBy(6.dp)) {
         Box(Modifier.fillMaxWidth().height(6.dp).background(c.fill, RoundedCornerShape(3.dp))) {
             Box(Modifier.fillMaxWidth(battery.toFloat().coerceIn(0.03f, 1f)).height(6.dp).background(if (awake) c.tint else c.secondary, RoundedCornerShape(3.dp)))
             val floor = state.batteryFloor
@@ -447,6 +454,26 @@ private fun NeedsYouCard(session: ShellSessionInfo, onOpen: () -> Unit) {
 }
 
 @Composable
+private fun StepAwayRow(onClick: () -> Unit) {
+    val c = LocalPT.current
+    Row(
+        Modifier.fillMaxWidth().heightIn(min = 56.dp)
+            .background(c.card, RoundedCornerShape(18.dp)).border(1.dp, c.cardBorder, RoundedCornerShape(18.dp))
+            .clickable(role = Role.Button, onClick = onClick).padding(12.dp),
+        verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp),
+    ) {
+        Box(Modifier.size(32.dp).background(c.tint.copy(alpha = 0.16f), CircleShape), contentAlignment = Alignment.Center) {
+            Icon(Icons.AutoMirrored.Filled.DirectionsWalk, null, tint = c.tintText, modifier = Modifier.size(18.dp))
+        }
+        Column(Modifier.weight(1f)) {
+            Text("Step away", style = PT.display(15.sp, FontWeight.SemiBold), color = c.primary)
+            Text("Check what would stop it working while you're gone", style = PT.display(12.sp, FontWeight.Normal), color = c.secondary)
+        }
+        Icon(Icons.Filled.ChevronRight, null, tint = c.tertiary)
+    }
+}
+
+@Composable
 private fun Tile(
     title: String, detail: String, icon: ImageVector, on: Boolean, modifier: Modifier = Modifier,
     enabled: Boolean = true, pending: Boolean = false, warning: Boolean = false, onClick: () -> Unit,
@@ -458,7 +485,8 @@ private fun Tile(
         modifier.heightIn(min = 104.dp)
             .background(fill, shape)
             .border(1.dp, if (on) c.tint.copy(alpha = 0.45f) else c.cardBorder, shape)
-            .clickable(enabled = enabled, role = Role.Switch, onClick = onClick)
+            .toggleable(value = on, enabled = enabled, role = Role.Switch, onValueChange = { onClick() })
+            .semantics { if (pending) stateDescription = "Waiting for the Mac" }
             .padding(14.dp),
         verticalArrangement = Arrangement.spacedBy(10.dp),
     ) {
@@ -498,7 +526,7 @@ private fun ShellsPreview(sessions: List<ShellSessionInfo>, macName: String, onO
                     Modifier.fillMaxWidth().heightIn(min = 52.dp).clickable(role = Role.Button) { onOpen(s.id) },
                     verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp),
                 ) {
-                    Box(Modifier.size(8.dp).background(if (s.running && s.waiting != null) PT.attention else if (s.running) c.tint else c.tertiary, CircleShape))
+                    Box(Modifier.size(8.dp).background(if (s.isAsking) PT.attention else if (s.running) c.tint else c.tertiary, CircleShape))
                     Column(Modifier.weight(1f)) {
                         Text(s.title, style = PT.display(15.sp, FontWeight.SemiBold), color = c.primary, maxLines = 1, overflow = TextOverflow.Ellipsis)
                         Text(ShellFormat.status(s, now), style = PT.display(12.sp, FontWeight.Normal), color = c.secondary, maxLines = 1, overflow = TextOverflow.Ellipsis)

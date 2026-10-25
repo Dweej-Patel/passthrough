@@ -96,7 +96,8 @@ public final class ShellListener: @unchecked Sendable {
     }
 
     /// A phone asked to change Keep awake or the VPN: nil accepts it (the
-    /// new state follows through `pushMacState()`), an error refuses it.
+    /// new state follows through `pushMacState()`, and that phone gets a
+    /// `macState` a second later either way), an error refuses it.
     /// Asked on the listener's queue, so it must not block. Unset: refused
     /// as `bad_request`, as a Mac that doesn't know the request would.
     public var onMacControl: (@Sendable (_ phoneID: String, _ label: String, _ change: MacControl) -> ShellError?)? {
@@ -707,6 +708,9 @@ final class ShellConnection: ShellAttachment, @unchecked Sendable {
         send(message)
     }
 
+    /// How long after an accepted `setAwake`/`setVPN` its `macState` answer goes out.
+    static let controlAnswerDelay: TimeInterval = 1
+
     /// Asked for the screen: being relayed to Screen Sharing, or about to be.
     var isScreen: Bool { screenChecking || screenDial != nil || screenRelay != nil || screenVideo != nil }
 
@@ -797,6 +801,10 @@ final class ShellConnection: ShellAttachment, @unchecked Sendable {
             guard let on = message.on, let gate else { return fail(.badRequest) }
             let change: MacControl = message.t == ShellEnvelope.setAwake ? .awake(on) : .vpn(on)
             if let refused = gate.control(phoneID, label, change) { return fail(refused) }
+            // The Mac may hold its state (a limit refusing Keep awake, a VPN
+            // already on): answer anyway, once the change has had its moment,
+            // so the phone always hears back.
+            queue.asyncAfter(deadline: .now() + Self.controlAnswerDelay) { [weak self] in self?.sendMacState() }
         case ShellEnvelope.list:
             var reply = ShellEnvelope(t: ShellEnvelope.sessions)
             reply.sessions = manager.sessions

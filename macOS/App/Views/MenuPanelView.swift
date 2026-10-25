@@ -28,26 +28,39 @@ struct MenuPanelView: View {
     private var panel: some View {
         VStack(spacing: 12) {
             header
-            switch session.phase {
-            case .helperRequired: HelperCard()
-            case .pairingRequired: PairingCard()
-            default: EmptyView()
+            AskingRows()
+            ScrollView {
+                VStack(spacing: 12) {
+                    switch session.phase {
+                    case .helperRequired: HelperCard()
+                    case .pairingRequired: PairingCard()
+                    default: EmptyView()
+                    }
+                    MacMoments()
+                    ModuleTiles()
+                    FlowCard()
+                    if session.phase.isConnected {
+                        ThroughputPanel()
+                        TopAppsPanel(usage: session.appUsage)
+                    }
+                    PhoneHereSection()
+                    HeadingOutTip()
+                }
+                .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { bodyHeight = $0 }
             }
-            MacMoments()
-            ModuleTiles()
-            FlowCard()
-            if session.phase.isConnected {
-                ThroughputPanel()
-                TopAppsPanel(usage: session.appUsage)
-            }
-            PhoneHereSection()
-            HeadingOutTip()
+            .scrollBounceBehavior(.basedOnSize)
+            .frame(height: min(bodyHeight, maxBodyHeight))
             Divider().opacity(0.6)
             footer
         }
         .padding(14)
         .frame(width: 356)
     }
+
+    /// The middle of the panel scrolls once it's taller than the screen leaves
+    /// room for, under the header and above the footer.
+    @State private var bodyHeight: CGFloat = 600
+    private var maxBodyHeight: CGFloat { max(240, (NSScreen.screens.first?.visibleFrame.height ?? 800) - 190) }
 
     // MARK: Header
 
@@ -90,7 +103,7 @@ struct MenuPanelView: View {
         guard session.phase.isConnected else { return statusLine }
         var parts = [session.linkName.replacingOccurrences(of: "over ", with: "")]
         if let radio = session.phoneStatus?.radio { parts.append(radio) }
-        if let battery = session.phoneStatus?.battery { parts.append("phone \(Int(battery * 100))%") }
+        if let battery = session.phoneStatus?.battery { parts.append("phone \(MacFormat.percent(battery))") }
         return parts.joined(separator: " · ")
     }
 
@@ -150,12 +163,16 @@ struct MenuPanelView: View {
         }
     }
 
-    /// "Mac 64% · heat normal".
+    /// "Mac 64% · charging", "Mac 30% · running hot"; "heat normal" on a desktop Mac.
     private var macHealth: String {
         let battery = keepAwake.battery
         var parts: [String] = []
-        if battery.hasBattery, battery.percent >= 0 { parts.append("Mac \(battery.percent)%\(battery.isOnAC ? ", charging" : "")") }
-        parts.append(KeepAwakeController.isHot(keepAwake.thermal) ? "running \(KeepAwakeController.describe(keepAwake.thermal))" : "heat normal")
+        if battery.hasBattery, battery.percent >= 0 { parts.append("Mac \(battery.percent)%\(battery.isOnAC ? " · charging" : "")") }
+        if KeepAwakeController.isHot(keepAwake.thermal) {
+            parts.append("running \(KeepAwakeController.describe(keepAwake.thermal))")
+        } else if parts.isEmpty {
+            parts.append("heat normal")
+        }
         return parts.joined(separator: " · ")
     }
 }
@@ -163,66 +180,79 @@ struct MenuPanelView: View {
 // MARK: - Moments
 
 /// Desk, Away and Public, as on the phone: read off the switches (so a change
-/// from either side shows on both), and set together. At the Mac itself,
-/// turning the VPN off needs no Face ID.
+/// from either side shows on both), and set together through the coordinator
+/// (`SessionCoordinator.apply(_:)`). At the Mac itself, turning the VPN off
+/// needs no Face ID; letting it sleep with shells running asks first.
 struct MacMoments: View {
     @EnvironmentObject private var session: SessionCoordinator
     @EnvironmentObject private var vpnLayer: VPNLayer
     @EnvironmentObject private var keepAwake: KeepAwakeController
+    @EnvironmentObject private var shell: RemoteShellController
     @Environment(\.openSettings) private var openSettings
-    @State private var picked: Moment?
-    @State private var note: String?
-
-    private var current: Moment {
-        Moment.current(internet: session.phase.isConnected || session.phase.isBusy, awake: keepAwake.isOn, vpn: vpnLayer.isWanted)
-    }
+    /// A moment that lets the Mac sleep with shells running, waiting on "Switch".
+    @State private var asking: Moment?
 
     var body: some View {
-        let shown = picked ?? current
+        let current = session.currentMoment
+        let shown = session.pendingMoment ?? current
         VStack(alignment: .leading, spacing: 6) {
-            Picker("Moment", selection: Binding(get: { shown }, set: { apply($0) })) {
+            Picker("Moment", selection: Binding(get: { shown }, set: { pick($0) })) {
                 ForEach(Moment.choices) { Text($0.title).tag($0) }
             }
             .pickerStyle(.segmented)
             .labelsHidden()
-            Text(note ?? Self.caption(shown))
-                .font(.caption).foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
-                .contentTransition(.opacity)
+            if let moment = asking, let warning = session.sleepWarning {
+                SleepConfirm(warning: warning, action: "Switch to \(moment.title)") {
+                    asking = nil
+                    apply(moment)
+                } cancel: { asking = nil }
+            } else {
+                Text(session.momentNote ?? shown.caption(phone: "the phone", fromAnywhere: shell.reachAnywhere))
+                    .font(.caption).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .contentTransition(.opacity)
+            }
         }
-        .onChange(of: current) { _, now in if now == picked { picked = nil } }
+        .onChange(of: current) { _, now in
+            if now == session.pendingMoment { session.pendingMoment = nil } else if session.pendingMoment == nil { session.momentNote = nil }
+        }
     }
 
-    static func caption(_ moment: Moment) -> String {
-        switch moment {
-        case .desk: "Online through the phone. The Mac sleeps as usual."
-        case .away: "Stays awake with the lid closed, on its own Wi-Fi, reachable from anywhere. The VPN stays as it is."
-        case .public: "Online through the phone, with everything going through the VPN."
-        case .custom: "Your own mix of the switches below."
-        }
+    private func pick(_ moment: Moment) {
+        asking = nil
+        if session.plan(moment)?.letsSleep == true, session.sleepWarning != nil { return asking = moment }
+        apply(moment)
     }
 
     private func apply(_ moment: Moment) {
-        note = nil
-        guard let target = moment.switches else { return }
-        if target.vpn == true, vpnLayer.activeProfile == nil {
-            note = "\(moment.title) needs a VPN. Add one in Settings ▸ VPN."
-            return SettingsWindow.show(openSettings, tab: .vpn)
+        if !session.apply(moment) { SettingsWindow.show(openSettings, tab: .vpn) }
+    }
+}
+
+/// Asks before letting the Mac sleep while phones' shells run: asleep, it pauses them.
+struct SleepConfirm: View {
+    let warning: String
+    let action: String
+    let confirm: () -> Void
+    let cancel: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Label(warning, systemImage: "exclamationmark.triangle.fill")
+                .font(.caption)
+                .foregroundStyle(PTColor.attentionText)
+                .fixedSize(horizontal: false, vertical: true)
+            HStack(spacing: 8) {
+                Button(action, action: confirm).buttonStyle(PTPillButtonStyle())
+                Button("Cancel", action: cancel)
+                    .controlSize(.small)
+                    .buttonStyle(.plain)
+                    .foregroundStyle(.secondary)
+            }
         }
-        let online = session.phase.isConnected || session.phase.isBusy
-        if target.internet, !online, session.device == nil {
-            note = "Plug in the phone (or bring it near, for the wireless link) to go online through it."
-        }
-        picked = moment
-        if target.internet != online {
-            if target.internet { if session.device != nil { session.connect() } } else { session.disconnect() }
-        }
-        if target.awake != keepAwake.isOn { keepAwake.set(target.awake) }
-        if let vpn = target.vpn, vpn != vpnLayer.isWanted { vpnLayer.set(vpn) }
-        Task { @MainActor in
-            try? await Task.sleep(for: .seconds(8))
-            if picked == moment { picked = nil }
-        }
+        .padding(10)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(PTColor.attention.opacity(0.1), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
     }
 }
 
@@ -233,6 +263,8 @@ struct ModuleTiles: View {
     @EnvironmentObject private var vpnLayer: VPNLayer
     @EnvironmentObject private var keepAwake: KeepAwakeController
     @Environment(\.openSettings) private var openSettings
+    /// Keep awake turning off with shells running, waiting on "Turn off".
+    @State private var askingSleep = false
 
     var body: some View {
         VStack(spacing: 6) {
@@ -241,14 +273,22 @@ struct ModuleTiles: View {
                            on: session.phase.isConnected, busy: session.phase.isBusy) { session.toggle() }
                     .disabled(session.device == nil && !session.phase.isConnected && !session.phase.isBusy)
                     .help("Route this Mac through the phone")
-                ModuleTile(title: "Awake", detail: awakeDetail, symbol: "cup.and.saucer",
-                           on: keepAwake.isOn, warning: keepAwake.isOn && !keepAwake.lidCloseHeld) { keepAwake.set(!keepAwake.isOn) }
-                    .help("Keeps the Mac awake for long sessions, including with the lid closed. A closed, running Mac in a bag can overheat and drain the battery.")
+                ModuleTile(title: "Keep awake", detail: awakeDetail, symbol: "cup.and.saucer",
+                           on: keepAwake.isOn, warning: keepAwake.isOn && keepAwake.hasLid && !keepAwake.lidCloseHeld) { toggleAwake() }
+                    .help(keepAwake.hasLid
+                          ? "Keeps the Mac awake for long sessions, including with the lid closed. A closed, running Mac in a bag can overheat and drain the battery."
+                          : "Keeps the Mac awake for long sessions. The screen still turns off and locks.")
                 ModuleTile(title: "VPN", detail: vpnDetail, symbol: "lock.shield",
-                           on: vpnLayer.isWanted, busy: vpnLayer.status.isBusy, warning: vpnLayer.isWanted && vpnFailing) {
+                           on: vpnLayer.isWanted, busy: vpnLayer.status.isBusy, warning: vpnLayer.isWanted && vpnLayer.status.isDown) {
                     if vpnLayer.activeProfile != nil { vpnLayer.set(!vpnLayer.isWanted) } else { SettingsWindow.show(openSettings, tab: .vpn) }
                 }
                 .help("Wraps everything the Mac sends in one encrypted VPN flow (WireGuard or OpenVPN), so the network only ever sees a VPN.")
+            }
+            if askingSleep, let warning = session.sleepWarning {
+                SleepConfirm(warning: warning, action: "Turn off") {
+                    askingSleep = false
+                    keepAwake.set(false)
+                } cancel: { askingSleep = false }
             }
             ForEach(notes, id: \.self) { text in
                 Label(text, systemImage: "exclamationmark.triangle.fill")
@@ -260,9 +300,13 @@ struct ModuleTiles: View {
             }
         }
         .animation(.easeOut(duration: 0.2), value: notes)
+        .onChange(of: keepAwake.isOn) { _, on in if !on { askingSleep = false } }
     }
 
-    private var vpnFailing: Bool { ["failed", "held", "blocked", "reconnecting"].contains(vpnLayer.status.state) }
+    private func toggleAwake() {
+        if keepAwake.isOn, session.sleepWarning != nil { return askingSleep.toggle() }
+        keepAwake.set(!keepAwake.isOn)
+    }
 
     private var internetDetail: String {
         switch session.phase {
@@ -274,8 +318,9 @@ struct ModuleTiles: View {
 
     private var awakeDetail: String {
         guard keepAwake.isOn else { return "Sleeps as usual" }
+        guard keepAwake.hasLid else { return "On" }
         if !keepAwake.lidCloseHeld { return "Idle only" }
-        if keepAwake.batteryAutoOff, keepAwake.battery.hasBattery, !keepAwake.battery.isOnAC { return "Off at \(keepAwake.batteryAutoOffThreshold)%" }
+        if keepAwake.batteryAutoOff, !keepAwake.battery.isOnAC { return "Off at \(keepAwake.batteryAutoOffThreshold)%" }
         return "Lid closed OK"
     }
 
@@ -296,7 +341,7 @@ struct ModuleTiles: View {
     private var notes: [String] {
         var list: [String] = []
         if let reason = keepAwake.blockedReason { list.append(reason) }
-        if keepAwake.isOn, !keepAwake.lidCloseHeld { list.append("Closing the lid will still sleep the Mac until the helper is approved.") }
+        if keepAwake.isOn, keepAwake.hasLid, !keepAwake.lidCloseHeld { list.append("Closing the lid will still sleep the Mac until the helper is approved.") }
         if let vpn = vpnLayer.error ?? (vpnLayer.isWanted ? vpnLayer.status.warning : nil) { list.append(vpn) }
         if vpnLayer.isWanted, vpnLayer.status.state == "held" { list.append("Traffic is blocked since Passthrough stopped. Turn the VPN off to release it.") }
         return list
@@ -349,8 +394,37 @@ struct ModuleTile: View {
 
 // MARK: - Your phone is here
 
-/// What phones are doing on this Mac right now: a shell waiting on a
-/// question, someone viewing the screen (with Stop), shells running.
+/// Shells waiting on a question, just under the header: the most urgent thing
+/// in the panel. The answer is typed on the phone.
+struct AskingRows: View {
+    @EnvironmentObject private var shell: RemoteShellController
+
+    var body: some View {
+        let asking = shell.sessions.filter(\.isAsking)
+        if !asking.isEmpty {
+            VStack(spacing: 4) {
+                ForEach(asking, id: \.id) { s in
+                    HStack(spacing: 10) {
+                        Circle().fill(PTColor.attention).frame(width: 8, height: 8).frame(width: 18)
+                        VStack(alignment: .leading, spacing: 1) {
+                            Text("\(s.title) is asking").font(.system(size: 12.5, weight: .medium)).lineLimit(1).truncationMode(.middle)
+                            Text(s.waiting ?? "").font(.system(size: 11, design: .monospaced)).foregroundStyle(.secondary).lineLimit(1)
+                        }
+                        Spacer(minLength: 6)
+                    }
+                    .padding(.horizontal, 10)
+                    .frame(minHeight: 36)
+                    .background(PTColor.attention.opacity(0.1), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+                    .help("Answer it from your phone: Passthrough shows it there.")
+                    .accessibilityElement(children: .combine)
+                }
+            }
+        }
+    }
+}
+
+/// What phones are doing on this Mac right now: someone viewing the screen
+/// (with Stop), shells running, or what Remote shell still needs.
 struct PhoneHereSection: View {
     @EnvironmentObject private var session: SessionCoordinator
     @EnvironmentObject private var shell: RemoteShellController
@@ -359,25 +433,20 @@ struct PhoneHereSection: View {
 
     var body: some View {
         let running = shell.sessions.filter(\.running)
-        let waiting = running.filter { $0.waiting != nil }
         if session.remoteShellEnabled || !running.isEmpty || !shell.screenViewers.isEmpty {
             VStack(alignment: .leading, spacing: 2) {
-                Text("From your phone")
-                    .font(.system(size: 11, weight: .semibold))
-                    .foregroundStyle(.secondary)
-                    .padding(.horizontal, 4)
-                    .padding(.bottom, 2)
-                ForEach(waiting, id: \.id) { s in
-                    row(symbol: nil, attention: true) {
-                        VStack(alignment: .leading, spacing: 1) {
-                            Text("\(s.title) is asking").font(.system(size: 12.5, weight: .medium))
-                            Text(s.waiting ?? "").font(.system(size: 11, design: .monospaced)).foregroundStyle(.secondary).lineLimit(1)
-                        }
-                    } trailing: {
-                        EmptyView()
-                    }
-                    .help("Answer it from your phone: Passthrough shows it there.")
+                HStack {
+                    Text("From your phone")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                    Button("What phones may change") { SettingsWindow.show(openSettings, tab: .remoteShell) }
+                        .buttonStyle(.link)
+                        .font(.system(size: 11))
+                        .help("Keep awake, the VPN and the screen, for each phone: Settings ▸ Remote Shell")
                 }
+                .padding(.horizontal, 4)
+                .padding(.bottom, 2)
                 ForEach(shell.screenViewers) { viewer in
                     row(symbol: "eye", attention: false) {
                         Text("\(viewer.label) is viewing this screen").font(.system(size: 12.5, weight: .medium))
@@ -415,17 +484,11 @@ struct PhoneHereSection: View {
         return "Remote shell ready for \(shell.phones.count) phone\(shell.phones.count == 1 ? "" : "s")"
     }
 
-    private func row<Content: View, Trailing: View>(symbol: String?, attention: Bool, @ViewBuilder content: () -> Content,
+    private func row<Content: View, Trailing: View>(symbol: String, attention: Bool, @ViewBuilder content: () -> Content,
                                                     @ViewBuilder trailing: () -> Trailing) -> some View {
         HStack(spacing: 10) {
-            Group {
-                if let symbol {
-                    Image(systemName: symbol).font(.system(size: 12, weight: .semibold)).foregroundStyle(.secondary)
-                } else {
-                    Circle().fill(PTColor.attention).frame(width: 8, height: 8)
-                }
-            }
-            .frame(width: 18)
+            Image(systemName: symbol).font(.system(size: 12, weight: .semibold)).foregroundStyle(.secondary)
+                .frame(width: 18)
             content()
             Spacer(minLength: 6)
             trailing()
@@ -447,20 +510,18 @@ struct HeadingOutTip: View {
     @AppStorage("headingOutTipQuietUntil") private var quietUntil: Double = 0
 
     var body: some View {
-        let desk = Moment.current(internet: session.phase.isConnected, awake: keepAwake.isOn, vpn: vpnLayer.isWanted) == .desk
-        if desk, session.phase.isConnected, session.remoteShellEnabled, Date.now.timeIntervalSince1970 > quietUntil {
+        if session.currentMoment == .desk, session.phase.isConnected, session.remoteShellEnabled, Date.now.timeIntervalSince1970 > quietUntil {
             HStack(alignment: .top, spacing: 10) {
                 Image(systemName: "figure.walk").font(.system(size: 13, weight: .semibold)).foregroundStyle(PTColor.tintText)
                 VStack(alignment: .leading, spacing: 8) {
-                    Text("Heading out? Pick **Away** before you go. The Mac stays awake with the lid shut and moves to its own Wi-Fi when you take the phone.")
+                    Text(keepAwake.hasLid
+                         ? "Heading out? Pick **Away** before you go. The Mac stays awake with the lid shut and moves to its own Wi-Fi when you take the phone."
+                         : "Heading out? Pick **Away** before you go. The Mac stays awake and moves to its own network when you take the phone.")
                         .font(.caption)
                         .fixedSize(horizontal: false, vertical: true)
                     HStack(spacing: 8) {
-                        Button("Away") {
-                            keepAwake.set(true)
-                            session.disconnect()
-                        }
-                        .buttonStyle(PTPillButtonStyle())
+                        Button("Away") { session.apply(.away) }
+                            .buttonStyle(PTPillButtonStyle())
                         Button("Not now") {
                             quietUntil = Calendar.current.startOfDay(for: .now.addingTimeInterval(86_400)).timeIntervalSince1970
                         }

@@ -6,10 +6,12 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.WindowInsetsSides
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.statusBars
+import androidx.compose.foundation.layout.only
+import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.layout.wrapContentWidth
@@ -27,10 +29,6 @@ import androidx.compose.material3.NavigationBarItemDefaults
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.getValue
-import androidx.compose.runtime.saveable.rememberSaveable
-import androidx.compose.runtime.setValue
-import androidx.compose.runtime.mutableStateOf
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -41,12 +39,24 @@ import dev.dpatel.passthrough.ui.shell.ShellViewModel
 
 enum class MainTab { MAC, SHELLS, ACTIVITY, PHONE }
 
-/** The app's sections, as on iOS: the Mac first, its shells, what happened, then this phone's own sharing. */
+/**
+ * A tab's content insets: the status bar and any cutout or side bars (landscape),
+ * but not the bottom, which the navigation bar already pads.
+ */
+@Composable
+fun tabInsets(): WindowInsets = WindowInsets.safeDrawing.only(WindowInsetsSides.Horizontal + WindowInsetsSides.Top)
+
+/**
+ * The app's sections, as on iOS: the Mac first, its shells, what happened, then
+ * this phone's own sharing. [tab] is held by the caller, so it survives the
+ * terminal, history and Settings screens that replace this one.
+ */
 @Composable
 fun MainTabs(
     vm: AppViewModel,
     shell: ShellViewModel,
-    initial: MainTab,
+    tab: MainTab,
+    onTab: (MainTab) -> Unit,
     onPower: () -> Unit,
     onPair: () -> Unit,
     onSettings: () -> Unit,
@@ -55,7 +65,6 @@ fun MainTabs(
     phoneScroll: ScrollState,
 ) {
     val c = LocalPT.current
-    var tab by rememberSaveable { mutableStateOf(initial) }
     Scaffold(
         containerColor = c.background,
         contentWindowInsets = WindowInsets(0),
@@ -68,7 +77,7 @@ fun MainTabs(
                     Triple(MainTab.PHONE, "Phone", Icons.Filled.PhoneAndroid),
                 ).forEach { (t, label, icon) ->
                     NavigationBarItem(
-                        selected = tab == t, onClick = { tab = t },
+                        selected = tab == t, onClick = { onTab(t) },
                         icon = { Icon(icon, null) }, label = { Text(label) },
                         colors = NavigationBarItemDefaults.colors(
                             selectedIconColor = PT.onTint, indicatorColor = c.tint,
@@ -81,7 +90,7 @@ fun MainTabs(
     ) { padding ->
         Box(Modifier.fillMaxSize().background(c.background).padding(padding)) {
             when (tab) {
-                MainTab.MAC -> MacScreen(vm, shell, onPower, onPair, onSettings, onOpenTerminal, onShells = { tab = MainTab.SHELLS })
+                MainTab.MAC -> MacScreen(vm, shell, onPower, onPair, onSettings, onOpenTerminal, onShells = { onTab(MainTab.SHELLS) })
                 MainTab.SHELLS -> ShellsTab(shell, onOpenTerminal, onShellHistory)
                 MainTab.ACTIVITY -> ActivityScreen(vm, shell, onOpenTerminal = { onOpenTerminal(it) }, onHistory = onShellHistory)
                 MainTab.PHONE -> HomeScreen(vm, onPower = onPower, onPair = onPair, onSettings = onSettings, scroll = phoneScroll)
@@ -94,7 +103,7 @@ fun MainTabs(
 private fun ShellsTab(shell: ShellViewModel, onOpenTerminal: (String?) -> Unit, onShellHistory: () -> Unit) {
     Column(
         Modifier
-            .windowInsetsPadding(WindowInsets.statusBars)
+            .windowInsetsPadding(tabInsets())
             .verticalScroll(rememberScrollState())
             .fillMaxWidth().wrapContentWidth().widthIn(max = 640.dp)
             .padding(horizontal = 16.dp)

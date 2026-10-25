@@ -62,8 +62,8 @@ private struct MenuBarLabel: View {
             online: session.phase.isConnected,
             awake: keepAwake.isOn,
             vpn: vpnLayer.status.isConnected,
-            needsYou: shell.sessions.contains { $0.running && $0.waiting != nil },
-            problem: vpnLayer.isWanted && ["failed", "held"].contains(vpnLayer.status.state))))
+            needsYou: shell.sessions.contains(where: \.isAsking),
+            problem: vpnLayer.isWanted && vpnLayer.status.isFailing)))
     }
 }
 

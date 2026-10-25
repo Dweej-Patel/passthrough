@@ -20,7 +20,9 @@ final class KeepAwakeController: ObservableObject {
     /// Auto-disable when the battery falls to the threshold (on battery power).
     @AppStorage("batteryAutoOff") var batteryAutoOff = true
     @AppStorage("batteryAutoOffThreshold") var batteryAutoOffThreshold = 20
-    @Published private(set) var battery = BatteryReading(percent: -1, isOnAC: true, hasBattery: false)
+    @Published private(set) var battery = BatteryMonitor.read()
+    /// A laptop: a desktop Mac has no battery and no lid to close.
+    var hasLid: Bool { battery.hasBattery }
     /// Auto-disable when macOS reports the Mac running hot.
     @AppStorage("thermalAutoOff") var thermalAutoOff = true
     @Published private(set) var thermal = ProcessInfo.processInfo.thermalState
@@ -29,11 +31,11 @@ final class KeepAwakeController: ObservableObject {
     private enum Cause { case battery, heat }
     /// What `blockedReason` is about, so each check clears only its own.
     @Published private var blockedBy: Cause?
-    /// Why keep-awake last turned itself off or refused to turn on: "battery" or "heat".
+    /// Why keep-awake last turned itself off or refused to turn on: `MacState.stoppedBattery` or `stoppedHeat`.
     var stoppedBy: String? {
         switch blockedBy {
-        case .battery: "battery"
-        case .heat: "heat"
+        case .battery: MacState.stoppedBattery
+        case .heat: MacState.stoppedHeat
         case nil: nil
         }
     }
@@ -45,16 +47,15 @@ final class KeepAwakeController: ObservableObject {
     init(helper: HelperClient) {
         self.helper = helper
         power.apply(isOn)
+        // Snapshot runs start no helper: draw a charging laptop, with lid-close sleep held once Keep awake is on.
+        if SessionCoordinator.isSnapshotRun {
+            battery = BatteryReading(percent: 82, isOnAC: true, hasBattery: true)
+            lidCloseHeld = isOn
+        }
         thermalObserver = NotificationCenter.default.addObserver(forName: ProcessInfo.thermalStateDidChangeNotification,
                                                                  object: nil, queue: .main) { [weak self] _ in
             Task { @MainActor in self?.checkThermal() }
         }
-    }
-
-    /// Snapshot runs start no helper: draw Keep awake as it looks once the helper holds lid-close sleep.
-    func showAsHeldForSnapshot() {
-        guard SessionCoordinator.isSnapshotRun else { return }
-        lidCloseHeld = isOn
     }
 
     /// Re-asserts lid-close sleep once the helper is known to be current.

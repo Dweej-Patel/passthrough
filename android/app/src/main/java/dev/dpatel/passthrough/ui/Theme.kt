@@ -79,6 +79,9 @@ object PT {
         TextStyle(fontFamily = rounded, fontSize = size, fontWeight = weight, fontFeatureSettings = "tnum")
 }
 
+/** The dark scheme's card and surface. */
+private val DarkCard = Color(0xFF15171C)
+
 /** Label colours matching iOS's primary/secondary/tertiary for the current scheme. */
 data class PTColors(val dark: Boolean) {
     val primary = if (dark) Color.White else Color.Black
@@ -86,7 +89,7 @@ data class PTColors(val dark: Boolean) {
     val tertiary = if (dark) Color(0x4DEBEBF5) else Color(0x4D3C3C43)
     val background = if (dark) Color(0xFF0A0B0E) else Color(0xFFF2F2F7)
     /** Solid content cards; glass is left to floating bars and sheets. */
-    val card = if (dark) Color(0xFF15171C) else Color.White
+    val card = if (dark) DarkCard else Color.White
     val cardBorder = if (dark) Color.White.copy(alpha = 0.08f) else Color.Black.copy(alpha = 0.06f)
     /** Mint, the "on" fill; darker in light mode so it reads on white. */
     val tint = if (dark) Color(0xFF5EE6B5) else Color(0xFF3DD9A0)
@@ -106,9 +109,9 @@ fun PassthroughTheme(content: @Composable () -> Unit) {
     val dark = isSystemInDarkTheme()
     val colors = PTColors(dark)
     val scheme = if (dark) darkColorScheme(
-        primary = colors.tint, secondary = PT.accentStart, background = colors.background, surface = Color(0xFF15171C),
+        primary = colors.tint, secondary = PT.accentStart, background = colors.background, surface = DarkCard,
         onPrimary = PT.onTint, onBackground = Color.White, onSurface = Color.White, error = PT.danger,
-        surfaceContainerHigh = Color(0xFF1E2027), surfaceContainerLow = Color(0xFF15171C), surfaceContainer = Color(0xFF15171C),
+        surfaceContainerHigh = Color(0xFF1E2027), surfaceContainerLow = DarkCard, surfaceContainer = DarkCard,
         secondaryContainer = colors.cardOn, onSecondaryContainer = colors.tintText,
     ) else lightColorScheme(
         primary = colors.tint, secondary = Color(0xFF14A89B), background = colors.background, surface = Color.White,

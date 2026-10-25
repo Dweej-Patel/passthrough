@@ -15,7 +15,7 @@ For iPhone and Android. No accounts, no Passthrough server.</p>
     <img src="docs/images/mac-panel-dark.png" width="290" alt="The Mac's menu-bar panel: online through the iPhone, the moments, three switches, the route and live speeds, and what the phone is doing on the Mac">
   </picture>
   &nbsp;
-  <img src="docs/images/iphone-activity.png" width="250" alt="The Activity tab: shells finished, questions answered and dropouts, the Mac's battery as a line, and a timeline of what happened">
+  <img src="docs/images/iphone-activity.png" width="250" alt="The Activity tab: shells finished, questions answered and connection drops, the Mac's battery as a line, and a timeline of what happened">
 </p>
 
 ## What it does
@@ -29,7 +29,7 @@ For iPhone and Android. No accounts, no Passthrough server.</p>
 
 ## Built around where you are
 
-Instead of four switches, pick a **moment**. **Desk**: online through the phone, the Mac sleeps as usual. **Away**: the Mac stays awake on its own Wi-Fi, reachable from anywhere. **Public**: everything through the VPN. Both the phone and the Mac read the moment off the switches, so they always agree.
+Instead of four switches, pick a **moment**. **Desk**: online through the phone, the Mac sleeps as usual. **Away**: the Mac stays awake on its own Wi-Fi, reachable from anywhere. **Public**: everything through the VPN. The moment is read off the Mac's switches, so the phone and the Mac always show the same one.
 
 <p align="center">
   <img src="docs/images/iphone-step-away.png" width="250" alt="Step away: a checklist before leaving the Mac, with a warning that it's only reachable on this network">
@@ -41,13 +41,13 @@ Instead of four switches, pick a **moment**. **Desk**: online through the phone,
 
 * **Step away** checks what would bite once you're gone (asleep with the lid shut, battery, the Mac still online through the phone you're taking, reachable from anywhere) and fixes what it can before switching to Away.
 * **Needs you**: when a shell goes quiet on a question, like Claude asking to make an edit, the phone shows it and opens the terminal right there.
-* **While you were away**: a timeline of what happened on the Mac, from the VPN reconnecting to a build finishing, with its battery as a line.
+* **While you were away**: a timeline of what happened on the Mac, from the VPN reconnecting to a long-running shell finishing, with its battery as a line.
 * **Without opening the app** (iPhone): a Live Activity counts down the Mac's awake time in the Dynamic Island and on the Lock Screen; a widget, Control Center buttons and Shortcuts cover the rest.
 
 ## On the Mac
 
 <p align="center">
-  <img src="docs/images/mac-notice-notch.png" width="380" alt="A notice growing out of the notch: iPhone turned the VPN off, with Turn back on">
+  <img src="docs/images/mac-notice-notch.png" width="380" alt="A notice growing out of the notch: VPN turned off by iPhone, kill switch off too, with Turn back on">
   &nbsp;
   <img src="docs/images/mac-notice-capsule.png" width="380" alt="The same kind of notice as a capsule under the menu bar on a screen without a notch">
 </p>

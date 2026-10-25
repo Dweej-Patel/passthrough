@@ -73,7 +73,7 @@ final class ShellProtocolTests: XCTestCase {
         let lines = try messages.compactMap { $0["line"] as? String }.map { try ShellEnvelope.decode(Data($0.utf8)) }
         let states = lines.filter { $0.t == ShellEnvelope.macState }.compactMap(\.state)
         XCTAssertEqual(states.first, MacState(awake: true, battery: 0.64, charging: false, minutesLeft: 190, batteryFloor: 0.2, hot: false,
-                                              vpn: MacState.vpnOn, vpnName: "NordVPN Germany", killSwitch: true, control: true))
+                                              vpn: MacState.vpnOn, vpnName: "NordVPN Germany", killSwitch: true, control: true, internet: true))
         XCTAssertEqual(states.last, MacState(awake: false, awakeStopped: "battery", battery: 0.19, charging: false, batteryFloor: 0.2, control: false))
         XCTAssertEqual(lines.first { $0.t == ShellEnvelope.setAwake }?.on, false)
         XCTAssertEqual(lines.first { $0.t == ShellEnvelope.setVPN }?.on, true)

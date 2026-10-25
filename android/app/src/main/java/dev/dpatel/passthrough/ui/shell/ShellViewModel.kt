@@ -1,6 +1,7 @@
 package dev.dpatel.passthrough.ui.shell
 
 import android.app.Application
+import android.os.SystemClock
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import dev.dpatel.passthrough.BuildConfig
@@ -106,12 +107,14 @@ class ShellViewModel(app: Application) : AndroidViewModel(app) {
     /** The selected Mac's state as it last said (kept while it can't be reached); null from an older Mac. */
     private val _macState = MutableStateFlow<MacState?>(null)
     val macState: StateFlow<MacState?> = _macState.asStateFlow()
-    /** A Keep awake or VPN change sent and not yet answered. */
-    private val _pendingControl = MutableStateFlow<MacControl?>(null)
-    val pendingControl: StateFlow<MacControl?> = _pendingControl.asStateFlow()
-    /** Why the Mac refused the last Keep awake or VPN change. */
-    private val _controlError = MutableStateFlow<ShellError?>(null)
-    val controlError: StateFlow<ShellError?> = _controlError.asStateFlow()
+    /** Keep awake and VPN changes the Mac doesn't show yet, one per switch (see [MacControls]). */
+    private val _pendingControl = MutableStateFlow<List<MacControl>>(emptyList())
+    val pendingControl: StateFlow<List<MacControl>> = _pendingControl.asStateFlow()
+    /** Why the last Keep awake or VPN change didn't happen. */
+    private val _controlError = MutableStateFlow<MacControlError?>(null)
+    val controlError: StateFlow<MacControlError?> = _controlError.asStateFlow()
+    private val controls = MacControls()
+    private var controlTimer: Job? = null
     /** What happened on the selected Mac, as of the last [loadTimeline]. */
     private val _timeline = MutableStateFlow<MacTimeline?>(null)
     val timeline: StateFlow<MacTimeline?> = _timeline.asStateFlow()
@@ -455,9 +458,13 @@ class ShellViewModel(app: Application) : AndroidViewModel(app) {
         if (_activeSession.value == id) _activeSession.value = null
     }
 
-    /** Asks the Mac to turn Keep awake or its VPN on or off; [macState] follows. The caller asked for the biometric before VPN off. */
+    /**
+     * Asks the Mac to turn Keep awake or its VPN on or off; [macState] follows.
+     * The caller asked for the biometric before VPN off. Made while the Mac
+     * can't be reached (a PIN prompt stopped the activity, say), it's held and
+     * sent once connected again, or given up after [MacControls.HOLD_MS].
+     */
     fun control(change: MacControl) {
-        _controlError.value = null
         if (demo != null) {
             _macState.value = _macState.value?.let {
                 when (change) {
@@ -467,12 +474,29 @@ class ShellViewModel(app: Application) : AndroidViewModel(app) {
             }
             return
         }
-        val conn = connection ?: return
-        if (_reach.value != ShellReach.READY) return
-        _pendingControl.value = change
-        when (change) {
-            is MacControl.Awake -> conn.setAwake(change.on)
-            is MacControl.Vpn -> conn.setVPN(change.on)
+        val conn = connection?.takeIf { _reach.value == ShellReach.READY }
+        controls.request(change, ready = conn != null, SystemClock.elapsedRealtime())
+        conn?.let { send(it, change) }
+        publishControls()
+    }
+
+    private fun send(conn: ShellConnection, change: MacControl) = when (change) {
+        is MacControl.Awake -> conn.setAwake(change.on)
+        is MacControl.Vpn -> conn.setVPN(change.on)
+    }
+
+    /** Shows [controls]; while anything is pending, checks once a second for what to stop waiting on. */
+    private fun publishControls() {
+        _pendingControl.value = controls.pending
+        _controlError.value = controls.error
+        if (controls.pending.isEmpty() || controlTimer?.isActive == true) return
+        controlTimer = viewModelScope.launch {
+            while (controls.pending.isNotEmpty()) {
+                delay(1_000)
+                controls.expire(SystemClock.elapsedRealtime())
+                _pendingControl.value = controls.pending
+                _controlError.value = controls.error
+            }
         }
     }
 
@@ -519,6 +543,8 @@ class ShellViewModel(app: Application) : AndroidViewModel(app) {
                 stopRedialing()
                 _reach.value = ShellReach.READY
                 _path.value = event.path
+                connection?.let { conn -> controls.readied(SystemClock.elapsedRealtime()).forEach { send(conn, it) } }
+                publishControls()
                 // No list(): the Mac sends `sessions` right after `ready`.
                 // An ended session's log is already on screen; it has nothing more to send.
                 _activeSession.value?.takeUnless { _ended.value.isEnded(it) }?.let { active ->
@@ -529,7 +555,8 @@ class ShellViewModel(app: Application) : AndroidViewModel(app) {
             is ShellEvent.MacInfo -> apply(event)
             is ShellEvent.MacStateChanged -> {
                 _macState.value = event.state
-                _pendingControl.value = null
+                controls.stateArrived(event.state)
+                publishControls()
             }
             is ShellEvent.Events -> {
                 _timeline.value = MacTimeline(event.since, event.events, event.battery, System.currentTimeMillis() / 1000.0)
@@ -579,8 +606,8 @@ class ShellViewModel(app: Application) : AndroidViewModel(app) {
             }
             is ShellEvent.Failed -> {
                 if (event.error == ShellError.NOT_ALLOWED || event.error == ShellError.VPN_NOT_SET_UP) {
-                    _pendingControl.value = null
-                    _controlError.value = event.error
+                    controls.refused(event.error)
+                    publishControls()
                     return
                 }
                 if (event.error == ShellError.BAD_REQUEST && event.session == null && timelineLoading) {
@@ -599,6 +626,9 @@ class ShellViewModel(app: Application) : AndroidViewModel(app) {
                 connection = null
                 _path.value = null
                 _historyLoading.value = false
+                timelineLoading = false
+                controls.disconnected()
+                publishControls()
                 finishTranscript(null)
                 if (event.error != null && _reach.value != ShellReach.NO_ACCESS) failed(dropped)
             }
@@ -671,6 +701,9 @@ class ShellViewModel(app: Application) : AndroidViewModel(app) {
         connection = null
         _path.value = null
         _historyLoading.value = false
+        timelineLoading = false
+        controls.disconnected()
+        publishControls()
         finishTranscript(null)
     }
 
@@ -681,8 +714,8 @@ class ShellViewModel(app: Application) : AndroidViewModel(app) {
 
     private fun resetSessions() {
         _macState.value = null
-        _pendingControl.value = null
-        _controlError.value = null
+        controls.reset()
+        publishControls()
         _timeline.value = null
         _timelineUnsupported.value = false
         timelineLoading = false

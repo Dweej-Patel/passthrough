@@ -157,7 +157,7 @@ struct RemoteShellCard: View {
         HStack(spacing: 12) {
             Button { router.terminal = .attach(session.id) } label: {
                 HStack(spacing: 12) {
-                    if session.running, session.waiting != nil {
+                    if session.isAsking {
                         NeedsYouDot().frame(width: 16, height: 16)
                     } else {
                         PTStatusDot(color: session.running ? PTColor.tint : .secondary.opacity(0.5), live: session.running)

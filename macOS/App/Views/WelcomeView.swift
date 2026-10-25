@@ -3,7 +3,8 @@ import PassthroughUI
 
 /// First run: pick what the phone should do for this Mac, and see what each
 /// choice needs, now or only when first used, instead of a wall of prompts.
-/// Shown once, on a Mac that has never been set up; Continue applies the picks.
+/// Shown once, on a Mac that has never been set up; Continue applies the
+/// picks (then, with Internet picked, says to plug in the phone), Skip just closes it.
 struct WelcomeView: View {
     static let id = "welcome"
     static let doneKey = "welcomeDone"
@@ -15,6 +16,8 @@ struct WelcomeView: View {
     @State private var awake = true
     @State private var reach = true
     @State private var vpn = false
+    /// Continue applied the picks: now say to plug in the phone.
+    @State private var plugIn = false
 
     /// A Mac that has never been set up: no pairing, no shell phones, Remote shell off.
     @MainActor static func shouldShow(_ session: SessionCoordinator) -> Bool {
@@ -22,6 +25,10 @@ struct WelcomeView: View {
     }
 
     var body: some View {
+        if plugIn { plugInStep } else { picker }
+    }
+
+    private var picker: some View {
         VStack(alignment: .leading, spacing: 24) {
             VStack(alignment: .leading, spacing: 8) {
                 Text("What should your phone do for this Mac?")
@@ -32,7 +39,8 @@ struct WelcomeView: View {
             HStack(alignment: .top, spacing: 20) {
                 LazyVGrid(columns: [GridItem(.flexible(), spacing: 12), GridItem(.flexible(), spacing: 12)], spacing: 12) {
                     choice($internet, "wifi", "Get online through my phone", "Plug in and the Mac uses the phone's connection. No hotspot.")
-                    choice($awake, "cup.and.saucer", "Keep the Mac awake when I leave", "Lid closed is fine. It still sleeps when the battery is low or it gets hot.")
+                    choice($awake, "cup.and.saucer", "Keep the Mac awake when I leave", 
+                           session.keepAwake.hasLid ? "Lid closed is fine. It still sleeps when the battery is low or it gets hot." : "It still sleeps when it gets hot.")
                     choice($reach, "apple.terminal", "Reach the Mac from my phone", "Its shell and its screen, from anywhere, end-to-end encrypted.")
                     choice($vpn, "lock.shield", "Protect my traffic with a VPN", "NordVPN or WireGuard on top, with a kill switch for public Wi-Fi.")
                 }
@@ -90,7 +98,7 @@ struct WelcomeView: View {
         }
         if reach {
             needs.append(Need(title: "Full Disk Access", why: "So commands from your phone don't stall on a privacy prompt nobody can click.", when: "First shell"))
-            needs.append(Need(title: "Screen Recording and Accessibility", why: "To show the screen and click for you.", when: "First Screen"))
+            needs.append(Need(title: "Screen Recording and Accessibility", why: "To show the screen and click for you.", when: "First screen"))
         }
         if vpn {
             needs.append(Need(title: "Add a VPN", why: "Sign in to NordVPN or import a WireGuard file.", when: "First use"))
@@ -128,25 +136,67 @@ struct WelcomeView: View {
                 .keyboardShortcut(.defaultAction)
                 .disabled(needs.isEmpty)
                 .opacity(needs.isEmpty ? 0.5 : 1)
+            Button("Skip for now") { skip() }
+                .buttonStyle(.plain)
+                .font(.callout)
+                .foregroundStyle(.secondary)
+                .frame(maxWidth: .infinity)
+                .padding(.top, 10)
             Text("Passthrough lives in the menu bar.")
                 .font(.caption).foregroundStyle(.secondary)
                 .frame(maxWidth: .infinity)
-                .padding(.top, 8)
+                .padding(.top, 4)
         }
         .padding(18)
         .frame(maxHeight: .infinity, alignment: .top)
         .background(Color.primary.opacity(0.04), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
     }
 
-    /// Applies the picks: sharing connects by itself when plugged in, the
-    /// helper is asked for now, Remote shell turns on, and the VPN settings
-    /// open. Keep awake needs nothing yet: it's a switch in the panel.
+    /// With Internet picked, the last step: the phone goes online for the Mac once it's plugged in.
+    private var plugInStep: some View {
+        VStack(spacing: 16) {
+            Image(systemName: "cable.connector")
+                .font(.system(size: 30, weight: .semibold))
+                .foregroundStyle(PTColor.onTint)
+                .frame(width: 64, height: 64)
+                .background(PTColor.tint, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+            Text("Now plug in your phone").font(.system(size: 28, weight: .bold))
+            Text("Connect it with a cable and unlock it. Trust this Mac if asked; an Android phone needs USB debugging on. The Mac goes online through it by itself.")
+                .font(.title3).foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+                .fixedSize(horizontal: false, vertical: true)
+            Button("Done") { close() }
+                .buttonStyle(PTProminentButtonStyle())
+                .keyboardShortcut(.defaultAction)
+                .frame(width: 240)
+                .padding(.top, 8)
+            Text("Passthrough lives in the menu bar.")
+                .font(.caption).foregroundStyle(.secondary)
+        }
+        .padding(48)
+        .frame(width: 560)
+    }
+
+    /// Applies the picks: sharing connects by itself when plugged in (never
+    /// turned off here: Auto-connect may already be on), the helper is asked
+    /// for now, Remote shell turns on, and the VPN settings open. Keep awake
+    /// needs nothing yet: it's a switch in the panel.
     private func finish() {
         UserDefaults.standard.set(true, forKey: Self.doneKey)
-        session.autoConnect = internet
+        if internet { session.autoConnect = true }
         if internet || awake || vpn { session.retryHelper() }
         if reach { session.remoteShellEnabled = true }
+        if internet { plugIn = true } else { close() }
+    }
+
+    private func close() {
         dismiss()
         if vpn { SettingsWindow.show(openSettings, tab: .vpn) }
+    }
+
+    /// Nothing set up, and not shown again: it's all in the panel and Settings.
+    private func skip() {
+        UserDefaults.standard.set(true, forKey: Self.doneKey)
+        dismiss()
     }
 }

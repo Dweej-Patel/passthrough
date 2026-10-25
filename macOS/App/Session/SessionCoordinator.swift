@@ -100,6 +100,14 @@ final class SessionCoordinator: ObservableObject {
     /// The Mac's Wi-Fi is a metered network, which is how macOS marks a phone's hotspot.
     @Published private(set) var onPhoneHotspot = false
     private let wifiMonitor = NWPathMonitor(requiredInterfaceType: .wifi)
+    /// The Mac has Wi-Fi or Ethernet of its own that isn't a phone's hotspot,
+    /// to stay online on once off the phone; nil until known.
+    @Published private(set) var ownNetwork: Bool?
+    private let ownNetworkMonitor = NWPathMonitor(prohibitedInterfaceTypes: [.other, .loopback, .cellular])
+    /// The moment just picked, shown while the switches get there (`apply(_:)`).
+    @Published var pendingMoment: Moment?
+    /// What the last moment picked couldn't do, or should warn about.
+    @Published var momentNote: String?
 
     /// Also watch for Android phones through adb. On by default; harmless without platform-tools.
     @Published var androidEnabled: Bool = UserDefaults.standard.object(forKey: "androidEnabled") as? Bool ?? true {
@@ -286,7 +294,7 @@ final class SessionCoordinator: ObservableObject {
         }
         let recorder = MacEventRecorder(log: shell.events, session: self)
         eventRecorder = recorder
-        macStateBridge = MacStateBridge(shell: shell, keepAwake: keepAwake, vpn: vpnLayer, recorder: recorder)
+        macStateBridge = MacStateBridge(session: self, recorder: recorder)
         directory.onChange = { [weak self] change in self?.devicesChanged(change) }
         helper.onInterrupted = { [weak self] in Task { @MainActor in self?.syncHotspotGuard() } }
         androidWatcher.onStatusChange = { [weak self] status in self?.androidWatch = status }
@@ -304,6 +312,11 @@ final class SessionCoordinator: ObservableObject {
             }
         }
         wifiMonitor.start(queue: DispatchQueue(label: "\(PassthroughProtocol.identifier).wifi-path"))
+        ownNetworkMonitor.pathUpdateHandler = { [weak self] path in
+            let own = path.status == .satisfied && !path.isExpensive
+            Task { @MainActor in if self?.ownNetwork != own { self?.ownNetwork = own } }
+        }
+        ownNetworkMonitor.start(queue: DispatchQueue(label: "\(PassthroughProtocol.identifier).own-network"))
         _ = clientID   // the wireless listener advertises a tag derived from it
         for watcher in directory.watchers {
             switch watcher.transport {

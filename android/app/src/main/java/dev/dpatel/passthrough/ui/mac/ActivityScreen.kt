@@ -8,13 +8,11 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.statusBars
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.layout.wrapContentWidth
@@ -64,11 +62,13 @@ import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import dev.dpatel.passthrough.core.BatterySample
 import dev.dpatel.passthrough.core.MacEvent
+import dev.dpatel.passthrough.core.MacFormat
 import dev.dpatel.passthrough.core.MacTimeline
 import dev.dpatel.passthrough.ui.AppViewModel
 import dev.dpatel.passthrough.ui.LocalPT
 import dev.dpatel.passthrough.ui.PT
 import dev.dpatel.passthrough.ui.PTCard
+import dev.dpatel.passthrough.ui.tabInsets
 import dev.dpatel.passthrough.ui.shell.ShellReach
 import dev.dpatel.passthrough.ui.shell.ShellViewModel
 import java.text.DateFormat
@@ -92,7 +92,7 @@ fun ActivityScreen(vm: AppViewModel, shell: ShellViewModel, onOpenTerminal: (Str
 
     Column(
         Modifier
-            .windowInsetsPadding(WindowInsets.statusBars)
+            .windowInsetsPadding(tabInsets())
             .verticalScroll(rememberScrollState())
             .fillMaxWidth().wrapContentWidth().widthIn(max = 640.dp)
             .padding(horizontal = 16.dp)
@@ -136,18 +136,18 @@ private fun time(seconds: Double): String = DateFormat.getTimeInstance(DateForma
 @Composable
 private fun Summary(t: MacTimeline, away: Boolean) {
     val c = LocalPT.current
-    val answered = t.events.count { it.kind == "answered" }
-    val dropouts = t.events.count { it.warning == true && (it.kind == "vpn" || it.kind == "link") }
-    val finished = t.events.count { it.kind == "shell" }
+    val answered = t.events.count { it.kind == MacEvent.KIND_ANSWERED }
+    val drops = t.events.count { it.warning == true && (it.kind == MacEvent.KIND_VPN || it.kind == MacEvent.KIND_LINK) }
+    val finished = t.events.count { it.kind == MacEvent.KIND_SHELL }
     PTCard {
         Text(if (away) "While you were away" else "Last 24 hours", style = PT.display(17.sp), color = c.primary)
         val minutes = ((System.currentTimeMillis() / 1000.0 - t.since) / 60).toInt().coerceAtLeast(0)
-        Text(if (away) "Since ${time(t.since)}, ${duration(minutes)} ago" else "${t.events.size} events",
+        Text(if (away) "Since ${time(t.since)}, ${MacFormat.duration(minutes)} ago" else "${t.events.size} events",
             style = PT.display(14.sp, FontWeight.Normal), color = c.secondary)
         Row(Modifier.fillMaxWidth().padding(top = 12.dp)) {
             Stat("$finished", if (finished == 1) "shell finished" else "shells finished", Modifier.weight(1f))
             Stat("$answered", "answered", Modifier.weight(1f))
-            Stat("$dropouts", if (dropouts == 1) "dropout" else "dropouts", Modifier.weight(1f), warning = dropouts > 0)
+            Stat("$drops", if (drops == 1) "connection drop" else "connection drops", Modifier.weight(1f), warning = drops > 0)
         }
     }
 }
@@ -172,14 +172,14 @@ private fun BatteryChart(samples: List<BatterySample>, floor: Double?) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Text("Battery", style = PT.display(17.sp), color = c.primary, modifier = Modifier.weight(1f))
             Text(
-                picked?.let { "${percent(it.level)} at ${time(it.t)}" } ?: floor?.let { "Keep awake stops at ${percent(it)}" } ?: "",
+                picked?.let { "${MacFormat.percent(it.level)} at ${time(it.t)}" } ?: floor?.let { "Keep awake stops at ${MacFormat.percent(it)}" } ?: "",
                 style = PT.mono(13.sp, FontWeight.Normal), color = c.secondary,
             )
         }
         val low = samples.minOf { it.level }
         Canvas(
             Modifier.fillMaxWidth().height(120.dp).padding(top = 10.dp)
-                .semantics { contentDescription = "Battery over time, from ${percent(samples.first().level)} to ${percent(samples.last().level)}, lowest ${percent(low)}." }
+                .semantics { contentDescription = "Battery over time, from ${MacFormat.percent(samples.first().level)} to ${MacFormat.percent(samples.last().level)}, lowest ${MacFormat.percent(low)}." }
                 .pointerInput(samples) {
                     fun pick(x: Float) {
                         val at = first + span * (x / size.width).coerceIn(0f, 1f)
@@ -229,7 +229,7 @@ private fun EventRow(event: MacEvent, open: (() -> Unit)?) {
             Text(time(event.t), style = PT.mono(12.sp, FontWeight.Normal), color = c.secondary)
             Text(event.title, style = PT.display(15.sp, FontWeight.SemiBold), color = c.primary)
             event.detail?.let {
-                if (event.kind == "asked") Text(it, fontFamily = FontFamily.Monospace, fontSize = 12.sp, color = c.secondary)
+                if (event.kind == MacEvent.KIND_ASKED) Text(it, fontFamily = FontFamily.Monospace, fontSize = 12.sp, color = c.secondary)
                 else Text(it, style = PT.display(12.sp, FontWeight.Normal), color = c.secondary)
             }
         }
@@ -238,13 +238,13 @@ private fun EventRow(event: MacEvent, open: (() -> Unit)?) {
 }
 
 private fun icon(e: MacEvent): ImageVector = when (e.kind) {
-    "awake" -> Icons.Filled.Coffee
-    "vpn" -> if (e.warning == true) Icons.Filled.GppMaybe else Icons.Filled.Shield
-    "link" -> Icons.Filled.Cable
-    "power" -> Icons.Filled.Bolt
-    "sleep" -> Icons.Filled.Bedtime
-    "shell" -> if (e.warning == true) Icons.Filled.Close else Icons.Filled.Check
-    "asked" -> Icons.Filled.QuestionMark
-    "answered" -> Icons.AutoMirrored.Filled.Reply
+    MacEvent.KIND_AWAKE -> Icons.Filled.Coffee
+    MacEvent.KIND_VPN -> if (e.warning == true) Icons.Filled.GppMaybe else Icons.Filled.Shield
+    MacEvent.KIND_LINK -> Icons.Filled.Cable
+    MacEvent.KIND_POWER -> Icons.Filled.Bolt
+    MacEvent.KIND_SLEEP -> Icons.Filled.Bedtime
+    MacEvent.KIND_SHELL -> if (e.warning == true) Icons.Filled.Close else Icons.Filled.Check
+    MacEvent.KIND_ASKED -> Icons.Filled.QuestionMark
+    MacEvent.KIND_ANSWERED -> Icons.AutoMirrored.Filled.Reply
     else -> Icons.Filled.Circle
 }

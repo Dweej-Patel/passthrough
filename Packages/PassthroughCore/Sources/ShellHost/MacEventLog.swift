@@ -35,11 +35,19 @@ public final class MacEventLog: @unchecked Sendable {
         }
     }
 
-    /// `~/Library/Application Support/Passthrough/events.json`.
+    /// `~/Library/Application Support/<identifier>/Activity/events.json`, in
+    /// a folder only this user can open and kept out of backups: it holds
+    /// shell titles and the questions they asked.
     public static func defaultFile() throws -> URL {
-        let dir = try FileManager.default.url(for: .applicationSupportDirectory, in: .userDomainMask, appropriateFor: nil, create: true)
-            .appendingPathComponent("Passthrough", isDirectory: true)
-        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let dir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent(PassthroughProtocol.identifier, isDirectory: true)
+            .appendingPathComponent("Activity", isDirectory: true)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: dir.path)
+        var folder = dir
+        var values = URLResourceValues()
+        values.isExcludedFromBackup = true
+        try? folder.setResourceValues(values)
         return dir.appendingPathComponent("events.json")
     }
 
@@ -82,7 +90,17 @@ public final class MacEventLog: @unchecked Sendable {
         let oldest = now().timeIntervalSince1970 - MacEvent.kept
         stored.events.removeAll { $0.t < oldest }
         stored.battery.removeAll { $0.t < oldest }
-        if stored.events.count > Self.maxEvents { stored.events.removeFirst(stored.events.count - Self.maxEvents) }
+        // Over the cap, the oldest plain events go first: a burst of them
+        // can't push out a warning such as the VPN being turned off.
+        var excess = stored.events.count - Self.maxEvents
+        if excess > 0 {
+            stored.events.removeAll { event in
+                guard excess > 0, event.warning != true else { return false }
+                excess -= 1
+                return true
+            }
+            if excess > 0 { stored.events.removeFirst(excess) }
+        }
         if stored.battery.count > Self.maxSamples { stored.battery.removeFirst(stored.battery.count - Self.maxSamples) }
     }
 
@@ -100,7 +118,8 @@ public final class MacEventLog: @unchecked Sendable {
                 self.savePending = false
                 return try? JSONEncoder().encode(self.stored)
             }
-            if let data { try? data.write(to: file, options: .atomic) }
+            guard let data, (try? data.write(to: file, options: .atomic)) != nil else { return }
+            try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: file.path)
         }
         if saveDelay > 0 { writer.asyncAfter(deadline: .now() + saveDelay, execute: save) } else { writer.async(execute: save) }
     }

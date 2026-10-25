@@ -53,7 +53,7 @@ class ShellProtocolTests {
         val states = lines.filter { it.t == ShellEnvelope.MAC_STATE }.mapNotNull { it.state }
         assertEquals(
             MacState(awake = true, battery = 0.64, charging = false, minutesLeft = 190, batteryFloor = 0.2, hot = false,
-                vpn = "on", vpnName = "NordVPN Germany", killSwitch = true, control = true),
+                vpn = "on", vpnName = "NordVPN Germany", killSwitch = true, control = true, internet = true),
             states.first(),
         )
         assertEquals(MacState(awake = false, awakeStopped = "battery", battery = 0.19, charging = false, batteryFloor = 0.2, control = false), states.last())

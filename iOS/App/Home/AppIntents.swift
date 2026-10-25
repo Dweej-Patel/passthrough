@@ -1,5 +1,6 @@
 import AppIntents
 import Foundation
+import PassthroughCore
 
 /// A link or intent waiting for the app to unlock (and, for a change to the
 /// Mac, for the Mac to be reachable). `RootView` carries it out.

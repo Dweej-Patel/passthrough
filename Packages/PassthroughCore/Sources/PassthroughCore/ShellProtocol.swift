@@ -227,19 +227,27 @@ public struct MacState: Codable, Equatable, Sendable {
     public var killSwitch: Bool?
     /// This phone may change Keep awake and the VPN (`setAwake`, `setVPN`).
     public var control: Bool?
+    /// The Mac is online through a phone, or on its way there: the Internet
+    /// part of a moment. Absent from older Macs.
+    public var internet: Bool?
 
     public init(awake: Bool? = nil, awakeStopped: String? = nil, battery: Double? = nil, charging: Bool? = nil,
                 minutesLeft: Int? = nil, batteryFloor: Double? = nil, hot: Bool? = nil, vpn: String? = nil,
-                vpnName: String? = nil, killSwitch: Bool? = nil, control: Bool? = nil) {
+                vpnName: String? = nil, killSwitch: Bool? = nil, control: Bool? = nil, internet: Bool? = nil) {
         self.awake = awake; self.awakeStopped = awakeStopped; self.battery = battery; self.charging = charging
         self.minutesLeft = minutesLeft; self.batteryFloor = batteryFloor; self.hot = hot; self.vpn = vpn
         self.vpnName = vpnName; self.killSwitch = killSwitch; self.control = control
+        self.internet = internet
     }
 
     public static let vpnOff = "off"
     public static let vpnConnecting = "connecting"
     public static let vpnOn = "on"
     public static let vpnFailed = "failed"
+
+    /// `awakeStopped`: the battery limit, or the Mac running hot.
+    public static let stoppedBattery = "battery"
+    public static let stoppedHeat = "heat"
 }
 
 /// Something that happened on the Mac, for the phone's timeline. `title` and
@@ -263,6 +271,15 @@ public struct MacEvent: Codable, Equatable, Sendable {
     /// How far back a Mac keeps events, and the most one `eventList` carries (the newest).
     public static let kept: TimeInterval = 7 * 86_400
     public static let maxPerList = 500
+
+    public static let kindAwake = "awake"
+    public static let kindVPN = "vpn"
+    public static let kindLink = "link"
+    public static let kindPower = "power"
+    public static let kindSleep = "sleep"
+    public static let kindShell = "shell"
+    public static let kindAsked = "asked"
+    public static let kindAnswered = "answered"
 }
 
 /// The Mac's battery at a moment, for the timeline's battery line.

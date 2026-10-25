@@ -367,6 +367,11 @@ struct VPNStatus: Equatable {
     var isBusy: Bool { state == "starting" || state == "reconnecting" || state == "blocked" }
     /// Traffic is held back by the kill switch.
     var isBlocking: Bool { state == "blocked" || state == "held" }
+    /// Failed, or still held by the kill switch from before Passthrough
+    /// stopped: stays so until someone acts (the menu-bar "!").
+    var isFailing: Bool { state == "failed" || state == "held" }
+    /// Wanted but not carrying traffic: failing, or reconnecting (the tile's amber).
+    var isDown: Bool { isFailing || state == "reconnecting" || state == "blocked" }
     var engineLabel: String { engine == "wireguard" ? "WireGuard" : engine == "openvpn" ? "OpenVPN" : engine }
     var duration: TimeInterval? { since.map { Date().timeIntervalSince($0) } }
 }

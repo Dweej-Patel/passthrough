@@ -3,8 +3,8 @@ import LocalAuthentication
 import PassthroughUI
 
 /// Turning the Mac's VPN off from the phone: it lowers protection, so it
-/// says what changes and asks for Face ID (or the passcode) first. The system
-/// draws the Face ID prompt. Turning the VPN on never comes through here.
+/// says what changes and asks for Face ID, Touch ID or the passcode first. The
+/// system draws the prompt. Turning the VPN on never comes through here.
 struct VPNOffSheet: View {
     let macName: String
     let killSwitch: Bool
@@ -14,8 +14,19 @@ struct VPNOffSheet: View {
     @Environment(\.dismiss) private var dismiss
     @State private var checking = false
     @State private var failure: String?
+    @Environment(\.dynamicTypeSize) private var typeSize
 
     var body: some View {
+        ScrollView {
+            content.padding(22)
+        }
+        .scrollBounceBehavior(.basedOnSize)
+        // Half height fits until the accessibility sizes; it scrolls either way.
+        .presentationDetents(typeSize.isAccessibilitySize ? [.large] : [.medium, .large])
+        .presentationDragIndicator(.visible)
+    }
+
+    private var content: some View {
         VStack(alignment: .leading, spacing: 16) {
             HStack(spacing: 14) {
                 Image(systemName: "lock.slash")
@@ -34,7 +45,7 @@ struct VPNOffSheet: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .background(PTColor.attention.opacity(0.1), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
                 .fixedSize(horizontal: false, vertical: true)
-            Text("Face ID confirms it. The Mac shows a notice. Turning the VPN back on never asks.")
+            Text("\(Self.confirmedBy) The Mac shows a notice. Turning the VPN back on never asks.")
                 .font(.footnote).foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
             if let failure {
@@ -42,7 +53,6 @@ struct VPNOffSheet: View {
                     .font(.footnote.weight(.semibold))
                     .foregroundStyle(PTColor.problem)
             }
-            Spacer(minLength: 0)
             Button("Keep VPN on") { dismiss() }
                 .buttonStyle(PTProminentButtonStyle())
             Button { confirm() } label: {
@@ -56,9 +66,18 @@ struct VPNOffSheet: View {
             .buttonStyle(.plain)
             .disabled(checking)
         }
-        .padding(22)
-        .presentationDetents([.medium])
-        .presentationDragIndicator(.visible)
+    }
+
+    /// How this phone checks it's you: whatever `deviceOwnerAuthentication` will ask for.
+    private static var confirmedBy: String {
+        let context = LAContext()
+        guard context.canEvaluatePolicy(.deviceOwnerAuthentication, error: nil) else { return "This iPhone has no passcode, so nothing confirms it." }
+        switch context.biometryType {
+        case .faceID: return "Face ID confirms it."
+        case .touchID: return "Touch ID confirms it."
+        case .opticID: return "Optic ID confirms it."
+        default: return "Your passcode confirms it."
+        }
     }
 
     private func confirm() {

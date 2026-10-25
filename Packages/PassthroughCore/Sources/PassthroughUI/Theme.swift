@@ -3,10 +3,13 @@ import SwiftUI
 /// The Passthrough visual language: deep graphite surfaces, a teal→violet
 /// accent, rounded numerals, and glass cards. Shared by both apps.
 public enum PTTheme {
-    public static let down = Color(red: 0.25, green: 0.88, blue: 0.82)     // teal: bytes arriving at the Mac
-    public static let up = Color(red: 0.71, green: 0.52, blue: 1.0)        // violet: bytes leaving the Mac
-    public static let accentStart = down
-    public static let accentEnd = up
+    /// Teal: bytes arriving at the Mac. Darker in light mode, to read on white.
+    public static let down = PTColor.dynamic(light: 0x0A7C74, dark: 0x40E0D1)
+    /// Violet: bytes leaving the Mac.
+    public static let up = PTColor.dynamic(light: 0x6B3FD1, dark: 0xB585FF)
+    /// The bright teal and violet in both appearances, for glows and fills.
+    public static let accentStart = Color(red: 0.25, green: 0.88, blue: 0.82)
+    public static let accentEnd = Color(red: 0.71, green: 0.52, blue: 1.0)
     public static let warning = Color(red: 1.0, green: 0.72, blue: 0.30)
     public static let danger = Color(red: 1.0, green: 0.42, blue: 0.42)
     public static let success = Color(red: 0.36, green: 0.90, blue: 0.56)

@@ -23,8 +23,9 @@ final class MacEventRecorder {
     private var charging: Bool?
     private var connected: Bool
     private var sessions: [String: ShellSessionInfo] = [:]
-    /// What a phone just asked for: the change it causes is already written.
-    private var askedByPhone: (change: MacControl, at: Date)?
+    /// What phones just asked for (a moment sends several at once): the
+    /// changes they cause are already written.
+    private var askedByPhone: [(change: MacControl, at: Date)] = []
 
     init(log: MacEventLog, session: SessionCoordinator) {
         self.log = log
@@ -48,32 +49,33 @@ final class MacEventRecorder {
             .store(in: &cancellables)
         let center = NSWorkspace.shared.notificationCenter
         observers.append(center.addObserver(forName: NSWorkspace.willSleepNotification, object: nil, queue: .main) { [weak self] _ in
-            Task { @MainActor in self?.log.record("sleep", "The Mac went to sleep") }
+            Task { @MainActor in self?.log.record(MacEvent.kindSleep, "The Mac went to sleep") }
         })
         observers.append(center.addObserver(forName: NSWorkspace.didWakeNotification, object: nil, queue: .main) { [weak self] _ in
-            Task { @MainActor in self?.log.record("sleep", "The Mac woke up") }
+            Task { @MainActor in self?.log.record(MacEvent.kindSleep, "The Mac woke up") }
         })
     }
 
     /// A phone asked for `change` and it's being carried out.
     func phoneChanged(_ change: MacControl, by label: String) {
-        askedByPhone = (change, .now)
+        askedByPhone.append((change, .now))
         switch change {
-        case .awake(true): log.record("awake", "\(label) turned Keep awake on")
-        case .awake(false): log.record("awake", "\(label) let the Mac sleep")
-        case .vpn(true): log.record("vpn", "\(label) turned the VPN on")
-        case .vpn(false): log.record("vpn", "\(label) turned the VPN off", warning: true)
+        case .awake(true): log.record(MacEvent.kindAwake, "\(label) turned Keep awake on")
+        case .awake(false): log.record(MacEvent.kindAwake, "\(label) let the Mac sleep")
+        case .vpn(true): log.record(MacEvent.kindVPN, "\(label) turned the VPN on")
+        case .vpn(false): log.record(MacEvent.kindVPN, "\(label) turned the VPN off", warning: true)
         }
     }
 
     /// A phone asked, and the Mac's own limit said no.
     func phoneRefused(_ change: MacControl, by label: String, reason: String) {
-        log.record("awake", "\(label) asked to keep the Mac awake", detail: reason, warning: true)
+        log.record(MacEvent.kindAwake, "\(label) asked to keep the Mac awake", detail: reason, warning: true)
     }
 
     private func fromPhone(_ change: MacControl) -> Bool {
-        guard let asked = askedByPhone, asked.change == change, Date.now.timeIntervalSince(asked.at) < 10 else { return false }
-        askedByPhone = nil
+        askedByPhone.removeAll { Date.now.timeIntervalSince($0.at) >= 10 }
+        guard let index = askedByPhone.firstIndex(where: { $0.change == change }) else { return false }
+        askedByPhone.remove(at: index)
         return true
     }
 
@@ -83,7 +85,7 @@ final class MacEventRecorder {
         if battery.hasBattery, battery.percent >= 0 {
             log.sample(level: Double(battery.percent) / 100, charging: battery.isOnAC)
             if let charging, charging != battery.isOnAC {
-                log.record("power", battery.isOnAC ? "Plugged in at \(battery.percent)%" : "Unplugged at \(battery.percent)%")
+                log.record(MacEvent.kindPower, battery.isOnAC ? "Plugged in at \(battery.percent)%" : "Unplugged at \(battery.percent)%")
             }
             charging = battery.isOnAC
         }
@@ -91,11 +93,12 @@ final class MacEventRecorder {
             awake = keepAwake.isOn
             if !fromPhone(.awake(awake)) {
                 switch (awake, keepAwake.stoppedBy) {
-                case (true, _): log.record("awake", "Keep awake turned on")
-                case (false, .some("battery")): log.record("awake", "Keep awake stopped at \(battery.percent)% battery",
-                                                    detail: "Your \(keepAwake.batteryAutoOffThreshold)% limit", warning: true)
-                case (false, .some("heat")): log.record("awake", "Keep awake stopped: the Mac ran hot", warning: true)
-                default: log.record("awake", "Keep awake turned off")
+                case (true, _): log.record(MacEvent.kindAwake, "Keep awake turned on")
+                case (false, MacState.stoppedBattery?):
+                    log.record(MacEvent.kindAwake, "Keep awake stopped at \(battery.percent)% battery",
+                               detail: "Your \(keepAwake.batteryAutoOffThreshold)% limit", warning: true)
+                case (false, MacState.stoppedHeat?): log.record(MacEvent.kindAwake, "Keep awake stopped: the Mac ran hot", warning: true)
+                default: log.record(MacEvent.kindAwake, "Keep awake turned off")
                 }
             }
         }
@@ -105,7 +108,7 @@ final class MacEventRecorder {
     private func vpnChanged(_ vpn: VPNLayer) {
         if vpn.isWanted != vpnUp {
             vpnUp = vpn.isWanted
-            if !fromPhone(.vpn(vpnUp)) { log.record("vpn", vpnUp ? "VPN turned on" : "VPN turned off") }
+            if !fromPhone(.vpn(vpnUp)) { log.record(MacEvent.kindVPN, vpnUp ? "VPN turned on" : "VPN turned off") }
             vpnDroppedAt = nil
         }
         let nowConnected = vpn.status.isConnected
@@ -117,17 +120,17 @@ final class MacEventRecorder {
         if nowConnected {
             if let dropped = vpnDroppedAt {
                 let seconds = max(1, Int(Date.now.timeIntervalSince(dropped).rounded()))
-                log.record("vpn", "VPN reconnected after \(seconds) s",
+                log.record(MacEvent.kindVPN, "VPN reconnected after \(seconds) s",
                            detail: vpn.killSwitch ? "Kill switch held: nothing left without it" : nil)
             } else {
-                log.record("vpn", "VPN connected", detail: vpn.activeProfile?.name)
+                log.record(MacEvent.kindVPN, "VPN connected", detail: vpn.activeProfile?.name)
             }
             vpnDroppedAt = nil
-        } else if vpn.status.state == "failed" {
-            log.record("vpn", "VPN failed", detail: vpn.killSwitch ? "Traffic blocked until it's turned off" : vpn.status.error, warning: true)
+        } else if vpn.status.isFailing {
+            log.record(MacEvent.kindVPN, "VPN failed", detail: vpn.killSwitch ? "Traffic blocked until it's turned off" : vpn.status.error, warning: true)
         } else {
             vpnDroppedAt = .now
-            log.record("vpn", "VPN dropped", detail: "Reconnecting", warning: true)
+            log.record(MacEvent.kindVPN, "VPN dropped", detail: "Reconnecting", warning: true)
         }
     }
 
@@ -135,7 +138,7 @@ final class MacEventRecorder {
         guard isConnected != connected else { return }
         connected = isConnected
         let phone = session.phoneStatus?.deviceName ?? session.phoneKindName
-        log.record("link", isConnected ? "Online through \(phone)" : "Off \(phone)'s connection")
+        log.record(MacEvent.kindLink, isConnected ? "Online through \(phone)" : "Off \(phone)'s connection")
     }
 
     private func sessionsChanged(_ list: [ShellSessionInfo]) {
@@ -144,12 +147,12 @@ final class MacEventRecorder {
             if before?.running == true, !now.running {
                 let minutes = max(0, Int((now.lastOutputAt - now.startedAt) / 60))
                 let exit = now.exitStatus.map { "exit \($0)" } ?? "ended"
-                log.record("shell", "\(now.title) finished", detail: "\(exit) · \(minutes) min", session: now.id,
+                log.record(MacEvent.kindShell, "\(now.title) finished", detail: "\(exit) · \(minutes) min", session: now.id,
                            warning: (now.exitStatus ?? 0) != 0)
-            } else if now.running, let question = now.waiting, before?.waiting != question {
-                log.record("asked", "\(now.title) asked", detail: question, session: now.id)
-            } else if now.running, before?.waiting != nil, now.waiting == nil {
-                log.record("answered", "\(now.title) got an answer", session: now.id)
+            } else if now.isAsking, let question = now.waiting, before?.waiting != question {
+                log.record(MacEvent.kindAsked, "\(now.title) asked", detail: question, session: now.id)
+            } else if now.running, before?.isAsking == true, !now.isAsking {
+                log.record(MacEvent.kindAnswered, "\(now.title) got an answer", session: now.id)
             }
         }
         sessions = Dictionary(uniqueKeysWithValues: list.map { ($0.id, $0) })

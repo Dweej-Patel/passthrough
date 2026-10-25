@@ -77,7 +77,8 @@ class MainActivity : FragmentActivity() {
         var showPairing by rememberSaveable { mutableStateOf(false) }
         // Debug builds only: which tab to open on, for screenshots (pt.demo.tab = mac|shells|activity|phone).
         val startTab = if (BuildConfig.DEBUG) intent?.getStringExtra("pt.demo.tab")?.let { v -> MainTab.entries.firstOrNull { it.name.equals(v, true) } } ?: MainTab.MAC else MainTab.MAC
-        // Hoisted so Home keeps its place after Settings, the terminal or history.
+        // Hoisted so Home keeps its tab and place after Settings, the terminal or history.
+        var tab by rememberSaveable { mutableStateOf(startTab) }
         val homeScroll = rememberSaveable(saver = ScrollState.Saver) { ScrollState(0) }
         val prefs = Runtime.settings.prefs
         val permissions = rememberLauncherForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { vm.start() }
@@ -140,7 +141,7 @@ class MainActivity : FragmentActivity() {
                 )
                 Screen.HISTORY -> ShellHistoryScreen(shell, onDone = { screen = Screen.HOME })
                 Screen.HOME -> MainTabs(
-                    vm, shell, initial = startTab,
+                    vm, shell, tab = tab, onTab = { tab = it },
                     onPower = onPower, onPair = { showPairing = true }, onSettings = { screen = Screen.SETTINGS },
                     onOpenTerminal = { session ->
                         terminalIntent = session?.let(TerminalIntent::attach) ?: TerminalIntent.NEW

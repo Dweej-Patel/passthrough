@@ -1165,6 +1165,19 @@ final class ShellListenerTests: XCTestCase {
         XCTAssertTrue(probe.failures.isEmpty)
     }
 
+    /// The Mac holding its state (a limit refusing Keep awake) still answers
+    /// the phone that asked, so its spinner always stops.
+    func testAnAcceptedRequestIsAnsweredEvenWhenNothingChanges() {
+        let listener = startListener()
+        listener.macState = { _ in MacState(awake: false, awakeStopped: MacState.stoppedBattery, control: true) }
+        listener.onMacControl = { _, _, _ in nil }
+        let (client, probe) = readyClient(listener)
+        wait(for: [probe.expect(self, "state") { Self.state($0).count == 1 }], timeout: 5)
+        client.setAwake(true)
+        wait(for: [probe.expect(self, "answered") { Self.state($0).count == 2 }], timeout: 5)
+        XCTAssertTrue(probe.failures.isEmpty)
+    }
+
     func testARefusedControlRequestIsAnswered() {
         let listener = startListener()
         listener.onMacControl = { _, _, _ in .notAllowed }

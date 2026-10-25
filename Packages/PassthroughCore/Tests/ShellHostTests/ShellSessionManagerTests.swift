@@ -71,7 +71,27 @@ final class ShellSessionManagerTests: XCTestCase {
         let before = changes.get()
         manager.input(id, Data("y\n".utf8))
         wait("answered") { info(id)?.waiting == nil }
-        XCTAssertGreaterThan(changes.get(), before, "phones hear it stopped waiting")
+        // Told on the callout queue, a moment after the list changed.
+        wait("phones hear it stopped waiting") { changes.get() > before }
+    }
+
+    /// Once answered, the question still on the screen above the prompt
+    /// isn't found again: only output after the answer is read.
+    func testAnAnsweredQuestionStaysAnswered() throws {
+        let id = try manager.open(phoneLabel: "Pixel", cols: 80, rows: 24)
+        manager.input(id, Data("printf 'Delete the build folder? [y/N] '; read answer; echo got $answer\n".utf8))
+        wait("waiting") { info(id)?.waiting != nil }
+        manager.input(id, Data("y\n".utf8))
+        wait("answered") { info(id)?.waiting == nil }
+        Thread.sleep(forTimeInterval: 0.6)   // well past `quiet`, after "got y" and the prompt
+        XCTAssertNil(info(id)?.waiting)
+    }
+
+    /// A stream of output keeps pushing the look back; it happens once things go quiet.
+    func testStreamingOutputLooksOnceQuiet() throws {
+        let id = try manager.open(phoneLabel: "Pixel", cols: 80, rows: 24)
+        manager.input(id, Data("for i in 1 2 3 4 5 6; do echo line $i; sleep 0.05; done; printf 'Overwrite it? [y/N] '; read a\n".utf8))
+        wait("waiting") { info(id)?.waiting == "Overwrite it? [y/N]" }
     }
 
     func testAPromptIsNotAQuestion() throws {

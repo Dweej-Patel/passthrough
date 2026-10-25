@@ -3,16 +3,16 @@ import Foundation
 /// The app's own links (`passthrough://…`): what the Live Activity, widgets
 /// and Control Center open. Each lands in the app, which unlocks first; the
 /// ones that change the Mac run once it's reachable.
-enum AppLink: Equatable {
+public enum AppLink: Equatable, Sendable {
     case mac
     case stepAway
     case keepAwake
     case vpnOn
     case session(String)
 
-    static let scheme = "passthrough"
+    public static let scheme = "passthrough"
 
-    var url: URL {
+    public var url: URL {
         switch self {
         case .mac: URL(string: "\(Self.scheme)://mac")!
         case .stepAway: URL(string: "\(Self.scheme)://step-away")!
@@ -23,7 +23,7 @@ enum AppLink: Equatable {
         }
     }
 
-    init?(url: URL) {
+    public init?(url: URL) {
         guard url.scheme == Self.scheme, let host = url.host() else { return nil }
         switch host {
         case "mac": self = .mac
