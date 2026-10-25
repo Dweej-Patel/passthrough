@@ -12,6 +12,12 @@ struct MacHomeView: View {
     @Binding var showSettings: Bool
     @State private var confirmSleep = false
     @State private var confirmVPNOff = false
+    /// A moment just picked, shown until the switches catch up with it.
+    @State private var picked: Moment?
+    /// A picked moment that turns the VPN off, waiting for Face ID.
+    @State private var momentNeedingFaceID: Moment?
+    @State private var momentNote: String?
+    @State private var showStepAway = false
 
     /// The Mac on screen: the shell's selection, else the first paired Mac.
     private var macID: String? { shell.selectedMacID ?? model.pairedClients.first?.id }
@@ -26,6 +32,7 @@ struct MacHomeView: View {
                 VStack(spacing: 14) {
                     MacHeroCard(shell: shell, paired: !model.pairedClients.isEmpty || !shell.macs.isEmpty, online: onlineThroughPhone,
                                 lastSeen: model.pairedClients.first { $0.id == macID }?.lastSeen, showPairing: $showPairing)
+                    if let state, canControl { moments(state) }
                     tiles
                     if shell.reach == .noAccess, !model.pairedClients.isEmpty { setupCard }
                     if shell.reach == .ready { shells }
@@ -52,13 +59,99 @@ struct MacHomeView: View {
                 }
             }
         }
+        .sheet(item: $momentNeedingFaceID) { moment in
+            VPNOffSheet(macName: macName, killSwitch: state?.killSwitch == true, reason: "Switching to \(moment.title) turns it off") {
+                apply(moment)
+            }
+        }
+        .sheet(isPresented: $showStepAway) {
+            StepAwaySheet(shell: shell, macName: macName, online: onlineThroughPhone) { apply(.away) }
+        }
         #if DEBUG
         .onAppear {
-            if ProcessInfo.processInfo.environment["PASSTHROUGH_SHOW_VPN_OFF"] == "1" {
+            let env = ProcessInfo.processInfo.environment
+            if env["PASSTHROUGH_SHOW_VPN_OFF"] == "1" {
                 DispatchQueue.main.asyncAfter(deadline: .now() + 1) { confirmVPNOff = true }
+            }
+            if env["PASSTHROUGH_SHOW_STEP_AWAY"] == "1" {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1) { showStepAway = true }
             }
         }
         #endif
+    }
+
+    // MARK: Moments
+
+    private var currentMoment: Moment? {
+        guard let state else { return nil }
+        return Moment.current(internet: model.state.isActive, awake: state.awake == true, vpn: state.vpnUp)
+    }
+
+    private func moments(_ state: MacState) -> some View {
+        let shown = picked ?? currentMoment ?? .custom
+        return VStack(alignment: .leading, spacing: 10) {
+            Picker("Moment", selection: Binding(get: { shown }, set: { pick($0, state) })) {
+                ForEach(Moment.choices) { Text($0.title).tag($0) }
+            }
+            .pickerStyle(.segmented)
+            .controlSize(.large)
+            .accessibilityHint("Sets Internet, Keep awake and the VPN together")
+            Text(momentNote ?? shown.caption)
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+                .contentTransition(.opacity)
+                .padding(.horizontal, 4)
+            Button { showStepAway = true } label: {
+                HStack(spacing: 12) {
+                    Image(systemName: "figure.walk")
+                        .font(.system(size: 15, weight: .semibold))
+                        .foregroundStyle(PTColor.tintText)
+                        .frame(width: 32, height: 32)
+                        .background(PTColor.tint.opacity(0.16), in: Circle())
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text("Step away").font(.subheadline.weight(.semibold))
+                        Text("Check what would stop it working while you're gone").font(.caption).foregroundStyle(.secondary)
+                    }
+                    Spacer(minLength: 0)
+                    Image(systemName: "chevron.right").font(.caption.weight(.semibold)).foregroundStyle(.tertiary)
+                }
+                .padding(12)
+                .frame(minHeight: 56)
+                .background(PTColor.surface, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+                .overlay(RoundedRectangle(cornerRadius: 18, style: .continuous).strokeBorder(PTColor.hairline))
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+        }
+        .animation(.easeOut(duration: 0.25), value: shown)
+        .onChange(of: currentMoment) { _, now in if now == picked { picked = nil } }
+    }
+
+    private func pick(_ moment: Moment, _ state: MacState) {
+        momentNote = nil
+        guard let target = moment.switches else { return }
+        if target.vpn == true, state.vpn == nil {
+            momentNote = "\(moment.title) needs a VPN set up on \(macName). Add one in Passthrough's VPN settings on the Mac."
+            return
+        }
+        // Lowering protection asks first; raising it never does.
+        if target.vpn == false, state.vpnUp { return momentNeedingFaceID = moment }
+        apply(moment)
+    }
+
+    /// Sets Internet, Keep awake and the VPN to the moment's, changing only what differs.
+    private func apply(_ moment: Moment) {
+        guard let target = moment.switches, let state else { return }
+        picked = moment
+        if target.internet != model.state.isActive { target.internet ? model.start() : model.stop() }
+        if target.awake != (state.awake == true) { shell.control(.awake(target.awake)) }
+        if let vpn = target.vpn, vpn != state.vpnUp { shell.control(.vpn(vpn)) }
+        // If the Mac refuses or something lags, stop showing the pick after a while.
+        Task { @MainActor in
+            try? await Task.sleep(for: .seconds(8))
+            if picked == moment { picked = nil }
+        }
     }
 
     // MARK: Tiles
