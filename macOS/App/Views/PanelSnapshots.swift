@@ -25,18 +25,73 @@ enum PanelSnapshots {
             let session = SessionCoordinator()
             configure(session)
             for scheme in [ColorScheme.dark, .light] {
-                let view = MenuPanelView().environmentObject(session).environmentObject(session.vpnLayer).environmentObject(session.keepAwake).environmentObject(session.shell).environment(\.colorScheme, scheme)
-                    .frame(width: 356)
-                let renderer = ImageRenderer(content: view)
-                renderer.scale = 2
-                if let image = renderer.nsImage, let tiff = image.tiffRepresentation,
-                   let png = NSBitmapImageRep(data: tiff)?.representation(using: .png, properties: [:]) {
-                    try? png.write(to: URL(fileURLWithPath: directory).appendingPathComponent("\(name)-\(scheme == .dark ? "dark" : "light").png"))
-                }
+                let view = MenuPanelView().environmentObject(session).environmentObject(session.vpnLayer).environmentObject(session.keepAwake).environmentObject(session.shell)
+                    .background(Color(nsColor: .windowBackgroundColor))
+                capture(view, width: 356, scheme: scheme, to: directory, name: "\(name)-\(scheme == .dark ? "dark" : "light")")
             }
         }
         renderShellSettings(to: directory)
         renderNotices(to: directory)
+        renderWelcome(to: directory)
+        renderMenuBarIcons(to: directory)
+    }
+
+    @MainActor
+    private static func renderWelcome(to directory: String) {
+        let session = SessionCoordinator()
+        for scheme in [ColorScheme.dark, .light] {
+            let view = WelcomeView().environmentObject(session).background(Color(nsColor: .windowBackgroundColor))
+            capture(view, width: 900, scheme: scheme, to: directory, name: "welcome-\(scheme == .dark ? "dark" : "light")")
+        }
+    }
+
+    /// Every icon state on a light and a dark menu bar, at 4x.
+    @MainActor
+    private static func renderMenuBarIcons(to directory: String) {
+        let states: [MenuBarIcon.State] = [
+            .init(), .init(online: true), .init(online: true, awake: true), .init(online: true, vpn: true),
+            .init(online: true, needsYou: true), .init(awake: true, needsYou: true), .init(problem: true),
+        ]
+        for (name, appearance) in [("dark", NSAppearance.Name.darkAqua), ("light", .aqua)] {
+            let cell = MenuBarIcon.size, gap: CGFloat = 14, scale: CGFloat = 4
+            let width = CGFloat(states.count) * (cell.width + gap) + gap
+            let rep = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: Int(width * scale), pixelsHigh: Int((cell.height + 12) * scale),
+                                       bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false, colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0)!
+            rep.size = NSSize(width: width, height: cell.height + 12)
+            NSGraphicsContext.saveGraphicsState()
+            NSGraphicsContext.current = NSGraphicsContext(bitmapImageRep: rep)
+            NSAppearance(named: appearance)!.performAsCurrentDrawingAppearance {
+                (appearance == .darkAqua ? NSColor(white: 0.16, alpha: 1) : NSColor(white: 0.93, alpha: 1)).setFill()
+                NSRect(origin: .zero, size: rep.size).fill()
+                for (i, state) in states.enumerated() {
+                    let rect = NSRect(x: gap + CGFloat(i) * (cell.width + gap), y: 6, width: cell.width, height: cell.height)
+                    NSGraphicsContext.saveGraphicsState()
+                    let shift = NSAffineTransform(); shift.translateX(by: rect.minX, yBy: rect.minY); shift.concat()
+                    MenuBarIcon.draw(state, in: NSRect(origin: .zero, size: cell), ink: .labelColor)
+                    NSGraphicsContext.restoreGraphicsState()
+                }
+            }
+            NSGraphicsContext.restoreGraphicsState()
+            try? rep.representation(using: .png, properties: [:])?.write(to: URL(fileURLWithPath: directory).appendingPathComponent("menubar-\(name).png"))
+        }
+    }
+
+    /// Through a real (offscreen) window, so native controls (segmented
+    /// pickers, switches) draw as they do on screen; `ImageRenderer` can't.
+    @MainActor
+    private static func capture<V: View>(_ view: V, width: CGFloat, scheme: ColorScheme, to directory: String, name: String) {
+        let appearance = NSAppearance(named: scheme == .dark ? .darkAqua : .aqua)
+        let host = NSHostingView(rootView: view.frame(width: width))
+        host.appearance = appearance
+        let height = host.fittingSize.height
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: width, height: height), styleMask: [.borderless], backing: .buffered, defer: false)
+        window.appearance = appearance
+        window.contentView = host
+        host.frame = NSRect(x: 0, y: 0, width: width, height: height)
+        host.layoutSubtreeIfNeeded()
+        guard let rep = host.bitmapImageRepForCachingDisplay(in: host.bounds) else { return }
+        host.cacheDisplay(in: host.bounds, to: rep)
+        try? rep.representation(using: .png, properties: [:])?.write(to: URL(fileURLWithPath: directory).appendingPathComponent("\(name).png"))
     }
 
     /// The notice from the notch, and the capsule on a screen without one.

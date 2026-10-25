@@ -74,6 +74,21 @@ public struct PTSurface<Content: View>: View {
     }
 }
 
+/// A small mint capsule button. Drawn rather than `.borderedProminent`, which
+/// greys out in a window that isn't key (a notch notice never is).
+public struct PTPillButtonStyle: ButtonStyle {
+    public init() {}
+    public func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .font(.system(size: 12, weight: .semibold))
+            .foregroundStyle(PTColor.onTint)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 5)
+            .background(PTColor.tint, in: Capsule())
+            .opacity(configuration.isPressed ? 0.8 : 1)
+    }
+}
+
 /// The primary action: a mint capsule with dark text (white text on mint is unreadable).
 public struct PTProminentButtonStyle: ButtonStyle {
     var fill: Color

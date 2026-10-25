@@ -15,7 +15,7 @@ struct PassthroughMacApp: App {
                 .environmentObject(session.keepAwake)
                 .environmentObject(session.shell)
         } label: {
-            MenuBarLabel(session: session, vpnLayer: session.vpnLayer, keepAwake: session.keepAwake)
+            MenuBarLabel(session: session, vpnLayer: session.vpnLayer, keepAwake: session.keepAwake, shell: session.shell)
         }
         .menuBarExtraStyle(.window)
 
@@ -31,18 +31,39 @@ struct PassthroughMacApp: App {
             ShellHistoryWindow()
                 .environmentObject(session.shell)
         }
+
+        Window("Welcome to Passthrough", id: WelcomeView.id) {
+            WelcomeView()
+                .environmentObject(session)
+        }
+        .windowResizability(.contentSize)
     }
 }
 
-/// The menu-bar icon: the phone shows passthrough on/off, with badges for the
-/// VPN layer and keep-awake. Observes all three so any of them redraws it.
+/// The menu-bar icon (`MenuBarIcon`). Observes everything it shows so any change redraws it.
 private struct MenuBarLabel: View {
     @ObservedObject var session: SessionCoordinator
     @ObservedObject var vpnLayer: VPNLayer
     @ObservedObject var keepAwake: KeepAwakeController
+    @ObservedObject var shell: RemoteShellController
+    @Environment(\.openWindow) private var openWindow
 
     var body: some View {
-        Image(nsImage: MenuBarIcon.image(passthroughOn: session.phase.isConnected, vpnOn: vpnLayer.status.isConnected, keepAwake: keepAwake.isOn))
+        icon.task {
+            // First run on a Mac never set up: what should the phone do for it?
+            guard !SessionCoordinator.isSnapshotRun, WelcomeView.shouldShow(session) else { return }
+            openWindow(id: WelcomeView.id)
+            NSApp.activate()
+        }
+    }
+
+    private var icon: some View {
+        Image(nsImage: MenuBarIcon.image(MenuBarIcon.State(
+            online: session.phase.isConnected,
+            awake: keepAwake.isOn,
+            vpn: vpnLayer.status.isConnected,
+            needsYou: shell.sessions.contains { $0.running && $0.waiting != nil },
+            problem: vpnLayer.isWanted && ["failed", "held"].contains(vpnLayer.status.state))))
     }
 }
 

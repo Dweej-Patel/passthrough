@@ -115,10 +115,7 @@ struct NotchNoticeView: View {
                 text(title, detail)
                 Spacer(minLength: 0)
                 Button(action) { perform(); dismiss() }
-                    .buttonStyle(.borderedProminent)
-                    .tint(PTColor.tint)
-                    .foregroundStyle(PTColor.onTint)
-                    .controlSize(.small)
+                    .buttonStyle(PTPillButtonStyle())
                 Button(action: dismiss) { Image(systemName: "xmark").font(.caption.weight(.bold)) }
                     .buttonStyle(.plain)
                     .foregroundStyle(.secondary)
