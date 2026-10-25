@@ -7,12 +7,12 @@ For iPhone and Android. No accounts, no Passthrough server.</p>
 <p align="center">
   <picture>
     <source media="(prefers-color-scheme: light)" srcset="docs/images/iphone-mac-light.png">
-    <img src="docs/images/iphone-mac-dark.png" width="250" alt="The iPhone app's Mac tab: the Mac staying awake with 3 hours 10 minutes left, a shell asking a question, and the Internet, Keep awake and VPN switches">
+    <img src="docs/images/iphone-mac-dark.png" width="250" alt="The iPhone app's Mac tab: the Mac staying awake with 3 hours 10 minutes left, a shell asking a question, and switches for Internet through this iPhone, Keep Mac awake and VPN">
   </picture>
   &nbsp;
   <picture>
     <source media="(prefers-color-scheme: light)" srcset="docs/images/mac-panel-light.png">
-    <img src="docs/images/mac-panel-dark.png" width="290" alt="The Mac's menu-bar panel: online through the iPhone, three switches, the route and live speeds, and what the phone is doing on the Mac">
+    <img src="docs/images/mac-panel-dark.png" width="290" alt="The Mac's menu-bar panel: online through the iPhone with the VPN on, three switches with their status, and the route and live speeds below">
   </picture>
   &nbsp;
   <img src="docs/images/iphone-activity.png" width="250" alt="The Activity tab: shells finished, questions answered and connection drops, the Mac's battery as a line, and a timeline of what happened">
@@ -49,7 +49,7 @@ The phone apps open on your Mac: three switches, **Internet through this phone**
   <img src="docs/images/mac-notice-capsule.png" width="380" alt="The same kind of notice as a capsule under the menu bar on a screen without a notch">
 </p>
 <p align="center">
-  <img src="docs/images/mac-menubar.png" width="560" alt="The menu-bar icon's states: off, online, awake, VPN on, a shell needs you, and a problem">
+  <img src="docs/images/mac-menubar.png" width="560" alt="The menu-bar icon's states: the phone alone, online, with a cup while awake and a lock while the VPN is on, an amber dot when a shell needs you, and an amber phone when something is wrong">
 </p>
 
 A menu-bar app with the same three switches; one that can't turn on says why and offers the fix. When the phone changes something, a notice grows out of the notch (or drops in under the menu bar on screens without one), and anything that lowers protection stays until someone at the Mac sees it. The icon says it all at a glance: online, awake, VPN on, a shell waiting on you, or something wrong. On first launch it asks what you want the phone to do and only asks for permissions when each one is first needed.
