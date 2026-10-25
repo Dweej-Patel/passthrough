@@ -8,6 +8,16 @@ import Foundation
 public enum ScreenVideoWire {
     /// Largest payload either side accepts (a keyframe of a big screen fits easily).
     public static let maxPayload = 16 << 20
+    /// Largest payloads the Mac takes from a phone (`Reader(from: .phone)`),
+    /// so a phone cannot make it buffer 16 MiB of input: one `text` message
+    /// (longer text goes in several, `textPieces`), one `clipboard`, and
+    /// every fixed-size event.
+    public static let maxTextPayload = 4 << 10
+    public static let maxClipboardPayload = 64 << 10
+    static let maxEventPayload = 64
+
+    /// Who wrote the bytes a `Reader` splits, which sets how large each payload may be.
+    public enum Sender: Sendable { case mac, phone }
 
     public enum Message: Equatable, Sendable {
         // Mac → phone
@@ -15,6 +25,8 @@ public enum ScreenVideoWire {
         case format(width: Int, height: Int, sps: Data, pps: Data)
         /// One frame: AVCC NAL units (4-byte lengths), numbered from 1.
         case frame(number: UInt32, keyframe: Bool, data: Data)
+        /// The answer to `copy`.
+        case copied(CopyResult)
 
         // Phone → Mac
         /// The phone's largest useful size in pixels; the Mac fits the stream inside it.
@@ -33,6 +45,21 @@ public enum ScreenVideoWire {
         case clipboard(String)
         /// The phone lost its place in the stream: send a keyframe.
         case keyframeRequest
+        /// Press ⌘C on the Mac and answer with what it copied (`copied`).
+        case copy
+    }
+
+    /// What a `copy` found. Only what that ⌘C put on the Mac's clipboard is
+    /// sent: a clipboard that didn't change is `nothing`, never what was on
+    /// it before (a password copied on the Mac, say).
+    public enum CopyResult: Equatable, Sendable {
+        case text(String)
+        /// The clipboard didn't change: nothing was selected, or the app doesn't copy.
+        case nothing
+        /// Text longer than `maxClipboardPayload`.
+        case tooLong
+        /// Something that isn't text (an image, a file).
+        case notText
     }
 
     public struct Modifiers: OptionSet, Sendable {
@@ -45,8 +72,8 @@ public enum ScreenVideoWire {
     }
 
     enum Kind: UInt8 {
-        case format = 1, frame = 2
-        case hello = 16, ack = 17, pointer = 18, scroll = 19, key = 20, text = 21, clipboard = 22, keyframeRequest = 23
+        case format = 1, frame = 2, copied = 3
+        case hello = 16, ack = 17, pointer = 18, scroll = 19, key = 20, text = 21, clipboard = 22, keyframeRequest = 23, copy = 24
     }
 
     public enum Failure: Error, Equatable { case tooLarge, malformed }
@@ -63,6 +90,14 @@ public enum ScreenVideoWire {
         case let .frame(number, keyframe, data):
             kind = .frame
             payload.append(u32: number); payload.append(keyframe ? 1 : 0); payload.append(data)
+        case let .copied(result):
+            kind = .copied
+            switch result {
+            case let .text(text): payload.append(0); payload.append(Data(text.utf8))
+            case .nothing: payload.append(1)
+            case .tooLong: payload.append(2)
+            case .notText: payload.append(3)
+            }
         case let .hello(maxWidth, maxHeight):
             kind = .hello
             payload.append(u16: maxWidth); payload.append(u16: maxHeight)
@@ -86,6 +121,8 @@ public enum ScreenVideoWire {
             payload.append(Data(text.utf8))
         case .keyframeRequest:
             kind = .keyframeRequest
+        case .copy:
+            kind = .copy
         }
         var out = Data([kind.rawValue])
         out.append(u32: UInt32(payload.count))
@@ -93,20 +130,59 @@ public enum ScreenVideoWire {
         return out
     }
 
+    /// `text` split into pieces of at most `maxBytes` of UTF-8 each, on
+    /// character boundaries (a single character longer than that, on scalar
+    /// boundaries), so a long paste still fits `maxTextPayload` per message.
+    public static func textPieces(_ text: String, maxBytes: Int = maxTextPayload) -> [String] {
+        guard text.utf8.count > maxBytes else { return text.isEmpty ? [] : [text] }
+        var pieces: [String] = [], piece = "", pieceBytes = 0
+        func add(_ part: String, _ bytes: Int) {
+            if pieceBytes + bytes > maxBytes, !piece.isEmpty { pieces.append(piece); piece = ""; pieceBytes = 0 }
+            piece += part
+            pieceBytes += bytes
+        }
+        for character in text {
+            let bytes = character.utf8.count
+            if bytes <= maxBytes {
+                add(String(character), bytes)
+            } else {
+                for scalar in character.unicodeScalars { add(String(scalar), String(scalar).utf8.count) }
+            }
+        }
+        if !piece.isEmpty { pieces.append(piece) }
+        return pieces
+    }
+
+    /// The most a payload of message type `type` from `sender` may be.
+    static func maxPayload(of type: UInt8, from sender: Sender) -> Int {
+        // What the Mac copied is held to what a phone may paste (and a status byte).
+        guard sender == .phone else { return Kind(rawValue: type) == .copied ? maxClipboardPayload + 1 : maxPayload }
+        switch Kind(rawValue: type) {
+        case .text: return maxTextPayload
+        case .clipboard: return maxClipboardPayload
+        case .some: return maxEventPayload
+        // A type added later: skipped, but not buffered without bound either.
+        case nil: return maxClipboardPayload
+        }
+    }
+
     /// Splits a byte stream into messages. Unknown types are skipped, so
     /// either side can add some later.
     public struct Reader: Sendable {
         private var buffer = Data()
-        public init() {}
+        private let sender: Sender
+        /// `sender`: the side that writes the stream; a phone's messages have smaller limits.
+        public init(from sender: Sender = .mac) { self.sender = sender }
 
-        /// The messages complete so far; throws on a payload over `maxPayload` or one that doesn't parse.
+        /// The messages complete so far; throws on a payload over its type's
+        /// limit (`maxPayload(of:from:)`), checked before it is buffered, or one that doesn't parse.
         public mutating func append(_ data: Data) throws -> [Message] {
             buffer.append(data)
             var messages: [Message] = []
             var offset = buffer.startIndex
             while buffer.endIndex - offset >= 5 {
                 let length = Int(buffer.u32(at: offset + 1))
-                guard length <= ScreenVideoWire.maxPayload else { throw Failure.tooLarge }
+                guard length <= ScreenVideoWire.maxPayload(of: buffer[offset], from: sender) else { throw Failure.tooLarge }
                 guard buffer.endIndex - offset >= 5 + length else { break }
                 let type = buffer[offset]
                 let payload = buffer.subdata(in: (offset + 5)..<(offset + 5 + length))
@@ -153,8 +229,19 @@ public enum ScreenVideoWire {
             return .text(String(decoding: p, as: UTF8.self))
         case .clipboard:
             return .clipboard(String(decoding: p, as: UTF8.self))
+        case .copied:
+            try need(1)
+            switch p[b] {
+            case 0: return .copied(.text(String(decoding: p.dropFirst(), as: UTF8.self)))
+            case 2: return .copied(.tooLong)
+            case 3: return .copied(.notText)
+            // A status added later reads as nothing copied.
+            default: return .copied(.nothing)
+            }
         case .keyframeRequest:
             return .keyframeRequest
+        case .copy:
+            return .copy
         }
     }
 }

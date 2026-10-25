@@ -87,6 +87,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import dev.dpatel.passthrough.ui.LocalPT
 import dev.dpatel.passthrough.ui.PT
 import dev.dpatel.passthrough.ui.PTColors
+import dev.dpatel.passthrough.ui.lock.HideFromCapture
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.combine
@@ -126,6 +127,7 @@ class ShellTerminalController(context: Context, private val vm: ShellViewModel) 
         view.onResize = { cols, rows -> if (vm.activeSession.value != null && !readOnly) vm.resize(cols, rows) }
         view.onCtrlChanged = { ctrl = it }
         view.onLongPress = { menu = true }
+        view.macName = { vm.macs.value.firstOrNull { it.macID == vm.selectedMacID.value }?.macName ?: "your Mac" }
     }
 
     /** Runs the screen's opening request once the terminal has its real size. */
@@ -192,6 +194,7 @@ fun TerminalScreen(vm: ShellViewModel, intent: String, onIntentStarted: () -> Un
         combine(vm.ended, vm.openTabs, ::Pair).collect { (ended, tabs) -> controller.update(ended, tabs) }
     }
     DarkSystemBars()
+    HideFromCapture()
 
     val reach by vm.reach.collectAsStateWithLifecycle()
     val active by vm.activeSession.collectAsStateWithLifecycle()

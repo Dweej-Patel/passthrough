@@ -187,6 +187,13 @@ targets:
         # iroh-ffi ships a macOS arm64 slice only (like the helper's engines).
         ARCHS: arm64
         EXCLUDED_ARCHS: x86_64
+      configs:
+        # Xcode adds com.apple.security.get-task-allow to development-signed
+        # builds, which lets any process of the user's attach and inject code
+        # that then speaks to the root helper as this app. A Release helper
+        # refuses clients that carry it (CodeSigning.requirementForOwnTeam).
+        Release:
+          CODE_SIGN_INJECT_BASE_ENTITLEMENTS: NO
 
   PassthroughHelper:
     type: tool
@@ -198,6 +205,9 @@ targets:
       # Parsing and pinning only (Foundation + CryptoKit); keeps the root helper's surface small.
       - package: PassthroughCore
         product: VPNConfig
+      # Its pure decisions (XPC input checks, process and socket ownership), tested in the package.
+      - package: PassthroughCore
+        product: HelperLogic
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: $(PASSTHROUGH_ID).helper
@@ -210,6 +220,10 @@ targets:
         INFOPLIST_FILE: macOS/Helper/Info.plist
         ARCHS: arm64
         EXCLUDED_ARCHS: x86_64
+      configs:
+        # No get-task-allow in Release: the helper refuses debuggable clients.
+        Release:
+          CODE_SIGN_INJECT_BASE_ENTITLEMENTS: NO
 
 schemes:
   Passthrough:

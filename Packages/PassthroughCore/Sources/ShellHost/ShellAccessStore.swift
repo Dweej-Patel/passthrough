@@ -37,6 +37,11 @@ public struct ShellPhone: Codable, Equatable, Sendable {
 /// handshakes cannot make every one go to the Keychain, while a phone stored
 /// by another writer is still seen soon. The lock guarding the copy is never
 /// held across store I/O, and writes serialize on their own lock.
+///
+/// Taking access away fails closed: a revoke, or Screen turned off, holds in
+/// memory even when the store cannot be written, and is laid over every
+/// later read of the store until a write succeeds, so a failed write never
+/// brings back what the owner took away.
 public final class ShellAccessStore: @unchecked Sendable {
     private static let account = "shell.phones"
     /// How long a read that found nothing is answered from memory.
@@ -57,6 +62,12 @@ public final class ShellAccessStore: @unchecked Sendable {
     /// Bumped whenever `cached` is set by a write, so a read that began
     /// earlier does not install what it saw before that write.
     private var generation = 0
+    /// Reductions not yet in the store (its write failed): phones revoked and
+    /// phones whose screen access was turned off. Applied to every list read
+    /// from the store; cleared once a list that includes them is written.
+    /// Guarded by `lock`.
+    private var unsavedRevokes: Set<String> = []
+    private var unsavedScreenOff: Set<String> = []
 
     /// `now` is for tests.
     public init(secrets: SecretStore, now: @escaping @Sendable () -> Date = Date.init) {
@@ -130,13 +141,23 @@ public final class ShellAccessStore: @unchecked Sendable {
     }
 
     /// Lets the phone see and control the screen, or stops it. False if it
-    /// could not be stored (nothing changes then), or the phone is unknown.
+    /// could not be stored, or the phone is unknown. A failed allow changes
+    /// nothing; a failed stop still stops it, in memory, until the store can
+    /// be written (and the caller should say it may come back after a relaunch).
     @discardableResult
     public func setScreenAllowed(_ allowed: Bool, forPhone phoneID: String) -> Bool {
         writeLock.lock(); defer { writeLock.unlock() }
-        guard var list = loadForWrite(), let index = list.firstIndex(where: { $0.phoneID == phoneID }) else { return false }
+        guard var list = loadForWrite(), let index = list.firstIndex(where: { $0.phoneID == phoneID }) else {
+            // Unreadable or unknown: nobody can be allowed the screen through it anyway.
+            return false
+        }
         list[index].screen = allowed
-        return store(list)
+        if allowed { return store(list) }
+        setCache(list)
+        if write(list) { saved(); return true }
+        ptLog(.error, "Could not store that a phone may no longer see the screen; it stays off until this Mac quits")
+        lock.lock(); unsavedScreenOff.insert(phoneID); lock.unlock()
+        return false
     }
 
     /// The keys a proof from this phone may use: its current key, then the
@@ -159,6 +180,19 @@ public final class ShellAccessStore: @unchecked Sendable {
         if !store(list) { ptLog(.warning, "Could not drop a phone's previous shell key") }
     }
 
+    /// The phone's pairing moved from `fromSlot` to `toSlot` (an iPhone's,
+    /// out of the slot every iPhone once shared): so does its access, which
+    /// `record` would otherwise refuse to renew. False if the phone has no
+    /// access through `fromSlot`, or the move could not be stored.
+    @discardableResult
+    public func move(phoneID: String, fromSlot: String, toSlot: String) -> Bool {
+        writeLock.lock(); defer { writeLock.unlock() }
+        guard var list = loadForWrite(),
+              let index = list.firstIndex(where: { $0.phoneID == phoneID && $0.pairingSlot == fromSlot }) else { return false }
+        list[index].pairingSlot = toSlot
+        return store(list)
+    }
+
     /// False only if the key may still be usable afterwards.
     @discardableResult
     public func revoke(phoneID: String) -> Bool {
@@ -177,13 +211,16 @@ public final class ShellAccessStore: @unchecked Sendable {
     private func remove(where shouldRemove: (ShellPhone) -> Bool) -> Bool {
         writeLock.lock(); defer { writeLock.unlock() }
         if var list = loadForWrite() {
+            let removed = Set(list.filter(shouldRemove).map(\.phoneID))
             list.removeAll(where: shouldRemove)
             setCache(list)
-            if write(list) { return true }
+            if write(list) { saved(); return true }
             ptLog(.error, "Could not update the shell phones; removing them all")
             secrets.delete(Self.account)
-            // Still stored: the in-memory list stays the trimmed one.
-            if secrets.read(Self.account) == nil { setCache(nil); return true }
+            // Still stored: the in-memory list stays the trimmed one, and any
+            // later read of the store leaves these phones out.
+            if secrets.read(Self.account) == nil { setCache(nil); saved(); return true }
+            lock.lock(); unsavedRevokes.formUnion(removed); lock.unlock()
             return false
         }
         ptLog(.error, "Could not update the shell phones; removing them all")
@@ -196,6 +233,12 @@ public final class ShellAccessStore: @unchecked Sendable {
         lock.lock(); cached = list; emptyUntil = nil; generation += 1; lock.unlock()
     }
 
+    /// A list built on the in-memory one (so with every unsaved reduction
+    /// applied) was written, or nothing is stored at all: nothing is unsaved.
+    private func saved() {
+        lock.lock(); unsavedRevokes.removeAll(); unsavedScreenOff.removeAll(); lock.unlock()
+    }
+
     /// Writes `list` to the store, no lock held.
     private func write(_ list: [ShellPhone]) -> Bool {
         guard let data = try? JSONEncoder().encode(list) else { return false }
@@ -204,7 +247,7 @@ public final class ShellAccessStore: @unchecked Sendable {
 
     /// Under `writeLock`.
     private func store(_ list: [ShellPhone]) -> Bool {
-        if write(list) { setCache(list); return true }
+        if write(list) { setCache(list); saved(); return true }
         setCache(nil)   // whatever the store holds now, read it again
         return false
     }
@@ -219,11 +262,16 @@ public final class ShellAccessStore: @unchecked Sendable {
         return loaded
     }
 
-    /// From the store, no lock held. Empty when nothing is stored
-    /// and nil when something is stored but unreadable.
+    /// From the store, with the unsaved reductions applied; no lock held
+    /// across the read. Empty when nothing is stored and nil when something
+    /// is stored but unreadable.
     private func readStore() -> [ShellPhone]? {
         guard let data = secrets.read(Self.account) else { return [] }
-        return try? JSONDecoder().decode([ShellPhone].self, from: data)
+        guard var list = try? JSONDecoder().decode([ShellPhone].self, from: data) else { return nil }
+        lock.lock(); let revoked = unsavedRevokes, screenOff = unsavedScreenOff; lock.unlock()
+        list.removeAll { revoked.contains($0.phoneID) }
+        for index in list.indices where screenOff.contains(list[index].phoneID) { list[index].screen = false }
+        return list
     }
 }
 #endif

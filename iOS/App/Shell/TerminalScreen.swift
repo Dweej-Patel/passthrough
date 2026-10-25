@@ -25,6 +25,11 @@ final class ShellTerminalController: ObservableObject {
     private let shell: ShellModel
     /// The session whose output the terminal shows.
     @Published private(set) var shown: String?
+    /// A program on the Mac just copied to this iPhone's clipboard: said briefly, since it happens unasked.
+    @Published private(set) var copiedNotice = false
+    /// A paste that would run as it arrives, waiting for the user's yes.
+    @Published var pendingPaste: PendingPaste?
+    private var noticeTask: Task<Void, Never>?
     private var subscriptions: Set<AnyCancellable> = []
 
     init(shell: ShellModel) {
@@ -59,6 +64,20 @@ final class ShellTerminalController: ObservableObject {
             guard self != nil, shell.activeSession != nil else { return }
             shell.resize(cols: cols, rows: rows)
         }
+        driver.onClipboardCopy = { [weak self] in self?.showCopiedNotice() }
+        driver.onConfirmPaste = { [weak self] lineBreaks, paste in
+            self?.pendingPaste = PendingPaste(lineBreaks: lineBreaks, paste: paste)
+        }
+    }
+
+    private func showCopiedNotice() {
+        copiedNotice = true
+        noticeTask?.cancel()
+        noticeTask = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(2))
+            guard !Task.isCancelled else { return }
+            self?.copiedNotice = false
+        }
     }
 
     /// Runs the screen's opening request once the terminal has its real size.
@@ -86,6 +105,13 @@ final class ShellTerminalController: ObservableObject {
         // An ended session's replay is its log: show it read-only.
         driver.setReadOnly(!shell.ended.isWritable(id, openTabs: shell.openTabs))
     }
+}
+
+/// A paste into a shell that would run each of its lines as they arrive.
+struct PendingPaste: Identifiable {
+    let id = UUID()
+    let lineBreaks: Int
+    let paste: () -> Void
 }
 
 /// The full-screen terminal: session tabs, the terminal and its key row.
@@ -124,9 +150,25 @@ struct TerminalScreen: View {
                     .padding(.horizontal, 12)
                     .padding(.top, 8)
                 }
+                .overlay(alignment: .bottom) {
+                    if controller.copiedNotice { copiedBanner.transition(.opacity.combined(with: .move(edge: .bottom))) }
+                }
+                .animation(.easeInOut(duration: 0.2), value: controller.copiedNotice)
             }
         }
         .environment(\.colorScheme, .dark)
+        .alert("Run what you paste?", isPresented: Binding(get: { controller.pendingPaste != nil },
+                                                          set: { if !$0 { controller.pendingPaste = nil } }),
+               presenting: controller.pendingPaste) { pending in
+            Button("Paste and Run") { pending.paste() }
+            Button("Cancel", role: .cancel) {}
+        } message: { pending in
+            Text("This shell runs each line of a paste as soon as it arrives. The text has \(pending.lineBreaks == 1 ? "a line break" : "\(pending.lineBreaks) line breaks"), so it runs without a chance to check it first.")
+        }
+        .hiddenWhileCaptured { covered in
+            // Typing into a terminal no one can see would be blind.
+            if covered { _ = controller.driver.view.resignFirstResponder() }
+        }
         .onAppear { controller.start(intent) }
     }
 
@@ -271,10 +313,24 @@ struct TerminalScreen: View {
         }
     }
 
+    private var macName: String {
+        shell.macs.first { $0.macID == shell.selectedMacID }?.macName ?? "your Mac"
+    }
+
+    private var copiedBanner: some View {
+        Label("Copied from \(macName)", systemImage: "doc.on.clipboard")
+            .font(.caption.weight(.semibold))
+            .foregroundStyle(.secondary)
+            .padding(.horizontal, 12).padding(.vertical, 7)
+            .background(.regularMaterial, in: Capsule())
+            .padding(.bottom, 10)
+            .allowsHitTesting(false)
+    }
+
     private var statusText: String? {
         switch shell.reach {
         case .ready: nil
-        case .connecting: "Connecting…"
+        case .connecting: shell.isRedialing ? "Reconnecting…" : "Connecting…"
         default: shell.reachMessage
         }
     }

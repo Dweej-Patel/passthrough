@@ -1,16 +1,21 @@
 {
   "_comment": "Shared by the Swift tests (Packages/PassthroughCore) and the Kotlin tests (android/). Change it and both suites must agree. See protocol/README.md.",
-  "protocolVersion": 1,
+  "protocolVersion": 2,
   "ports": {
     "socks": 7890,
     "control": 7891
   },
   "pairingCodeLifetimeSeconds": 300,
+  "pairingMaxWrongCodesPerConnection": 3,
+  "pairingMaxWrongCodesPerCode": 10,
+  "unauthenticatedTimeoutSeconds": 10,
   "pairingFailures": [
     "bad_code",
     "expired",
     "not_authenticated",
-    "unsupported_version"
+    "unsupported_version",
+    "locked",
+    "code_withdrawn"
   ],
   "tokens": [
     {
@@ -29,12 +34,34 @@
       "wellFormed": false
     }
   ],
+  "controlAuth": {
+    "_comment": "K = SHA-256(token). phoneProof = HMAC-SHA256(K, phoneLabel || clientID || macNonce || phoneNonce), macProof = HMAC-SHA256(K, macLabel || clientID || phoneNonce || macNonce), both base64; socksPassword = HMAC-SHA256(K, socksLabel) as unpadded URL-safe base64. See protocol/README.md.",
+    "phoneLabel": "passthrough-control-v2 phone",
+    "macLabel": "passthrough-control-v2 mac",
+    "socksLabel": "passthrough-socks-v2",
+    "nonceLength": 32,
+    "vectors": [
+      {
+        "token": "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8",
+        "tokenSHA256": "ea866a757e4c38babfa8127cbe9a409d3e1f93a00ff1488ff735fcf917afffd0",
+        "clientID": "8F0C2A51-4C8E-4D3B-9B1E-2F5C8A7D6E10",
+        "macNonce": "QEFCQ0RFRkdISUpLTE1OT1BRUlNUVVZXWFlaW1xdXl8=",
+        "phoneNonce": "YGFiY2RlZmdoaWprbG1ub3BxcnN0dXZ3eHl6e3x9fn8=",
+        "phoneProof": "KG8T1+HX19LNtQHrj3YohbhZc9EpLvPb90zFcqaGHek=",
+        "macProof": "zC5fd9NGXIKwv4lYJrFtQt+R/GV5de9PjT/xd0T2bIw=",
+        "socksPassword": "zO8xzREvPyEXtzz-VhlDx5TlYpObH2tZrB9fbLxGkiQ"
+      }
+    ]
+  },
   "messages": [
     {
-      "line": "{\"t\":\"hello\",\"protocolVersion\":1,\"clientID\":\"8F0C2A51-4C8E-4D3B-9B1E-2F5C8A7D6E10\",\"name\":\"MacBook Pro\",\"token\":\"AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8\"}"
+      "line": "{\"t\":\"hello\",\"protocolVersion\":2,\"clientID\":\"8F0C2A51-4C8E-4D3B-9B1E-2F5C8A7D6E10\",\"name\":\"MacBook Pro\",\"nonce\":\"QEFCQ0RFRkdISUpLTE1OT1BRUlNUVVZXWFlaW1xdXl8=\",\"via\":\"usb\"}"
     },
     {
-      "line": "{\"t\":\"welcome\",\"protocolVersion\":1,\"paired\":false,\"socksPort\":7890,\"deviceName\":\"Pixel 8\",\"radio\":\"5G\",\"carrier\":\"T-Mobile\",\"battery\":0.82,\"hosting\":\"background\"}"
+      "line": "{\"t\":\"welcome\",\"protocolVersion\":2,\"paired\":false,\"nonce\":\"YGFiY2RlZmdoaWprbG1ub3BxcnN0dXZ3eHl6e3x9fn8=\"}"
+    },
+    {
+      "line": "{\"t\":\"auth\",\"proof\":\"zC5fd9NGXIKwv4lYJrFtQt+R/GV5de9PjT/xd0T2bIw=\"}"
     },
     {
       "line": "{\"t\":\"pair\",\"clientID\":\"8F0C2A51-4C8E-4D3B-9B1E-2F5C8A7D6E10\",\"name\":\"MacBook Pro\",\"code\":\"042917\"}"
@@ -44,6 +71,15 @@
     },
     {
       "line": "{\"t\":\"error\",\"reason\":\"bad_code\"}"
+    },
+    {
+      "line": "{\"t\":\"error\",\"reason\":\"locked\"}"
+    },
+    {
+      "line": "{\"t\":\"error\",\"reason\":\"code_withdrawn\"}"
+    },
+    {
+      "line": "{\"t\":\"error\",\"reason\":\"unsupported_version\",\"protocolVersion\":2}"
     },
     {
       "line": "{\"t\":\"ping\"}"
@@ -58,7 +94,7 @@
       "line": "{\"t\":\"status\",\"deviceName\":\"iPhone\",\"radio\":\"Wi-Fi\",\"hosting\":\"background\",\"ipv6\":false,\"activeConnections\":1,\"rxBytes\":10,\"txBytes\":20,\"timestamp\":1758062400.5}"
     },
     {
-      "line": "{\"t\":\"welcome\",\"protocolVersion\":1,\"paired\":true,\"socksPort\":7890,\"deviceName\":\"Pixel 8\",\"hosting\":\"background\",\"ipv6\":true}"
+      "line": "{\"t\":\"welcome\",\"protocolVersion\":2,\"paired\":true,\"nonce\":\"YGFiY2RlZmdoaWprbG1ub3BxcnN0dXZ3eHl6e3x9fn8=\",\"proof\":\"KG8T1+HX19LNtQHrj3YohbhZc9EpLvPb90zFcqaGHek=\"}"
     },
     {
       "line": "{\"t\":\"shellGrant\",\"shellKey\":\"AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=\",\"certSHA256\":\"abababababababababababababababababababababababababababababababab\",\"shellPort\":7893,\"addresses\":[\"192.168.1.20\",\"100.101.102.103\"],\"macName\":\"MacBook Pro\"}"
@@ -165,6 +201,72 @@
         "system": [],
         "chosen": "1.1.1.1"
       }
+    ]
+  },
+  "shellKeySeal": {
+    "_comment": "A shell key waiting for the app, sealed to the app's P-256 sealing key (ShellKeySeal): [1][ephemeral public key X9.63, 65][AES-GCM nonce 12][ciphertext][tag 16]. ECDH, then HKDF-SHA256 with no salt and info 'passthrough.shell.pending.v1' + ephemeral public key + sealing public key, 32 bytes; associated data 'passthrough.shell.key:' + clientID. Hex throughout.",
+    "recipientPrivateKey": "0a6962486883c33dd12e5adc698a1403caba4a6755d7235a0e7d63591211d987",
+    "recipientPublicKey": "046dff6eb01a3c7d1c04feddf4721ef1c5e14ab36f8a9a15eafe688ff6aa14a4de0e9d49b10bb56245858492219a66b782abbd57d25f24bec5a319b7f2e9836694",
+    "clientID": "4F1C2B9E-6A57-4D3B-9C1E-0B7A2D5E8F10",
+    "key": "00070e151c232a31383f464d545b626970777e858c939aa1a8afb6bdc4cbd2d9",
+    "sealed": "010400ba839eeacc39a3dc1c810040be122323f4fdb822c7168d2ce159b4e2c03890922ad76f98162e4666784d42adf95693c8f68c94adb4f862bdfe2ee15325f17967edba1594d7dd9e381dfeff26a1f0d89d9f1abdf5f5f50103fa20df053383be70d22a53060b1520010c2436eafaa72aae4fce303709e9b7936b7944"
+  },
+  "localDestinations": {
+    "_comment": "Destinations the phone refuses (refuseLocalDestinations): nothing on its uplink can answer them. Each address is checked as an IP and spelled as a name, and is also the rule for what a name resolved to. NAT64 (64:ff9b::/96) and IPv4-mapped/compatible addresses are judged by the IPv4 inside. Names are checked as sent.",
+    "addresses": [
+      { "ip": "10.1.2.3", "local": true },
+      { "ip": "127.0.0.1", "local": true },
+      { "ip": "0.1.2.3", "local": true },
+      { "ip": "172.16.0.1", "local": true },
+      { "ip": "192.168.1.1", "local": true },
+      { "ip": "192.0.0.8", "local": true },
+      { "ip": "198.18.0.1", "local": true },
+      { "ip": "198.19.255.255", "local": true },
+      { "ip": "169.254.1.1", "local": true },
+      { "ip": "100.64.0.1", "local": true },
+      { "ip": "224.0.0.251", "local": true },
+      { "ip": "255.255.255.255", "local": true },
+      { "ip": "::", "local": true },
+      { "ip": "::1", "local": true },
+      { "ip": "fe80::1", "local": true },
+      { "ip": "fd7a:115c:a1e0::53", "local": true },
+      { "ip": "ff02::fb", "local": true },
+      { "ip": "::ffff:192.168.1.1", "local": true },
+      { "ip": "::ffff:127.0.0.1", "local": true },
+      { "ip": "::10.0.0.1", "local": true },
+      { "ip": "64:ff9b::a00:1", "local": true },
+      { "ip": "64:ff9b::7f00:1", "local": true },
+      { "ip": "64:ff9b:1::808:808", "local": true },
+      { "ip": "2002:c0a8:101::1", "local": true },
+      { "ip": "1.1.1.1", "local": false },
+      { "ip": "8.8.8.8", "local": false },
+      { "ip": "192.0.2.1", "local": false },
+      { "ip": "198.20.0.1", "local": false },
+      { "ip": "100.128.0.1", "local": false },
+      { "ip": "172.32.0.1", "local": false },
+      { "ip": "2606:4700:4700::1111", "local": false },
+      { "ip": "64:ff9b::808:808", "local": false },
+      { "ip": "64:ff9b:2::1", "local": false },
+      { "ip": "::ffff:8.8.8.8", "local": false }
+    ],
+    "names": [
+      { "name": "localhost", "local": true },
+      { "name": "LocalHost.", "local": true },
+      { "name": "foo.localhost", "local": true },
+      { "name": "printer.local", "local": true },
+      { "name": "router.home.arpa", "local": true },
+      { "name": "db.internal", "local": true },
+      { "name": "[::1]", "local": true },
+      { "name": "127.1", "local": true },
+      { "name": "2130706433", "local": true },
+      { "name": "0x7f.0.0.1", "local": true },
+      { "name": "012.0.0.1", "local": true },
+      { "name": "192.168.1.1.", "local": true },
+      { "name": "example.com", "local": false },
+      { "name": "localhost.example.com", "local": false },
+      { "name": "1.1.1.1", "local": false },
+      { "name": "[2606:4700:4700::1111]", "local": false },
+      { "name": "8.8.8.8.nip.io", "local": false }
     ]
   },
   "shell": {

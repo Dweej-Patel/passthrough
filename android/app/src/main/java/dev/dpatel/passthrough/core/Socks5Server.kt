@@ -109,10 +109,19 @@ class Socks5Server(
         val server = DnsRedirect.server(egress.dnsServers())
         if (server != lastDnsServer) {
             lastDnsServer = server
-            ptLog(PtLog.Level.INFO, "DNS sent to ${address.host} goes to this phone's DNS server ${server.hostAddress} instead")
+            ptLog(PtLog.Level.INFO, "DNS sent to ${ptPrivate(address.host)} goes to this phone's DNS server ${server.hostAddress} instead")
         }
         return server
     }
+
+    /**
+     * A name's DNS answers the phone may connect to. A name the Mac sent can
+     * resolve to a private address (a rebinding answer, or a spelling of an IP
+     * [Socks5.Address.ipLiteral] doesn't know), so the answers get the same
+     * check as an address the Mac sent.
+     */
+    private fun reachable(resolved: List<InetAddress>): List<InetAddress> =
+        if (config.refuseLocalDestinations) resolved.filterNot(Socks5.Address::isLocalIp) else resolved
 
     private fun authenticate(user: String, password: String): Boolean {
         val auth = authenticator ?: return true
@@ -196,7 +205,7 @@ class Socks5Server(
                 cmd == Socks5.Command.CONNECT -> {
                     if (config.refuseLocalDestinations && address.isLocalOnly) {
                         if (DnsRedirect.applies(address)) { connect(address, redirected = true); return }
-                        ptLog(PtLog.Level.DEBUG, "refused $address: private/local address, not reachable via the phone")
+                        ptLog(PtLog.Level.DEBUG, "refused ${ptPrivate(address)}: private/local address, not reachable via the phone")
                         output.write(Socks5.reply(Socks5.Reply.NETWORK_UNREACHABLE)); return
                     }
                     connect(address)
@@ -214,14 +223,19 @@ class Socks5Server(
             val deadline = System.currentTimeMillis() + config.connectTimeoutMs
             val eg = egress.acquire(config.connectTimeoutMs.toLong())
             if (eg == null) {
-                ptLog(PtLog.Level.DEBUG, "connect to $address failed: no usable network")
+                ptLog(PtLog.Level.DEBUG, "connect to ${ptPrivate(address)} failed: no usable network")
                 output.write(Socks5.reply(Socks5.Reply.NETWORK_UNREACHABLE)); return
             }
             val candidates = try {
-                if (redirected) listOf(dnsServer(eg, address)) else address.ip?.let { listOf(it) } ?: eg.resolve(address.host)
+                if (redirected) listOf(dnsServer(eg, address)) else address.ip?.let { listOf(it) } ?: reachable(eg.resolve(address.host))
             } catch (e: UnknownHostException) {
-                ptLog(PtLog.Level.DEBUG, "connect to $address failed: DNS error")
+                ptLog(PtLog.Level.DEBUG, "connect to ${ptPrivate(address)} failed: DNS error")
                 output.write(Socks5.reply(Socks5.Reply.HOST_UNREACHABLE)); return
+            }
+            if (candidates.isEmpty()) {
+                // Every answer for the name was private (a rebinding DNS answer, say).
+                ptLog(PtLog.Level.DEBUG, "refused ${ptPrivate(address)}: resolves only to private/local addresses")
+                output.write(Socks5.reply(Socks5.Reply.NETWORK_UNREACHABLE)); return
             }
             var lastError: Exception? = null
             var socket: Socket? = null
@@ -245,7 +259,7 @@ class Socks5Server(
             }
             if (socket == null) {
                 val code = replyCode(lastError)
-                ptLog(PtLog.Level.DEBUG, "connect to $address failed: ${describe(lastError)}")
+                ptLog(PtLog.Level.DEBUG, "connect to ${ptPrivate(address)} failed: ${describe(lastError)}")
                 output.write(Socks5.reply(code)); return
             }
             remote = socket
@@ -279,7 +293,7 @@ class Socks5Server(
                     if (download) counter.addRx(n) else counter.addTx(n)
                 }
             } catch (e: IOException) {
-                if (!closed.get()) ptLog(PtLog.Level.DEBUG, "stream to $label ended: ${describe(e)}")
+                if (!closed.get()) ptLog(PtLog.Level.DEBUG, "stream to ${ptPrivate(label)} ended: ${describe(e)}")
                 close("stream error")
             }
         }
@@ -304,7 +318,7 @@ class Socks5Server(
             private val peers = object : LinkedHashMap<InetSocketAddress, ByteArray>(64, 0.75f, true) {
                 override fun removeEldestEntry(eldest: MutableMap.MutableEntry<InetSocketAddress, ByteArray>?) = size > config.maxUdpPeersPerSession
             }
-            private val dns = HashMap<String, Pair<InetAddress, Long>>()
+            private val dns = HashMap<String, Pair<InetAddress?, Long>>()
 
             fun run() {
                 while (!closed.get()) {
@@ -326,9 +340,9 @@ class Socks5Server(
                     if (config.refuseLocalDestinations && DnsRedirect.applies(address)) {
                         val eg = egress.acquire(config.connectTimeoutMs.toLong()) ?: throw UnknownHostException(address.host)
                         InetSocketAddress(dnsServer(eg, address), DnsRedirect.PORT)
-                    } else InetSocketAddress(address.ip ?: resolve(address.host), address.port)
+                    } else InetSocketAddress(address.ip ?: resolve(address.host) ?: return, address.port)
                 } catch (e: Exception) {
-                    ptLog(PtLog.Level.DEBUG, "UDP to $address dropped: ${describe(e)}"); return
+                    ptLog(PtLog.Level.DEBUG, "UDP to ${ptPrivate(address)} dropped: ${describe(e)}"); return
                 }
                 synchronized(peers) { peers[target] = address.raw }
                 label = address.toString()
@@ -338,16 +352,18 @@ class Socks5Server(
                 } catch (e: IOException) {
                     // The network under the socket went away (radio handoff, cellular
                     // fallback): replace it so later datagrams (DNS!) are not lost forever.
-                    ptLog(PtLog.Level.DEBUG, "UDP to $address reset: ${describe(e)}")
+                    ptLog(PtLog.Level.DEBUG, "UDP to ${ptPrivate(address)} reset: ${describe(e)}")
                     resetSocket(socket)
                 }
             }
 
-            private fun resolve(host: String): InetAddress {
+            /** Null when the name resolves only to private addresses; remembered like an answer. */
+            private fun resolve(host: String): InetAddress? {
                 val now = System.currentTimeMillis()
                 dns[host]?.let { (ip, at) -> if (now - at < 60_000) return ip }
                 val eg = egress.acquire(config.connectTimeoutMs.toLong()) ?: throw UnknownHostException(host)
-                val ip = eg.resolve(host).first()
+                val ip = reachable(eg.resolve(host)).firstOrNull()
+                if (ip == null) ptLog(PtLog.Level.DEBUG, "UDP to ${ptPrivate(host)} dropped: resolves only to private/local addresses")
                 if (dns.size > 256) dns.clear()
                 dns[host] = ip to now
                 return ip
@@ -434,7 +450,8 @@ class Socks5Server(
                 msg.contains("ENETUNREACH") -> "network unreachable"
                 msg.contains("EHOSTUNREACH") -> "host unreachable"
                 e is UnknownHostException -> "DNS error"
-                else -> msg
+                // Socket errors spell out the address they failed on.
+                else -> ptPrivate(msg)
             }
         }
     }

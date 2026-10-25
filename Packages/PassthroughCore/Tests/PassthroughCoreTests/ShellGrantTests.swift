@@ -1,20 +1,25 @@
 import XCTest
+import CryptoKit
 @testable import PassthroughCore
 @testable import PhoneTransport
 
 final class ShellGrantTests: XCTestCase {
     private struct Rig {
         let registry: PairingRegistry
+        /// Stands in for the app's sealing key, published to `registry`.
+        let sealing: P256.KeyAgreement.PrivateKey
         let server: ControlServer
         let client: ControlClient
         let events: Locked<[ControlClient.Event]>
         let cleanup: () -> Void
     }
 
-    private func makeRig(onEvent: @escaping @Sendable (ControlClient.Event) -> Void) throws -> Rig {
+    private func makeRig(sealed: Bool = true, onEvent: @escaping @Sendable (ControlClient.Event) -> Void) throws -> Rig {
         let suite = "\(PassthroughProtocol.identifier).tests.\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suite)!
         let registry = PairingRegistry(defaults: defaults, secrets: InMemorySecrets())
+        let sealing = P256.KeyAgreement.PrivateKey()
+        if sealed { registry.publishShellSealingKey(sealing.publicKey) }
         let port = freePort()
         let server = ControlServer(port: port, socksPort: 7890, registry: registry, counter: ByteCounter()) {
             DeviceStatus(deviceName: "Test iPhone", hosting: "test")
@@ -26,7 +31,7 @@ final class ShellGrantTests: XCTestCase {
             events.set(events.get() + [event])
             onEvent(event)
         }
-        return Rig(registry: registry, server: server, client: client, events: events) {
+        return Rig(registry: registry, sealing: sealing, server: server, client: client, events: events) {
             client.close(); server.stop(); defaults.removePersistentDomain(forName: suite)
         }
     }
@@ -57,11 +62,12 @@ final class ShellGrantTests: XCTestCase {
         guard case .shellGranted(let phoneID, let grantID) = rig.events.get().last else { return XCTFail() }
         XCTAssertEqual(phoneID, rig.registry.phoneID)
         XCTAssertNil(grantID, "no grant ID sent, none echoed")
-        XCTAssertEqual(rig.registry.pendingShellKey(clientID: "mac1"), key)
+        XCTAssertEqual(rig.registry.openedPendingShellKey(clientID: "mac1", with: rig.sealing), key)
+        XCTAssertNotEqual(rig.registry.sealedPendingShellKey(clientID: "mac1"), key, "never stored as it came")
         let grant = try XCTUnwrap(rig.registry.clients.first?.shell)
         XCTAssertEqual(grant, ShellGrant(certSHA256: cert, port: 7893, addresses: ["192.168.1.5", "fe80::1"], macName: "MacBook"))
         rig.registry.clearPendingShellKey(clientID: "mac1")
-        XCTAssertNil(rig.registry.pendingShellKey(clientID: "mac1"))
+        XCTAssertNil(rig.registry.sealedPendingShellKey(clientID: "mac1"))
     }
 
     private let irohID = String(repeating: "3f", count: 32)
@@ -102,7 +108,7 @@ final class ShellGrantTests: XCTestCase {
         wait(for: [granted], timeout: 5)
         guard case .shellGranted(_, let echoed) = rig.events.get().last else { return XCTFail() }
         XCTAssertNil(echoed, "the grant is stored; the bad ID is not echoed")
-        XCTAssertNotNil(rig.registry.pendingShellKey(clientID: "mac1"))
+        XCTAssertNotNil(rig.registry.sealedPendingShellKey(clientID: "mac1"))
     }
 
     func testGrantWithIrohFieldsStoresTokenAsSecret() throws {
@@ -126,7 +132,7 @@ final class ShellGrantTests: XCTestCase {
                               irohID: irohID, irohRelay: "http://relay.example.com/", relayToken: "tok-secret")
         wait(for: [granted], timeout: 5)
         XCTAssertEqual(rig.registry.clients.first?.shell, ShellGrant(certSHA256: cert, port: 7893, addresses: ["192.168.1.5"], macName: "M"))
-        XCTAssertNotNil(rig.registry.pendingShellKey(clientID: "mac1"))
+        XCTAssertNotNil(rig.registry.sealedPendingShellKey(clientID: "mac1"))
         XCTAssertNil(rig.registry.relayToken(clientID: "mac1"))
     }
 
@@ -144,6 +150,8 @@ final class ShellGrantTests: XCTestCase {
         defer { defaults.removePersistentDomain(forName: suite) }
         let secrets = InMemorySecrets()
         let registry = PairingRegistry(defaults: defaults, secrets: secrets)
+        let sealing = P256.KeyAgreement.PrivateKey()
+        registry.publishShellSealingKey(sealing.publicKey)
         let (code, _) = registry.issueCode()
         guard case .success = registry.pair(code: code, clientID: "mac1", name: "m") else { return XCTFail("pairing failed") }
         let key = WirelessLink.randomBytes(32)
@@ -158,7 +166,7 @@ final class ShellGrantTests: XCTestCase {
         XCTAssertEqual(grant?.irohRelay, "https://r.example.com/")
         XCTAssertEqual(grant?.addresses.count, 16)
         XCTAssertEqual(grant?.certSHA256, cert)
-        XCTAssertEqual(registry.pendingShellKey(clientID: "mac1"), key)
+        XCTAssertEqual(registry.openedPendingShellKey(clientID: "mac1", with: sealing), key)
         XCTAssertEqual(registry.relayToken(clientID: "mac1"), "tk")
 
         // Invalid iroh details change nothing about the stored ones, but valid addresses still apply.
@@ -192,6 +200,8 @@ final class ShellGrantTests: XCTestCase {
         defer { defaults.removePersistentDomain(forName: suite) }
         let secrets = InMemorySecrets()
         let registry = PairingRegistry(defaults: defaults, secrets: secrets)
+        let sealing = P256.KeyAgreement.PrivateKey()
+        registry.publishShellSealingKey(sealing.publicKey)
         for id in ["a", "b"] {
             let (code, _) = registry.issueCode()
             guard case .success = registry.pair(code: code, clientID: id, name: id) else { return XCTFail("pairing failed") }
@@ -214,7 +224,7 @@ final class ShellGrantTests: XCTestCase {
         // A ping round trip later the grant has been seen (and ignored).
         Thread.sleep(forTimeInterval: 0.5)
         XCTAssertFalse(rig.events.get().contains { if case .shellGranted = $0 { return true } else { return false } })
-        XCTAssertNil(rig.registry.pendingShellKey(clientID: "mac1"))
+        XCTAssertNil(rig.registry.sealedPendingShellKey(clientID: "mac1"))
     }
 
     func testBadKeyIsIgnored() throws {
@@ -242,7 +252,7 @@ final class ShellGrantTests: XCTestCase {
         rig.client.grantShell(shellKey: WirelessLink.randomBytes(32), certificateSHA256: fullwidth, port: 7893, addresses: [], macName: "M")
         rig.client.grantShell(shellKey: WirelessLink.randomBytes(32), certificateSHA256: cert, port: 0, addresses: [], macName: "M")
         Thread.sleep(forTimeInterval: 0.5)
-        XCTAssertNil(rig.registry.pendingShellKey(clientID: "mac1"))
+        XCTAssertNil(rig.registry.sealedPendingShellKey(clientID: "mac1"))
         XCTAssertNil(rig.registry.clients.first?.shell)
 
         // A valid grant afterwards still works: the channel survived.
@@ -256,6 +266,8 @@ final class ShellGrantTests: XCTestCase {
         defer { defaults.removePersistentDomain(forName: suite) }
         let secrets = InMemorySecrets()
         let registry = PairingRegistry(defaults: defaults, secrets: secrets)
+        let sealing = P256.KeyAgreement.PrivateKey()
+        registry.publishShellSealingKey(sealing.publicKey)
         for id in ["mac1", "mac2"] {
             let (code, _) = registry.issueCode()
             guard case .success = registry.pair(code: code, clientID: id, name: id) else { return XCTFail("pairing failed") }
@@ -265,10 +277,10 @@ final class ShellGrantTests: XCTestCase {
         XCTAssertNil(secrets.read("shell.pending.unknown"))
 
         registry.revoke(clientID: "mac1")
-        XCTAssertNil(registry.pendingShellKey(clientID: "mac1"))
-        XCTAssertNotNil(registry.pendingShellKey(clientID: "mac2"))
+        XCTAssertNil(registry.sealedPendingShellKey(clientID: "mac1"))
+        XCTAssertNotNil(registry.sealedPendingShellKey(clientID: "mac2"))
         registry.revokeAll()
-        XCTAssertNil(registry.pendingShellKey(clientID: "mac2"))
+        XCTAssertNil(registry.sealedPendingShellKey(clientID: "mac2"))
         XCTAssertTrue(registry.clients.isEmpty)
     }
 
@@ -282,10 +294,46 @@ final class ShellGrantTests: XCTestCase {
         let defaults = UserDefaults(suiteName: suite)!
         defer { defaults.removePersistentDomain(forName: suite) }
         let registry = PairingRegistry(defaults: defaults, secrets: Refusing())
+        registry.publishShellSealingKey(P256.KeyAgreement.PrivateKey().publicKey)
         let (code, _) = registry.issueCode()
         guard case .success = registry.pair(code: code, clientID: "mac1", name: "M") else { return XCTFail("pairing failed") }
         XCTAssertFalse(registry.grantShell(clientID: "mac1", grant: ShellGrant(certSHA256: cert, port: 7893, addresses: [], macName: "M"), shellKey: WirelessLink.randomBytes(32)))
         XCTAssertNil(registry.clients.first?.shell)
+    }
+
+    /// Before the app has published its sealing key, a grant is neither stored
+    /// nor answered: the key is never kept unsealed, and the Mac grants again later.
+    func testGrantWithoutSealingKeyIsNotStoredOrAnswered() throws {
+        let welcomed = expectation(description: "welcomed"), paired = expectation(description: "paired"), granted = expectation(description: "granted")
+        let rig = try makeRig(sealed: false) { event in
+            switch event {
+            case .welcomed: welcomed.fulfill()
+            case .paired: paired.fulfill()
+            case .shellGranted: granted.fulfill()
+            default: break
+            }
+        }
+        defer { rig.cleanup() }
+        rig.client.connect()
+        wait(for: [welcomed], timeout: 5)
+        let (code, _) = rig.registry.issueCode()
+        rig.client.pair(code: code)
+        wait(for: [paired], timeout: 5)
+
+        rig.client.grantShell(shellKey: WirelessLink.randomBytes(32), certificateSHA256: cert, port: 7893, addresses: [], macName: "M")
+        Thread.sleep(forTimeInterval: 0.5)
+        XCTAssertFalse(rig.events.get().contains { if case .shellGranted = $0 { return true } else { return false } })
+        XCTAssertNil(rig.registry.sealedPendingShellKey(clientID: "mac1"))
+        XCTAssertNil(rig.registry.clients.first?.shell)
+        XCTAssertFalse(rig.registry.grantShell(clientID: "mac1", grant: ShellGrant(certSHA256: cert, port: 7893, addresses: [], macName: "M"),
+                                               shellKey: WirelessLink.randomBytes(32)))
+
+        // Once the app has opened and published its key, the Mac's next grant lands.
+        rig.registry.publishShellSealingKey(rig.sealing.publicKey)
+        let key = WirelessLink.randomBytes(32)
+        rig.client.grantShell(shellKey: key, certificateSHA256: cert, port: 7893, addresses: [], macName: "M")
+        wait(for: [granted], timeout: 5)
+        XCTAssertEqual(rig.registry.openedPendingShellKey(clientID: "mac1", with: rig.sealing), key)
     }
 
     /// Paired Macs saved before shell grants existed must still load.
@@ -296,5 +344,15 @@ final class ShellGrantTests: XCTestCase {
         XCTAssertNil(list.first?.shell)
         let roundTrip = try JSONDecoder().decode([PairedClient].self, from: JSONEncoder().encode(list))
         XCTAssertEqual(roundTrip, list)
+    }
+}
+
+extension PairingRegistry {
+    /// What the app would open from `clientID`'s pending entry with its sealing key.
+    func openedPendingShellKey(clientID: String, with sealing: P256.KeyAgreement.PrivateKey) -> Data? {
+        guard let stored = sealedPendingShellKey(clientID: clientID) else { return nil }
+        return try? ShellKeySeal.open(stored, clientID: clientID, recipient: sealing.publicKey) {
+            try sealing.sharedSecretFromKeyAgreement(with: $0)
+        }.get()
     }
 }

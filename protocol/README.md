@@ -25,19 +25,20 @@ On the Mac, `LocalForwarder` exposes the phone's SOCKS port on
 
 Newline-delimited JSON, one object per line, lines up to 256 KB. Every
 message has a type tag `t`; every other field is optional and omitted when
-absent (never `null`). Unknown fields are ignored.
+absent (never `null`). Unknown fields are ignored. Protocol version 2.
 
 | `t` | From | Fields | Meaning |
 |-----|------|--------|---------|
-| `hello` | Mac | `protocolVersion`, `clientID`, `name`, `token`?, `via`? | First message. With a valid token the Mac is authenticated. `via` is `usb` or `wireless`: how this connection reaches the phone (a phone may have a wireless link up while the Mac uses the cable). |
-| `welcome` | phone | `protocolVersion`, `paired`, `socksPort`, device facts | Reply to `hello`. `paired: false` means pair first. |
-| `pair` | Mac | `clientID`, `name`, `code` | The six digits shown on the phone. |
-| `paired` | phone | `token`, `socksPort`, `deviceName` | Pairing worked; followed by a `status`. |
-| `error` | phone | `reason` | `bad_code`, `expired`, `not_authenticated` or `unsupported_version`. |
+| `hello` | Mac | `protocolVersion`, `clientID`, `name`, `nonce`, `via`? | First message. `nonce` is 32 random bytes, base64, fresh per connection; no token. `via` is `usb` or `wireless`: how this connection reaches the phone (a phone may have a wireless link up while the Mac uses the cable). |
+| `welcome` | phone | `protocolVersion`, `paired`, `nonce`, `proof`? | Reply to `hello`, with the phone's own fresh `nonce`. `paired: true` comes with `proof` (below); `paired: false` means pair first. Nothing else: the peer is a stranger until it proves itself, so the phone's name and status wait for `status` (phones before this sent `socksPort` and device facts here too; the Mac ignores them). |
+| `auth` | Mac | `proof` | The Mac's proof, sent first after a `welcome` whose proof it verified. The connection is authenticated once the phone has verified it, and the phone answers with a `status` at once. |
+| `pair` | Mac | `clientID`, `name`, `code` | The six digits shown on the phone. After `hello`; `clientID` must match it. |
+| `paired` | phone | `token`, `socksPort`, `deviceName` | Pairing worked (the connection is now authenticated); followed by a `status`. |
+| `error` | phone | `reason`, `protocolVersion`? | `bad_code`, `expired`, `locked` (too many wrong codes on this connection, which the phone then closes), `code_withdrawn` (too many wrong codes against this code: pairing needs a new one), `not_authenticated` or `unsupported_version` (which carries the phone's `protocolVersion`, absent from version 1 phones). Earlier phones sent `locked` for a 30 s lockout; a Mac that doesn't know a reason reads it as `bad_code`. |
 | `ping` / `pong` | Mac / phone | none | Heartbeat every 5 s; the Mac gives up after 20 s of silence. |
-| `status` | phone | device facts, `activeConnections`, `rxBytes`, `txBytes`, `timestamp` | Once a second to authenticated Macs. |
+| `status` | phone | device facts, `activeConnections`, `rxBytes`, `txBytes`, `timestamp` | To authenticated Macs only: right after `auth` or `paired`, then once a second. The Mac ignores it before. |
 | `shellGrant` | Mac | `shellKey`, `certSHA256`, `shellPort`, `addresses`, `macName`, `irohID`?, `irohRelay`?, `relayToken`?, `grantID`? | Over the cable, on every paired connection while Remote shell is on: gives the phone access to the Mac's remote shell (below). `shellKey` is 32 random bytes, base64; `addresses` are where to dial the Mac. Each grant is a fresh key; the Mac also accepts the key the phone last proved until the phone first proves the new one, since a phone adopts a grant only once its app is unlocked. The optional `irohID` (the Mac's iroh endpoint id: 64 lowercase hex), `irohRelay` (its home relay: an `https` URL, at most 256 characters) and `relayToken` (at most 512 characters; kept in the phone's secret store, never in the grant record) let the phone dial the Mac over iroh (below). If the iroh fields are not valid as a group (a valid `irohID` is required; lengths count UTF-8 bytes), the phone drops all three and still stores the rest of the grant. The optional `grantID` (at most 64 UTF-8 bytes) names this grant for the answer. The Mac keeps one grant per phone in flight; one unanswered within 15 s counts as lost. The Mac then grants again after a wait counted from the end of those 15 s: 15, 30, 60 and 120 s for consecutive lost grants, then every 10 minutes. The next control channel, a new pairing, a change in what grants carry, or an answer starts the waits over. |
-| `shellGranted` | phone | `phoneID`, `grantID`? | The phone stored the grant. Echoes the grant's `grantID` when it had a valid one (1 to 64 UTF-8 bytes), so the Mac records the key of the grant answered and ignores a late answer to an earlier one. An answer without `grantID` (from phones that predate it) counts for the grant in flight. |
+| `shellGranted` | phone | `phoneID`, `grantID`? | The phone stored the grant, its key sealed to the phone app's sealing key (`ShellKeySeal`; the vector is in fixtures.json). A phone whose app has not published a sealing key yet stores nothing and does not answer, so the grant expires and the Mac grants again as above. Echoes the grant's `grantID` when it had a valid one (1 to 64 UTF-8 bytes), so the Mac records the key of the grant answered and ignores a late answer to an earlier one. An answer without `grantID` (from phones that predate it) counts for the grant in flight. |
 
 Device facts are `deviceName`, `radio`, `carrier`, `battery` (0 to 1),
 `hosting` (`background` or `foreground`) and `ipv6`: whether the network the
@@ -45,19 +46,101 @@ phone sends traffic out on routes IPv6. When it is `false` the Mac rejects
 IPv6 in its tunnel, so apps fall back to IPv4 at once instead of hanging on
 connections the phone can't make; older phones omit it and nothing changes.
 
+### Authentication
+
+Whatever answers on the phone's port may not be the phone (another device on
+the cable, an app squatting the port on an Android phone), and whatever the
+Mac talks to may not be the Mac (an adb client), so each side proves the
+pairing before the other trusts it, and the token never goes on the wire
+after pairing (`ControlAuth`, `ControlAuth.kt`). With K = SHA-256(token), the
+32 bytes the phone keeps (as hex), labels as ASCII, the client ID as UTF-8,
+and nonces as their raw 32 bytes:
+
+```
+phone proof = HMAC-SHA256(K, "passthrough-control-v2 phone" ‖ clientID ‖ nonceMac ‖ noncePhone)
+Mac proof   = HMAC-SHA256(K, "passthrough-control-v2 mac"   ‖ clientID ‖ noncePhone ‖ nonceMac)
+```
+
+both base64, compared in constant time.
+
+1. `hello` with `nonce` = nonceMac.
+2. The phone answers `welcome` with `nonce` = noncePhone. If it holds K for
+   that `clientID`: `paired: true` and `proof` = phone proof; else
+   `paired: false`.
+3. The Mac checks the phone proof against its own token. Only then does it
+   send `auth` (`proof` = Mac proof), before anything else, followed by
+   `link`, `shellGrant` and so on. A `paired: true` without a valid proof
+   from a phone the Mac holds a token for ends the connection (the user can
+   forget the pairing and pair again); the Mac never sends anything secret to
+   it. A Mac with no token for the phone, or only the token from the slot
+   all iPhones once shared (below), treats it as unpaired.
+4. The phone treats the connection as authenticated once the Mac proof checks
+   out. A bad `auth` gets `error` `not_authenticated` and the connection is
+   closed. Before that, nothing privileged is acted on: `link` and
+   `shellGrant` are ignored, and no `status` is sent: before it, the phone
+   says nothing about itself (`welcome` holds only the handshake). Its
+   `paired` and `proof` do answer whether this phone holds a pairing for the
+   `clientID` named, which is unavoidable (the proof must come first) and
+   tells a peer without K nothing it can use.
+5. A completed code pairing (`pair` → `paired`) authenticates the connection
+   for both sides. The Mac accepts `paired` only as the answer to its own
+   `pair`, once.
+
+The channel is authenticated, not encrypted. The proofs stop a peer that
+merely answers on the port (no token, no proof) from learning anything, but a
+relay in the path, such as a process running as the Mac user posing as the
+adb server on `127.0.0.1:5037` and forwarding to the real one, can let the
+proofs through and read what follows them: `link` and `shellGrant` keys,
+relay details and, during a pairing, the `paired` token. That is outside the
+threat model (code already running as the user); closing it would take an
+encrypted channel bound to the pairing, with keys derived from K and both
+nonces.
+
+Versions must match: a phone answers any other `protocolVersion` with `error`
+`unsupported_version` (carrying its own version) and closes; the Mac refuses a
+`welcome` with another version, and tells the user which side to update.
+
+The phone closes a connection that is not authenticated within 10 s, except
+while a pairing code is showing and the connection has said `hello` (then it
+may wait until the code expires). It drops an authenticated Mac silent for 30
+s over the cable (150 s over the wireless link, whose pings stop while it
+waits to resume). The Mac opens a fresh connection if the phone closes one
+while the user is still entering a code.
+
 ## Pairing
 
-* The phone shows a six-digit code, valid for 5 minutes. Five wrong guesses
-  withdraw it.
+* The phone shows a six-digit code, valid for 5 minutes. Wrong guesses are
+  counted twice. Per connection: the third wrong code on one connection is
+  answered `locked` and the phone closes it (a new connection may try again).
+  Per code, over every connection (and, on the iPhone, both the app and its
+  extension): the tenth wrong guess withdraws the code, answered
+  `code_withdrawn`; later `pair`s get `expired` until the phone shows a new
+  code, and the phone app says why the code went away. A lockout in time
+  would let anything local that can reach the port (any app on the phone, any
+  process on the Mac through adb) keep refusing even the right code by
+  guessing now and then; a budget per code never refuses the right code while
+  the code stands, and bounds a guesser at 10 in 10^6 per code the user
+  shows. A guesser can still burn the user's code, but visibly, and a new one
+  is a tap away. A `pair` with an empty or over-long `clientID` or `name` is
+  refused (`bad_code`) before the code is looked at, and costs it nothing.
 * On success the phone issues a token: 32 random bytes as unpadded URL-safe
   base64 (43 characters, `PairingToken`). The phone stores only its SHA-256
-  (lowercase hex); the Mac keeps the token in its keychain.
-* The Mac sends the token in `hello`, and as the SOCKS5 password with its
-  `clientID` as the username.
+  (lowercase hex); the Mac keeps the token in its keychain, one slot per
+  phone: `token.iphone.<UDID>` or `token.android.<serial>` (letters, digits,
+  `-`, `_` and `.` only). iPhones once shared the slot `token`: the Mac still
+  tries it for an iPhone whose own slot is empty, and once the phone proves
+  that token it moves to the phone's slot, with the link key and any shell
+  access granted through it. Until then the token may be another iPhone's:
+  the Mac shows that iPhone as not paired, and forgetting its pairing leaves
+  the shared slot alone (with no iPhone attached, Forget Pairing clears it).
+* The token is never sent again. The SOCKS5 password is derived from it (below).
 
 ## SOCKS5 (7890)
 
-RFC 1928 with username/password auth (RFC 1929) only. Commands:
+RFC 1928 with username/password auth (RFC 1929) only. The username is the
+Mac's `clientID`; the password is HMAC-SHA256(K, "passthrough-socks-v2") as
+unpadded URL-safe base64 (43 characters, the shape of a token), so a process
+squatting port 7890 learns nothing it can use on the control channel. Commands:
 
 * `CONNECT` (1).
 * `FORWARD_UDP` (5), hev-socks5-tunnel's UDP-in-TCP: after the reply, each
@@ -117,7 +200,9 @@ pairing; the Mac keeps `linkKey` per phone, keyed by `phoneID`.
    `session` and `streams` are present only when the phone is resuming (below).
 4. The Mac answers `{"t":"fresh","session":"<id>"}` for a new session, or
    `{"t":"resume","streams":[…]}` to continue the phone's.
-5. From then on the connection carries multiplexed streams.
+5. From then on the connection carries multiplexed streams. A control
+   channel opened over it runs the same `hello`/`welcome`/`auth` exchange as
+   over the cable, with the token of the pairing the phone was linked through.
 
 ### Resuming
 
@@ -193,7 +278,14 @@ Nothing the phone sends is acted on before a valid proof. The Mac closes a
 connection whose `hello` or proof line exceeds 4096 bytes (a hard limit: a
 newline-terminated line over it is refused too) or that has not proved itself
 within 10 seconds, and holds at most 2 unproven connections per address (16 in
-total; over iroh, 8 of them for connections arriving through relays).
+total; over iroh, 8 of them for connections arriving through relays). A public
+IPv4 peer is counted by its /24 and a ULA or global IPv6 peer by its /64, so
+taking many addresses does not multiply a stranger's share; a link-local IPv6
+peer (`fe80::/10`, where every AWDL and LAN neighbour is) is counted by its own
+address. 4 of the 16 are kept for addresses that proved a shell key within the
+last 30 days (remembered across relaunches, at most 256), which are counted on their own. Over
+iroh a slot is taken only once QUIC has validated the peer's address (it is
+sent a retry first), so packets with forged source addresses hold none.
 After `ready` a line over the 262144-byte limit closes the connection.
 
 A connection is attached to at most one session: `open` attaches it to the
@@ -235,8 +327,8 @@ disconnected; it can attach again and gets the scrollback.
 | `transcriptData` | Mac | `session`, `data`, `cols`?, `rows`?, `done`? | A piece of the transcript (same chunk size); `done: true` on the last. `cols`/`rows`, when present, are the size the recorded terminal had from this piece on: set it before feeding `data` (which may be empty when a size change ends the transcript). The first piece always carries the size its first byte was drawn at; older Macs send none. |
 | `screen` | phone | none | See and control the screen: the connection becomes a relay to Screen Sharing (below). |
 | `screenReady` | Mac | none | Reply to `screen`; every later byte, both ways, is Screen Sharing's. |
-| `ping` / `pong` | either | none | Liveness. |
-| `error` | Mac | `reason`, `session`? | `not_authorized`, `too_many_sessions` (8 at once), `no_such_session`, `bad_request`, `screen_not_allowed` or `screen_unavailable`. |
+| `ping` / `pong` | either | none | Liveness; each side answers `ping` with `pong`. A phone pings after 5 s without hearing from the Mac and gives the connection up after 15 s of silence, or 2 s after a ping it sent because the system said the connection's path failed (the cable it used unplugged, Wi-Fi lost), and then dials again. |
+| `error` | Mac | `reason`, `session`? | `not_authorized`, `too_many_sessions` (8 at once), `no_such_session`, `bad_request`, `screen_not_allowed`, `screen_unavailable`, `screen_video_unavailable` or `too_many_screens`. |
 
 The Mac keeps 1 MiB of scrollback per session.
 
@@ -267,7 +359,10 @@ does not answer it is `screen_unavailable`. In both cases the connection
 stays a shell connection. The phone sends nothing after `screen` until
 `screenReady`; a line that does arrive meanwhile closes the connection. A
 phone uses its own connection for the screen, beside any shell connection.
-Turning a phone's screen access off ends its screen connections at once.
+Turning a phone's screen access off ends its screen connections at once. A
+Mac shows its screen to at most 2 connections per phone and 4 in all
+(`screen` and `screenVideo` together); past that the reply is `error`
+`too_many_screens` and the connection stays a shell connection.
 
 ### Screen video
 
@@ -281,14 +376,26 @@ and the connection stays a shell connection, so the phone can ask for
 `screen` next; a Mac too old to know `screenVideo` answers `bad_request`,
 read the same way. Otherwise the Mac replies `screenVideoReady`, and from
 the byte after that line both directions carry binary messages: a type
-byte, a 4-byte big-endian payload length (at most 16 MiB), the payload.
-Unknown types are skipped. Numbers are big-endian.
+byte, a 4-byte big-endian payload length (at most 16 MiB from the Mac), the
+payload. Unknown types are skipped. Numbers are big-endian. The Mac takes
+less from a phone, and closes the connection on a payload over it: 4 KiB for
+`text` (the phone sends a longer paste in pieces), 64 KiB for `clipboard` and
+for a type it doesn't know, 64 bytes for every other message. The phone, in
+turn, takes at most 64 KiB and a byte for `copied`. It types text
+at up to 8 KiB a second (keys sent after text wait their turn), and drops
+text once 256 KiB is waiting.
 
 Mac → phone:
 - `1` format: width u16, height u16, SPS length u16, SPS, PPS length u16,
   PPS. Sent before every keyframe.
 - `2` frame: number u32 (from 1), flags u8 (bit 0: keyframe), then the
   frame's NAL units, each after a 4-byte length (AVCC).
+- `3` copied: the answer to `copy`. Status u8, then for status 0 the copied
+  text, UTF-8. Status 0: text; 1: nothing was copied (the clipboard didn't
+  change within a second of the ⌘C, the change came from another device or
+  a phone's paste, or the text is empty); 2: text over 64 KiB; 3: not text. A status the phone
+  doesn't know reads as 1. The phone takes `copied` only as the answer to a
+  `copy` it sent, never unasked.
 
 Phone → Mac:
 - `16` hello: max width u16, max height u16, the phone's largest useful
@@ -309,16 +416,50 @@ Phone → Mac:
 - `22` clipboard: UTF-8, put on the Mac's clipboard.
 - `23` keyframe request: the phone lost its place (its display failed, or
   it was in the background).
+- `24` copy: no payload. Once the text and keys before it are typed, the Mac
+  reads its clipboard's change count, presses ⌘C, and answers `copied` with
+  the clipboard only if the count moves within a second, so what was on it
+  before (a password copied on the Mac, say) doesn't go to the phone. A
+  clipboard marked `com.apple.is-remote-clipboard` (Universal Clipboard) or
+  `org.nspasteboard.TransientType` (a phone's paste among them) is not the
+  ⌘C's and answers 1. Every `copy` gets exactly one answer: one sent while
+  another is unanswered gets 1 at once.
+
+The Mac marks text a phone puts on its clipboard (`22`) with
+`org.nspasteboard.ConcealedType` and `TransientType`, so clipboard managers
+leave it out of their history. Over Screen Sharing, which sends the Mac's
+clipboard whenever it changes (RFB ServerCutText), the phone takes it only
+in the 2 seconds after its own ⌘C for Copy, never when it is the text the
+phone itself just pasted, and ignores it otherwise.
 
 When the screen goes still the Mac sends its last frame again, twice, a
 quarter of a second apart, so the encoder sharpens it.
+
+Acks are the phone's word, so the Mac also counts what it has handed the
+connection that the network has not taken yet: it encodes a new frame only
+while fewer than 2 frames and under 4 MiB wait there, and closes the
+connection when more than 8 MiB has waited for 5 seconds (a phone that acks
+without reading).
+
+The phone uses Apple's login (security type 30) with Screen Sharing and
+nothing else: a server offering only None (type 1) is refused. It refuses a
+framebuffer wider or taller than 16384 or of more than 50 million pixels
+(Screen Sharing sends every display as one), a refusal reason or desktop
+name over 64 KiB, and Zlib or ZRLE data that inflates past what its
+rectangle can hold.
 
 ### Address policy
 
 The Mac closes a connection from any peer outside these ranges before the TLS
 handshake completes: 10/8, 172.16/12, 192.168/16, 169.254/16, 127/8,
 100.64/10, `fc00::/7`, `fe80::/10`, `::1` and `fd7a:115c:a1e0::/48`
-(Tailscale). Hosts may carry a `%zone` suffix, which is ignored. A global
+(Tailscale). 100.64/10 is also carrier-grade NAT space, so a peer from it, or
+from `fd7a:115c:a1e0::/48`, is let in only while one of the Mac's own tunnel
+interfaces (a point-to-point `utun`, as Tailscale, NetBird and Headscale set
+up) has an address in that range of the same family, and only when the
+connection arrived on such an address; the same range on Wi-Fi or Ethernet is
+the carrier's network and does not count. A connection from such a peer whose
+arrival address is not known is refused. Hosts may carry a `%zone` suffix, which is ignored. A global
 IPv6 peer (`2000::/3`) is also let in when it shares a /64 with one of the
 Mac's own global addresses, so an IPv6-only LAN works; any other global
 address is refused. Only the Mac listens, so this check has no Kotlin

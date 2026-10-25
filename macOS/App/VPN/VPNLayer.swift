@@ -14,6 +14,10 @@ final class VPNLayer: ObservableObject {
     @Published private(set) var profiles: [VPNProfile] = VPNProfileStore.load()
     @AppStorage("vpnKillSwitch") var killSwitch = true
     @AppStorage("vpnBlockIPv6") var blockIPv6 = true
+    /// The kill switch lets the local network through (LAN devices, AirPlay,
+    /// the remote shell's local path). The wireless link to the phone goes
+    /// through either way (`phoneLink`).
+    @AppStorage("vpnAllowLocalNetwork") var allowLocalNetwork = true
     @AppStorage("vpnAutoStart") var autoStart = false
     @AppStorage("vpnActiveProfile") var activeProfileID = ""
     var activeProfile: VPNProfile? { profiles.first { $0.id.uuidString == activeProfileID } ?? profiles.first }
@@ -21,11 +25,26 @@ final class VPNLayer: ObservableObject {
     /// Fires when turning the layer on needs the helper approved first.
     var onHelperRequired: (() -> Void)?
 
+    /// The wireless link to the phone while it may carry passthrough, which
+    /// the kill switch always lets through (else a VPN over a wireless
+    /// passthrough could never connect). Set by the session; sent with each
+    /// start, and to a running session whenever it changes.
+    var phoneLink: HelperClient.PhoneLink? {
+        didSet {
+            guard phoneLink != oldValue, isWanted else { return }
+            let link = phoneLink
+            Task { await helper.setPhoneLink(link) }
+        }
+    }
+
     private let helper: HelperClient
     /// Bumped on every on/off so a late status poll can't undo a newer choice.
     private(set) var generation = 0
     /// A profile imported for diagnostics, removed again on quit.
     private var temporaryProfile: VPNProfile?
+    /// When a kill switch the helper held was last reconnected, so a failing
+    /// reconnect is retried calmly rather than on every status poll.
+    private var lastHeldResume = Date.distantPast
 
     init(helper: HelperClient) {
         self.helper = helper
@@ -70,7 +89,8 @@ final class VPNLayer: ObservableObject {
         isWanted = true
         status = VPNStatus(state: "starting", name: profile.name, engine: profile.engine.rawValue)
         let config = HelperClient.VPNConfig(engine: profile.engine.rawValue, name: profile.name, config: text,
-                                            username: creds.username, password: creds.password, killSwitch: killSwitch, blockIPv6: blockIPv6)
+                                            username: creds.username, password: creds.password, killSwitch: killSwitch, blockIPv6: blockIPv6,
+                                            allowLocalNetwork: allowLocalNetwork)
         Task {
             guard helper.ensureRegistered() else {
                 isWanted = false; status = VPNStatus()
@@ -81,16 +101,54 @@ final class VPNLayer: ObservableObject {
             await helper.ensureCurrent(mayReregister: false)
             guard isWanted else { return }
             do {
+                var config = config
+                config.phoneLink = phoneLink
                 try await helper.startVPN(config)
+                // A change while the start was on its way may have reached
+                // the helper before the session did, and been dropped.
+                if phoneLink != config.phoneLink { await helper.setPhoneLink(phoneLink) }
                 ptLog(.info, "VPN layer starting: \(profile.name) (\(profile.engine.label))")
                 apply(await helper.status())
             } catch {
-                isWanted = false
-                status = VPNStatus()
-                self.error = error.localizedDescription
                 ptLog(.error, "VPN layer failed to start: \(error.localizedDescription)")
+                // A kill switch the helper was already holding stays: keep
+                // the layer "on" so turning it off is what lifts it.
+                let now = VPNStatus(from: await helper.status()[VPNStatusKey.vpn] as? [String: Any] ?? [:])
+                if now.state == "held" {
+                    status = now
+                    self.error = error.localizedDescription + " " + Self.heldExplanation
+                } else {
+                    isWanted = false
+                    status = VPNStatus()
+                    self.error = error.localizedDescription
+                }
             }
         }
+    }
+
+    static let heldExplanation = "The kill switch keeps this Mac offline until the VPN reconnects or you turn the VPN layer off."
+
+    /// The helper is holding the kill switch for a VPN that lost its app
+    /// (Passthrough crashed or was killed) or its helper: reconnect it with
+    /// the active profile; failing that, show the layer on and blocked, so
+    /// turning it off is one click. Retried at most every 30 s.
+    func resumeHeld() {
+        guard Date().timeIntervalSince(lastHeldResume) > 30, status.state != "starting" else { return }
+        lastHeldResume = Date()
+        ptLog(.warning, "VPN layer: the kill switch was left blocking by an earlier session; reconnecting")
+        isWanted = false
+        set(true)
+        if !isWanted {
+            isWanted = true
+            status = VPNStatus(state: "held", name: activeProfile?.name ?? "", engine: activeProfile?.engine.rawValue ?? "")
+            error = (error.map { $0 + " " } ?? "") + Self.heldExplanation
+        }
+    }
+
+    /// At launch, or after the helper restarted: picks up a kill switch it held over.
+    func checkHeld(_ reply: [String: Any]) {
+        let parsed = VPNStatus(from: reply[VPNStatusKey.vpn] as? [String: Any] ?? [:])
+        if parsed.state == "held" { resumeHeld() }
     }
 
     /// Passthrough just connected: start the layer if the user asked for that.
@@ -101,8 +159,10 @@ final class VPNLayer: ObservableObject {
     /// Folds in the helper's `getStatus` reply. An empty reply means the helper
     /// didn't answer, which says nothing about the VPN.
     func apply(_ reply: [String: Any]) {
-        guard isWanted else { return }
         let parsed = VPNStatus(from: reply[VPNStatusKey.vpn] as? [String: Any] ?? [:])
+        // Held for a session the helper lost (it restarted under us): reconnect.
+        if parsed.state == "held" { return resumeHeld() }
+        guard isWanted else { return }
         switch parsed.state {
         case "failed":
             // Stay "on" with the block in place: only an explicit toggle
@@ -280,6 +340,8 @@ struct VPNStatus: Equatable {
     var handshakeAge: Int?
     var dns: [String] = []
     var endpoint: String?
+    /// Weaker protection, or a network pushing routes around the VPN.
+    var warning: String?
 
     init(state: String = "off", name: String = "", engine: String = "") {
         self.state = state; self.name = name; self.engine = engine
@@ -298,10 +360,13 @@ struct VPNStatus: Equatable {
         handshakeAge = dict[VPNStatusKey.handshakeAge] as? Int
         dns = dict[VPNStatusKey.dns] as? [String] ?? []
         endpoint = dict[VPNStatusKey.endpoint] as? String
+        warning = dict[VPNStatusKey.warning] as? String
     }
 
     var isConnected: Bool { state == "connected" }
     var isBusy: Bool { state == "starting" || state == "reconnecting" || state == "blocked" }
+    /// Traffic is held back by the kill switch.
+    var isBlocking: Bool { state == "blocked" || state == "held" }
     var engineLabel: String { engine == "wireguard" ? "WireGuard" : engine == "openvpn" ? "OpenVPN" : engine }
     var duration: TimeInterval? { since.map { Date().timeIntervalSince($0) } }
 }

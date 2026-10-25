@@ -31,6 +31,8 @@ final class AppModel: ObservableObject {
     @Published private(set) var stats = ProviderStats(rx: 0, tx: 0, active: 0, totalConnections: 0, macs: [], startedAt: nil)
     @Published private(set) var pairedClients: [PairedClient] = []
     @Published private(set) var pairingCode: (code: String, expiry: Date)?
+    /// The code shown was withdrawn after too many wrong guesses (by whichever process checks codes).
+    @Published private(set) var pairingCodeWithdrawn = false
     @Published private(set) var radio: String?
     @Published private(set) var batteryLevel: Double?
     /// "Cellular only" is on but the phone is on Wi-Fi, so Macs get its Wi-Fi.
@@ -206,6 +208,7 @@ final class AppModel: ObservableObject {
         logTick += 1
         if logTick % 2 == 0 { refreshLog() }
         if let pairingCode, pairingCode.expiry <= Date() { self.pairingCode = nil }
+        if pairingCode != nil, registry.codeWasWithdrawn { pairingCode = nil; pairingCodeWithdrawn = true }
         guard state == .running, let fresh = await activeHost.stats() else { return }
         if stats.macs.count < fresh.macs.count, pairingCode != nil { pairingCode = nil }
         stats = fresh
@@ -233,11 +236,13 @@ final class AppModel: ObservableObject {
 
     func beginPairing() {
         pairingCode = registry.issueCode()
+        pairingCodeWithdrawn = false
     }
 
     func endPairing() {
         registry.clearCode()
         pairingCode = nil
+        pairingCodeWithdrawn = false
     }
 
     func revoke(_ client: PairedClient) {

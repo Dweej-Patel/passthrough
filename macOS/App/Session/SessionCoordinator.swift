@@ -148,6 +148,7 @@ final class SessionCoordinator: ObservableObject {
     private let androidWatcher: ADBWatcher
     private let wirelessWatcher: WirelessWatcher
     private let links = LinkStore()
+    private let tokens = KeychainPairingTokens()
     private var forwarder: LocalForwarder?
     /// The control channel to the current phone. Opened by a connect, or on
     /// its own over the cable with Remote shell on (pairing, wireless link and
@@ -158,6 +159,9 @@ final class SessionCoordinator: ObservableObject {
     private var controlGeneration = 0
     private enum ControlState { case opening, paired, needsPairing }
     private var controlState = ControlState.opening
+    /// The token the open control channel proves, and the slot it came from.
+    private var controlPairing: PairingSlots.Stored?
+    private var controlOpenedAt = Date.distantPast
     /// The connect attempt that reached the control step and waits on it.
     private var tunnelGen: Int?
     private var tunnelRequested = false
@@ -190,9 +194,22 @@ final class SessionCoordinator: ObservableObject {
         return storedClientID
     }
     var macName: String { Host.current().localizedName ?? "Mac" }
-    /// Keychain slot of the attached phone's pairing token (the iPhone slot when none is attached).
-    private var pairingSlot: String { device?.pairingSlot ?? PhoneDevice.Kind.iPhone.defaultPairingSlot }
-    var hasToken: Bool { Keychain.read(pairingSlot) != nil }
+    /// Keychain slot of the attached phone's pairing token (the slot iPhones
+    /// once shared when none is attached).
+    private var pairingSlot: String { device?.pairingSlot ?? PhoneDevice.sharediPhonePairingSlot }
+    /// Paired with the attached phone: a token of its own, not one in the
+    /// slot iPhones once shared that it hasn't proved (that may be another
+    /// iPhone's). With no phone attached, whether that shared slot holds one,
+    /// so Forget Pairing can clear it.
+    var hasToken: Bool {
+        guard let device else { return Keychain.read(pairingSlot) != nil }
+        return !PairingSlots.provenSlots(for: device, provedShared: controlProvedSharedSlot, in: tokens).isEmpty
+    }
+    /// The open channel's phone proved the token in the shared slot (which
+    /// stays there only if moving it to the phone's own slot failed).
+    private var controlProvedSharedSlot: Bool {
+        controlState == .paired && controlDeviceID == device?.id && controlPairing?.isShared == true
+    }
     var linkedPhoneCount: Int { links.phones.count }
     /// "over USB" or "over Hotspot" (the wireless carrier), for status copy.
     var linkName: String { device?.medium == .wireless ? "over \(wirelessCarrier ?? "Wi-Fi")" : "over USB" }
@@ -200,10 +217,26 @@ final class SessionCoordinator: ObservableObject {
     /// "USB", "Wi-Fi network", or "Wireless" when not known.
     @Published private(set) var wirelessCarrier: String?
     private func refreshWirelessCarrier() {
+        syncPhoneLink()
         guard let device, device.medium == .wireless, device.id.hasPrefix("wifi:") else { wirelessCarrier = nil; return }
         let carrier = wirelessWatcher.carriers[String(device.id.dropFirst(5))] ?? WirelessLink.carrier(interface: nil)
         wirelessCarrier = carrier == "Wi-Fi network" && onPhoneHotspot ? "Hotspot" : carrier
     }
+
+    /// The wireless link for the VPN's kill switch to let through, while it
+    /// may carry passthrough: the listener's port, and where the phone is
+    /// once one is linked (none yet: it must be able to dial in). Not while
+    /// the cable carries passthrough, or the listener is off.
+    private func syncPhoneLink() {
+        guard let port = wirelessWatcher.listenerPort, device?.medium != .usb else { vpnLayer.phoneLink = nil; return }
+        var peers: [String] = []
+        if let device, device.id.hasPrefix("wifi:"), let host = wirelessWatcher.peers[String(device.id.dropFirst(5))],
+           let peer = PeerAddress.numeric(host) {
+            peers = [peer]
+        }
+        vpnLayer.phoneLink = HelperClient.PhoneLink(port: port, peers: peers)
+    }
+
     /// "iPhone" or "Android phone" for the attached device; "phone" when none.
     var phoneKindName: String { device?.kindName ?? "phone" }
     var dnsList: [String] { dnsServers.split(whereSeparator: { $0 == "," || $0 == " " }).map(String.init).filter { !$0.isEmpty } }
@@ -226,7 +259,8 @@ final class SessionCoordinator: ObservableObject {
         wirelessWatcher = WirelessWatcher(
             macTag: { WirelessLink.macTag(clientID: UserDefaults.standard.string(forKey: "clientID") ?? "") },
             identity: { try MacIdentity.loadOrCreate(label: SessionCoordinator.identityLabel) },
-            phones: { links.phones })
+            phones: { links.phones },
+            provenAddresses: FileProvenAddressStore.inApplicationSupport(named: "ProvenWirelessPeers"))
         directory = DeviceDirectory(watchers: [USBMuxWatcher(), androidWatcher, wirelessWatcher])
         suppressAutoConnect = env["PASSTHROUGH_NO_AUTOCONNECT"] != nil || env["PASSTHROUGH_VPN_TEST"] != nil
         // A snapshot run only draws views: no devices, helper, shell or network,
@@ -271,6 +305,9 @@ final class SessionCoordinator: ObservableObject {
             }
         }
 
+        // Before any listener starts: a phone is relayed to Screen Sharing
+        // only once the root helper has checked who listens on its port.
+        shell.screenSharingCheck = { [helper] in await ScreenSharing.check(helper) }
         if remoteShellEnabled { startShell() }
         // Revoked access: the next grant hands out a key again (also after re-pairing).
         shell.onAccessRevoked = { [weak self] slots in self?.shellAccessRevoked(pairingSlots: slots) }
@@ -293,6 +330,9 @@ final class SessionCoordinator: ObservableObject {
         Task {
             await ensureHelperCurrent()
             keepAwake.resume()
+            // A kill switch still blocking from before Passthrough crashed or
+            // was killed with the VPN on: reconnect it (or show it, to turn off).
+            if helper.availability == .ready { vpnLayer.checkHeld(await helper.status()) }
         }
         if let raw = env["PASSTHROUGH_DIRECT_SOCKS"], let port = UInt16(raw) {
             Task { await self.directDiagnosticConnect(socksPort: port) }
@@ -376,6 +416,25 @@ final class SessionCoordinator: ObservableObject {
     }
     private var pendingLink: (key: Data, device: PhoneDevice)?
 
+    /// The phone proved the token from the slot iPhones once shared, so the
+    /// token is its own: move it, and the link key, into the phone's own slot.
+    private func adoptSharedPairing(_ device: PhoneDevice) {
+        guard let stored = controlPairing, stored.isShared, PairingSlots.adopt(stored, for: device, in: tokens) else { return }
+        links.moveKey(fromSlot: stored.slot, toSlot: device.pairingSlot)
+        controlPairing = PairingSlots.Stored(token: stored.token, slot: device.pairingSlot)
+        ptLog(.info, "Moved the \(device.kindName)'s pairing to its own keychain slot")
+    }
+
+    /// An iPhone answering on the cable after proving its pairing: shell
+    /// access it was granted through the slot iPhones once shared moves to
+    /// its own slot, as its pairing did, so the grant now on its way can
+    /// replace it. (Any iPhone could renew such access before, through the
+    /// shared slot; access granted through any other slot never moves.)
+    private func moveSharedShellAccess(phoneID: String, device: PhoneDevice) {
+        guard device.mayUseSharedSlot else { return }
+        shell.movePairing(phoneID: phoneID, fromSlot: PhoneDevice.sharediPhonePairingSlot, toSlot: device.pairingSlot)
+    }
+
     private func startShell() {
         do {
             shell.start(identity: try MacIdentity.loadOrCreate(label: Self.identityLabel))
@@ -455,13 +514,16 @@ final class SessionCoordinator: ObservableObject {
         closeControl()
         controlGeneration += 1
         let cgen = controlGeneration
-        let identity = ControlClient.Identity(clientID: clientID, name: macName, token: Keychain.read(device.pairingSlot))
+        let stored = PairingSlots.lookup(for: device, in: tokens)
+        controlPairing = stored
+        let identity = ControlClient.Identity(clientID: clientID, name: macName, token: stored?.token, tokenIsGuess: stored?.isShared ?? false)
         let control = ControlClient(device: device, identity: identity) { [weak self] event in
             Task { @MainActor in self?.handleControl(event, control: cgen) }
         }
         self.control = control
         controlDeviceID = device.id
         controlState = .opening
+        controlOpenedAt = Date()
         shellGrants.channelOpened(deviceID: device.id)
         control.connect()
     }
@@ -474,6 +536,7 @@ final class SessionCoordinator: ObservableObject {
         controlDeviceID = nil
         controlGeneration += 1
         controlState = .opening
+        controlPairing = nil
         pairingInFlight = false
         pendingLink = nil
         pendingShellGrant = nil
@@ -592,12 +655,14 @@ final class SessionCoordinator: ObservableObject {
     private func handleControl(_ event: ControlClient.Event, control cgen: Int) {
         guard cgen == controlGeneration, let device, device.id == controlDeviceID else { return }
         switch event {
-        case .welcomed(let paired, let status, _):
+        case .welcomed(let paired):
             shellControlBackoff.succeeded()
-            phoneStatus = status
-            syncTunnelIPv6()
+            // The phone's name and status come only once the channel is
+            // authenticated (`status`, right after the proofs or the pairing).
+            phoneStatus = nil
             if paired {
                 controlState = .paired
+                adoptSharedPairing(device)
                 sendLink()
                 sendShellGrant()
                 continueTunnel()
@@ -608,17 +673,24 @@ final class SessionCoordinator: ObservableObject {
                 // step the user can finish now (and it gets the phone its shell key).
                 // Once paired, or if pairing is cancelled, .helperRequired returns.
                 if !phase.isBusy || tunnelUsesControl {
+                    // A fresh channel for a pairing already on screen keeps what went wrong last.
+                    if phase != .pairingRequired { pairingError = nil }
                     phase = .pairingRequired
-                    pairingError = nil
                 }
             }
         case .paired(let token):
+            // Only the answer to a code the user entered on this channel, once.
+            guard pairingInFlight else {
+                ptLog(.warning, "Ignoring a pairing the \(phoneKindName) sent unasked")
+                return
+            }
             pairingInFlight = false
             guard PairingToken.isWellFormed(token) else {
                 fail("The \(phoneKindName) sent a malformed pairing token")
                 return
             }
             Keychain.write(token, account: device.pairingSlot)
+            controlPairing = PairingSlots.Stored(token: token, slot: device.pairingSlot)
             pairingError = nil
             controlState = .paired
             shellGrants.paired(deviceID: device.id)
@@ -641,6 +713,7 @@ final class SessionCoordinator: ObservableObject {
         case .linked(let phoneID, let network, let passphrase):
             guard let pending = pendingLink else { return }
             pendingLink = nil
+            moveSharedShellAccess(phoneID: phoneID, device: pending.device)
             links.record(WirelessPhone(phoneID: phoneID, linkKey: pending.key, isAndroid: pending.device.kind == .android,
                                        label: phoneStatus?.deviceName ?? pending.device.kindName,
                                        pairingSlot: pending.device.pairingSlot, network: network, passphrase: passphrase))
@@ -655,6 +728,7 @@ final class SessionCoordinator: ObservableObject {
                 return
             }
             pendingShellGrant = nil
+            moveSharedShellAccess(phoneID: phoneID, device: pending.device)
             guard shellGrants.confirmed(deviceID: pending.device.id, grantID: pending.grantID) else {
                 // A stale answer: still make sure the phone gets what it should hold now.
                 if !shellGrants.isHeld(deviceID: pending.device.id) { sendShellGrant() }
@@ -671,6 +745,14 @@ final class SessionCoordinator: ObservableObject {
             case .expired: pairingError = "The code expired or wasn't generated yet. Tap Pair on the \(phoneKindName) and try again."
             case .notAuthenticated: pairingError = "Not authenticated."
             case .unsupportedVersion: pairingError = "The \(phoneKindName) app is a different version. Update both apps."
+            case .locked:
+                // The phone closes a channel after a few wrong codes; the code
+                // still works on a new one, so open that now.
+                pairingError = "That code didn't match again. Check the digits on the \(phoneKindName), then type them once more."
+                closeControl()
+                openControl(for: device)
+            case .codeWithdrawn:
+                pairingError = "Too many wrong codes were tried, so the \(phoneKindName) withdrew that code. Tap Pair on the \(phoneKindName) for a new one, then type it here."
             }
         case .status(let status, _, _, let active):
             phoneStatus = status
@@ -680,7 +762,22 @@ final class SessionCoordinator: ObservableObject {
         case .disconnected(let error):
             let why = error?.localizedDescription ?? "The \(phoneKindName) closed the connection"
             let forTunnel = tunnelUsesControl
+            // The phone closes a channel that has not paired within seconds
+            // unless a code is showing. A user still reading the code off the
+            // phone gets a fresh channel to type it into (not in a tight loop
+            // if something closes channels at once).
+            if error == nil, controlState == .needsPairing, !pairingInFlight, phase == .pairingRequired,
+               Date().timeIntervalSince(controlOpenedAt) >= PassthroughProtocol.unauthenticatedTimeout / 2 {
+                closeControl()
+                openControl(for: device)
+                return
+            }
             closeControl()
+            if let refused = error as? ControlClient.ControlError {
+                // Retrying can't help until the user acts: say what to do.
+                ptLog(.error, refused.localizedDescription)
+                if !forTunnel, !phase.isConnected { phase = .error(refused.localizedDescription) }
+            }
             if !forTunnel {
                 // Only open for the shell: try again later, backing off while the phone keeps refusing.
                 let retry = shellControlBackoff.failed()
@@ -698,12 +795,14 @@ final class SessionCoordinator: ObservableObject {
 
     private func bringTunnelUp(generation gen: Int) async {
         guard gen == generation else { return }
-        guard let device, let token = Keychain.read(device.pairingSlot) else { phase = .pairingRequired; return }
+        guard let device, let stored = PairingSlots.lookup(for: device, in: tokens) else { phase = .pairingRequired; return }
         phase = .connecting("Routing the Mac through the \(phoneKindName)")
         tunnelStartInFlight = true
         defer { if gen == generation { tunnelStartInFlight = false } }
         do {
-            let iface = try await helper.startTunnel(tunnelConfig(socksPort: UInt16(localPort), username: clientID, password: token, ipv6: ipv6Enabled))
+            // The phone checks a password derived from the token, never the token itself.
+            let password = ControlAuth.socksPassword(token: stored.token)
+            let iface = try await helper.startTunnel(tunnelConfig(socksPort: UInt16(localPort), username: clientID, password: password, ipv6: ipv6Enabled))
             // Torn down meanwhile: teardown already queued a stop behind this start.
             guard gen == generation else { return }
             tunnelInterface = iface
@@ -832,16 +931,25 @@ final class SessionCoordinator: ObservableObject {
     func openLoginItems() { HelperClient.openLoginItemsSettings() }
 
     func forgetPairing() {
+        // The phone's own slot; the slot iPhones once shared only if this
+        // iPhone proved the token there, since it may be another iPhone's.
+        // Decided before the channel that proved it closes.
+        var slots = [pairingSlot]
+        if let device {
+            slots += PairingSlots.provenSlots(for: device, provedShared: controlProvedSharedSlot, in: tokens).filter { $0 != pairingSlot }
+        }
         // Mid-connect too: the attempt's forwarder and control step go with it.
         if phase.isConnected || phase.isBusy || tunnelUsesControl || phase == .pairingRequired { disconnect() }
         // The open channel was authenticated with the forgotten token; a fresh one asks to pair.
         closeControl()
         if phase == .pairingRequired { phase = device == nil ? .noDevice : .deviceFound }
-        Keychain.delete(pairingSlot)
-        let forgotten = links.phones.filter { $0.pairingSlot == pairingSlot }.map(\.phoneID)
-        links.forget(slot: pairingSlot)
-        forgotten.forEach { wirelessWatcher.drop(phoneID: $0) }
-        shell.revoke(pairingSlot: pairingSlot)
+        for slot in slots {
+            Keychain.delete(slot)
+            let forgotten = links.phones.filter { $0.pairingSlot == slot }.map(\.phoneID)
+            links.forget(slot: slot)
+            forgotten.forEach { wirelessWatcher.drop(phoneID: $0) }
+            shell.revoke(pairingSlot: slot)
+        }
         // The fresh channel below grants again once the phone is paired anew.
         shellGrants.reset()
         shellControlRetryAt = .distantPast
@@ -921,12 +1029,17 @@ final class SessionCoordinator: ObservableObject {
         forwarder?.stop()
         // Quitting ends every session; wait so their transcripts are finished.
         shell.stop(wait: true)
-        // The app quits 0.8 s from now: release sleep and tear down routes side by side.
-        Task { await keepAwake.shutdown() }
+        // Release sleep and tear down routes side by side; the app quits once
+        // both are done (or after a few seconds). The VPN must be turned off
+        // explicitly here: the helper takes a connection that merely drops
+        // for a crash, and keeps the kill switch blocking.
+        let sleep = Task { await keepAwake.shutdown() }
         Task {
             await vpnLayer.shutdown()
             await helper.stopTunnel()
+            await sleep.value
             helper.invalidate()
+            NotificationCenter.default.post(name: .passthroughReadyToQuit, object: nil)
         }
     }
 
@@ -1064,4 +1177,11 @@ final class SessionCoordinator: ObservableObject {
             ])
         }
     }
+}
+
+/// Pairing tokens by keychain slot, for `PairingSlots`.
+private struct KeychainPairingTokens: PairingTokenStore {
+    func read(_ slot: String) -> String? { Keychain.read(slot) }
+    @discardableResult func write(_ token: String, slot: String) -> Bool { Keychain.write(token, account: slot) }
+    func delete(_ slot: String) { Keychain.delete(slot) }
 }

@@ -2,18 +2,34 @@ import Foundation
 import Network
 import PassthroughCore
 
-/// Mac side of the control channel: says hello, pairs, keeps a heartbeat,
-/// and relays the phone's live status.
+/// Mac side of the control channel: says hello, proves the pairing (or
+/// pairs), keeps a heartbeat, and relays the phone's live status.
+///
+/// Whatever answers on the phone's port may not be the phone: another
+/// iPhone on the cable, or an app squatting the port on an Android phone.
+/// So the token is never sent; the phone must prove it holds the pairing
+/// first (`ControlAuth`), and only then does the Mac prove itself and hand
+/// over anything (link and shell keys are refused before that).
 public final class ControlClient: @unchecked Sendable {
     public struct Identity: Sendable {
         public var clientID: String
         public var name: String
+        /// The pairing token the proofs are made with. Never sent.
         public var token: String?
-        public init(clientID: String, name: String, token: String?) { self.clientID = clientID; self.name = name; self.token = token }
+        /// `token` is only a guess at this phone's pairing (the slot every
+        /// iPhone once shared): a phone that can't prove it counts as
+        /// unpaired. Otherwise a failed proof ends the connection.
+        public var tokenIsGuess: Bool
+        public init(clientID: String, name: String, token: String?, tokenIsGuess: Bool = false) {
+            self.clientID = clientID; self.name = name; self.token = token; self.tokenIsGuess = tokenIsGuess
+        }
     }
 
     public enum Event: Sendable {
-        case welcomed(paired: Bool, status: DeviceStatus, socksPort: UInt16)
+        /// `paired`: the phone proved it holds this Mac's pairing, and the
+        /// Mac has proved it back. False: pair first. The phone's name and
+        /// status follow as `status` once the channel is authenticated.
+        case welcomed(paired: Bool)
         case paired(token: String)
         case pairingFailed(PairingFailure)
         case status(DeviceStatus, rx: Int64, tx: Int64, active: Int)
@@ -26,6 +42,24 @@ public final class ControlClient: @unchecked Sendable {
         case disconnected(Error?)
     }
 
+    /// Why the channel closed, when it was this side's decision.
+    public enum ControlError: LocalizedError, Equatable {
+        /// The phone said it was paired but could not prove it.
+        case proofFailed(kind: String)
+        /// The phone speaks another protocol version; `phoneIsOlder` says which side to update.
+        case incompatible(kind: String, phoneIsOlder: Bool)
+
+        public var errorDescription: String? {
+            switch self {
+            case .proofFailed(let kind):
+                return "The \(kind) on the cable could not prove it is paired with this Mac. If it is yours, use Forget Pairing in Settings and pair again."
+            case .incompatible(let kind, let phoneIsOlder):
+                return phoneIsOlder ? "Passthrough on the \(kind) is out of date. Update it on the \(kind), then connect again."
+                                    : "Passthrough on this Mac is out of date. Update it on this Mac, then connect again."
+            }
+        }
+    }
+
     private let device: PhoneDevice
     private let port: UInt16
     private let identity: Identity
@@ -35,6 +69,14 @@ public final class ControlClient: @unchecked Sendable {
     private var lastPong = Date()
     private var closed = false
     private let handler: @Sendable (Event) -> Void
+    private let macNonce = ControlAuth.nonce()
+    private var welcomed = false
+    /// The phone proved the pairing (or paired here): link and shell keys may go out.
+    private var authenticated = false
+    /// A `pair` is out and unanswered: the one time a `paired` counts.
+    private var pairing = false
+    /// A code entered before the phone's welcome; sent once it arrives.
+    private var pendingCode: String?
 
     /// Silence after which the phone counts as gone: short over the cable,
     /// longer than a wireless link's resume window over the air.
@@ -69,7 +111,7 @@ public final class ControlClient: @unchecked Sendable {
             hello.protocolVersion = PassthroughProtocol.version
             hello.clientID = identity.clientID
             hello.name = identity.name
-            hello.token = identity.token
+            hello.nonce = macNonce.base64EncodedString()
             hello.via = device.medium == .wireless ? "wireless" : "usb"
             send(hello)
             startHeartbeat()
@@ -78,17 +120,24 @@ public final class ControlClient: @unchecked Sendable {
 
     public func pair(code: String) {
         queue.async {
-            var m = ControlEnvelope(t: ControlEnvelope.pair)
-            m.clientID = self.identity.clientID
-            m.name = self.identity.name
-            m.code = code
-            self.send(m)
+            guard self.welcomed else { self.pendingCode = code; return }
+            self.sendPair(code)
         }
+    }
+
+    private func sendPair(_ code: String) {
+        var m = ControlEnvelope(t: ControlEnvelope.pair)
+        m.clientID = identity.clientID
+        m.name = identity.name
+        m.code = code
+        pairing = true
+        send(m)
     }
 
     /// Hands the phone what it needs to reach this Mac wirelessly (after pairing).
     public func link(linkKey: Data, certificateSHA256: String) {
         queue.async {
+            guard self.authenticated else { ptLog(.warning, "control: not sending the link key over an unauthenticated channel"); return }
             var m = ControlEnvelope(t: ControlEnvelope.link)
             m.linkKey = linkKey.base64EncodedString()
             m.certSHA256 = certificateSHA256
@@ -101,6 +150,7 @@ public final class ControlClient: @unchecked Sendable {
     public func grantShell(shellKey: Data, certificateSHA256: String, port: UInt16, addresses: [String], macName: String,
                            irohID: String? = nil, irohRelay: String? = nil, relayToken: String? = nil, grantID: String? = nil) {
         queue.async {
+            guard self.authenticated else { ptLog(.warning, "control: not sending a shell key over an unauthenticated channel"); return }
             var m = ControlEnvelope(t: ControlEnvelope.shellGrant)
             m.grantID = grantID
             m.shellKey = shellKey.base64EncodedString()
@@ -141,25 +191,79 @@ public final class ControlClient: @unchecked Sendable {
 
     private func handle(_ m: ControlEnvelope) {
         lastPong = Date()
-        let status = DeviceStatus(deviceName: m.deviceName ?? device.kindName, radio: m.radio, carrier: m.carrier, battery: m.battery, hosting: m.hosting ?? "", ipv6: m.ipv6)
         switch m.t {
         case ControlEnvelope.welcome:
-            handler(.welcomed(paired: m.paired ?? false, status: status, socksPort: UInt16(m.socksPort ?? Int(PassthroughProtocol.defaultSOCKSPort))))
+            guard !welcomed else { return }
+            welcomed = true
+            welcome(m)
         case ControlEnvelope.paired:
-            if let token = m.token { handler(.paired(token: token)) }
+            // Only the answer to our own `pair`, once: anything else could
+            // plant a token of its choosing.
+            guard pairing else { ptLog(.warning, "control: ignoring a pairing the Mac did not ask for"); return }
+            pairing = false
+            if let token = m.token {
+                authenticated = true
+                handler(.paired(token: token))
+            }
         case ControlEnvelope.error:
-            handler(.pairingFailed(PairingFailure(rawValue: m.reason ?? "") ?? .badCode))
+            let failure = PairingFailure(rawValue: m.reason ?? "") ?? .badCode
+            if failure == .unsupportedVersion {
+                // Phones from before version 2 say nothing of their own version.
+                finish(ControlError.incompatible(kind: device.kindName, phoneIsOlder: (m.protocolVersion ?? 1) < PassthroughProtocol.version))
+                return
+            }
+            pairing = false
+            handler(.pairingFailed(failure))
         case ControlEnvelope.linked:
-            if let phoneID = m.phoneID, !phoneID.isEmpty, phoneID.count <= 64 {
+            if authenticated, let phoneID = m.phoneID, !phoneID.isEmpty, phoneID.count <= 64 {
                 handler(.linked(phoneID: phoneID, network: m.network, passphrase: m.passphrase))
             }
         case ControlEnvelope.shellGranted:
-            if let phoneID = m.phoneID, !phoneID.isEmpty, phoneID.count <= 64 {
+            if authenticated, let phoneID = m.phoneID, !phoneID.isEmpty, phoneID.count <= 64 {
                 handler(.shellGranted(phoneID: phoneID, grantID: m.grantID))
             }
         case ControlEnvelope.status:
+            guard authenticated else { return }
+            let status = DeviceStatus(deviceName: m.deviceName ?? device.kindName, radio: m.radio, carrier: m.carrier, battery: m.battery, hosting: m.hosting ?? "", ipv6: m.ipv6)
             handler(.status(status, rx: m.rxBytes ?? 0, tx: m.txBytes ?? 0, active: m.activeConnections ?? 0))
         default: break
+        }
+    }
+
+    private func welcome(_ m: ControlEnvelope) {
+        let version = m.protocolVersion ?? 0
+        guard version == PassthroughProtocol.version else {
+            finish(ControlError.incompatible(kind: device.kindName, phoneIsOlder: version < PassthroughProtocol.version))
+            return
+        }
+        // Nothing else in a welcome counts: the phone's status comes only after
+        // the proofs (earlier phones sent it here too, unproven).
+        var paired = false
+        if m.paired == true {
+            if let token = identity.token, let phoneNonce = ControlAuth.decodeNonce(m.nonce),
+               ControlAuth.isValidPhoneProof(m.proof, key: ControlAuth.key(token: token), clientID: identity.clientID, macNonce: macNonce, phoneNonce: phoneNonce) {
+                // Our proof goes before anything else on this channel.
+                var auth = ControlEnvelope(t: ControlEnvelope.auth)
+                auth.proof = ControlAuth.macProof(key: ControlAuth.key(token: token), clientID: identity.clientID,
+                                                  macNonce: macNonce, phoneNonce: phoneNonce).base64EncodedString()
+                send(auth)
+                authenticated = true
+                paired = true
+            } else if identity.token == nil {
+                // The phone remembers a pairing this Mac no longer has; pairing again replaces it.
+                ptLog(.info, "control: the \(device.kindName) remembers this Mac, but this Mac has no pairing for it")
+            } else if identity.tokenIsGuess {
+                ptLog(.warning, "control: the \(device.kindName) is not the one this Mac's earlier iPhone pairing belongs to")
+            } else {
+                ptLog(.warning, "control: the \(device.kindName) said it was paired but could not prove it; closing the connection")
+                finish(ControlError.proofFailed(kind: device.kindName))
+                return
+            }
+        }
+        handler(.welcomed(paired: paired))
+        if !paired, let code = pendingCode {
+            pendingCode = nil
+            sendPair(code)
         }
     }
 

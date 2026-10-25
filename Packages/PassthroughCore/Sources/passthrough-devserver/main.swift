@@ -3,7 +3,8 @@ import PassthroughCore
 
 // Runs the iPhone-side servers on this Mac for development and protocol testing.
 // Usage: swift run passthrough-devserver [socksPort] [controlPort]
-// Prints a pairing code; pair with the control channel or use client "dev" / token "dev-token".
+// Prints a pairing code; pair with the control channel or use client "dev" / token "dev-token"
+// (whose SOCKS5 password, derived from it, is printed).
 
 let socksPort = UInt16(CommandLine.arguments.dropFirst().first ?? "") ?? PassthroughProtocol.defaultSOCKSPort
 let controlPort = UInt16(CommandLine.arguments.dropFirst(2).first ?? "") ?? PassthroughProtocol.defaultControlPort
@@ -29,8 +30,9 @@ PassthroughLog.shared.onAppend = { entry in print("[\(entry.level.rawValue)] \(e
 service.onClientsChanged = { macs in print("connected macs: \(macs.map(\.name))") }
 try service.start()
 let (code, _) = registry.issueCode()
-print("SOCKS5 on 127.0.0.1:\(socksPort) (user dev / password dev-token), control on \(controlPort), pairing code \(code)")
-print("try: curl --socks5-hostname 127.0.0.1:\(socksPort) --proxy-user dev:dev-token https://example.com")
+let password = ControlAuth.socksPassword(token: seedToken)
+print("SOCKS5 on 127.0.0.1:\(socksPort) (user \(seedID) / password \(password)), control on \(controlPort), pairing code \(code)")
+print("try: curl --socks5-hostname 127.0.0.1:\(socksPort) --proxy-user \(seedID):\(password) https://example.com")
 
 signal(SIGINT) { _ in service.stop(); exit(0) }
 let ticker = Timer(timeInterval: 5, repeats: true) { _ in

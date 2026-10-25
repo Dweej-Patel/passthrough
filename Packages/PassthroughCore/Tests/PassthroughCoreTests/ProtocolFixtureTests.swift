@@ -1,4 +1,5 @@
 import XCTest
+import CryptoKit
 import Network
 @testable import PassthroughCore
 
@@ -24,6 +25,9 @@ final class ProtocolFixtureTests: XCTestCase {
         XCTAssertEqual(ports["socks"], Int(PassthroughProtocol.defaultSOCKSPort))
         XCTAssertEqual(ports["control"], Int(PassthroughProtocol.defaultControlPort))
         XCTAssertEqual(f["pairingCodeLifetimeSeconds"] as? Double, PassthroughProtocol.pairingCodeLifetime)
+        XCTAssertEqual(f["pairingMaxWrongCodesPerConnection"] as? Int, PassthroughProtocol.pairingMaxWrongCodesPerConnection)
+        XCTAssertEqual(f["pairingMaxWrongCodesPerCode"] as? Int, PassthroughProtocol.pairingMaxWrongCodesPerCode)
+        XCTAssertEqual(f["unauthenticatedTimeoutSeconds"] as? Double, PassthroughProtocol.unauthenticatedTimeout)
         let failures = try XCTUnwrap(f["pairingFailures"] as? [String])
         XCTAssertEqual(failures.compactMap(PairingFailure.init(rawValue:)).count, failures.count)
     }
@@ -35,6 +39,36 @@ final class ProtocolFixtureTests: XCTestCase {
             XCTAssertEqual(PairingToken.isWellFormed(token), t["wellFormed"] as? Bool, token)
         }
         XCTAssertTrue(PairingToken.isWellFormed(PairingToken.generate()))
+    }
+
+    /// The same proofs and SOCKS5 password as the Kotlin side computes, from the same vectors.
+    func testControlAuthVectors() throws {
+        let f = try XCTUnwrap(fixtures()["controlAuth"] as? [String: Any])
+        XCTAssertEqual(f["phoneLabel"] as? String, ControlAuth.phoneLabel)
+        XCTAssertEqual(f["macLabel"] as? String, ControlAuth.macLabel)
+        XCTAssertEqual(f["socksLabel"] as? String, ControlAuth.socksLabel)
+        XCTAssertEqual(f["nonceLength"] as? Int, ControlAuth.nonceLength)
+        for v in try XCTUnwrap(f["vectors"] as? [[String: String]]) {
+            let token = try XCTUnwrap(v["token"]), clientID = try XCTUnwrap(v["clientID"])
+            let macNonce = try XCTUnwrap(ControlAuth.decodeNonce(v["macNonce"])), phoneNonce = try XCTUnwrap(ControlAuth.decodeNonce(v["phoneNonce"]))
+            XCTAssertEqual(PairingToken.hash(token), v["tokenSHA256"])
+            // The Mac's K (from the token) and the phone's (from the hash it keeps) agree.
+            let macKey = ControlAuth.key(token: token), phoneKey = try XCTUnwrap(ControlAuth.key(tokenHash: try XCTUnwrap(v["tokenSHA256"])))
+            XCTAssertEqual(ControlAuth.phoneProof(key: phoneKey, clientID: clientID, macNonce: macNonce, phoneNonce: phoneNonce).base64EncodedString(), v["phoneProof"])
+            XCTAssertEqual(ControlAuth.macProof(key: macKey, clientID: clientID, macNonce: macNonce, phoneNonce: phoneNonce).base64EncodedString(), v["macProof"])
+            XCTAssertTrue(ControlAuth.isValidPhoneProof(v["phoneProof"], key: macKey, clientID: clientID, macNonce: macNonce, phoneNonce: phoneNonce))
+            XCTAssertTrue(ControlAuth.isValidMacProof(v["macProof"], key: phoneKey, clientID: clientID, macNonce: macNonce, phoneNonce: phoneNonce))
+            // Each proof is bound to its own label and to the order of the nonces.
+            XCTAssertFalse(ControlAuth.isValidMacProof(v["phoneProof"], key: phoneKey, clientID: clientID, macNonce: macNonce, phoneNonce: phoneNonce))
+            XCTAssertFalse(ControlAuth.isValidPhoneProof(v["phoneProof"], key: macKey, clientID: clientID, macNonce: phoneNonce, phoneNonce: macNonce))
+            XCTAssertFalse(ControlAuth.isValidPhoneProof(v["phoneProof"], key: macKey, clientID: clientID + "x", macNonce: macNonce, phoneNonce: phoneNonce))
+            XCTAssertEqual(ControlAuth.socksPassword(token: token), v["socksPassword"])
+            XCTAssertEqual(ControlAuth.socksPassword(key: phoneKey), v["socksPassword"])
+            XCTAssertTrue(PairingToken.isWellFormed(ControlAuth.socksPassword(token: token)), "the password has a token's shape")
+        }
+        XCTAssertNil(ControlAuth.key(tokenHash: "zz"))
+        XCTAssertNil(ControlAuth.key(tokenHash: String(repeating: "g", count: 64)))
+        XCTAssertNil(ControlAuth.decodeNonce(Data(count: 31).base64EncodedString()))
     }
 
     /// Every field survives a decode and re-encode, and nothing extra (like nulls) is added.
@@ -82,5 +116,49 @@ final class ProtocolFixtureTests: XCTestCase {
         }
         // Reads the real resolver configuration without crashing; the list depends on the machine.
         _ = DNSRedirect.systemServers()
+    }
+
+    /// The Android app seals and opens with the same format: both open this vector.
+    func testShellKeySealVector() throws {
+        let f = try XCTUnwrap(fixtures()["shellKeySeal"] as? [String: String])
+        func hex(_ s: String?) throws -> Data {
+            let s = try XCTUnwrap(s)
+            return Data(stride(from: 0, to: s.count, by: 2).map { UInt8(s.dropFirst($0).prefix(2), radix: 16)! })
+        }
+        let recipient = try P256.KeyAgreement.PrivateKey(rawRepresentation: hex(f["recipientPrivateKey"]))
+        XCTAssertEqual(recipient.publicKey.x963Representation, try hex(f["recipientPublicKey"]))
+        let clientID = try XCTUnwrap(f["clientID"])
+        let opened = ShellKeySeal.open(try hex(f["sealed"]), clientID: clientID, recipient: recipient.publicKey) {
+            try recipient.sharedSecretFromKeyAgreement(with: $0)
+        }
+        XCTAssertEqual(try opened.get(), try hex(f["key"]))
+    }
+
+    func testLocalDestinations() throws {
+        let f = try XCTUnwrap(fixtures()["localDestinations"] as? [String: Any])
+        func name(_ text: String) -> SOCKS5.Address? {
+            SOCKS5.Address(raw: Data([SOCKS5.AddressType.domain, UInt8(text.utf8.count)] + Array(text.utf8) + [1, 187]))
+        }
+        for d in try XCTUnwrap(f["addresses"] as? [[String: Any]]) {
+            let text = try XCTUnwrap(d["ip"] as? String)
+            let local = try XCTUnwrap(d["local"] as? Bool)
+            let host: NWEndpoint.Host
+            let raw: Data
+            if let v4 = IPv4Address(text) { host = .ipv4(v4); raw = Data([SOCKS5.AddressType.ipv4]) + v4.rawValue + [1, 187] }
+            else {
+                let v6 = try XCTUnwrap(IPv6Address(text), text)
+                host = .ipv6(v6); raw = Data([SOCKS5.AddressType.ipv6]) + v6.rawValue + [1, 187]
+            }
+            XCTAssertEqual(try XCTUnwrap(SOCKS5.Address(raw: raw)).isLocalOnly, local, text)
+            XCTAssertEqual(try XCTUnwrap(name(text)).isLocalOnly, local, "\(text) as a name")
+            // What a name resolved to, as a ready connection reports it.
+            XCTAssertEqual(SOCKS5.Address.isLocal(endpoint: .hostPort(host: host, port: 443)), local, "\(text) reached")
+        }
+        for d in try XCTUnwrap(f["names"] as? [[String: Any]]) {
+            let text = try XCTUnwrap(d["name"] as? String)
+            XCTAssertEqual(try XCTUnwrap(name(text)).isLocalOnly, d["local"] as? Bool, text)
+        }
+        XCTAssertFalse(SOCKS5.Address.isLocal(endpoint: nil))
+        XCTAssertFalse(SOCKS5.Address.isLocal(endpoint: .hostPort(host: "localhost", port: 80)), "only addresses count once reached")
     }
 }

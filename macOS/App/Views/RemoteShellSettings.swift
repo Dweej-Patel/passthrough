@@ -102,9 +102,9 @@ struct RemoteShellSettings: View {
         return SetupStep(status: access.ready ? .done : (wanted ? .needed : .optional),
                          title: "Screen Recording and Accessibility",
                          detail: access.ready
-                            ? "Phones you allow below see this screen as smooth video and control it."
+                            ? "Phones you allow below see this screen as smooth video and control it. Shells inherit these permissions too, so any phone with shell access can also capture the screen and post input from a shell."
                             : (wanted ? "A phone below may see this screen. " : "Optional. ")
-                                + "Allow Passthrough under Privacy & Security › Screen Recording (to stream this screen) and › Accessibility (to take a phone's clicks and keys). macOS may want Passthrough reopened after Screen Recording.") {
+                                + "Allow Passthrough under Privacy & Security › Screen Recording (to stream this screen) and › Accessibility (to take a phone's clicks and keys). Shells inherit them too, so any phone with shell access could then capture the screen and post input from a shell. macOS may want Passthrough reopened after Screen Recording.") {
             HStack(spacing: 6) {
                 if !access.capture {
                     Button("Screen Recording…") {
@@ -134,6 +134,9 @@ struct RemoteShellSettings: View {
                             ? "Until Passthrough may stream this screen itself, phones need Screen Sharing. Turn it on in System Settings › General › Sharing."
                             : "Optional fallback, slower, for when Passthrough can't stream this screen itself.") {
                 if !on { Button("Open Settings…") { ScreenSharing.openSettings() } }
+            }
+            if let problem = shell.screenSharingProblem {
+                Label(problem, systemImage: "exclamationmark.triangle.fill").font(.caption).foregroundStyle(PTTheme.warning)
             }
         }
     }
@@ -365,6 +368,12 @@ private struct HistorySection: View {
                 Text("\(shell.history.count) · \(ByteCountFormatter.string(fromByteCount: shell.historyBytes, countStyle: .file))")
                     .monospacedDigit()
             }
+            Picker(selection: $shell.historyRetention) {
+                ForEach(RemoteShellController.HistoryRetention.allCases) { Text($0.title).tag($0) }
+            } label: {
+                Text("Keep shell history")
+                Text("Older finished sessions are deleted, and the oldest go first past \(ByteCountFormatter.string(fromByteCount: TranscriptStore.maxTotalBytes, countStyle: .file)).")
+            }
             HStack {
                 Button("Open History…") {
                     NSApp.activate()
@@ -377,7 +386,7 @@ private struct HistorySection: View {
         } header: {
             Text("History")
         } footer: {
-            Text("Recordings stay on this Mac. Phones with access can read them.")
+            Text("Recordings stay on this Mac, out of backups, \(shell.historyRetention.keptFor). Phones with access can read them.")
         }
         .confirmationDialog("Delete all shell history?", isPresented: $confirmClear) {
             Button("Delete All", role: .destructive) { shell.clearHistory() }

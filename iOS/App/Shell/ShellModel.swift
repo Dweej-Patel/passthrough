@@ -94,6 +94,15 @@ final class ShellModel: ObservableObject {
     private var relockRequested = false
     /// The Bonjour endpoint the current connect was given, to tell when a better one appears.
     private var dialedDiscovered: NWEndpoint?
+    /// A working connection dropped (the cable unplugged while the shell
+    /// used its link, Wi-Fi lost; `ShellClient` notices within seconds):
+    /// how many redials have been made since. Nil when not redialling.
+    private var redialsMade: Int?
+    private var redialTask: Task<Void, Never>?
+    /// The wait before each redial after a drop: the first at once (another
+    /// path, iroh say, usually answers), then backing off. After the last,
+    /// the card offers Try again.
+    static let redialDelays: [TimeInterval] = [0, 1, 2, 4, 8, 15]
     /// The addresses each Mac granted, so a manual address can be applied without re-reading keys.
     private var granted: [String: [String]] = [:]
     private var size = (cols: 80, rows: 24)
@@ -179,6 +188,8 @@ final class ShellModel: ObservableObject {
 
     /// What `.unreachable` says for the selected Mac.
     var reachMessage: String? { reach.message(fromAnywhere: clientTriesIroh) }
+    /// Connecting again by itself after a working connection dropped.
+    var isRedialing: Bool { redialsMade != nil && reach == .connecting }
 
     func manualAddress(for macID: String) -> String? {
         UserDefaults.standard.string(forKey: Self.manualAddressPrefix + macID)
@@ -211,7 +222,9 @@ final class ShellModel: ObservableObject {
 
     func forgetAll() {
         ShellKeyVault.deleteAll()
-        for id in macs.map(\.macID) + granted.keys { UserDefaults.standard.removeObject(forKey: Self.manualAddressPrefix + id) }
+        for id in macs.map(\.macID) + granted.keys {
+            UserDefaults.standard.removeObject(forKey: Self.manualAddressPrefix + id)
+        }
         granted = [:]
         clear(.noAccess)
     }
@@ -225,7 +238,10 @@ final class ShellModel: ObservableObject {
         if let demo = Self.demoState { return applyDemo(demo) }
         #endif
         dropConnection()
+        redialTask?.cancel()
+        redialTask = nil
         guard let credential = macs.first(where: { $0.macID == selectedMacID }) else {
+            redialsMade = nil
             reach = macs.isEmpty ? .noAccess : reach
             return
         }
@@ -335,6 +351,7 @@ final class ShellModel: ObservableObject {
         switch event {
         case let .ready(path):
             reach = .ready
+            redialsMade = nil
             self.path = path
             // No `list`: the Mac sends `sessions` right after `ready`.
             // An ended session's log is already on screen; it has nothing more to send.
@@ -389,10 +406,19 @@ final class ShellModel: ObservableObject {
             // Only a failure naming the requested session ends that request.
             if error == .noSuchSession || error == .badRequest, let session, session == pendingTranscript?.id { finishTranscript(nil) }
         case let .disconnected(error):
+            let dropped = reach == .ready
             client = nil
             path = nil
             finishTranscript(nil)
-            if error != nil, reach != .noAccess { reach = .unreachable }
+            guard error != nil, reach != .noAccess else { return }
+            if dropped { redialsMade = 0 }
+            if let made = redialsMade, made < Self.redialDelays.count {
+                redial(after: Self.redialDelays[made])
+                redialsMade = made + 1
+            } else {
+                redialsMade = nil
+                reach = .unreachable
+            }
         case let .screen(stream, _):
             // The screen has its own client (`ScreenModel`); this one never asks.
             stream.cancel()
@@ -442,10 +468,26 @@ final class ShellModel: ObservableObject {
         ended = ShellEndedSessions()
     }
 
+    /// Dials again after `delay`, showing Reconnecting meanwhile; it
+    /// re-attaches the session on screen once ready, as any connect does.
+    /// Dropped if something else connects, locks or clears first.
+    private func redial(after delay: TimeInterval) {
+        reach = .connecting
+        redialTask?.cancel()
+        redialTask = Task { [weak self] in
+            if delay > 0 { try? await Task.sleep(for: .seconds(delay)) }
+            guard !Task.isCancelled, let self, self.reach == .connecting, self.client == nil else { return }
+            self.connect()
+        }
+    }
+
     /// No usable Mac right now: forget keys held in memory, stop dialing and
     /// browsing. While merely locked (or without a passcode) the selection and
     /// tabs stay, so the next unlock reconnects and re-attaches.
     private func clear(_ reach: Reach) {
+        redialTask?.cancel()
+        redialTask = nil
+        redialsMade = nil
         dropConnection()
         // Browsing exposes nothing secret: keep it across relocks so results are ready on unlock.
         if reach == .noAccess { stopBrowsing() }
@@ -508,6 +550,7 @@ extension ShellError {
         // Asked for only after the Mac said it can't stream its screen itself.
         case .screenUnavailable: "Your Mac can't show its screen yet. In Passthrough's Remote Shell settings on your Mac, allow Screen Recording and Accessibility, or turn on Screen Sharing."
         case .screenVideoUnavailable: "Your Mac can't stream its screen itself yet. In Passthrough's Remote Shell settings on your Mac, allow Screen Recording and Accessibility."
+        case .tooManyScreens: "Your Mac is already showing its screen as often as it allows (\(RemoteShell.maxScreenViewsPerPhone) views per phone, \(RemoteShell.maxScreenViews) in all). Close one to open another."
         case .notAuthorized: nil
         }
     }

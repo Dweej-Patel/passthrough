@@ -80,7 +80,7 @@ class ShellCredentialsTests {
     private val irohID = "cd".repeat(32)
 
     private fun grantedRegistry(): PairingRegistry {
-        val reg = PairingRegistry(MemoryStore(), secrets = MemorySecrets())
+        val reg = PairingRegistry(MemoryStore(), secrets = MemorySecrets()).apply { withSealing() }
         reg.pair(reg.issueCode().code, "mac1", "Studio")
         reg.grantShell("mac1", grant, ByteArray(32) { 7 })
         return reg

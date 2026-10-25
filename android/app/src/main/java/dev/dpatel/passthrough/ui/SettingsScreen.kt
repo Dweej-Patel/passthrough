@@ -84,6 +84,7 @@ fun SettingsScreen(vm: AppViewModel, shell: ShellViewModel, onDone: () -> Unit) 
     val socksPort by s.socksPort.collectAsStateWithLifecycle()
     val controlPort by s.controlPort.collectAsStateWithLifecycle()
     val connectMode by s.shellConnectMode.collectAsStateWithLifecycle()
+    val captureProtection by s.captureProtection.collectAsStateWithLifecycle()
     val log by vm.log.collectAsStateWithLifecycle()
     val clients by vm.pairedClients.collectAsStateWithLifecycle()
     val shellReach by shell.reach.collectAsStateWithLifecycle()
@@ -186,6 +187,14 @@ fun SettingsScreen(vm: AppViewModel, shell: ShellViewModel, onDone: () -> Unit) 
                             if (i > 0) Divider()
                             ManualShellAddressRow(shell, client.id, client.shell?.macName ?: client.name)
                         }
+                    }
+                }
+                if (shellReach != ShellReach.UNSUPPORTED) {
+                    Section(
+                        "Privacy",
+                        footer = "Keeps the terminal, shell history and session transcripts out of screenshots, screen recordings, casting and Recents.",
+                    ) {
+                        ToggleRow("Hide shell and Screen from screenshots and recordings", captureProtection, enabled = true) { s.setCaptureProtection(it) }
                     }
                 }
                 Section("Advanced", footer = if (locked) "Stop the proxy to change these." else null) {

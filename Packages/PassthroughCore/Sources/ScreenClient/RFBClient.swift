@@ -4,8 +4,9 @@ import PassthroughCore
 
 /// A VNC (RFB 3.8, RFC 6143) viewer for macOS Screen Sharing, over a stream
 /// the remote shell handed over after `screenReady` (protocol/README.md,
-/// "Screen"). It logs in with Apple's method (account name and password),
-/// asks for 32-bit pixels in ZRLE, Zlib, CopyRect or Raw, and keeps one
+/// "Screen"). It logs in with Apple's method (account name and password)
+/// only: a server offering no login at all is not the Mac's Screen Sharing,
+/// which always asks for one. It asks for 32-bit pixels in ZRLE, Zlib, CopyRect or Raw, and keeps one
 /// incremental update request outstanding, sent as each update starts so the
 /// Mac prepares the next one while this one decodes. Everything runs on its
 /// own queue; events arrive on the queue given to `init`, at most one frame
@@ -20,6 +21,9 @@ public final class RFBClient: @unchecked Sendable {
     public enum Failure: Error, Equatable, Sendable {
         /// Not an RFB server this client speaks to, or no login method it knows.
         case unsupportedServer
+        /// It offered to connect with no login (RFB "None"), which the Mac's
+        /// Screen Sharing never does: something else is answering.
+        case noLoginOffered
         /// The Mac refused the name and password; its reason, if it gave one.
         case loginFailed(String?)
         case protocolError(String)
@@ -50,6 +54,9 @@ public final class RFBClient: @unchecked Sendable {
     }
 
     static let encodings: [Int32] = [16, 6, 1, 0, -223]   // ZRLE, Zlib, CopyRect, Raw, DesktopSize
+    /// Longest refusal reason or screen name it reads: what a server says
+    /// there is buffered whole before anything is checked.
+    static let maxTextLength = 64 << 10
 
     private enum Stage {
         case version, securityTypes, appleParameters, securityResult, failureReason(login: Bool), serverInit, running
@@ -65,7 +72,7 @@ public final class RFBClient: @unchecked Sendable {
     private var inbox: [UInt8] = []
     private var head = 0
     private var stage = Stage.version
-    private var framebuffer = Framebuffer(width: 0, height: 0)
+    private var framebuffer = Framebuffer()
     private let zlib = Inflater()
     private let zrle = Inflater()
     private var rectsLeft = 0
@@ -194,8 +201,8 @@ public final class RFBClient: @unchecked Sendable {
                 send([30])
                 stage = .appleParameters
             } else if offered.contains(1) {
-                send([1])
-                stage = .securityResult
+                // Only None: chosen, it would see (and take) whatever the phone types.
+                throw Failure.noLoginOffered
             } else {
                 throw Failure.unsupportedServer
             }
@@ -226,6 +233,7 @@ public final class RFBClient: @unchecked Sendable {
         case .failureReason(let afterLogin):
             guard available >= 4 else { return false }
             let length = Int(u32())
+            guard length <= Self.maxTextLength else { throw afterLogin ? Failure.loginFailed(nil) : Failure.unsupportedServer }
             guard available >= 4 + length else { return false }
             head += 4
             let reason = String(decoding: take(length), as: UTF8.self)
@@ -233,11 +241,12 @@ public final class RFBClient: @unchecked Sendable {
         case .serverInit:
             guard available >= 24 else { return false }
             let nameLength = Int(u32(20))
+            guard nameLength <= Self.maxTextLength else { throw Failure.protocolError("name too long") }
             guard available >= 24 + nameLength else { return false }
             let width = u16(), height = u16(2)
             head += 24
             let name = String(decoding: take(nameLength), as: UTF8.self)
-            framebuffer = Framebuffer(width: width, height: height)
+            try framebuffer.resize(width: width, height: height)
             stage = .running
             // 32 bpp, depth 24, little-endian, true colour, 255 per channel, red at 16, green 8, blue 0.
             send([0, 0, 0, 0, 32, 24, 0, 1, 0, 255, 0, 255, 0, 255, 16, 8, 0, 0, 0, 0])
@@ -286,6 +295,10 @@ public final class RFBClient: @unchecked Sendable {
         guard available >= 12 else { return false }
         let x = u16(), y = u16(2), w = u16(4), h = u16(6)
         let encoding = Int32(bitPattern: u32(8))
+        // Before waiting for its pixels: a rectangle off the screen would only be refused once all of it is buffered.
+        guard encoding == -223 || framebuffer.contains(x: x, y: y, w: w, h: h) else {
+            throw Failure.protocolError("rectangle outside the screen")
+        }
         switch encoding {
         case 0:
             let size = w * h * 4
@@ -305,15 +318,17 @@ public final class RFBClient: @unchecked Sendable {
             guard available >= 16 + length else { return false }
             head += 16
             let compressed = Data(take(length))
+            // Inflated no further than the rectangle can use, so a few
+            // compressed bytes cannot become gigabytes on the phone.
             if encoding == 6 {
-                let pixels = try zlib.inflated(compressed)
+                let pixels = try zlib.inflated(compressed, limit: w * h * 4)
                 try pixels.withUnsafeBytes { try framebuffer.raw(x: x, y: y, w: w, h: h, $0) }
             } else {
-                try framebuffer.zrle(x: x, y: y, w: w, h: h, try zrle.inflated(compressed))
+                try framebuffer.zrle(x: x, y: y, w: w, h: h, try zrle.inflated(compressed, limit: Framebuffer.zrleLimit(w: w, h: h)))
             }
         case -223:   // DesktopSize: the screen changed size
             head += 12
-            framebuffer.resize(width: w, height: h)
+            try framebuffer.resize(width: w, height: h)
             requestUpdate(incremental: false)   // the request sent with this update had the old size
         default:
             throw Failure.protocolError("encoding \(encoding)")

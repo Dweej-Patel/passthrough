@@ -14,6 +14,8 @@ public final class ScreenVideoClient: @unchecked Sendable {
         case size(width: Int, height: Int)
         /// A frame to show, then pass `number` to `shown`.
         case frame(CMSampleBuffer, number: UInt32)
+        /// The answer to `copySelection()`.
+        case copied(ScreenVideoWire.CopyResult)
         /// The connection is over: nil when `close()` ended it.
         case closed(Error?)
     }
@@ -32,6 +34,9 @@ public final class ScreenVideoClient: @unchecked Sendable {
     private var format: CMVideoFormatDescription?
     private var parameterSets: (Data, Data)?
     private var size: (Int, Int)?
+    /// `copySelection()` calls not yet answered: the Mac's copies are taken
+    /// only as answers, so it can't put things on this phone's clipboard unasked.
+    private var copiesAsked = 0
     /// After a keyframe request, frames are skipped until a keyframe arrives.
     private var awaitingKeyframe = true
     private var closed = false
@@ -79,8 +84,28 @@ public final class ScreenVideoClient: @unchecked Sendable {
         send(.key(keysym: keysym, modifiers: modifiers.rawValue))
     }
 
-    public func text(_ text: String) { send(.text(text)) }
-    public func clipboard(_ text: String) { send(.clipboard(text)) }
+    /// Typed as is; a long paste goes in pieces the Mac accepts (`ScreenVideoWire.maxTextPayload`).
+    public func text(_ text: String) {
+        for piece in ScreenVideoWire.textPieces(text) { send(.text(piece)) }
+    }
+
+    /// Puts `text` on the Mac's clipboard; false (nothing sent) when it is
+    /// longer than the Mac takes (`ScreenVideoWire.maxClipboardPayload`).
+    @discardableResult
+    public func clipboard(_ text: String) -> Bool {
+        guard text.utf8.count <= ScreenVideoWire.maxClipboardPayload else { return false }
+        send(.clipboard(text))
+        return true
+    }
+
+    /// Presses ⌘C on the Mac; what it copied comes back as `copied`.
+    public func copySelection() {
+        queue.async { [self] in
+            guard !closed else { return }
+            copiesAsked += 1
+            send(.copy)
+        }
+    }
 
     /// Frame `number` is on screen.
     public func shown(_ number: UInt32) { send(.ack(number: number)) }
@@ -138,6 +163,10 @@ public final class ScreenVideoClient: @unchecked Sendable {
                 awaitingKeyframe = false
             }
             emit(.frame(try Self.sampleBuffer(data, format: format, number: number), number: number))
+        case let .copied(result):
+            guard copiesAsked > 0 else { return }
+            copiesAsked -= 1
+            emit(.copied(result))
         default:
             break
         }
@@ -146,6 +175,8 @@ public final class ScreenVideoClient: @unchecked Sendable {
     // MARK: H.264
 
     static func formatDescription(sps: Data, pps: Data) throws -> CMVideoFormatDescription {
+        // Empty parameter sets have no base address to hand over.
+        guard !sps.isEmpty, !pps.isEmpty else { throw Failure.malformed }
         var format: CMVideoFormatDescription?
         let status = sps.withUnsafeBytes { spsBytes in
             pps.withUnsafeBytes { ppsBytes in
@@ -156,12 +187,14 @@ public final class ScreenVideoClient: @unchecked Sendable {
                                                                            nalUnitHeaderLength: 4, formatDescriptionOut: &format)
             }
         }
-        guard status == noErr, let format, !sps.isEmpty, !pps.isEmpty else { throw Failure.malformed }
+        guard status == noErr, let format else { throw Failure.malformed }
         return format
     }
 
     /// One frame's AVCC data as a sample buffer the display shows as soon as it has it.
     static func sampleBuffer(_ data: Data, format: CMVideoFormatDescription, number: UInt32) throws -> CMSampleBuffer {
+        // An empty frame is nothing to show, and has no base address to copy from.
+        guard !data.isEmpty else { throw Failure.malformed }
         var block: CMBlockBuffer?
         guard CMBlockBufferCreateWithMemoryBlock(allocator: nil, memoryBlock: nil, blockLength: data.count, blockAllocator: nil,
                                                  customBlockSource: nil, offsetToData: 0, dataLength: data.count, flags: 0,

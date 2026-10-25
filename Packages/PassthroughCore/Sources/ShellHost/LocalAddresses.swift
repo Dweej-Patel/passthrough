@@ -12,11 +12,21 @@ public enum LocalAddresses {
         var address: String
         /// Leading one bits of the netmask; nil when it has none.
         var prefixLength: Int?
+        /// The BSD name ("en0", "utun4").
+        var name = ""
+
+        /// What the address policy needs to know of it.
+        var policyAddress: ShellAddressPolicy.LocalAddress {
+            .init(address: address, interface: name, isPointToPoint: flags & Int32(IFF_POINTOPOINT) != 0)
+        }
     }
 
     /// Every IPv4 and IPv6 address on an interface that is up, numeric, in
     /// interface order (IPv6 link-local ones keep their `%scope`).
     public static func all() -> [String] { interfaces().map(\.address) }
+
+    /// `all()` with the interface each address is on, for `ShellAddressPolicy`.
+    public static func withInterfaces() -> [ShellAddressPolicy.LocalAddress] { interfaces().map(\.policyAddress) }
 
     static func interfaces() -> [Interface] {
         var head: UnsafeMutablePointer<ifaddrs>?
@@ -32,7 +42,8 @@ public enum LocalAddresses {
             var host = [CChar](repeating: 0, count: Int(NI_MAXHOST))
             guard getnameinfo(address, length, &host, socklen_t(host.count), nil, 0, NI_NUMERICHOST) == 0 else { continue }
             result.append(Interface(flags: flags, address: String(cString: host),
-                                    prefixLength: prefixLength(of: entry.pointee.ifa_netmask)))
+                                    prefixLength: prefixLength(of: entry.pointee.ifa_netmask),
+                                    name: String(cString: entry.pointee.ifa_name)))
         }
         return result
     }

@@ -32,6 +32,9 @@ struct ScreenView: View {
             }
         }
         .preferredColorScheme(.dark)
+        .hiddenWhileCaptured { covered in
+            if covered { keyboard = false }
+        }
         .persistentSystemOverlays(landscape ? .hidden : .automatic)
         .task { model.begin(shell: shell, context: lock.context) }
         .onAppear { AppOrientation.allowed = .allButUpsideDown }
@@ -59,6 +62,7 @@ struct ScreenView: View {
             }
             Spacer(minLength: 0)
             if model.phase == .live {
+                clipboardMenu
                 desktopsMenu
                 modeButton
                 keyboardButton
@@ -77,6 +81,7 @@ struct ScreenView: View {
                 .accessibilityLabel("Done")
             Spacer(minLength: 0)
             if model.phase == .live {
+                clipboardMenu
                 desktopsMenu
                 modeButton
                 keyboardButton
@@ -105,6 +110,18 @@ struct ScreenView: View {
         .accessibilityLabel(keyboard ? "Hide keyboard" : "Show keyboard")
     }
 
+    /// Copy and paste between the Mac and this iPhone, also on the keyboard's key row.
+    private var clipboardMenu: some View {
+        Menu {
+            Button { model.copyFromMac() } label: { Label("Copy from \(model.macName)", systemImage: "doc.on.doc") }
+                .disabled(model.copying)
+            Button { model.pastePhoneClipboard() } label: { Label("Paste on \(model.macName)", systemImage: "doc.on.clipboard") }
+        } label: {
+            Image(systemName: "doc.on.clipboard")
+        }
+        .accessibilityLabel("Copy and paste")
+    }
+
     /// Mission Control: the same as the canvas's three-finger swipes.
     private var desktopsMenu: some View {
         Menu {
@@ -126,6 +143,21 @@ struct ScreenView: View {
         case .live:
             ScreenCanvas(model: model, mode: mode, keyboard: $keyboard)
                 .ignoresSafeArea(.container, edges: .bottom)
+                .overlay(alignment: .bottom) {
+                    if let notice = model.notice {
+                        Text(notice)
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(.secondary)
+                            .multilineTextAlignment(.center)
+                            .padding(.horizontal, 12).padding(.vertical, 7)
+                            .background(.regularMaterial, in: Capsule())
+                            .padding(.bottom, 14)
+                            .padding(.horizontal, 16)
+                            .allowsHitTesting(false)
+                            .transition(.opacity.combined(with: .move(edge: .bottom)))
+                    }
+                }
+                .animation(.easeInOut(duration: 0.2), value: model.notice)
         case .connecting:
             VStack(spacing: 12) {
                 ProgressView()
@@ -135,6 +167,10 @@ struct ScreenView: View {
             ScreenLoginForm(macName: model.macName, error: error) { login, remember in
                 model.connect(login, remember: remember)
             }
+        case .confirmScreenSharing:
+            ScreenSharingPrompt(macName: model.macName, reason: model.slowReason,
+                                onUse: { model.useScreenSharing(always: $0) },
+                                onCancel: { model.stop(); dismiss() })
         case let .failed(message):
             VStack(spacing: 16) {
                 Image(systemName: "display.trianglebadge.exclamationmark")
@@ -149,6 +185,44 @@ struct ScreenView: View {
             }
             .padding(32)
         }
+    }
+}
+
+/// Asked when the Mac's own stream didn't work, before the Mac's login is
+/// sent to Screen Sharing: once, always for this Mac, or not.
+struct ScreenSharingPrompt: View {
+    let macName: String
+    let reason: String?
+    let onUse: (_ always: Bool) -> Void
+    let onCancel: () -> Void
+
+    var body: some View {
+        VStack(spacing: 16) {
+            Image(systemName: "rectangle.on.rectangle")
+                .font(.system(size: 40)).foregroundStyle(PTTheme.warning)
+            Text("Use Screen Sharing with your Mac login?").font(.title3.weight(.semibold)).multilineTextAlignment(.center)
+            Text("\(macName) can't stream its screen itself right now. Screen Sharing is slower and needs the name and password of your account on \(macName): the one saved on this iPhone, if there is one.")
+                .font(.subheadline).foregroundStyle(.secondary).multilineTextAlignment(.center)
+                .fixedSize(horizontal: false, vertical: true)
+            if let reason {
+                Text(reason).font(.caption).foregroundStyle(.secondary).multilineTextAlignment(.center)
+            }
+            VStack(spacing: 10) {
+                Button { onUse(false) } label: {
+                    Text("Use Screen Sharing").font(.subheadline.weight(.semibold)).frame(maxWidth: .infinity, minHeight: 34)
+                }
+                .buttonStyle(.borderedProminent)
+                Button { onUse(true) } label: {
+                    Text("Always for This Mac").font(.subheadline.weight(.semibold)).frame(maxWidth: .infinity, minHeight: 34)
+                }
+                .buttonStyle(.bordered)
+                Button("Cancel", action: onCancel).font(.subheadline)
+            }
+            .buttonBorderShape(.capsule)
+            .tint(PTTheme.accentEnd)
+        }
+        .padding(32)
+        .frame(maxWidth: 420)
     }
 }
 

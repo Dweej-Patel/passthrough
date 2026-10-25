@@ -1,4 +1,6 @@
 import Foundation
+import HelperLogic
+import ObjectiveC
 import Security
 import os
 
@@ -25,7 +27,11 @@ final class ListenerDelegate: NSObject, NSXPCListenerDelegate {
         }
         connection.exportedInterface = NSXPCInterface(with: PassthroughHelperProtocol.self)
         connection.exportedObject = service
-        let id = ObjectIdentifier(connection)
+        // A fresh ID per connection, never reused (an ObjectIdentifier can be,
+        // once the connection object is freed), so ownership recorded for a
+        // client that has gone can never pass to a later one.
+        let id = UUID()
+        ClientID.set(id, on: connection)
         connection.invalidationHandler = { [service] in
             service.clientGone(id)
         }
@@ -35,14 +41,39 @@ final class ListenerDelegate: NSObject, NSXPCListenerDelegate {
     }
 }
 
+/// The ID `ListenerDelegate` gave a connection, read by the XPC methods it calls.
+enum ClientID {
+    private static var key: UInt8 = 0
+
+    static func set(_ id: UUID, on connection: NSXPCConnection) {
+        objc_setAssociatedObject(connection, &key, id as NSUUID, .OBJC_ASSOCIATION_RETAIN)
+    }
+
+    /// The calling client's ID; only inside an XPC method, before any hop off its thread.
+    static func current() -> UUID? {
+        (NSXPCConnection.current().flatMap { objc_getAssociatedObject($0, &key) } as? NSUUID) as UUID?
+    }
+}
+
 enum CodeSigning {
-    /// Builds a requirement that only accepts apps signed by the same team as this helper.
+    /// Builds a requirement that only accepts apps signed by the same team as
+    /// this helper. A Release helper also refuses an app that carries
+    /// get-task-allow (any development-signed build): code injected into it
+    /// by a debugger, which needs no privileges for a debuggable app, would
+    /// speak to this root helper as our app. A Debug helper accepts it so a
+    /// Debug app can drive it.
     static func requirementForOwnTeam() -> String? {
         guard let team = ownTeamIdentifier() else { return nil }
         let id = HelperConstants.identifier
-        // Checked where it is spliced in, so a bad ID can never loosen the requirement.
+        // Checked where they are spliced in, so neither can loosen the requirement.
         precondition(HelperConstants.isValidIdentifier(id), "PassthroughID \"\(id)\" is not safe in a code-signing requirement")
-        return "anchor apple generic and certificate leaf[subject.OU] = \"\(team)\" and identifier \"\(id).mac\""
+        precondition(CodeRequirement.isValidTeam(team), "Team ID \"\(team)\" is not safe in a code-signing requirement")
+        #if DEBUG
+        let allowDebuggable = true
+        #else
+        let allowDebuggable = false
+        #endif
+        return CodeRequirement.client(team: team, identifier: id, allowDebuggable: allowDebuggable)
     }
 
     /// The Team ID this helper is signed with, or nil for unsigned dev builds.

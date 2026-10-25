@@ -7,39 +7,20 @@ enum Keychain {
     private static let service = PassthroughProtocol.identifier
 
     /// Items live in the data-protection keychain, this device only, so they
-    /// never ride a keychain export, iCloud sync or Migration Assistant.
-    private static func base(_ account: String, modern: Bool = true) -> [String: Any] {
-        var q: [String: Any] = [
+    /// never ride a keychain export, iCloud sync or Migration Assistant. The
+    /// legacy file keychain is never read: any process running as the user
+    /// can add an item there, and one planted under our service and account
+    /// (a pairing token, a shell key, an iroh secret) would be taken as ours.
+    private static func base(_ account: String) -> [String: Any] {
+        [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
             kSecAttrAccount as String: account,
+            kSecUseDataProtectionKeychain as String: true,
         ]
-        if modern { q[kSecUseDataProtectionKeychain as String] = true }
-        return q
     }
 
     static func read(_ account: String) -> String? {
-        var query = base(account)
-        query[kSecReturnData as String] = true
-        query[kSecMatchLimit as String] = kSecMatchLimitOne
-        var item: CFTypeRef?
-        if SecItemCopyMatching(query as CFDictionary, &item) == errSecSuccess, let data = item as? Data {
-            return String(data: data, encoding: .utf8)
-        }
-        // One-time migration from the legacy file keychain.
-        var legacy = base(account, modern: false)
-        legacy[kSecReturnData as String] = true
-        legacy[kSecMatchLimit as String] = kSecMatchLimitOne
-        guard SecItemCopyMatching(legacy as CFDictionary, &item) == errSecSuccess, let data = item as? Data,
-              let value = String(data: data, encoding: .utf8) else { return nil }
-        // Only retire the legacy copy once the new one demonstrably exists.
-        if write(value, account: account), readModern(account) == value {
-            SecItemDelete(base(account, modern: false) as CFDictionary)
-        }
-        return value
-    }
-
-    private static func readModern(_ account: String) -> String? {
         var query = base(account)
         query[kSecReturnData as String] = true
         query[kSecMatchLimit as String] = kSecMatchLimitOne
@@ -70,6 +51,5 @@ enum Keychain {
 
     static func delete(_ account: String) {
         SecItemDelete(base(account) as CFDictionary)
-        SecItemDelete(base(account, modern: false) as CFDictionary)
     }
 }

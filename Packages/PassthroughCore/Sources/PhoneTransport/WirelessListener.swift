@@ -12,6 +12,8 @@ public final class WirelessListener: @unchecked Sendable {
         public let mux: Mux
         /// What carries the phone's connection ("Hotspot", "Peer-to-peer", …).
         public let carrier: String
+        /// Where the phone dialed from (`PeerAddress.host`).
+        public let peer: String
     }
 
     private let identity: MacIdentity
@@ -22,8 +24,9 @@ public final class WirelessListener: @unchecked Sendable {
     private let queue = DispatchQueue(label: "\(PassthroughProtocol.identifier).wireless-listener")
     private var listener: NWListener?
     private var stopped = false
+    private let provenAddresses: ProvenAddressStore
     /// Unproven connections, few at once and from one address (`HandshakeLimiter`).
-    private lazy var handshakes = HandshakeLimiter(queue: queue)
+    private lazy var handshakes = HandshakeLimiter(queue: queue, store: provenAddresses)
     /// A phone's first line (its proof, plus its streams when resuming). Read
     /// before it has proved anything, so far below the general line limit.
     static let proofLineLimit = 128 * 1024
@@ -31,18 +34,23 @@ public final class WirelessListener: @unchecked Sendable {
     private var sessions: [String: (phoneID: String, mux: Mux)] = [:]
     /// A phone proved itself; on the listener's queue.
     public var onLink: (@Sendable (Link) -> Void)?
-    /// A phone resumed its link, possibly over another carrier; on the listener's queue.
-    public var onResume: (@Sendable (_ phoneID: String, _ carrier: String) -> Void)?
+    /// A phone resumed its link, possibly over another carrier or from another
+    /// address; on the listener's queue.
+    public var onResume: (@Sendable (_ phoneID: String, _ carrier: String, _ peer: String) -> Void)?
     /// The TCP port once listening (tests).
     public private(set) var port: UInt16?
 
     /// `linkKey` returns the key shared with the phone of that ID, if linked.
-    /// `advertise` is false in tests (no Bonjour).
-    public init(identity: MacIdentity, macTag: String, advertise: Bool = true, peerToPeer: Bool = false, linkKey: @escaping @Sendable (String) -> Data?) {
+    /// `advertise` is false in tests (no Bonjour). `provenAddresses` keeps
+    /// the addresses that proved themselves across launches (`HandshakeLimiter`).
+    public init(identity: MacIdentity, macTag: String, advertise: Bool = true, peerToPeer: Bool = false,
+                provenAddresses: ProvenAddressStore = MemoryProvenAddressStore(),
+                linkKey: @escaping @Sendable (String) -> Data?) {
         self.identity = identity
         self.macTag = macTag
         self.advertise = advertise
         self.peerToPeer = peerToPeer
+        self.provenAddresses = provenAddresses
         self.linkKey = linkKey
     }
 
@@ -79,7 +87,8 @@ public final class WirelessListener: @unchecked Sendable {
     }
 
     private func accept(_ connection: NWConnection) {
-        guard let slot = handshakes.acquire(host: PeerAddress.host(of: connection), onTimeout: { connection.cancel() }) else {
+        let host = PeerAddress.host(of: connection)
+        guard let slot = handshakes.acquire(host: host, onTimeout: { connection.cancel() }) else {
             connection.cancel(); return
         }
         let stream = ConnectionStream(connection, queue: queue)
@@ -102,13 +111,15 @@ public final class WirelessListener: @unchecked Sendable {
                     ptLog(.warning, "wireless: rejected a connection that could not prove a link")
                     finish(nil); return
                 }
+                // Gets past strangers holding the shared slots from now on (`HandshakeLimiter.proven`).
+                self.handshakes.proven(host)
                 self.sessions = self.sessions.filter { !$0.value.mux.isClosed }
                 if let id = message.session, let session = self.sessions[id], session.phoneID == phoneID {
                     // Same phone, same session: carry on over the new connection.
                     session.mux.resume(on: stream, peerStreams: message.streams ?? [], initialBytes: rest) { states in
                         WirelessLink.sendLine(.init(t: "resume", streams: states), on: stream)
                     }
-                    self.onResume?(phoneID, WirelessLink.carrier(of: stream))
+                    self.onResume?(phoneID, WirelessLink.carrier(of: stream), host)
                     slot.release()
                     return
                 }
@@ -117,7 +128,7 @@ public final class WirelessListener: @unchecked Sendable {
                               initialBytes: rest, sessionID: id, resumable: true)
                 self.sessions[id] = (phoneID, mux)
                 WirelessLink.sendLine(.init(t: "fresh", session: id), on: stream)
-                finish(Link(phoneID: phoneID, mux: mux, carrier: WirelessLink.carrier(of: stream)))
+                finish(Link(phoneID: phoneID, mux: mux, carrier: WirelessLink.carrier(of: stream), peer: host))
             }
         }
     }
@@ -159,6 +170,13 @@ public enum PeerAddress {
             }
         }
         return "\(host)"
+    }
+
+    /// `host` as a bare numeric address the kill switch can name: an IPv6
+    /// zone ("%en0") dropped; nil for anything that isn't an address.
+    public static func numeric(_ host: String) -> String? {
+        let bare = host.split(separator: "%", maxSplits: 1).first.map(String.init) ?? host
+        return IPv4Address(bare) != nil || IPv6Address(bare) != nil ? bare : nil
     }
 }
 

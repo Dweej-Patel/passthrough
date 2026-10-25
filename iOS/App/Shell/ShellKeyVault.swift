@@ -5,8 +5,9 @@ import Security
 import PassthroughCore
 
 /// The app's private home for remote-shell keys. The tunnel extension parks a
-/// key a Mac granted over the cable in the shared store
-/// (`PairingRegistry.grantShell`); after each unlock the app moves it here: a
+/// key a Mac granted over the cable in the shared store, sealed to the app's
+/// `ShellSealingKey` (`PairingRegistry.grantShell`); after each unlock the app
+/// opens it and moves it here: a
 /// data-protection Keychain item with no access group (so the extension can't
 /// read it), only on this device, only while a passcode is set, and only after
 /// user presence. Reads reuse the app lock's evaluated `LAContext`, never
@@ -74,19 +75,34 @@ enum ShellKeyVault {
         return LAError.Code(rawValue: error.code) != .passcodeNotSet
     }
 
-    /// Moves every pending key from the shared store into the vault and clears
-    /// it there. A key that can't be stored (no passcode) stays pending.
-    /// Returns how many moved.
+    /// Opens every key waiting sealed in the shared store (`ShellSealingKey`,
+    /// with the lock's `context`), moves it into the vault and clears it
+    /// there. Also makes sure the extension has the sealing key to seal the
+    /// next grant with. A key that can't be opened or stored yet stays
+    /// pending; one that can never be opened (an older build's bare key,
+    /// sealed to a key since replaced, altered) is deleted, and the Mac
+    /// grants again on its next cable connection. Returns how many moved.
     @discardableResult
     static func adoptPending(from registry: PairingRegistry, context: LAContext) -> Int {
         guard passcodeSet else { return 0 }
+        let opener = ShellSealingKey.prepare(registry: registry, context: context)
         var moved = 0
         for client in registry.clients where client.shell != nil {
-            guard let key = registry.pendingShellKey(clientID: client.id) else { continue }
-            if store(key, macID: client.id, context: context) {
-                // A newer grant may have landed meanwhile: leave that one for the next unlock.
-                if registry.pendingShellKey(clientID: client.id) == key { registry.clearPendingShellKey(clientID: client.id) }
-                moved += 1
+            guard let stored = registry.sealedPendingShellKey(clientID: client.id) else { continue }
+            let adoption = opener?.adopt(stored, clientID: client.id) ?? (ShellKeySeal.format(of: stored) == .sealed ? .keep : .discard)
+            // A newer grant may have landed meanwhile: leave that one for the next unlock.
+            let clear = { if registry.sealedPendingShellKey(clientID: client.id) == stored { registry.clearPendingShellKey(clientID: client.id) } }
+            switch adoption {
+            case let .key(key):
+                if store(key, macID: client.id, context: context) {
+                    clear()
+                    moved += 1
+                }
+            case .discard:
+                log.info("Discarded a pending shell key this build can't open; the Mac grants again over the cable")
+                clear()
+            case .keep:
+                break
             }
         }
         return moved

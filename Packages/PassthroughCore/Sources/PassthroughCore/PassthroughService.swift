@@ -53,7 +53,7 @@ public final class PassthroughService: @unchecked Sendable {
         let registry = self.registry
         var authenticator: SOCKS5Server.Authenticator? = nil
         if !options.disableAuth {
-            authenticator = { user, password in registry.verify(clientID: user, token: password) }
+            authenticator = { user, password in registry.verifySOCKS(clientID: user, password: password) }
         }
         let socks = SOCKS5Server(configuration: config, authenticator: authenticator)
         socks.onEgressChange = { [weak self] egress in self?.onEgressChange?(egress) }

@@ -12,7 +12,9 @@ import ScreenClient
 /// protocol/README.md "Screen video"): smooth, and no password. A Mac that
 /// can't stream (it lacks Screen Recording or Accessibility, or predates it)
 /// says so, and the same connection asks for Screen Sharing instead, handed
-/// to an `RFBClient` with the Mac's login ("Screen"). Frames go straight to
+/// to an `RFBClient` with the Mac's login ("Screen"). That fallback sends a
+/// saved login only once the user agrees (`confirmScreenSharing`), or chose
+/// "Always" for that Mac: whatever answers as Screen Sharing gets it. Frames go straight to
 /// the canvas (`onFrame`, `onVideoFrame`; not published: a frame must not
 /// re-render the SwiftUI screen around it); takes pointer and key input.
 @MainActor
@@ -20,6 +22,9 @@ final class ScreenModel: ObservableObject {
     enum Phase: Equatable {
         /// Waiting for the Mac's account name and password; `error` says why again.
         case login(error: String?)
+        /// The Mac's own stream didn't work: asking whether to use Screen
+        /// Sharing, which sends the Mac's login (`useScreenSharing`).
+        case confirmScreenSharing
         case connecting
         case live
         case failed(String)
@@ -37,6 +42,10 @@ final class ScreenModel: ObservableObject {
     @Published private(set) var macName = "your Mac"
     /// Why the view is on Screen Sharing rather than the Mac's own stream; nil when it isn't.
     @Published private(set) var slowReason: String?
+    /// Said briefly over the screen: what a copy or paste did.
+    @Published private(set) var notice: String?
+    /// A Copy is waiting for the Mac's answer; another waits for it.
+    @Published private(set) var copying = false
 
     private var shell: ShellModel?
     private var context: LAContext?
@@ -53,6 +62,12 @@ final class ScreenModel: ObservableObject {
     private var lastPointer: CGPoint?
     /// The stream has shown its size: a stream ending before that never worked, so Screen Sharing is tried.
     private var videoStarted = false
+    private var noticeTask: Task<Void, Never>?
+    /// Ends a Copy the Mac doesn't answer (the stream: a Mac that predates
+    /// copying; Screen Sharing: one whose clipboard didn't change).
+    private var copyTimeout: Task<Void, Never>?
+    /// What Paste last put on the Mac over Screen Sharing, which may send it back.
+    private var lastPaste: String?
     /// Bumped by every start and stop, so a stale connection's events are dropped.
     private var generation = 0
     private var pendingLogin: (login: RFBClient.Login, remember: Bool)?
@@ -104,19 +119,48 @@ final class ScreenModel: ObservableObject {
         dialer = connection.dialer
     }
 
-    /// The Mac can't stream its screen itself: Screen Sharing on the same connection, if a login is saved.
+    /// The Mac can't stream its screen itself: Screen Sharing on the same
+    /// connection with a login typed for this view, or the saved one if the
+    /// user chose "Always" for this Mac; otherwise they are asked first.
     private func fallBackToScreenSharing() {
         wantsVideo = false
         slowReason = "Slower: allow Passthrough Screen Recording and Accessibility on \(macName) for the smooth view."
-        if pendingLogin == nil, let macID, let context, let saved = ScreenLoginStore.read(macID: macID, context: context) {
+        if pendingLogin == nil, let macID, Self.alwaysUsesScreenSharing(macID: macID), let context,
+           let saved = ScreenLoginStore.read(macID: macID, context: context) {
             pendingLogin = (saved, false)
         }
         if pendingLogin != nil {
             client?.requestScreen(video: false)
         } else {
             stop()
+            phase = .confirmScreenSharing
+        }
+    }
+
+    /// The user agreed to Screen Sharing (`always`: from now on for this
+    /// Mac, without asking): with the saved login, else the login form.
+    func useScreenSharing(always: Bool) {
+        guard let macID else { return }
+        if always { Self.setAlwaysUsesScreenSharing(macID: macID) }
+        if let context, let saved = ScreenLoginStore.read(macID: macID, context: context) {
+            connect(saved, remember: false)
+        } else {
             phase = .login(error: nil)
         }
+    }
+
+    private static let screenSharingAlwaysKey = "screenSharingAlwaysMacs"
+
+    /// The user chose "Always" for this Mac: a fallback sends its saved login without asking.
+    static func alwaysUsesScreenSharing(macID: String) -> Bool {
+        UserDefaults.standard.stringArray(forKey: screenSharingAlwaysKey)?.contains(macID) ?? false
+    }
+
+    private static func setAlwaysUsesScreenSharing(macID: String) {
+        var macs = UserDefaults.standard.stringArray(forKey: screenSharingAlwaysKey) ?? []
+        guard !macs.contains(macID) else { return }
+        macs.append(macID)
+        UserDefaults.standard.set(macs, forKey: screenSharingAlwaysKey)
     }
 
     /// Ends the view; the shell sessions are untouched.
@@ -126,6 +170,8 @@ final class ScreenModel: ObservableObject {
         rfb = nil
         video?.close()
         video = nil
+        copyTimeout?.cancel()
+        copying = false
         pendingLogin = nil
         client?.disconnect()
         client = nil
@@ -181,16 +227,27 @@ final class ScreenModel: ObservableObject {
             // Not shown (no canvas yet, or its display failed): what follows needs a new keyframe.
             if onVideoFrame?(sample) != true { video?.requestKeyframe() }
             video?.shown(number)
+        case let .copied(result):
+            // An answer after Copy timed out (and said so) changes nothing now.
+            guard copying else { return }
+            switch result {
+            case let .text(text) where !text.isEmpty: copied(text)
+            case .text: copyFailed("Nothing was copied. Select something on \(macName) first.")
+            case .nothing: copyFailed("Nothing was copied. Select something on \(macName) first.")
+            case .tooLong: copyFailed("That's too long to copy to this iPhone.")
+            case .notText: copyFailed("Only text can be copied to this iPhone.")
+            }
         case .closed:
             let worked = videoStarted
             stop()
             guard worked else {
                 // The Mac said yes but couldn't capture or encode after all.
                 slowReason = "Slower: \(macName) couldn't stream its screen. Reopening Passthrough on it may help."
-                if let macID, let context, let saved = ScreenLoginStore.read(macID: macID, context: context) {
+                if let macID, Self.alwaysUsesScreenSharing(macID: macID), let context,
+                   let saved = ScreenLoginStore.read(macID: macID, context: context) {
                     return connect(saved, remember: false)
                 }
-                phase = .login(error: nil)
+                phase = .confirmScreenSharing
                 return
             }
             phase = .failed("The connection to \(macName) was lost.")
@@ -213,7 +270,9 @@ final class ScreenModel: ObservableObject {
             if size != screenSize { screenSize = size }
             onFrame?(image)
         case let .clipboard(text):
-            if !text.isEmpty { UIPasteboard.general.string = text }
+            // Screen Sharing sends the Mac's clipboard whenever it changes, whatever is on it:
+            // taken only as the answer to Copy's ⌘C, and never the phone's own paste coming back.
+            if copying, !text.isEmpty, text != lastPaste { copied(text) }
         case .bell:
             UINotificationFeedbackGenerator().notificationOccurred(.warning)
         case let .closed(failure):
@@ -227,6 +286,8 @@ final class ScreenModel: ObservableObject {
                 phase = .login(error: "Your Mac didn't accept that name and password.")
             case .unsupportedServer?:
                 phase = .failed("Screen Sharing on your Mac answered in a way this app doesn't understand.")
+            case .noLoginOffered?:
+                phase = .failed("What answered as Screen Sharing on \(macName) didn't ask for a login, which your Mac's Screen Sharing always does. Passthrough didn't connect.")
             case .protocolError?:
                 phase = .failed("The screen connection broke. Try again.")
             case .connectionLost?:
@@ -326,8 +387,62 @@ final class ScreenModel: ObservableObject {
     /// Puts the phone's clipboard on the Mac's and pastes it there.
     func pastePhoneClipboard() {
         guard let text = UIPasteboard.general.string, !text.isEmpty else { return }
-        if let video { video.clipboard(text) } else { rfb?.clipboard(text) }
+        if let video {
+            // Longer than the Mac takes: pasting would paste what was there before.
+            guard video.clipboard(text) else {
+                UINotificationFeedbackGenerator().notificationOccurred(.error)
+                return show("That's too long to paste on \(macName).")
+            }
+        } else {
+            rfb?.clipboard(text)
+            lastPaste = text
+        }
         key(0x76, modifiers: [RFBKeys.command])   // ⌘V
+    }
+
+    /// ⌘C on the Mac, and what it copied onto this iPhone's clipboard
+    /// (`MacClipboard`: this iPhone only, for two minutes). Only what changed
+    /// the Mac's clipboard right after this ⌘C comes here: the stream answers
+    /// with that (a second at most), and Screen Sharing's clipboard is taken
+    /// only in the two seconds after it.
+    func copyFromMac() {
+        guard !copying, video != nil || rfb != nil else { return }
+        copying = true
+        if let video { video.copySelection() } else { key(0x63, modifiers: [RFBKeys.command]) }   // ⌘C
+        copyTimeout?.cancel()
+        // The stream's ⌘C may wait for typing to finish on the Mac.
+        let wait: Duration = video != nil ? .seconds(5) : .seconds(2)
+        copyTimeout = Task { [weak self] in
+            try? await Task.sleep(for: wait)
+            guard !Task.isCancelled, let self, self.copying else { return }
+            self.copyFailed(self.video != nil ? "\(self.macName) didn't answer. Update Passthrough on it to copy from it."
+                                             : "Nothing was copied. Select something on \(self.macName) first.")
+        }
+    }
+
+    private func copied(_ text: String) {
+        copying = false
+        copyTimeout?.cancel()
+        MacClipboard.put(text)
+        UINotificationFeedbackGenerator().notificationOccurred(.success)
+        show("Copied from \(macName)")
+    }
+
+    private func copyFailed(_ message: String) {
+        copying = false
+        copyTimeout?.cancel()
+        UINotificationFeedbackGenerator().notificationOccurred(.warning)
+        show(message)
+    }
+
+    private func show(_ message: String) {
+        notice = message
+        noticeTask?.cancel()
+        noticeTask = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(2.5))
+            guard !Task.isCancelled else { return }
+            self?.notice = nil
+        }
     }
 
     /// The display lost its place (it was in the background, say): ask for a keyframe.

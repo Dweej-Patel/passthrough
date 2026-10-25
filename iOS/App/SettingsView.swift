@@ -62,6 +62,7 @@ struct SettingsView: View {
                 }
                 RemoteShellSettings(shell: model.shell)
                 AppLockSettings()
+                CaptureProtectionSettings()
                 Section {
                     LabeledContent("SOCKS port") {
                         TextField("", value: $model.socksPort, format: .number.grouping(.never)).keyboardType(.numberPad).multilineTextAlignment(.trailing)
@@ -162,6 +163,21 @@ private struct RemoteShellSettings: View {
             } footer: {
                 Text("Only needed when this iPhone can't find your Mac by itself, for example over Tailscale. Enter its Tailscale name or IP address. Leave blank to use the addresses your Mac shares.")
             }
+        }
+    }
+}
+
+/// "Hide shell and Screen from screenshots and recordings" (`CaptureProtection`).
+private struct CaptureProtectionSettings: View {
+    @AppStorage(CaptureProtection.key) private var enabled = CaptureProtection.defaultOn
+
+    var body: some View {
+        Section {
+            Toggle("Hide shell and Screen from screenshots and recordings", isOn: $enabled)
+        } header: {
+            Text("Privacy")
+        } footer: {
+            Text("Covers the terminal, session history and your Mac's screen while this iPhone's screen is recorded, mirrored or shared. iOS doesn't let apps block screenshots, so take care with those.")
         }
     }
 }

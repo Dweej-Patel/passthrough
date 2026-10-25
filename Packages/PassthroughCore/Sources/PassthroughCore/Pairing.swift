@@ -73,9 +73,13 @@ public final class PairingRegistry: @unchecked Sendable {
     public static let changedNotification = "\(PassthroughProtocol.identifier).pairings-changed"
     public static let codeKey = "pairing.code"
     public static let codeExpiryKey = "pairing.codeExpiry"
-    /// Wrong guesses against the current code. Kept with the code in the shared
-    /// defaults, since the iOS app issues codes and the extension checks them.
+    /// Wrong guesses against the current code, over every connection. Kept
+    /// with the code in the shared defaults, since the iOS app issues codes
+    /// and the extension checks them.
     public static let failedAttemptsKey = "pairing.failedAttempts"
+    /// Set when the last code was withdrawn for too many wrong guesses, so
+    /// the app can say why it is gone; cleared by the next code.
+    public static let codeWithdrawnKey = "pairing.codeWithdrawn"
 
     public static let phoneIDKey = "pairing.phoneID"
 
@@ -117,14 +121,19 @@ public final class PairingRegistry: @unchecked Sendable {
     }
 
     /// Records the shell key a paired Mac sent over the cable. The key waits
-    /// in the secret store until the app moves it to the shell client's own
-    /// keychain item. False if the Mac isn't paired or the key could not be stored.
+    /// in the secret store, sealed to the app's sealing key (`ShellKeySeal`),
+    /// until the app opens it and moves it to the shell client's own keychain
+    /// item. False if the Mac isn't paired, the app hasn't published its
+    /// sealing key yet (`shellSealingKey`: the key is then not kept at all),
+    /// or the key could not be stored.
     @discardableResult
     public func grantShell(clientID: String, grant: ShellGrant, shellKey: Data, relayToken: String? = nil) -> Bool {
+        guard let recipient = shellSealingKey,
+              let sealed = try? ShellKeySeal.seal(shellKey, to: recipient, clientID: clientID) else { return false }
         lock.lock()
         var list = loadClients()
         guard let i = list.firstIndex(where: { $0.id == clientID }),
-              secrets.write(shellKey, account: Self.pendingShellAccount + clientID),
+              secrets.write(sealed, account: Self.pendingShellAccount + clientID),
               storeRelayToken(relayToken, clientID: clientID) else { lock.unlock(); return false }
         list[i].shell = grant
         save(list)
@@ -168,9 +177,24 @@ public final class PairingRegistry: @unchecked Sendable {
 
     private static let relayTokenAccount = "shell.relayToken."
 
-    public func pendingShellKey(clientID: String) -> Data? {
+    /// What waits for the app from `clientID`'s grant: sealed (`ShellKeySeal`),
+    /// or a bare key an older build stored, which the app discards.
+    public func sealedPendingShellKey(clientID: String) -> Data? {
         secrets.read(Self.pendingShellAccount + clientID)
     }
+
+    /// The public half of the app's sealing key (X9.63), which the app
+    /// publishes once it has one; nil until the app has been opened.
+    public var shellSealingKey: P256.KeyAgreement.PublicKey? {
+        defaults.data(forKey: Self.shellSealingKeyKey).flatMap { try? P256.KeyAgreement.PublicKey(x963Representation: $0) }
+    }
+
+    /// The app only: publishes (or, with nil, withdraws) its sealing key.
+    public func publishShellSealingKey(_ key: P256.KeyAgreement.PublicKey?) {
+        if let key { defaults.set(key.x963Representation, forKey: Self.shellSealingKeyKey) } else { defaults.removeObject(forKey: Self.shellSealingKeyKey) }
+    }
+
+    public static let shellSealingKeyKey = "shell.sealingKey"
 
     public func clearPendingShellKey(clientID: String) {
         secrets.delete(Self.pendingShellAccount + clientID)
@@ -205,8 +229,6 @@ public final class PairingRegistry: @unchecked Sendable {
 
     // MARK: Pairing code
 
-    private static let maxAttempts = 5
-
     /// Generates a fresh six digit code, valid for `PassthroughProtocol.pairingCodeLifetime`.
     @discardableResult
     public func issueCode() -> (code: String, expiry: Date) {
@@ -218,6 +240,7 @@ public final class PairingRegistry: @unchecked Sendable {
         defaults.set(code, forKey: Self.codeKey)
         defaults.set(expiry.timeIntervalSince1970, forKey: Self.codeExpiryKey)
         defaults.set(0, forKey: Self.failedAttemptsKey)
+        defaults.removeObject(forKey: Self.codeWithdrawnKey)
         lock.unlock()
         onChange?()
         return (code, expiry)
@@ -227,8 +250,16 @@ public final class PairingRegistry: @unchecked Sendable {
         lock.lock()
         defaults.removeObject(forKey: Self.codeKey)
         defaults.removeObject(forKey: Self.codeExpiryKey)
+        defaults.removeObject(forKey: Self.codeWithdrawnKey)
         lock.unlock()
         onChange?()
+    }
+
+    /// Whether the last code was withdrawn because too many wrong codes were
+    /// tried against it (until a new code is issued or pairing is ended).
+    public var codeWasWithdrawn: Bool {
+        lock.lock(); defer { lock.unlock() }
+        return defaults.bool(forKey: Self.codeWithdrawnKey)
     }
 
     public var activeCode: (code: String, expiry: Date)? {
@@ -240,31 +271,44 @@ public final class PairingRegistry: @unchecked Sendable {
     }
 
     /// Validates a code and registers the Mac; returns the token to hand back.
+    ///
+    /// Anything on the phone can reach the control port, and anything on the
+    /// Mac through adb, so wrong guesses must not be able to lock the user
+    /// out: a lockout in time, renewed by a few guesses every so often, would
+    /// refuse even the right code for as long as the guesser liked. Instead
+    /// each code takes `pairingMaxWrongCodesPerCode` wrong guesses in all,
+    /// over every connection (each connection is also held to a few by
+    /// `ControlServer`), and is then withdrawn: a new one must be shown, so
+    /// guessing wins with odds of at most 10 in a million per code the user
+    /// shows, and until then the right code always works. A guesser can still
+    /// make the user's code vanish, but not silently: the phone says why.
     public func pair(code: String, clientID: String, name: String) -> Result<String, PairingFailure> {
+        // Before the code is looked at, so a malformed request learns nothing and costs nothing.
+        guard !clientID.isEmpty, clientID.count <= 64, name.count <= 64 else { return .failure(.badCode) }
         lock.lock()
-        let stored = defaults.string(forKey: Self.codeKey)
-        let expiry = Date(timeIntervalSince1970: defaults.double(forKey: Self.codeExpiryKey))
-        lock.unlock()
-        guard let stored else { return .failure(.expired) }
-        guard expiry > Date() else { clearCode(); return .failure(.expired) }
+        guard let stored = defaults.string(forKey: Self.codeKey) else { lock.unlock(); return .failure(.expired) }
+        guard Date(timeIntervalSince1970: defaults.double(forKey: Self.codeExpiryKey)) > Date() else {
+            lock.unlock()
+            clearCode()
+            return .failure(.expired)
+        }
         guard constantTimeEquals(stored, code.trimmingCharacters(in: .whitespaces)) else {
-            // A six-digit code must not be brute-forceable over the cable: a
-            // handful of wrong guesses burns the code; the user shows a new one.
-            lock.lock()
             let n = defaults.integer(forKey: Self.failedAttemptsKey) + 1
             defaults.set(n, forKey: Self.failedAttemptsKey)
-            lock.unlock()
-            if n >= Self.maxAttempts {
-                ptLog(.warning, "Pairing code withdrawn after \(n) wrong attempts")
-                clearCode()
-                return .failure(.expired)
+            let withdrawn = n >= PassthroughProtocol.pairingMaxWrongCodesPerCode
+            if withdrawn {
+                defaults.removeObject(forKey: Self.codeKey)
+                defaults.removeObject(forKey: Self.codeExpiryKey)
+                defaults.set(true, forKey: Self.codeWithdrawnKey)
             }
-            return .failure(.badCode)
+            lock.unlock()
+            guard withdrawn else { return .failure(.badCode) }
+            ptLog(.warning, "Withdrew the pairing code after \(n) wrong codes")
+            onChange?()
+            return .failure(.codeWithdrawn)
         }
-        guard clientID.count <= 64, name.count <= 64 else { return .failure(.badCode) }
 
         let token = PairingToken.generate()
-        lock.lock()
         var list = loadClients().filter { $0.id != clientID }
         list.append(PairedClient(id: clientID, name: name, tokenHash: PairingToken.hash(token), pairedAt: Date(), lastSeen: Date()))
         save(list)
@@ -280,6 +324,18 @@ public final class PairingRegistry: @unchecked Sendable {
         lock.lock(); defer { lock.unlock() }
         guard let client = loadClients().first(where: { $0.id == clientID }) else { return false }
         return constantTimeEquals(client.tokenHash, PairingToken.hash(token))
+    }
+
+    /// K for a paired Mac (`ControlAuth`): what its proofs are checked against.
+    public func pairingKey(clientID: String) -> SymmetricKey? {
+        lock.lock(); defer { lock.unlock() }
+        return loadClients().first(where: { $0.id == clientID }).flatMap { ControlAuth.key(tokenHash: $0.tokenHash) }
+    }
+
+    /// Whether `password` is the SOCKS5 password derived from this Mac's pairing.
+    public func verifySOCKS(clientID: String, password: String) -> Bool {
+        guard let key = pairingKey(clientID: clientID) else { return false }
+        return constantTimeEquals(ControlAuth.socksPassword(key: key), password)
     }
 
     public func touch(clientID: String) {

@@ -18,8 +18,16 @@ final class RemoteShellController: ObservableObject {
     @Published private(set) var listenerError: String?
     /// Phones seeing the screen right now, through Screen Sharing.
     @Published private(set) var screenViewers: [ScreenViewer] = []
-    /// Whether Screen Sharing answers; nil until checked.
+    /// Whether macOS's own Screen Sharing is on (and only it listens on its
+    /// port); nil until checked.
     @Published private(set) var screenSharingOn: Bool?
+    /// Why phones can't be relayed to Screen Sharing even though something
+    /// may be listening (an impostor on its port, or no helper to check).
+    @Published private(set) var screenSharingProblem: String?
+    /// Asks the root helper who listens on Screen Sharing's port (nil: no
+    /// answer). Set before `start`: the listeners relay a phone to Screen
+    /// Sharing only once it says `.genuine`.
+    var screenSharingCheck: (@Sendable () async -> ScreenSharingCheck.Result?)?
     /// What streaming the screen itself needs (Screen Recording, Accessibility); without both, phones fall back to Screen Sharing.
     @Published private(set) var screenVideo = ScreenVideoAccess(capture: false, control: false)
 
@@ -60,6 +68,37 @@ final class RemoteShellController: ObservableObject {
     }
     @Published private(set) var irohStatus = IrohStatus()
 
+    /// How long finished sessions' transcripts are kept. Pruned at launch,
+    /// when this changes and whenever a session ends (`pruneHistory`).
+    @Published var historyRetention: HistoryRetention = RemoteShellController.loadRetention() {
+        didSet {
+            guard historyRetention != oldValue else { return }
+            UserDefaults.standard.set(historyRetention.rawValue, forKey: Self.historyRetentionKey)
+            pruneHistory()
+        }
+    }
+
+    enum HistoryRetention: Int, CaseIterable, Identifiable {
+        case week = 7, month = 30, quarter = 90
+        case forever = 0
+        static let standard = HistoryRetention.month
+        var id: Int { rawValue }
+        var title: String {
+            switch self {
+            case .week: "7 days"
+            case .month: "30 days"
+            case .quarter: "90 days"
+            case .forever: "Forever"
+            }
+        }
+        /// "kept for 30 days", for copy about the recordings.
+        var keptFor: String { self == .forever ? "kept until you delete them" : "kept for \(title)" }
+        /// Sessions that ended before this go; nil: none for their age (the size cap still holds).
+        func cutoff(now: Date = Date()) -> Date? {
+            self == .forever ? nil : now.addingTimeInterval(-TimeInterval(rawValue) * 86_400)
+        }
+    }
+
     struct IrohStatus: Equatable {
         enum State: Equatable { case off, starting, running, failed(String) }
         var state = State.off
@@ -74,6 +113,7 @@ final class RemoteShellController: ObservableObject {
     nonisolated private static let relayURLKey = "remoteShellRelayURL"
     nonisolated private static let secretKeyAccount = "iroh.secretKey"
     nonisolated private static let relayTokenAccount = "iroh.relayToken"
+    nonisolated private static let historyRetentionKey = "remoteShellHistoryRetentionDays"
 
     private let store = ShellAccessStore(secrets: KeychainSecretStore())
     /// What `macInfo` and grants say, kept current here and read on the
@@ -86,6 +126,11 @@ final class RemoteShellController: ObservableObject {
     private let manager: ShellSessionManager?
     /// A stopped listener cannot start again: each start makes a new one.
     private var listener: ShellListener?
+    /// Shared by both listeners, so the caps on views of the screen hold across them.
+    private let screenViews = ScreenViewLimit()
+    /// Phones' addresses that proved a shell key lately, kept across launches
+    /// for the LAN/Tailscale listener's reserved handshake slots.
+    private let provenPeers = FileProvenAddressStore.inApplicationSupport(named: "ProvenShellPeers")
     /// Starts and stops in order, off the main thread (ending sessions waits for them).
     private let lifecycle = DispatchQueue(label: "\(PassthroughProtocol.identifier).shell-lifecycle")
     /// History reads: at most one a second from session changes, and only the latest one's result is kept.
@@ -118,7 +163,7 @@ final class RemoteShellController: ObservableObject {
         }
         reach.set(ShellReach(reachAnywhere: reachAnywhere, relay: relay))
         refreshPhones()
-        refreshHistory()
+        pruneHistory()
     }
 
     // MARK: Listener
@@ -133,10 +178,13 @@ final class RemoteShellController: ObservableObject {
             shellKeys: { store.candidateKeys(forPhone: $0) },
             keyConfirmed: { store.confirmCurrentKey(phoneID: $0, proven: $1) },
             phoneLabel: { id in store.phones.first { $0.phoneID == id }?.label ?? "Phone" },
+            provenAddresses: provenPeers,
             macInfo: { reach.get().macInfo() })
         listener.onSessionEvent = { text in ptLog(.info, "shell: \(text)") }
         listener.screenAllowed = { store.screenAllowed(forPhone: $0) }
+        listener.screenSharingVerified = screenSharingVerifier()
         listener.screenVideo = Self.screenVideoSource
+        listener.screenViews = screenViews
         listener.onScreenViewer = screenViewerHandler()
         listener.onFailure = { [weak self, weak listener] error in
             Task { @MainActor in
@@ -213,6 +261,8 @@ final class RemoteShellController: ObservableObject {
         iroh = run
         irohStatus = IrohStatus(state: .starting)
         let store = self.store, reach = self.reach, relay = self.relay, onScreenViewer = screenViewerHandler()
+        let screenViews = self.screenViews
+        let screenSharingVerified = screenSharingVerifier()
         lifecycle.async { [weak self] in
             let host: IrohEndpointHost
             do {
@@ -246,7 +296,9 @@ final class RemoteShellController: ObservableObject {
                 macInfo: { reach.get().macInfo() })
             listener.onSessionEvent = { text in ptLog(.info, "shell: \(text)") }
             listener.screenAllowed = { store.screenAllowed(forPhone: $0) }
+            listener.screenSharingVerified = screenSharingVerified
             listener.screenVideo = Self.screenVideoSource
+            listener.screenViews = screenViews
             listener.onScreenViewer = onScreenViewer
             listener.onFailure = { [weak self] error in
                 Task { @MainActor in
@@ -385,8 +437,11 @@ final class RemoteShellController: ObservableObject {
         let updated = manager?.sessions ?? []
         let opensAndEnds = { (list: [ShellSessionInfo]) in Set(list.map { "\($0.id) \($0.running)" }) }
         let historyChanged = !opensAndEnds(updated).isSubset(of: opensAndEnds(sessions))
+        let wasRunning = Set(sessions.filter(\.running).map(\.id))
+        let ended = updated.contains { !$0.running && wasRunning.contains($0.id) }
         sessions = updated
-        if historyChanged { scheduleHistoryRefresh() }
+        // A session that ended may be what takes the folder past its size cap.
+        if ended { pruneHistory() } else if historyChanged { scheduleHistoryRefresh() }
     }
 
     // MARK: Phones
@@ -401,7 +456,16 @@ final class RemoteShellController: ObservableObject {
         refreshPhones()
     }
 
-    /// The key goes first, so the phone cannot prove itself again, then its connections.
+    /// The phone's pairing moved to another slot; its access follows (see `ShellAccessStore.move`).
+    func movePairing(phoneID: String, fromSlot: String, toSlot: String) {
+        guard store.move(phoneID: phoneID, fromSlot: fromSlot, toSlot: toSlot) else { return }
+        ptLog(.info, "shell: moved a phone's access to its own pairing")
+        refreshPhones()
+    }
+
+    /// The key goes first, so the phone cannot prove itself again, then its
+    /// connections and the sessions it opened (other phones' stay, even
+    /// ones it was attached to).
     func revoke(_ phoneID: String) {
         let label = phones.first { $0.phoneID == phoneID }?.label ?? "a phone"
         let slots = Set(store.phones.filter { $0.phoneID == phoneID }.map(\.pairingSlot))
@@ -413,6 +477,8 @@ final class RemoteShellController: ObservableObject {
         }
         listener?.disconnect(phoneID: phoneID)
         iroh?.listener?.disconnect(phoneID: phoneID)
+        // The listeners also end one being opened as this runs; this covers them being off.
+        manager?.closeSessions(openedBy: phoneID)
         refreshPhones()
         onAccessRevoked?(slots)
     }
@@ -430,6 +496,7 @@ final class RemoteShellController: ObservableObject {
         for phone in removed {
             listener?.disconnect(phoneID: phone.phoneID)
             irohListener?.disconnect(phoneID: phone.phoneID)
+            manager?.closeSessions(openedBy: phone.phoneID)
         }
         refreshPhones()
         onAccessRevoked?([pairingSlot])
@@ -442,14 +509,19 @@ final class RemoteShellController: ObservableObject {
     // MARK: Screen
 
     /// Lets the phone see and control the screen, or stops it (ending any
-    /// view it has open).
+    /// view it has open). Stopping holds even when it can't be saved
+    /// (`ShellAccessStore.setScreenAllowed`), until Passthrough quits.
     func setScreenAllowed(_ allowed: Bool, for phoneID: String) {
         let label = phones.first { $0.phoneID == phoneID }?.label ?? "a phone"
         if store.setScreenAllowed(allowed, forPhone: phoneID) {
             ptLog(.info, "shell: \(allowed ? "allowed" : "stopped allowing") \(label) to see the screen")
-        } else {
+        } else if allowed {
             ptLog(.error, "shell: could not change \(label)'s screen access")
             listenerError = "Could not change \(label)'s screen access."
+        } else {
+            ptLog(.error, "shell: could not save that \(label) may no longer see the screen; off until Passthrough quits")
+            listenerError = "Screen is off for \(label), but that could not be saved in the Keychain: "
+                + "it may come back when Passthrough restarts. Turn it off again, or remove the phone."
         }
         if !allowed { endScreen(for: phoneID) }
         refreshPhones()
@@ -462,8 +534,34 @@ final class RemoteShellController: ObservableObject {
     }
 
     func refreshScreenSharing() async {
-        screenSharingOn = await ScreenSharing.isOn()
+        let result = await screenSharingCheck?()
+        screenSharingOn = result == .genuine
+        screenSharingProblem = Self.screenSharingProblem(result)
         refreshScreenVideo()
+    }
+
+    private static func screenSharingProblem(_ result: ScreenSharingCheck.Result?) -> String? {
+        switch result {
+        case .genuine, .off: return nil
+        case .impostor: return "Another app is listening on Screen Sharing's port (5900). Phones are not relayed to it: it could collect your Mac's password."
+        case nil: return "Passthrough's helper isn't running, so it can't check that Screen Sharing is really macOS's. Phones are not relayed to it until it is."
+        }
+    }
+
+    /// For both listeners: true only when the helper says macOS's own Screen
+    /// Sharing alone listens on its port; logs why when not.
+    private func screenSharingVerifier() -> @Sendable () async -> Bool {
+        let check = screenSharingCheck
+        return {
+            let result = await check?()
+            switch result {
+            case .genuine: return true
+            case .off: ptLog(.info, "shell: Screen Sharing is off")
+            case .impostor: ptLog(.error, "shell: something other than Screen Sharing listens on port \(ScreenSharingCheck.port); not relaying a phone to it")
+            case nil: ptLog(.warning, "shell: the helper did not answer, so Screen Sharing can't be checked; not relaying a phone to it")
+            }
+            return false
+        }
     }
 
     func refreshScreenVideo() {
@@ -535,6 +633,23 @@ final class RemoteShellController: ObservableObject {
         return await Task.detached(priority: .userInitiated) {
             try? transcripts.replay(of: id, maxBytes: TranscriptStore.readLimit)
         }.value
+    }
+
+    /// Deletes finished sessions past `historyRetention`, then the oldest
+    /// over `TranscriptStore.maxTotalBytes`, off the main actor; running
+    /// sessions are never touched. Then reads the history again.
+    func pruneHistory() {
+        guard let transcripts else { return }
+        let cutoff = historyRetention.cutoff()
+        Task.detached(priority: .utility) {
+            let deleted = transcripts.prune(endedBefore: cutoff)
+            if deleted > 0 { ptLog(.info, "shell: deleted \(deleted) old session recording(s)") }
+            await MainActor.run { [weak self] in self?.refreshHistory() }
+        }
+    }
+
+    private static func loadRetention() -> HistoryRetention {
+        (UserDefaults.standard.object(forKey: historyRetentionKey) as? Int).flatMap(HistoryRetention.init) ?? .standard
     }
 
     /// For session changes: refreshes at most once a second, catching up

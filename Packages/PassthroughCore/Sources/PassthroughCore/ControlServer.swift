@@ -1,5 +1,6 @@
 import Foundation
 import Network
+import CryptoKit
 
 /// Facts about the phone the Mac likes to display.
 public struct DeviceStatus: Sendable, Equatable {
@@ -28,6 +29,10 @@ public struct ConnectedMac: Identifiable, Sendable, Equatable, Codable {
 }
 
 /// Newline-delimited JSON control channel: pairing, heartbeat, live status.
+/// Anything on the phone can connect to its loopback port (and over adb, so
+/// can anything on the Mac), so a connection is a stranger until the Mac
+/// proves its pairing (`auth`) or pairs with the code shown. Only then is it
+/// sent the phone's name and status, or allowed to change anything.
 public final class ControlServer: @unchecked Sendable {
     public let port: UInt16
     private let registry: PairingRegistry
@@ -39,16 +44,24 @@ public final class ControlServer: @unchecked Sendable {
     private var peers: [ObjectIdentifier: Peer] = [:]
     public private(set) var isRunning = false
     public var onClientsChanged: (@Sendable ([ConnectedMac]) -> Void)?
+    /// How long a connection may go without proving a pairing, and an
+    /// authenticated Mac on the cable without a word. Shorter in tests.
+    private let unauthenticatedTimeout: TimeInterval
+    private let cableSilenceLimit: TimeInterval
 
     public init(port: UInt16 = PassthroughProtocol.defaultControlPort,
                 socksPort: UInt16,
                 registry: PairingRegistry,
                 counter: ByteCounter,
+                unauthenticatedTimeout: TimeInterval = PassthroughProtocol.unauthenticatedTimeout,
+                cableSilenceLimit: TimeInterval = PassthroughProtocol.cableSilenceLimit,
                 statusProvider: @escaping @Sendable () -> DeviceStatus) {
         self.port = port
         self.socksPort = socksPort
         self.registry = registry
         self.counter = counter
+        self.unauthenticatedTimeout = unauthenticatedTimeout
+        self.cableSilenceLimit = cableSilenceLimit
         self.statusProvider = statusProvider
     }
 
@@ -116,39 +129,76 @@ public final class ControlServer: @unchecked Sendable {
     fileprivate func handle(_ message: ControlEnvelope, from peer: Peer) -> [ControlEnvelope] {
         switch message.t {
         case ControlEnvelope.hello:
-            guard (message.protocolVersion ?? 0) == PassthroughProtocol.version else {
-                var e = ControlEnvelope(t: ControlEnvelope.error); e.reason = PairingFailure.unsupportedVersion.rawValue
+            guard peer.hello == nil else { return [] }
+            let version = message.protocolVersion ?? 0
+            guard version == PassthroughProtocol.version else {
+                ptLog(.warning, version < PassthroughProtocol.version
+                      ? "A Mac with an older Passthrough tried to connect: update Passthrough on the Mac"
+                      : "A Mac with a newer Passthrough tried to connect: update Passthrough on this phone")
+                // Our version tells the Mac which side to update.
+                var e = Self.error(.unsupportedVersion)
+                e.protocolVersion = PassthroughProtocol.version
+                peer.reject()
                 return [e]
+            }
+            guard let id = message.clientID, !id.isEmpty, id.utf8.count <= 64,
+                  let macNonce = ControlAuth.decodeNonce(message.nonce) else {
+                peer.reject()
+                return [Self.error(.notAuthenticated)]
             }
             peer.via = message.via
-            var paired = false
-            if let id = message.clientID, let token = message.token, registry.verify(clientID: id, token: token) {
-                paired = true
-                registry.touch(clientID: id)
-                peer.authenticate(id: id, name: message.name ?? "Mac")
-            }
+            let phoneNonce = ControlAuth.nonce()
+            peer.hello = Hello(clientID: id, name: String((message.name ?? "Mac").prefix(64)), macNonce: macNonce, phoneNonce: phoneNonce)
             var reply = welcome()
-            reply.paired = paired
-            return [reply]
-        case ControlEnvelope.pair:
-            guard let id = message.clientID, let code = message.code else {
-                var e = ControlEnvelope(t: ControlEnvelope.error); e.reason = PairingFailure.badCode.rawValue
-                return [e]
+            reply.nonce = phoneNonce.base64EncodedString()
+            // Proving first gives nothing away: the proof is bound to the
+            // Mac's fresh nonce and only says something to whoever holds K.
+            if let key = registry.pairingKey(clientID: id) {
+                reply.paired = true
+                reply.proof = ControlAuth.phoneProof(key: key, clientID: id, macNonce: macNonce, phoneNonce: phoneNonce).base64EncodedString()
+            } else {
+                reply.paired = false
             }
-            switch registry.pair(code: code, clientID: id, name: message.name ?? "Mac") {
+            return [reply]
+        case ControlEnvelope.auth:
+            guard peer.mac == nil else { return [] }
+            guard let hello = peer.hello, let key = registry.pairingKey(clientID: hello.clientID),
+                  ControlAuth.isValidMacProof(message.proof, key: key, clientID: hello.clientID, macNonce: hello.macNonce, phoneNonce: hello.phoneNonce) else {
+                ptLog(.warning, "A Mac could not prove its pairing; closing its control connection")
+                peer.reject()
+                return [Self.error(.notAuthenticated)]
+            }
+            registry.touch(clientID: hello.clientID)
+            peer.authenticate(id: hello.clientID, name: hello.name)
+            // The phone's status goes only to a proven Mac: the first now, not at the next tick.
+            return [statusMessage()]
+        case ControlEnvelope.pair:
+            // After hello, which checked the version and named the Mac being paired.
+            guard let hello = peer.hello else { return [Self.error(.notAuthenticated)] }
+            guard let code = message.code, message.clientID.map({ $0 == hello.clientID }) ?? true else { return [Self.error(.badCode)] }
+            switch registry.pair(code: code, clientID: hello.clientID, name: hello.name) {
             case .success(let token):
-                peer.authenticate(id: id, name: message.name ?? "Mac")
+                peer.authenticate(id: hello.clientID, name: hello.name)
                 var reply = ControlEnvelope(t: ControlEnvelope.paired)
                 reply.token = token
                 reply.deviceName = statusProvider().deviceName
                 reply.socksPort = Int(socksPort)
                 return [reply, statusMessage()]
+            case .failure(.badCode):
+                // A few wrong codes per connection, then it is closed: a guesser
+                // must keep reconnecting, and every guess still counts against
+                // the code itself (`PairingRegistry.pair`), so opening many
+                // connections buys nothing.
+                peer.wrongCodes += 1
+                guard peer.wrongCodes >= PassthroughProtocol.pairingMaxWrongCodesPerConnection else { return [Self.error(.badCode)] }
+                ptLog(.warning, "Closing a control connection after \(peer.wrongCodes) wrong pairing codes")
+                peer.reject()
+                return [Self.error(.locked)]
             case .failure(let failure):
-                var e = ControlEnvelope(t: ControlEnvelope.error); e.reason = failure.rawValue
-                return [e]
+                return [Self.error(failure)]
             }
         case ControlEnvelope.link:
-            // Only a Mac that already proved its pairing token may link.
+            // Only a Mac that already proved its pairing may link.
             guard let mac = peer.mac, let cert = message.certSHA256, cert.count == 64,
                   let key = message.linkKey.flatMap({ Data(base64Encoded: $0) }), key.count == 32 else { return [] }
             // No reply if the key could not be stored: the Mac stays unlinked
@@ -162,7 +212,7 @@ public final class ControlServer: @unchecked Sendable {
             ptLog(.info, "Linked \(mac.name) for the wireless link")
             return [reply]
         case ControlEnvelope.shellGrant:
-            // Only a Mac that already proved its pairing token may be granted a shell.
+            // Only a Mac that already proved its pairing may be granted a shell.
             guard let mac = peer.mac, let cert = message.certSHA256, cert.utf8.count == 64,
                   cert.utf8.allSatisfy({ (0x30...0x39).contains($0) || (0x41...0x46).contains($0) || (0x61...0x66).contains($0) }),
                   let key = message.shellKey.flatMap({ Data(base64Encoded: $0) }), key.count == 32,
@@ -176,6 +226,13 @@ public final class ControlServer: @unchecked Sendable {
             let grant = ShellGrant(certSHA256: cert.lowercased(), port: port, addresses: Array((message.addresses ?? []).prefix(IrohInfo.maxAddresses)),
                                    macName: String((message.macName ?? mac.name).prefix(64)),
                                    irohID: iroh.id, irohRelay: iroh.relay)
+            // The key is only ever kept sealed to the app's key. Before the app has made
+            // one, no answer: the Mac keeps the key unrecorded and grants again later
+            // (with backoff, and on every new cable connection).
+            guard registry.shellSealingKey != nil else {
+                ptLog(.info, "shell: open Passthrough once to set up Remote shell with \(mac.name)")
+                return []
+            }
             guard registry.grantShell(clientID: mac.id, grant: grant, shellKey: key, relayToken: iroh.token) else {
                 ptLog(.error, "Could not store the shell key from \(mac.name)")
                 return []
@@ -193,17 +250,35 @@ public final class ControlServer: @unchecked Sendable {
         }
     }
 
+    private static func error(_ failure: PairingFailure) -> ControlEnvelope {
+        var e = ControlEnvelope(t: ControlEnvelope.error)
+        e.reason = failure.rawValue
+        return e
+    }
+
+    /// Why `peer` should be closed now, if it should: it was rejected, has
+    /// not proved a pairing in time, or (authenticated) has gone silent.
+    fileprivate func closeReason(for peer: Peer, now: Date = Date()) -> String? {
+        if peer.isRejected { return "was refused" }
+        if peer.mac == nil {
+            var deadline = peer.openedAt.addingTimeInterval(unauthenticatedTimeout)
+            // A Mac waiting for its user to type the code shown may wait as long as the code lasts.
+            if peer.hello != nil, let code = registry.activeCode { deadline = max(deadline, code.expiry) }
+            return now > deadline ? "did not prove a pairing in time" : nil
+        }
+        // Over the air the Mac's pings stop while the link waits to resume.
+        let limit = peer.via == "wireless" ? Mux.suspendTimeout + 30 : cableSilenceLimit
+        return now.timeIntervalSince(peer.lastHeard) > limit ? "stopped answering" : nil
+    }
+
+    /// Only what the handshake needs: whoever asks may be a stranger, so the
+    /// phone's name and status wait until the Mac has proved its pairing (the
+    /// `status` answering `auth`) or paired with the code (`paired`). The Mac
+    /// already knows the kind of phone from the cable, which is all its
+    /// pairing prompt needs.
     private func welcome() -> ControlEnvelope {
-        let status = statusProvider()
         var reply = ControlEnvelope(t: ControlEnvelope.welcome)
         reply.protocolVersion = PassthroughProtocol.version
-        reply.deviceName = status.deviceName
-        reply.socksPort = Int(socksPort)
-        reply.radio = status.radio
-        reply.carrier = status.carrier
-        reply.battery = status.battery
-        reply.hosting = status.hosting
-        reply.ipv6 = status.ipv6
         return reply
     }
 
@@ -225,12 +300,28 @@ public final class ControlServer: @unchecked Sendable {
     }
 }
 
+/// What a Mac's hello said, and the nonce this connection's proofs use.
+private struct Hello {
+    let clientID: String
+    let name: String
+    let macNonce: Data
+    let phoneNonce: Data
+}
+
 private final class Peer: @unchecked Sendable {
     private let server: ControlServer
     private let channel: ControlConnection
     private var timer: DispatchSourceTimer?
     private var cancelled = false
+    /// Set once the Mac proved its pairing, or paired with the code.
     private(set) var mac: ConnectedMac?
+    var hello: Hello?
+    let openedAt = Date()
+    private(set) var lastHeard = Date()
+    /// Answered with an error: nothing it sends counts any more, and the next tick closes it.
+    private(set) var isRejected = false
+    /// Wrong pairing codes sent on this connection.
+    var wrongCodes = 0
     /// What the Mac's hello said carries this connection ("usb" or "wireless").
     var via: String?
 
@@ -241,16 +332,23 @@ private final class Peer: @unchecked Sendable {
 
     func start(on queue: DispatchQueue) {
         channel.onMessage = { [weak self] message in
-            guard let self else { return }
+            guard let self, !self.isRejected else { return }
+            self.lastHeard = Date()
             self.channel.send(self.server.handle(message, from: self))
         }
         channel.onClose = { [weak self] _ in self?.cancel() }
         channel.start(queue: queue)
-        // Status broadcast once authenticated.
+        // Every second: close it if it should go, else status once authenticated.
         let timer = DispatchSource.makeTimerSource(queue: queue)
         timer.schedule(deadline: .now() + 1, repeating: 1)
         timer.setEventHandler { [weak self] in
-            guard let self, self.mac != nil else { return }
+            guard let self else { return }
+            if let reason = self.server.closeReason(for: self) {
+                ptLog(.info, "Closing a control connection that \(reason)")
+                self.cancel()
+                return
+            }
+            guard self.mac != nil else { return }
             self.channel.send(self.server.statusMessage())
         }
         timer.resume()
@@ -264,6 +362,9 @@ private final class Peer: @unchecked Sendable {
             server.clientsChanged()
         }
     }
+
+    /// Closed at the next tick rather than now, so the error just sent gets out first.
+    func reject() { isRejected = true }
 
     func cancel() {
         guard !cancelled else { return }

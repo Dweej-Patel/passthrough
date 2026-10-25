@@ -128,6 +128,19 @@ public final class IrohIncoming: @unchecked Sendable {
         }
     }
 
+    /// Whether the peer has shown it receives packets at the address it
+    /// came from (QUIC address validation: it echoed a retry token).
+    public func isAddressValidated() async -> Bool {
+        (try? await incoming.remoteAddrValidated()) ?? false
+    }
+
+    /// Ends this attempt with a QUIC retry, keeping no state: a peer that
+    /// really is at its address comes again with a token, and that attempt
+    /// is validated. False if it cannot be asked (it already came with one).
+    public func retry() async -> Bool {
+        do { try await incoming.retry(); return true } catch { return false }
+    }
+
     /// Turns the attempt away without a handshake.
     public func refuse() async {
         try? await incoming.refuse()

@@ -363,7 +363,7 @@ struct FlowCard: View {
             let v = vpnLayer.status
             vpn = FlowMapState.VPN(name: v.name.isEmpty ? (vpnLayer.activeProfile?.name ?? "VPN") : v.name,
                                    engine: v.engineLabel.isEmpty ? (vpnLayer.activeProfile?.engine.label ?? "VPN") : v.engineLabel,
-                                   connected: v.isConnected, blocked: v.state == "blocked")
+                                   connected: v.isConnected, blocked: v.isBlocking)
         }
         // VPN with passthrough off: it rides the Mac's own network.
         let viaWiFi = vpnLayer.isWanted && !session.phase.isConnected && !session.phase.isBusy
@@ -410,6 +410,7 @@ struct VPNRow: View {
             return parts.joined(separator: " · ")
         case "reconnecting": return "Session dropped · reconnecting…"
         case "blocked": return "Down · traffic blocked · reconnecting…"
+        case "held": return "Traffic blocked since Passthrough stopped · turn off to release"
         case "failed": return vpnLayer.killSwitch ? "Failed · traffic blocked · turn off to release" : "Failed"
         default: return v.name
         }
@@ -420,7 +421,7 @@ struct VPNRow: View {
         switch vpnLayer.status.state {
         case "connected": return PTTheme.success
         case "blocked", "reconnecting": return PTTheme.warning
-        case "failed": return PTTheme.danger
+        case "failed", "held": return PTTheme.danger
         default: return .secondary
         }
     }
@@ -460,7 +461,7 @@ struct VPNRow: View {
             }
             .buttonStyle(.plain)
             .help("Wraps everything the Mac sends in one encrypted VPN flow (WireGuard or OpenVPN) on top of the passthrough, so the carrier only ever sees a VPN.")
-            if let error = vpnLayer.error {
+            if let error = vpnLayer.error ?? (isOn ? vpnLayer.status.warning : nil) {
                 HStack(alignment: .top, spacing: 6) {
                     Image(systemName: "exclamationmark.triangle.fill").font(.caption2)
                     Text(error).font(.caption2)

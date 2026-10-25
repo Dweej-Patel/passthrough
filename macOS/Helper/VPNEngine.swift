@@ -1,4 +1,5 @@
 import Foundation
+import HelperLogic
 import SystemConfiguration
 
 /// Events an engine runner reports back to the orchestrator (on its queue).
@@ -33,8 +34,16 @@ protocol VPNRunner: AnyObject {
 /// Routing: the VPN owns 0.0.0.0/2 ×4 (and ::/2 ×4) routes into its interface.
 /// Those beat the passthrough's /1 routes (longest prefix) without touching them,
 /// and a /32 host route per VPN endpoint keeps the encrypted flow itself on the
-/// underlay. With the kill switch on, the /2 routes become reject routes while
-/// the VPN is down, so nothing ever falls back to the bare underlay.
+/// underlay. With the kill switch on, /3 reject routes override the /2 routes
+/// while the VPN is down, so nothing falls back to the bare underlay.
+///
+/// Routes win by prefix length only, so a network that pushes longer ones
+/// (TunnelVision) would still get traffic past them; the kill switch's pf
+/// rules (`PacketFilter`, `KillSwitchRules`) close that, connected or not:
+/// out through the VPN, to the VPN server, to the phone over the wireless
+/// link, or to the local network, else dropped. The kill switch outlives a
+/// crash of the app or the helper (`KillSwitchStateStore`): only turning the
+/// VPN off lifts it.
 final class VPNEngine {
     struct Config {
         enum Engine: String { case wireguard, openvpn }
@@ -46,10 +55,21 @@ final class VPNEngine {
         var killSwitch = true
         /// Reject IPv6 while the VPN is up if the VPN can't carry it (else it leaks to the underlay).
         var blockIPv6 = true
+        /// The kill switch lets traffic to directly connected networks through.
+        var allowLocalNetwork = true
         var fallbackDNS = ["1.1.1.1", "1.0.0.1"]
+        /// Passthrough's wireless link, which the kill switch always lets
+        /// through: the app's listener port and where the phone is now.
+        /// `subnets` is filled in when the rules are made.
+        var phoneLink: KillSwitchRules.PhoneLink?
     }
 
-    enum State: String { case off, starting, connected, reconnecting, blocked, failed }
+    /// `held`: no session and no app, but the kill switch still blocks (the
+    /// app went away, or the helper restarted, with the VPN on).
+    enum State: String { case off, starting, connected, reconnecting, blocked, failed, held }
+
+    /// The kill switch's state files, in the root-only state directory.
+    static let stateStore = KillSwitchStateStore(directory: BundledEngines.stateDirectory)
 
     enum VPNError: LocalizedError {
         case noUnderlay
@@ -88,8 +108,23 @@ final class VPNEngine {
     private var interfaceName: String?
     private var underlay: Underlay?
     private var endpointRoutes: [(ip: String, viaInterface: String?, viaGateway: String?)] = []
+    /// The VPN servers' addresses and ports, for the packet filter.
+    private var endpointPasses: [KillSwitchRules.Endpoint] = []
     private var quarterRoutesOn: String?
+    /// IPv6 goes around the VPN by choice (Block IPv6 off, none in the VPN).
+    private var ipv6Bypass = false
     private var rejectRoutesInstalled = false
+    /// The packet filter rules last loaded, and why loading them failed.
+    private var filterRules: String?
+    private var filterError: String?
+    /// The VPN interface the filter was last made for (nil while the VPN is down).
+    private var filterInterface: String?
+    /// Routes the network pushed around the VPN, last time it was looked at.
+    private var foreignRoutes: [String] = []
+    private var routeWatch: DispatchSourceTimer?
+    /// The block was already up when this start began (a reconnect after a
+    /// crash, or a switch of profile), so a failed start keeps it.
+    private var heldBeforeStart = false
     private var startedAt: Date?
     private var activeDNS: [String] = []
     private var publishedKeys: [String] = []
@@ -112,6 +147,12 @@ final class VPNEngine {
     init(queue: DispatchQueue, tunnel: TunnelEngine) {
         self.queue = queue
         self.tunnel = tunnel
+        resolvedCache = Self.stateStore.endpoints
+        // A kill switch the recovery sweep kept: still blocking, no session.
+        if Self.stateStore.isWanted {
+            state = .held
+            rejectRoutesInstalled = true
+        }
     }
 
     var isActive: Bool { config != nil }
@@ -119,37 +160,104 @@ final class VPNEngine {
     // MARK: Public API (call on `queue`)
 
     func start(_ config: Config) throws {
-        if self.config != nil { stop() }
+        heldBeforeStart = state == .held || self.config?.killSwitch == true
+        // A switch of profile keeps any block in place meanwhile.
+        if self.config != nil { endSession() }
         self.config = config
+        if config.killSwitch {
+            try BundledEngines.prepareStateDirectory()
+            try Self.stateStore.setWanted(.init(allowLocalNetwork: config.allowLocalNetwork))
+        } else if heldBeforeStart {
+            liftKillSwitch()
+        }
         lastError = nil
         retryAttempt = 0
         try BundledEngines.prepareStateDirectory()
         try launch()
     }
 
+    /// Turns the VPN layer off, the kill switch included: the user asked
+    /// (also from `held`, with no session left to stop).
     func stop() {
-        guard config != nil else { return }
+        guard config != nil || state == .held || Self.stateStore.isWanted else { return }
         HelperLog.info("vpn: stopping")
+        endSession()
+        liftKillSwitch()
+        resolvedCache = [:]
+        config = nil
+        state = .off
+    }
+
+    /// The app that started the VPN went away without turning it off (it
+    /// crashed or was killed), or this helper is quitting: with the kill
+    /// switch on, the session ends but the block stays, until the app
+    /// reconnects the VPN or turns it off. Without it, a plain stop.
+    func hold() {
+        guard let config else { return }
+        guard KillSwitchHold.appGone(killSwitch: config.killSwitch) == .hold else { return stop() }
+        HelperLog.warn("vpn: the app went away with the VPN on; the kill switch keeps traffic blocked until the VPN reconnects or is turned off")
+        endSession()
+        state = .held
+        // Its wireless listener went with it; reconnecting names the link again.
+        self.config?.phoneLink = nil
+        engageKillSwitch()
+        self.config = nil
+    }
+
+    /// A start that threw: keeps a block that was already up (`hold`), else stops.
+    func abandonStart() {
+        switch KillSwitchHold.failedStart(wasHeld: heldBeforeStart) {
+        case .hold: hold()
+        case .lift: stop()
+        }
+    }
+
+    /// Ends the session (engine, timers, VPN and endpoint routes, DNS) and
+    /// leaves the kill switch as it is.
+    private func endSession() {
         generation += 1
         liveness.stop()
         underlayWatch.stop()
+        routeWatch?.cancel(); routeWatch = nil
         retryTimer?.cancel(); retryTimer = nil
         deadlineTimer?.cancel(); deadlineTimer = nil
         runner?.onEvent = nil
         runner?.stop()
         runner = nil
         removeQuarterRoutes()
-        // Unconditional: never trust the in-memory flag on the way out.
-        rejectRoutesInstalled = true
-        removeRejectRoutes()
         removeEndpointRoutes()
         clearDNS()
-        resolvedCache = [:]
-        config = nil
-        state = .off
+        foreignRoutes = []
         interfaceName = nil
         startedAt = nil
         underlay = nil
+    }
+
+    /// Reject routes (ours only), the packet filter and the state file: all of it.
+    private func liftKillSwitch() {
+        // Unconditional: never trust the in-memory flag on the way out.
+        rejectRoutesInstalled = true
+        removeRejectRoutes()
+        if PacketFilter.lift() { HelperLog.info("vpn: kill switch packet filter lifted") }
+        filterRules = nil
+        filterError = nil
+        filterInterface = nil
+        Self.stateStore.clearWanted()
+    }
+
+    /// The app's wireless link to the phone changed (it came up, moved to
+    /// another address, or went): the filter follows at once, since a link
+    /// it drops can't carry the VPN back. Ignored with no VPN session: the
+    /// next `start` carries the link.
+    func setPhoneLink(_ link: KillSwitchRules.PhoneLink?) {
+        guard config != nil, config?.phoneLink != link else { return }
+        config?.phoneLink = link
+        if let link {
+            HelperLog.info("vpn: wireless link to the phone on port \(link.port), at \(link.peers.isEmpty ? "no address yet" : link.peers.joined(separator: ", "))")
+        } else {
+            HelperLog.info("vpn: wireless link to the phone gone")
+        }
+        if filterRules != nil || filterError != nil { updateFilter(vpnInterface: filterInterface) }
     }
 
     /// The passthrough tunnel came up or went down: the encrypted flow has to
@@ -171,12 +279,21 @@ final class VPNEngine {
 
     func status() -> [String: Any] {
         var dict: [String: Any] = [VPNStatusKey.state: state.rawValue]
+        if state == .held {
+            dict[VPNStatusKey.error] = "Passthrough stopped while the VPN was on, so the kill switch is still blocking traffic."
+        }
         guard let config else { return dict }
         dict[VPNStatusKey.engine] = config.engine.rawValue
         dict[VPNStatusKey.name] = config.name
         if let interfaceName { dict[VPNStatusKey.interface] = interfaceName }
         if let startedAt { dict[VPNStatusKey.since] = startedAt.timeIntervalSince1970 }
         if let lastError { dict[VPNStatusKey.error] = lastError }
+        let blocking = config.killSwitch && filterError == nil
+        if let warning = filterError.map({ "The kill switch's packet filter is not active (\($0)); only its routes protect you." })
+            ?? (foreignRoutes.isEmpty ? nil : "This network is pushing routes around the VPN (\(foreignRoutes.prefix(3).joined(separator: ", ")))"
+                + (blocking ? "; blocked by the kill switch." : "; with the kill switch off, traffic to them bypasses the VPN.")) {
+            dict[VPNStatusKey.warning] = warning
+        }
         if let underlay { dict[VPNStatusKey.underlay] = underlay.isPassthrough ? "iPhone" : Self.friendlyName(for: underlay.interface) }
         if !activeDNS.isEmpty { dict[VPNStatusKey.dns] = activeDNS }
         if let first = endpointRoutes.first { dict[VPNStatusKey.endpoint] = first.ip }
@@ -218,9 +335,10 @@ final class VPNEngine {
             let h = ep.host.trimmingCharacters(in: CharacterSet(charactersIn: "[]"))
             return !(OpenVPNRunner.isIPv4(h) || Shell.isIPv6(h)) && resolvedCache[h] == nil
         }
-        if config.killSwitch, !needsDNS { installRejectRoutes() }
+        if config.killSwitch, !needsDNS { engageKillSwitch() }
         runner.endpointIPs = try installEndpointRoutes(for: runner.endpoints, underlay: underlay)
-        if config.killSwitch { installRejectRoutes() }
+        // Again, now with the VPN servers let through.
+        if config.killSwitch { engageKillSwitch() }
 
         runner.onEvent = { [weak self] event in
             guard let self, self.generation == gen else { return }
@@ -258,7 +376,11 @@ final class VPNEngine {
             retryAttempt = 0
             lastError = nil
             installQuarterRoutes(on: iface)
+            // The filter lets the VPN's interface through before the reject
+            // routes go, so the switch-over never opens anything else.
+            if config.killSwitch { updateFilter(vpnInterface: iface) }
             removeRejectRoutes()
+            startRouteWatch(vpnInterface: iface)
             // OpenVPN: the pushed resolvers first, then the fallback. NordVPN's stall
             // for seconds at a time, and with no second choice every lookup, and so
             // every new connection, stalled with them. The fallback is reached
@@ -281,7 +403,8 @@ final class VPNEngine {
             deadlineTimer?.cancel(); deadlineTimer = nil
             runner?.onEvent = nil
             runner = nil
-            if config.killSwitch { installRejectRoutes() }
+            routeWatch?.cancel(); routeWatch = nil
+            if config.killSwitch { engageKillSwitch() }
             removeQuarterRoutes()
             if let fatal {
                 // Nothing a retry can fix. With the kill switch on, traffic stays
@@ -315,13 +438,14 @@ final class VPNEngine {
     private func restart(after delay: TimeInterval) {
         liveness.stop()
         underlayWatch.stop()
+        routeWatch?.cancel(); routeWatch = nil
         retryTimer?.cancel()
         deadlineTimer?.cancel(); deadlineTimer = nil
         runner?.onEvent = nil
         runner?.stop()
         runner = nil
         // Block first, then tear down the rest.
-        if config?.killSwitch == true { installRejectRoutes() }
+        if config?.killSwitch == true { engageKillSwitch() }
         removeQuarterRoutes()
         removeEndpointRoutes()
         retractOwnService()
@@ -379,17 +503,31 @@ final class VPNEngine {
         removeEndpointRoutes()
         var ips: [String] = []
         var byHost: [String: String] = [:]
+        var passes: [KillSwitchRules.Endpoint] = []
+        let cachedBefore = resolvedCache
         for endpoint in endpoints {
             let literal = endpoint.host.trimmingCharacters(in: CharacterSet(charactersIn: "[]"))
-            var resolved = Shell.resolve(literal)
+            let isLiteral = OpenVPNRunner.isIPv4(literal) || Shell.isIPv6(literal)
+            // While the kill switch blocks, the last good answer: no DNS
+            // outside the tunnel (only the LAN's resolver could answer anyway).
+            var resolved = rejectRoutesInstalled && !isLiteral ? resolvedCache[literal] ?? [] : []
+            if resolved.isEmpty { resolved = Shell.resolve(literal) }
             if resolved.isEmpty, let cached = resolvedCache[literal] {
                 resolved = cached   // kill switch up: reuse the last good answer, no DNS needed
             }
             guard !resolved.isEmpty else { throw VPNError.unresolvable(endpoint.host) }
             if resolvedCache.count > 16 { resolvedCache = [:] }
-            resolvedCache[literal] = resolved
+            if !isLiteral { resolvedCache[literal] = resolved }
             byHost[endpoint.host] = resolved[0]
             for ip in resolved where !ips.contains(ip) { ips.append(ip) }
+            passes += resolved.map { KillSwitchRules.Endpoint(ip: $0, port: endpoint.port) }
+        }
+        endpointPasses = passes
+        // Kept on disk for a helper that starts after a crash with the block up.
+        if resolvedCache != cachedBefore {
+            do { try Self.stateStore.setEndpoints(resolvedCache) } catch {
+                HelperLog.warn("vpn: could not save the servers' addresses: \(error.localizedDescription)")
+            }
         }
         for ip in ips {
             let family = Shell.isIPv6(ip) ? "-inet6" : "-inet"
@@ -455,6 +593,7 @@ final class VPNEngine {
         }
         if v6Rejected { HelperLog.info("vpn: \(iface) carries no IPv6; IPv6 is blocked while the VPN is on") }
         if v6Open { HelperLog.warn("vpn: \(iface) carries no IPv6 and IPv6 blocking is off; IPv6 traffic bypasses the VPN") }
+        ipv6Bypass = v6Open
         quarterRoutesOn = iface
     }
 
@@ -464,29 +603,123 @@ final class VPNEngine {
         for q in Self.v4Quarters { RouteTable.deleteIfPresent(q, v6: false, table: v4) }
         for q in Self.v6Quarters { RouteTable.deleteIfPresent(q, v6: true, table: v6) }
         quarterRoutesOn = nil
+        ipv6Bypass = false
+    }
+
+    /// The VPN is down: reject routes and the packet filter (without the
+    /// VPN's interface) both block.
+    private func engageKillSwitch() {
+        installRejectRoutes()
+        updateFilter(vpnInterface: nil)
     }
 
     /// While the VPN is down, send everything (except the endpoint host routes)
-    /// into a reject route so nothing leaks onto the underlay.
+    /// into a reject route so nothing leaks onto the underlay. A route someone
+    /// else put at one of these prefixes (a network pushing routes around
+    /// the VPN) is replaced, never left to carry traffic past the block.
     private func installRejectRoutes() {
         guard !rejectRoutesInstalled else { return }
-        let v4 = RouteTable.present(v6: false), v6 = RouteTable.present(v6: true)
-        for q in Self.v4Eighths where !RouteTable.exists(q, v6: false, in: v4) {
-            if (try? Shell.run("/sbin/route", ["-q", "-n", "add", "-inet", q, "127.0.0.1", "-reject"], quiet: true)) == nil { HelperLog.warn("vpn: reject \(q) failed") }
-        }
-        for q in Self.v6Eighths where !RouteTable.exists(q, v6: true, in: v6) {
-            if (try? Shell.run("/sbin/route", ["-q", "-n", "add", "-inet6", q, "::1", "-reject"], quiet: true)) == nil { HelperLog.warn("vpn: reject \(q) failed") }
+        for (prefixes, v6) in [(Self.v4Eighths, false), (Self.v6Eighths, true)] {
+            let table = RouteTable.entries(v6: v6)
+            let family = v6 ? "-inet6" : "-inet"
+            for q in prefixes {
+                switch RejectRoutes.install(over: table[RouteTable.netstatName(q)], v6: v6) {
+                case .keep: continue
+                case .replace(let theirs):
+                    HelperLog.warn("vpn: \(q) was routed via \(theirs.gateway) on \(theirs.interface), around the VPN (a network pushing routes, TunnelVision-style); replacing it with the kill switch's reject route")
+                    _ = try? Shell.run("/sbin/route", ["-q", "-n", "delete", family, q], quiet: true)
+                case .add: break
+                }
+                if (try? Shell.run("/sbin/route", ["-q", "-n", "add", family, q, RejectRoutes.loopback(v6: v6), "-reject"], quiet: true)) == nil {
+                    HelperLog.warn("vpn: reject \(q) failed")
+                }
+            }
         }
         rejectRoutesInstalled = true
         HelperLog.info("vpn: kill switch engaged (traffic blocked until the VPN is back)")
     }
 
+    /// Our reject routes only: a route someone else holds at one of these
+    /// prefixes is not ours to delete.
     private func removeRejectRoutes() {
         guard rejectRoutesInstalled else { return }
-        let v4 = RouteTable.present(v6: false), v6 = RouteTable.present(v6: true)
-        for q in Self.v4Eighths { RouteTable.deleteIfPresent(q, v6: false, table: v4) }
-        for q in Self.v6Eighths { RouteTable.deleteIfPresent(q, v6: true, table: v6) }
+        for (prefixes, v6) in [(Self.v4Eighths, false), (Self.v6Eighths, true)] {
+            let entries = RouteTable.entries(v6: v6)
+            let table = Set(entries.keys)
+            for q in prefixes where RouteTable.isOurs(q, v6: v6, in: entries) { RouteTable.deleteIfPresent(q, v6: v6, table: table) }
+        }
         rejectRoutesInstalled = false
+    }
+
+    // MARK: Packet filter + foreign routes
+
+    /// Loads the kill switch's pf rules for the session as it is now: the
+    /// VPN's interface (while connected), the servers, the wireless link to
+    /// the phone, the local networks (when allowed) and Tailscale. Unchanged
+    /// rules are not reloaded. If pf can't be used the reject routes still
+    /// block while the VPN is down, and the app is told protection is weaker.
+    private func updateFilter(vpnInterface: String?) {
+        guard let config, config.killSwitch else { return }
+        filterInterface = vpnInterface
+        let addresses = LocalNetworks.current()
+        let lan = LocalNetworks.subnets(addresses)
+        let rules = KillSwitchRules.ruleset(KillSwitchRules.Input(
+            vpnInterface: vpnInterface,
+            endpoints: endpointPasses,
+            localSubnets: config.allowLocalNetwork ? lan : [],
+            tailscaleInterfaces: LocalNetworks.tailscaleInterfaces(addresses, excluding: notTailscale),
+            phoneLink: config.phoneLink.map { KillSwitchRules.PhoneLink(port: $0.port, peers: $0.peers, subnets: lan) },
+            allowIPv6Bypass: vpnInterface != nil && ipv6Bypass))
+        guard rules != filterRules else { return }
+        do {
+            try PacketFilter.apply(rules)
+            filterRules = rules
+            if filterError != nil { HelperLog.info("vpn: kill switch packet filter active again") }
+            filterError = nil
+        } catch {
+            filterRules = nil
+            if filterError == nil {
+                HelperLog.error("vpn: kill switch packet filter: \(error.localizedDescription); routes pushed by the network can get around a connected VPN")
+            }
+            filterError = error.localizedDescription
+        }
+    }
+
+    /// While connected: looks every 20 s for routes the network pushed around
+    /// the VPN (the filter drops what they carry; the user is told), and
+    /// keeps the filter's local networks current as interfaces come and go.
+    private func startRouteWatch(vpnInterface: String) {
+        routeWatch?.cancel()
+        let check = { [weak self] in
+            guard let self, self.state == .connected, self.interfaceName == vpnInterface else { return }
+            self.checkForeignRoutes(vpnInterface: vpnInterface)
+            self.updateFilter(vpnInterface: vpnInterface)
+        }
+        let timer = DispatchSource.makeTimerSource(queue: queue)
+        timer.schedule(deadline: .now() + 20, repeating: 20)
+        timer.setEventHandler(handler: check)
+        timer.resume()
+        routeWatch = timer
+        checkForeignRoutes(vpnInterface: vpnInterface)
+    }
+
+    /// Interfaces that are never Tailscale's, whatever address they hold:
+    /// the underlay (the passthrough's utun, or Wi-Fi), which carries
+    /// everything around the VPN.
+    private var notTailscale: Set<String> {
+        Set([underlay?.interface, tunnel.interfaceName].compactMap { $0 })
+    }
+
+    private func checkForeignRoutes(vpnInterface: String) {
+        let tailscale = Set(LocalNetworks.tailscaleInterfaces(LocalNetworks.current(), excluding: notTailscale))
+        let ours = Set(endpointRoutes.map(\.ip))
+        let foreign = ForeignRoutes.find(RouteTable.all(v6: false), vpnInterface: vpnInterface, ownInterfaces: tailscale, ownHosts: ours)
+            + ForeignRoutes.find(RouteTable.all(v6: true), vpnInterface: vpnInterface, ownInterfaces: tailscale, ownHosts: ours)
+        let described = foreign.map { "\($0.prefix?.description ?? $0.destination) via \($0.interface)" }
+        if described != foreignRoutes, !described.isEmpty {
+            HelperLog.warn("vpn: this network is pushing routes around the VPN (\(described.joined(separator: ", "))); \(config?.killSwitch == true && filterError == nil ? "the kill switch blocks them" : "traffic to them bypasses the VPN")")
+        }
+        foreignRoutes = described
     }
 
     // MARK: Network service (default route + DNS)

@@ -4,6 +4,7 @@ import kotlinx.serialization.Serializable
 import kotlinx.serialization.builtins.ListSerializer
 import java.security.MessageDigest
 import java.security.SecureRandom
+import java.security.interfaces.ECPublicKey
 import java.util.Base64
 import java.util.Locale
 import java.util.UUID
@@ -74,8 +75,8 @@ data class PairedClient(
 /**
  * Stores paired Macs and the short-lived pairing code. Mirrors
  * PassthroughCore/Pairing.swift: six digit codes valid for five minutes,
- * withdrawn after five wrong guesses, and a 32-byte URL-safe token per Mac of
- * which only the SHA-256 is kept.
+ * withdrawn after ten wrong guesses in all, and a 32-byte URL-safe token per
+ * Mac of which only the SHA-256 is kept.
  */
 class PairingRegistry(
     private val store: KeyValueStore,
@@ -92,7 +93,10 @@ class PairingRegistry(
     private val lock = Any()
     private val random = SecureRandom()
     private var code: Code? = null
+    /** Wrong guesses against the current code, over every connection. */
     private var failedAttempts = 0
+    /** The last code was withdrawn for too many wrong guesses; cleared by the next code. */
+    private var withdrawn = false
     @Volatile var onChange: (() -> Unit)? = null
 
     val clients: List<PairedClient> get() = synchronized(lock) { loadClients() }
@@ -113,13 +117,17 @@ class PairingRegistry(
 
     /**
      * Records the shell key a paired Mac sent over the cable. The key waits in
-     * the secret store until the app moves it elsewhere. False if the Mac isn't
-     * paired or the key could not be stored; nothing is recorded then.
+     * the secret store, sealed to the app's sealing key ([ShellKeySeal]), until
+     * the app opens it into its vault. False if the Mac isn't paired, the app
+     * hasn't published its sealing key yet ([shellSealingKey]: the key is then
+     * not kept at all) or the key could not be stored; nothing is recorded then.
      */
     fun grantShell(clientID: String, grant: ShellGrant, shellKey: ByteArray, relayToken: String? = null): Boolean {
+        val recipient = shellSealingKey ?: return false
+        val sealed = runCatching { ShellKeySeal.seal(shellKey, recipient, clientID) }.getOrNull() ?: return false
         val stored = synchronized(lock) {
             val list = loadClients()
-            if (list.none { it.id == clientID } || !secrets.write(PENDING_SHELL + clientID, shellKey) ||
+            if (list.none { it.id == clientID } || !secrets.write(PENDING_SHELL + clientID, sealed) ||
                 !storeRelayToken(clientID, relayToken)) return@synchronized false
             save(list.map { if (it.id == clientID) it.copy(shell = grant) else it })
             true
@@ -162,7 +170,17 @@ class PairingRegistry(
         return secrets.write(RELAY_TOKEN + clientID, token.toByteArray(Charsets.UTF_8))
     }
 
-    fun pendingShellKey(clientID: String): ByteArray? = secrets.read(PENDING_SHELL + clientID)
+    /** What waits for the app from [clientID]'s grant: sealed ([ShellKeySeal]), or a bare key an older build stored. */
+    fun sealedPendingShellKey(clientID: String): ByteArray? = secrets.read(PENDING_SHELL + clientID)
+
+    /** The public half of the app's sealing key, once the app has published one. */
+    val shellSealingKey: ECPublicKey?
+        get() = store.getString(SHELL_SEALING_KEY)?.let { runCatching { Base64.getDecoder().decode(it) }.getOrNull() }?.let(ShellKeySeal::publicKey)
+
+    /** The app only: publishes (or, with null, withdraws) its sealing key's public half (X9.63). */
+    fun publishShellSealingKey(x963: ByteArray?) {
+        store.putString(SHELL_SEALING_KEY, x963?.let { Base64.getEncoder().encodeToString(it) })
+    }
 
     fun clearPendingShellKey(clientID: String) = secrets.delete(PENDING_SHELL + clientID)
 
@@ -170,20 +188,38 @@ class PairingRegistry(
 
     fun issueCode(): Code {
         val c = Code(String.format(Locale.US, "%06d", random.nextInt(1_000_000)), clock() + PassthroughProtocol.PAIRING_CODE_LIFETIME_MS)
-        synchronized(lock) { code = c; failedAttempts = 0 }
+        synchronized(lock) { code = c; failedAttempts = 0; withdrawn = false }
         onChange?.invoke()
         return c
     }
 
     fun clearCode() {
-        synchronized(lock) { code = null }
+        synchronized(lock) { code = null; withdrawn = false }
         onChange?.invoke()
     }
 
+    /** Whether the last code was withdrawn because too many wrong codes were tried against it (until a new code is issued or pairing is ended). */
+    val codeWasWithdrawn: Boolean get() = synchronized(lock) { withdrawn }
+
     val activeCode: Code? get() = synchronized(lock) { code?.takeIf { it.expiry > clock() } }
 
-    /** Validates a code and registers the Mac; returns the token to hand back. */
+    /**
+     * Validates a code and registers the Mac; returns the token to hand back.
+     *
+     * Any app on the phone can reach the control port, and anything on the Mac
+     * through adb, so wrong guesses must not be able to lock the user out: a
+     * lockout in time, renewed by a few guesses every so often, would refuse even
+     * the right code for as long as the guesser liked. Instead each code takes
+     * [PassthroughProtocol.PAIRING_MAX_WRONG_CODES_PER_CODE] wrong guesses in all,
+     * over every connection (each connection is also held to a few by
+     * [ControlServer]), and is then withdrawn: a new one must be shown, so guessing
+     * wins with odds of at most 10 in a million per code the user shows, and until
+     * then the right code always works. A guesser can still make the user's code
+     * vanish, but not silently: the phone says why.
+     */
     fun pair(code: String, clientID: String, name: String): PairResult {
+        // Before the code is looked at, so a malformed request learns nothing and costs nothing.
+        if (clientID.isEmpty() || clientID.length > 64 || name.length > 64) return PairResult.Failure(PairingFailure.BAD_CODE)
         val result: PairResult = synchronized(lock) {
             val stored = this.code ?: return@synchronized PairResult.Failure(PairingFailure.EXPIRED)
             if (stored.expiry <= clock()) {
@@ -191,17 +227,13 @@ class PairingRegistry(
                 return@synchronized PairResult.Failure(PairingFailure.EXPIRED)
             }
             if (!constantTimeEquals(stored.code, code.trim())) {
-                // A six-digit code must not be brute-forceable over the cable:
-                // a handful of wrong guesses burns it; the user shows a new one.
                 failedAttempts++
-                if (failedAttempts >= MAX_ATTEMPTS) {
-                    ptLog(PtLog.Level.WARNING, "Pairing code withdrawn after $failedAttempts wrong attempts")
-                    this.code = null
-                    return@synchronized PairResult.Failure(PairingFailure.EXPIRED)
-                }
-                return@synchronized PairResult.Failure(PairingFailure.BAD_CODE)
+                if (failedAttempts < PassthroughProtocol.PAIRING_MAX_WRONG_CODES_PER_CODE) return@synchronized PairResult.Failure(PairingFailure.BAD_CODE)
+                ptLog(PtLog.Level.WARNING, "Withdrew the pairing code after $failedAttempts wrong codes")
+                this.code = null
+                withdrawn = true
+                return@synchronized PairResult.Failure(PairingFailure.CODE_WITHDRAWN)
             }
-            if (clientID.length > 64 || name.length > 64 || clientID.isEmpty()) return@synchronized PairResult.Failure(PairingFailure.BAD_CODE)
             val token = PairingToken.generate()
             val now = clock()
             save(loadClients().filter { it.id != clientID } + PairedClient(clientID, name, PairingToken.hash(token), now, now))
@@ -216,6 +248,17 @@ class PairingRegistry(
     fun verify(clientID: String, token: String): Boolean = synchronized(lock) {
         val client = loadClients().firstOrNull { it.id == clientID } ?: return false
         constantTimeEquals(client.tokenHash, PairingToken.hash(token))
+    }
+
+    /** K for a paired Mac ([ControlAuth]): what its proofs are checked against. */
+    fun pairingKey(clientID: String): ByteArray? = synchronized(lock) {
+        loadClients().firstOrNull { it.id == clientID }?.let { ControlAuth.keyFromHash(it.tokenHash) }
+    }
+
+    /** Whether [password] is the SOCKS5 password derived from this Mac's pairing. */
+    fun verifySocks(clientID: String, password: String): Boolean {
+        val key = pairingKey(clientID) ?: return false
+        return constantTimeEquals(ControlAuth.socksPassword(key), password)
     }
 
     fun touch(clientID: String) {
@@ -249,7 +292,8 @@ class PairingRegistry(
         const val PHONE_ID_KEY = "pairing.phoneID"
         private const val PENDING_SHELL = "shell.pending."
         private const val RELAY_TOKEN = "shell.relayToken."
-        private const val MAX_ATTEMPTS = 5
+        /** Same key as the iOS app's shared defaults; base64 X9.63 here (the store holds strings). */
+        const val SHELL_SEALING_KEY = "shell.sealingKey"
         private fun constantTimeEquals(a: String, b: String): Boolean =
             MessageDigest.isEqual(a.toByteArray(Charsets.UTF_8), b.toByteArray(Charsets.UTF_8))
     }

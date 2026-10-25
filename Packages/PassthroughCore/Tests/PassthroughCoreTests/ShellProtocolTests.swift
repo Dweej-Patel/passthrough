@@ -114,6 +114,64 @@ final class ShellProtocolTests: XCTestCase {
                        ["192.168.1.5", "100.101.1.2"])
     }
 
+    private func lanAddress(_ address: String, _ interface: String = "en0") -> ShellAddressPolicy.LocalAddress {
+        .init(address: address, interface: interface, isPointToPoint: false)
+    }
+
+    private func tunnelAddress(_ address: String, _ interface: String = "utun4") -> ShellAddressPolicy.LocalAddress {
+        .init(address: address, interface: interface, isPointToPoint: true)
+    }
+
+    /// 100.64.0.0/10 is carrier NAT space too: a peer from it gets in only
+    /// while the Mac is on an overlay (Tailscale, NetBird, Headscale) itself,
+    /// and only through its overlay address.
+    func testOverlayPeersNeedTheMacOnAnOverlay() {
+        let lan = [lanAddress("192.168.1.5"), lanAddress("fe80::1%en0")]
+        XCTAssertFalse(ShellAddressPolicy.isAllowedPeer("100.101.1.2", localAddresses: lan, onLinkPrefixes: []))
+        XCTAssertFalse(ShellAddressPolicy.isAllowedPeer("fd7a:115c:a1e0::5", localAddresses: lan, onLinkPrefixes: []))
+        XCTAssertTrue(ShellAddressPolicy.isAllowedPeer("192.168.1.9", localAddresses: lan, onLinkPrefixes: []))
+        XCTAssertTrue(ShellAddressPolicy.isAllowedPeer("fd00::9", localAddresses: lan, onLinkPrefixes: []), "other ULAs are unchanged")
+        XCTAssertFalse(ShellAddressPolicy.isAllowedPeer("8.8.8.8", localAddresses: lan, onLinkPrefixes: []))
+        let tailnet = lan + [tunnelAddress("100.90.0.1")]
+        XCTAssertTrue(ShellAddressPolicy.isAllowedPeer("100.101.1.2", localAddresses: tailnet, onLinkPrefixes: []))
+        XCTAssertFalse(ShellAddressPolicy.isAllowedPeer("fd7a:115c:a1e0::5", localAddresses: tailnet, onLinkPrefixes: []),
+                       "an IPv4 overlay address does not admit IPv6 overlay peers")
+        XCTAssertTrue(ShellAddressPolicy.isAllowedPeer("fd7a:115c:a1e0::5", localAddresses: lan + [tunnelAddress("fd7a:115c:a1e0::1")],
+                                                       onLinkPrefixes: []))
+        let prefixes = ShellAddressPolicy.onLinkPrefixes(of: ["2001:db8:1:2::10"])
+        XCTAssertTrue(ShellAddressPolicy.isAllowedPeer("2001:db8:1:2::99", localAddresses: lan, onLinkPrefixes: prefixes))
+
+        XCTAssertTrue(ShellAddressPolicy.arrivedOnItsNetwork(peer: "100.101.1.2", local: "100.90.0.1", localAddresses: tailnet))
+        XCTAssertFalse(ShellAddressPolicy.arrivedOnItsNetwork(peer: "100.101.1.2", local: "192.168.1.5", localAddresses: tailnet),
+                       "an overlay source on the LAN interface")
+        XCTAssertFalse(ShellAddressPolicy.arrivedOnItsNetwork(peer: "100.101.1.2", local: nil, localAddresses: tailnet),
+                       "an overlay peer whose arrival is unknown is refused")
+        XCTAssertTrue(ShellAddressPolicy.arrivedOnItsNetwork(peer: "192.168.1.9", local: "192.168.1.5", localAddresses: lan))
+        XCTAssertTrue(ShellAddressPolicy.arrivedOnItsNetwork(peer: "192.168.1.9", local: nil, localAddresses: lan),
+                      "other peers do not need it")
+    }
+
+    /// A carrier-grade NAT address on Wi-Fi or Ethernet is the carrier's
+    /// network: it admits no overlay-range peer, and nothing that arrives on
+    /// it counts as arriving on the overlay, even while a tunnel is also up.
+    func testCarrierNATAddressesAreNotAnOverlay() {
+        let cgnat = [lanAddress("100.72.3.4", "en0"), lanAddress("192.168.1.5")]
+        XCTAssertFalse(ShellAddressPolicy.isAllowedPeer("100.72.9.9", localAddresses: cgnat, onLinkPrefixes: []))
+        XCTAssertFalse(ShellAddressPolicy.isAllowedPeer("100.72.9.9", localAddresses: [tunnelAddress("100.72.3.4", "en0")], onLinkPrefixes: []),
+                       "point-to-point but not a utun")
+        XCTAssertFalse(ShellAddressPolicy.isAllowedPeer("100.72.9.9", localAddresses: [lanAddress("100.72.3.4", "utun3")], onLinkPrefixes: []),
+                       "a utun that is not point-to-point")
+        XCTAssertFalse(ShellAddressPolicy.isAllowedPeer("100.72.9.9", localAddresses: [tunnelAddress("10.8.0.2")], onLinkPrefixes: []),
+                       "a VPN tunnel outside the overlay range")
+        let both = cgnat + [tunnelAddress("100.90.0.1")]
+        XCTAssertTrue(ShellAddressPolicy.isAllowedPeer("100.101.1.2", localAddresses: both, onLinkPrefixes: []))
+        XCTAssertTrue(ShellAddressPolicy.arrivedOnItsNetwork(peer: "100.101.1.2", local: "100.90.0.1", localAddresses: both))
+        XCTAssertFalse(ShellAddressPolicy.arrivedOnItsNetwork(peer: "100.72.9.9", local: "100.72.3.4", localAddresses: both),
+                       "arrived on the carrier's address, not the tunnel's")
+        XCTAssertTrue(ShellAddressPolicy.arrivedOnItsNetwork(peer: "fd7a:115c:a1e0::5", local: "fd7a:115c:a1e0::1%utun4",
+                                                             localAddresses: [tunnelAddress("fd7a:115c:a1e0::1")]))
+    }
+
     func testErrorReasonsAreWireStrings() {
         XCTAssertEqual(ShellError.notAuthorized.rawValue, "not_authorized")
         XCTAssertEqual(ShellError.tooManySessions.rawValue, "too_many_sessions")

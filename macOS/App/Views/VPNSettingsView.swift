@@ -39,6 +39,9 @@ struct VPNSettings: View {
                     Button("Add NordVPN…") { showNordSheet = true }
                     Button("Import File…") { importFile() }
                 }
+                if vpnLayer.isWanted, let warning = vpnLayer.status.warning {
+                    Label(warning, systemImage: "exclamationmark.triangle.fill").font(.caption).foregroundStyle(PTTheme.warning)
+                }
                 if let importError { Label(importError, systemImage: "exclamationmark.triangle.fill").font(.caption).foregroundStyle(PTTheme.warning) }
             } header: {
                 Text("VPN layer")
@@ -53,9 +56,14 @@ struct VPNSettings: View {
             Section {
                 Toggle(isOn: $vpnLayer.killSwitch) {
                     Text("Kill switch")
-                    Text("Nothing leaves the Mac while the VPN reconnects. Off, traffic falls back to passthrough or Wi-Fi meanwhile.")
+                    Text("Nothing leaves the Mac outside the VPN, while it reconnects or if the network pushes routes around it. Off, traffic falls back to passthrough or Wi-Fi meanwhile. If Passthrough crashes while the VPN is on, the Mac stays offline until you reopen Passthrough or turn the VPN off.")
                 }
                 .disabled(vpnLayer.isWanted)
+                Toggle(isOn: $vpnLayer.allowLocalNetwork) {
+                    Text("Allow local network")
+                    Text("The kill switch lets this Mac reach its own network: printers, AirPlay and the remote shell nearby. Passthrough's wireless link to the phone always goes through.")
+                }
+                .disabled(vpnLayer.isWanted || !vpnLayer.killSwitch)
                 Toggle(isOn: $vpnLayer.blockIPv6) {
                     Text("Block IPv6 while the VPN is on")
                     Text("Most VPN servers, NordVPN included, carry no IPv6, so it would go around the VPN. Apps fall back to IPv4.")
@@ -68,7 +76,7 @@ struct VPNSettings: View {
             } header: {
                 Text("Behaviour")
             } footer: {
-                Text(vpnLayer.isWanted ? "Turn the VPN off to change the kill switch or IPv6." : "Kill switch and IPv6 changes apply the next time the VPN starts.")
+                Text(vpnLayer.isWanted ? "Turn the VPN off to change the kill switch, local network or IPv6." : "Kill switch, local network and IPv6 changes apply the next time the VPN starts.")
             }
 
             if !vpnLayer.profiles.isEmpty {
@@ -99,7 +107,7 @@ struct VPNSettings: View {
         guard vpnLayer.isWanted else { return .secondary }
         switch vpnLayer.status.state {
         case "connected": return PTTheme.success
-        case "blocked": return PTTheme.danger
+        case "blocked", "held": return PTTheme.danger
         default: return PTTheme.warning
         }
     }
@@ -111,6 +119,7 @@ struct VPNSettings: View {
         case "starting": return "Connecting…"
         case "reconnecting": return "Reconnecting…"
         case "blocked": return "Blocked, reconnecting…"
+        case "held": return "Blocked since Passthrough stopped; turn off to release"
         default: return vpnLayer.status.state.capitalized
         }
     }

@@ -11,8 +11,11 @@ import PhoneTransport
 /// Sessions are the manager's, so a phone can take one over from either path.
 ///
 /// Before the QUIC handshake each attempt needs a pre-auth slot: at most 16
-/// at once, 2 per remote IP on direct paths, 8 arriving via relays; a slot
-/// lasts until the proof or the 10 s timeout, whichever is first.
+/// at once, 2 per remote IP (or network, `HandshakeLimiter.bucket`) on
+/// direct paths, 8 arriving via relays; a slot lasts until the proof or the
+/// 10 s timeout, whichever is first. Only attempts whose address QUIC has
+/// validated get one (the rest are sent a retry first), so packets with
+/// forged source addresses cannot hold slots.
 public final class IrohShellListener: @unchecked Sendable {
     /// What relayed (and path-unknown) attempts are counted under, and their cap.
     static let relayBucket = "relay"
@@ -38,10 +41,22 @@ public final class IrohShellListener: @unchecked Sendable {
         set { gate.screenAccess.set(newValue) }
     }
 
+    /// As `ShellListener.screenSharingVerified`.
+    public var screenSharingVerified: (@Sendable () async -> Bool)? {
+        get { gate.screenSharingCheck.get() }
+        set { gate.screenSharingCheck.set(newValue) }
+    }
+
     /// As `ShellListener.screenVideo`.
     public var screenVideo: (@Sendable (_ phoneID: String) -> (any ScreenVideoSource)?)? {
         get { gate.screenVideoFactory.get() }
         set { gate.screenVideoFactory.set(newValue) }
+    }
+
+    /// As `ShellListener.screenViews`: give both listeners the same one.
+    public var screenViews: ScreenViewLimit {
+        get { gate.screenViews.get() }
+        set { gate.screenViews.set(newValue) }
     }
 
     /// As `ShellListener.onScreenViewer`.
@@ -106,6 +121,11 @@ public final class IrohShellListener: @unchecked Sendable {
                         return
                     }
                     Task {
+                        // A stateless round trip that proves the peer receives at its address.
+                        guard await incoming.isAddressValidated() else {
+                            if await !incoming.retry() { await incoming.refuse() }
+                            return
+                        }
                         let origin = await incoming.origin()
                         gate.queue.async { self.admit(incoming, path: origin.path, ip: origin.ip) }
                     }
@@ -128,8 +148,9 @@ public final class IrohShellListener: @unchecked Sendable {
         }
     }
 
-    /// Drops every iroh connection of this phone at once (it was revoked);
-    /// its sessions keep running. Call after its keys are gone from `shellKeys`.
+    /// Drops every iroh connection of this phone at once (it was revoked) and
+    /// ends the sessions it opened (`ShellListener.disconnect`). Call after
+    /// its keys are gone from `shellKeys`.
     public func disconnect(phoneID: String) {
         gate.disconnect(phoneID: phoneID)
     }

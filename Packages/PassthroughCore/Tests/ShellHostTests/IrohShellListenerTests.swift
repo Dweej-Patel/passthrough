@@ -250,8 +250,8 @@ final class IrohShellListenerTests: XCTestCase {
         await ready(fresh)
     }
 
-    /// Relayed attempts share one bucket of 8; direct ones get 2 per address;
-    /// 16 at most in all.
+    /// Relayed attempts share one bucket of 8; direct ones get 2 per address
+    /// (a public one: per /24); 12 at most in all, plus 4 for proven addresses.
     func testRelayBucketCap() {
         XCTAssertEqual(IrohShellListener.bucket(path: .relay, ip: nil).key, "relay")
         XCTAssertEqual(IrohShellListener.bucket(path: .relay, ip: nil).max, 8)
@@ -272,11 +272,15 @@ final class IrohShellListenerTests: XCTestCase {
             XCTAssertNotNil(take(.direct, "203.0.113.5"))
             XCTAssertNotNil(take(.direct, "203.0.113.5"))
             XCTAssertNil(take(.direct, "203.0.113.5"), "a third from one address is refused")
-            for i in 0..<6 { XCTAssertNotNil(take(.direct, "198.51.100.\(i)")) }
-            XCTAssertEqual(limiter.count, 16)
-            XCTAssertNil(take(.direct, "192.0.2.1"), "16 in all")
+            XCTAssertNil(take(.direct, "203.0.113.6"), "or from its /24")
+            for i in 0..<2 { XCTAssertNotNil(take(.direct, "198.51.\(i).1")) }
+            XCTAssertEqual(limiter.count, 12)
+            XCTAssertNil(take(.direct, "192.0.2.1"), "12 in all for addresses not proven lately")
             relayed[0]?.release()
             XCTAssertNotNil(take(.relay, nil), "a freed relay slot can be taken again")
+            limiter.proven("192.0.2.1")
+            for _ in 0..<2 { XCTAssertNotNil(take(.direct, "192.0.2.1")) }
+            XCTAssertEqual(limiter.count, 14)
         }
     }
 

@@ -5,13 +5,26 @@ import kotlinx.serialization.json.Json
 
 /** Constants shared with the Mac client. Must match PassthroughCore/Protocol.swift. */
 object PassthroughProtocol {
-    /** Bump when the wire protocol changes incompatibly. */
-    const val VERSION = 1
+    /** Bump when the wire protocol changes incompatibly. 2: the pairing is proved with HMACs ([ControlAuth]), never by sending the token. */
+    const val VERSION = 2
     /** SOCKS5 port the phone listens on (loopback only, reached over adb). */
     const val DEFAULT_SOCKS_PORT = 7890
     /** Control channel port (pairing, heartbeat, device status). */
     const val DEFAULT_CONTROL_PORT = 7891
     const val PAIRING_CODE_LIFETIME_MS = 300_000L
+    /** Wrong codes one control connection may send: the last of them is answered `locked` and the connection is closed. */
+    const val PAIRING_MAX_WRONG_CODES_PER_CONNECTION = 3
+    /**
+     * Wrong codes one pairing code takes, over every connection, before the phone
+     * withdraws it (`code_withdrawn`) and a new one must be shown: a guesser wins
+     * with odds of at most 10 in a million per code shown, and nothing can hold the
+     * right code off (see [PairingRegistry.pair]).
+     */
+    const val PAIRING_MAX_WRONG_CODES_PER_CODE = 10
+    /** A control connection that has not proved a pairing is closed after this, unless a pairing code is showing. */
+    const val UNAUTHENTICATED_TIMEOUT_MS = 10_000L
+    /** An authenticated Mac silent this long is dropped (it pings every 5 s and gives up itself after 20 s). */
+    const val SILENCE_LIMIT_MS = 30_000L
 }
 
 /**
@@ -26,7 +39,12 @@ data class ControlEnvelope(
     var clientID: String? = null,
     var name: String? = null,
     var code: String? = null,
+    /** paired: the new pairing token. Never sent anywhere else. */
     var token: String? = null,
+    /** hello, welcome: 32 random bytes, base64, fresh for every connection. */
+    var nonce: String? = null,
+    /** welcome (the phone's) and auth (the Mac's): the HMAC proving the pairing, base64 (see [ControlAuth]). */
+    var proof: String? = null,
     var reason: String? = null,
     var paired: Boolean? = null,
     var socksPort: Int? = null,
@@ -41,6 +59,8 @@ data class ControlEnvelope(
     var rxBytes: Long? = null,
     var txBytes: Long? = null,
     var timestamp: Double? = null,
+    /** hello: how the Mac reaches the phone, "usb" or "wireless" (always the cable for Android). */
+    var via: String? = null,
     // Granting remote shell access (protocol/README.md, "Remote shell").
     var certSHA256: String? = null,
     var phoneID: String? = null,
@@ -61,6 +81,7 @@ data class ControlEnvelope(
     companion object {
         const val HELLO = "hello"
         const val WELCOME = "welcome"
+        const val AUTH = "auth"
         const val PAIR = "pair"
         const val PAIRED = "paired"
         const val ERROR = "error"
@@ -88,6 +109,10 @@ enum class PairingFailure(val wire: String) {
     EXPIRED("expired"),
     NOT_AUTHENTICATED("not_authenticated"),
     UNSUPPORTED_VERSION("unsupported_version"),
+    /** Too many wrong codes on this connection: the phone closes it. The code still stands for a new connection, unless it was withdrawn. */
+    LOCKED("locked"),
+    /** Too many wrong codes against this code in all: the phone withdrew it, and pairing needs a new one shown. */
+    CODE_WITHDRAWN("code_withdrawn"),
 }
 
 /** Facts about the phone the Mac likes to display. */

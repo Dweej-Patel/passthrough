@@ -26,6 +26,8 @@ class PassthroughApp : Application() {
                 PtLog.Level.ERROR -> Log.e(TAG, message)
             }
         }
+        // Destinations stay out of logcat and the log file except in debug builds.
+        PtLog.redactPrivate = !BuildConfig.DEBUG
         PtLog.attachFile(File(filesDir, "passthrough.log"))
         val settings = AppSettings(this)
         Runtime.settings = settings

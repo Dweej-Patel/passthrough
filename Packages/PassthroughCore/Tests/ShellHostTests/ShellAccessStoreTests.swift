@@ -52,6 +52,26 @@ final class ShellAccessStoreTests: XCTestCase {
         XCTAssertTrue(store.record(phone("b", slot: "token")), "once that pairing is gone the ID is free")
     }
 
+    /// An iPhone's pairing moved out of the slot every iPhone once shared:
+    /// its access moves with it, keeping its keys and Screen switch, so the
+    /// next grant renews it instead of being refused.
+    func testMoveFollowsAPairingToItsNewSlot() {
+        let store = ShellAccessStore(secrets: InMemorySecrets())
+        let key = Data(repeating: 1, count: 32)
+        XCTAssertTrue(store.record(phone("a", slot: "token", key: key)))
+        XCTAssertTrue(store.record(phone("b", slot: "token")))
+        XCTAssertTrue(store.setScreenAllowed(true, forPhone: "a"))
+        XCTAssertFalse(store.record(phone("a", slot: "token.iphone.A")), "refused before the move")
+        XCTAssertFalse(store.move(phoneID: "a", fromSlot: "other", toSlot: "token.iphone.A"), "only from the slot it was granted through")
+        XCTAssertTrue(store.move(phoneID: "a", fromSlot: "token", toSlot: "token.iphone.A"))
+        XCTAssertEqual(store.phones.first { $0.phoneID == "a" }?.pairingSlot, "token.iphone.A")
+        XCTAssertEqual(store.phones.first { $0.phoneID == "b" }?.pairingSlot, "token", "other phones stay put")
+        XCTAssertEqual(store.candidateKeys(forPhone: "a"), [key])
+        XCTAssertTrue(store.screenAllowed(forPhone: "a"))
+        XCTAssertTrue(store.record(phone("a", slot: "token.iphone.A")))
+        XCTAssertFalse(store.move(phoneID: "nobody", fromSlot: "token", toSlot: "x"))
+    }
+
     /// A re-grant keeps the key the phone holds working until it uses the new one.
     func testRegrantKeepsThePreviousKeyUntilTheNewOneIsUsed() {
         let store = ShellAccessStore(secrets: InMemorySecrets())
@@ -272,6 +292,57 @@ final class ShellAccessStoreTests: XCTestCase {
         wait(for: [finished], timeout: 5)
         XCTAssertFalse(result.get(), "the key may still be stored: not a success")
         XCTAssertNil(store.key(forPhone: "a"), "still refused after the write failed")
+    }
+
+    /// Writes (and deletes) fail while `failing` is set.
+    private final class FlakySecrets: SecretStore, @unchecked Sendable {
+        let inner = InMemorySecrets()
+        let failing = Locked(false)
+        func read(_ account: String) -> Data? { inner.read(account) }
+        func write(_ data: Data, account: String) -> Bool { failing.get() ? false : inner.write(data, account: account) }
+        func delete(_ account: String) { if !failing.get() { inner.delete(account) } }
+    }
+
+    /// Turning Screen off holds even when the Keychain write fails, and
+    /// through later failed writes that make the store read again; the next
+    /// write that works stores it.
+    func testScreenOffHoldsWhenTheWriteFails() {
+        let secrets = FlakySecrets()
+        let store = ShellAccessStore(secrets: secrets)
+        store.record(phone("a"))
+        store.record(phone("b"))
+        XCTAssertTrue(store.setScreenAllowed(true, forPhone: "a"))
+        XCTAssertTrue(store.setScreenAllowed(true, forPhone: "b"))
+        secrets.failing.set(true)
+        XCTAssertFalse(store.setScreenAllowed(false, forPhone: "a"), "the failure is reported")
+        XCTAssertFalse(store.screenAllowed(forPhone: "a"), "but the screen is off at once")
+        XCTAssertTrue(store.screenAllowed(forPhone: "b"))
+        XCTAssertFalse(store.record(phone("b")), "another write fails, so the list is read from the store again")
+        XCTAssertFalse(store.screenAllowed(forPhone: "a"), "the store still says on; memory says off")
+        XCTAssertFalse(store.setScreenAllowed(true, forPhone: "a"), "a failed allow changes nothing")
+        XCTAssertFalse(store.screenAllowed(forPhone: "a"))
+        secrets.failing.set(false)
+        store.confirmCurrentKey(phoneID: "b", proven: Data(repeating: 9, count: 32))   // writes nothing
+        XCTAssertTrue(store.record(phone("b")))
+        XCTAssertFalse(ShellAccessStore(secrets: secrets.inner).screenAllowed(forPhone: "a"), "written with the next write")
+        XCTAssertTrue(ShellAccessStore(secrets: secrets.inner).screenAllowed(forPhone: "b"))
+    }
+
+    /// A revoke whose write and fallback delete both fail stays in force
+    /// through later reads of the store, until a write succeeds.
+    func testFailedRevokeSurvivesARereadOfTheStore() {
+        let secrets = FlakySecrets()
+        let store = ShellAccessStore(secrets: secrets)
+        store.record(phone("a", slot: "s1"))
+        store.record(phone("b", slot: "s2"))
+        secrets.failing.set(true)
+        XCTAssertFalse(store.revoke(phoneID: "a"))
+        XCTAssertFalse(store.record(phone("b", slot: "s2")), "forces the next lookup to read the store")
+        XCTAssertEqual(store.candidateKeys(forPhone: "a"), [], "the store still holds a; memory does not")
+        XCTAssertFalse(store.candidateKeys(forPhone: "b").isEmpty)
+        secrets.failing.set(false)
+        XCTAssertTrue(store.record(phone("c", slot: "s3")))
+        XCTAssertEqual(ShellAccessStore(secrets: secrets.inner).phones.map(\.phoneID).sorted(), ["b", "c"])
     }
 
     /// The store cannot tell "nothing stored" from "unreadable", so an empty

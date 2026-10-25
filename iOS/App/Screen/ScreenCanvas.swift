@@ -31,6 +31,7 @@ final class ScreenCanvasView: UIView, UIScrollViewDelegate, UIKeyInput {
     var onKey: ((UInt32, [UInt32]) -> Void)?
     var onText: ((String, [UInt32]) -> Void)?
     var onPaste: (() -> Void)?
+    var onCopy: (() -> Void)?
     var onSpace: ((ScreenModel.SpaceAction) -> Void)?
 
     var mode = ScreenTouchMode.trackpad {
@@ -355,7 +356,7 @@ private extension CGFloat {
 }
 
 /// The keys above the keyboard: esc, tab, the modifiers (held for the next
-/// key), arrows and paste.
+/// key), arrows, copy and paste.
 final class ScreenKeyRow: UIInputView {
     private weak var canvas: ScreenCanvasView?
     private var modifierButtons: [(UInt32, UIButton)] = []
@@ -376,6 +377,7 @@ final class ScreenKeyRow: UIInputView {
         case keysym(String, UInt32, accessibility: String)
         case symbol(String, UInt32, accessibility: String)
         case modifier(String, UInt32, accessibility: String)
+        case copy
         case paste
     }
 
@@ -390,6 +392,7 @@ final class ScreenKeyRow: UIInputView {
             .symbol("arrow.up", RFBKeys.up, accessibility: "Up arrow"),
             .symbol("arrow.down", RFBKeys.down, accessibility: "Down arrow"),
             .symbol("arrow.right", RFBKeys.right, accessibility: "Right arrow"),
+            .copy,
             .paste,
         ]
         let stack = UIStackView()
@@ -426,6 +429,9 @@ final class ScreenKeyRow: UIInputView {
                     }
                     self?.update()
                 }, for: .touchUpInside)
+            case .copy:
+                button.accessibilityLabel = "Copy from the Mac to this iPhone"
+                button.addAction(UIAction { [weak self] _ in self?.canvas?.onCopy?() }, for: .touchUpInside)
             case .paste:
                 button.accessibilityLabel = "Paste on the Mac"
                 button.addAction(UIAction { [weak self] _ in self?.canvas?.onPaste?() }, for: .touchUpInside)
@@ -465,6 +471,7 @@ final class ScreenKeyRow: UIInputView {
         switch key {
         case let .keysym(text, _, _), let .modifier(text, _, _): title(text)
         case let .symbol(name, _, _): symbol(name)
+        case .copy: symbol("doc.on.doc")
         case .paste: symbol("doc.on.clipboard")
         }
         return config
@@ -495,6 +502,7 @@ struct ScreenCanvas: UIViewRepresentable {
         view.onKey = { [weak model] keysym, modifiers in model?.key(keysym, modifiers: modifiers) }
         view.onText = { [weak model] text, modifiers in model?.type(text, modifiers: modifiers) }
         view.onPaste = { [weak model] in model?.pastePhoneClipboard() }
+        view.onCopy = { [weak model] in model?.copyFromMac() }
         view.onSpace = { [weak model] action in model?.perform(action) }
         model.onFrame = { [weak view] image in view?.show(image, size: CGSize(width: image.width, height: image.height)) }
         return view

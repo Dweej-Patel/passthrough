@@ -41,6 +41,16 @@ struct PairSheet: View {
                             .font(PTTheme.mono(13)).foregroundStyle(.secondary)
                     }
                 } else {
+                    if model.pairingCodeWithdrawn {
+                        PTCard {
+                            VStack(alignment: .leading, spacing: 4) {
+                                Label("That code was withdrawn", systemImage: "exclamationmark.triangle.fill")
+                                    .font(.footnote.weight(.semibold)).foregroundStyle(PTTheme.warning)
+                                Text(Self.withdrawnDetail).font(.footnote).foregroundStyle(.secondary)
+                            }
+                        }
+                        .padding(.horizontal, 24)
+                    }
                     Button("Generate a new code") { model.beginPairing() }
                         .buttonStyle(.borderedProminent).tint(PTTheme.accentEnd)
                 }
@@ -58,6 +68,9 @@ struct PairSheet: View {
             if new > old { dismiss() }
         }
     }
+
+    /// Why the code on screen went away early. Same words as the Android app's.
+    static let withdrawnDetail = "Too many wrong codes were entered, so it no longer works. If that wasn't you, something on this phone or the Mac tried to guess it. Generate a new code to pair."
 
     private func remaining(_ expiry: Date) -> TimeInterval {
         max(0, expiry.timeIntervalSince(now))

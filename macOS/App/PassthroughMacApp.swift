@@ -59,10 +59,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    private var quitObserver: NSObjectProtocol?
+
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
-        // Give the coordinator a moment to tear the tunnel down cleanly.
+        // Let the coordinator tear the tunnel down and turn the VPN off (else
+        // the helper keeps its kill switch blocking, as after a crash): quit
+        // once it says it is done, or after 4 s regardless.
+        var replied = false
+        let reply = { [weak self] in
+            guard !replied else { return }
+            replied = true
+            if let observer = self?.quitObserver { NotificationCenter.default.removeObserver(observer) }
+            NSApp.reply(toApplicationShouldTerminate: true)
+        }
+        quitObserver = NotificationCenter.default.addObserver(forName: .passthroughReadyToQuit, object: nil, queue: .main) { _ in reply() }
         NotificationCenter.default.post(name: .passthroughWillTerminate, object: nil)
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { NSApp.reply(toApplicationShouldTerminate: true) }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 4) { reply() }
         return .terminateLater
     }
 }
@@ -86,4 +98,6 @@ extension AppDelegate {
 
 extension Notification.Name {
     static let passthroughWillTerminate = Notification.Name("\(PassthroughProtocol.identifier).willTerminate")
+    /// The coordinator finished tearing down for a quit.
+    static let passthroughReadyToQuit = Notification.Name("\(PassthroughProtocol.identifier).readyToQuit")
 }

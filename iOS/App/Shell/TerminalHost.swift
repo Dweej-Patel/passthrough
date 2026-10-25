@@ -1,6 +1,8 @@
 import SwiftUI
 import UIKit
+import UniformTypeIdentifiers
 import SwiftTerm
+import PassthroughCore
 import PassthroughUI
 
 /// The terminal's colors and type, matched to the rest of the app.
@@ -9,6 +11,19 @@ enum TerminalStyle {
     static let background = UIColor(red: 0.05, green: 0.06, blue: 0.09, alpha: 1)
     static let foreground = UIColor(white: 0.9, alpha: 1)
     static let font = UIFont.monospacedSystemFont(ofSize: 13, weight: .regular)
+}
+
+/// Text from the Mac (its shell's copies, what Screen copies on it) on
+/// this iPhone's clipboard: kept off Universal Clipboard, so other devices
+/// never see it, and gone after two minutes, so it doesn't linger for every
+/// app to read.
+enum MacClipboard {
+    static let lifetime: TimeInterval = 120
+
+    static func put(_ text: String) {
+        UIPasteboard.general.setItems([[UTType.plainText.identifier: text]],
+                                      options: [.localOnly: true, .expirationDate: Date().addingTimeInterval(lifetime)])
+    }
 }
 
 /// Owns one SwiftTerm `TerminalView` and relays its input and size changes.
@@ -20,6 +35,11 @@ final class TerminalDriver: NSObject, ObservableObject, TerminalViewDelegate {
     var onInput: ((Data) -> Void)?
     /// The terminal's grid changed after its first layout.
     var onResize: ((Int, Int) -> Void)?
+    /// A program on the Mac put text on this iPhone's clipboard.
+    var onClipboardCopy: (() -> Void)?
+    /// A paste would run as it arrives (`ShellTerminalView.confirmPaste`):
+    /// call `paste` if the user says yes. Unset, it's pasted.
+    var onConfirmPaste: ((_ lineBreaks: Int, _ paste: @escaping () -> Void) -> Void)?
     /// Output being fed is a replay: the terminal's answers to queries in it
     /// (device attributes, cursor position, colors…) and clipboard writes are dropped.
     var replaying = false
@@ -34,6 +54,10 @@ final class TerminalDriver: NSObject, ObservableObject, TerminalViewDelegate {
         super.init()
         view.readOnly = readOnly
         view.terminalDelegate = self
+        view.confirmPaste = { [weak self] lineBreaks, paste in
+            guard let onConfirmPaste = self?.onConfirmPaste else { return paste() }
+            onConfirmPaste(lineBreaks, paste)
+        }
         view.backgroundColor = TerminalStyle.background
         view.layer.backgroundColor = TerminalStyle.background.cgColor
         view.nativeBackgroundColor = TerminalStyle.background
@@ -123,10 +147,13 @@ final class TerminalDriver: NSObject, ObservableObject, TerminalViewDelegate {
     nonisolated func scrolled(source: TerminalView, position: Double) {}
     nonisolated func requestOpenLink(source: TerminalView, link: String, params: [String: String]) {}
     nonisolated func bell(source: TerminalView) {}
+    /// A program on the Mac copied to the clipboard (OSC 52: Claude Code, tmux,
+    /// vim…). Never during a replay or in a read-only terminal; reads are never answered.
     nonisolated func clipboardCopy(source: TerminalView, content: Data) {
         MainActor.assumeIsolated {
-            guard !view.readOnly, !replaying else { return }
-            if let text = String(data: content, encoding: .utf8) { UIPasteboard.general.string = text }
+            guard !view.readOnly, !replaying, let text = String(data: content, encoding: .utf8) else { return }
+            MacClipboard.put(text)
+            onClipboardCopy?()
         }
     }
     nonisolated func clipboardRead(source: TerminalView) -> Data? { nil }
@@ -150,6 +177,9 @@ final class TerminalDriver: NSObject, ObservableObject, TerminalViewDelegate {
 final class ShellTerminalView: TerminalView {
     var readOnly = false
     var onFirstLayout: ((Int, Int) -> Void)?
+    /// Asked before a paste with line breaks goes to a program that hasn't
+    /// turned on bracketed paste, which would run each line as it arrives.
+    var confirmPaste: ((_ lineBreaks: Int, _ paste: @escaping () -> Void) -> Void)?
     private var reported = false
     private lazy var programScroll = UIPanGestureRecognizer(target: self, action: #selector(programScrolled(_:)))
     /// Drag not yet sent, short of a whole line.
@@ -183,6 +213,31 @@ final class ShellTerminalView: TerminalView {
             for case let press as UILongPressGestureRecognizer in gestureRecognizers ?? [] { press.isEnabled = false }
             addGestureRecognizer(hold)
         }
+    }
+
+    /// The phone's clipboard, made safe to send (`TerminalPaste`): bracketed
+    /// when the program asked for that, asked about first when its lines would run.
+    override func paste(_ sender: Any?) {
+        guard !readOnly, let raw = UIPasteboard.general.string else { return }
+        let paste = TerminalPaste(raw)
+        guard !paste.text.isEmpty else { return }
+        let deliver = { [weak self] in
+            guard let self, !self.readOnly else { return }
+            self.send(paste.bytes(bracketed: self.getTerminal().bracketedPasteMode))
+        }
+        if paste.lineBreaks > 0, !getTerminal().bracketedPasteMode, let confirmPaste {
+            confirmPaste(paste.lineBreaks, deliver)
+        } else {
+            deliver()
+        }
+    }
+
+    /// The selection goes where the Mac's own copies do (`MacClipboard`):
+    /// this iPhone only, for two minutes.
+    override func copy(_ sender: Any?) {
+        guard let text = getSelection(), !text.isEmpty else { return }
+        MacClipboard.put(text)
+        clearSelection()
     }
 
     /// Leaves out SwiftTerm's drag-as-mouse-drag; taps still reach the program as clicks.
@@ -472,7 +527,7 @@ final class TerminalKeyRow: UIInputView {
         case .tab: terminal.send([0x09])
         case .pipe: terminal.send(txt: "|")
         case .tilde: terminal.send(txt: "~")
-        case .paste: terminal.paste(nil)   // bracketed when the shell asked for it
+        case .paste: terminal.paste(nil)   // ShellTerminalView's: made safe, bracketed when the shell asked for it
         case .ctrl:
             terminal.controlModifier.toggle()
             updateCtrl()
