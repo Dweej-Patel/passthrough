@@ -6,6 +6,10 @@ import androidx.lifecycle.viewModelScope
 import dev.dpatel.passthrough.BuildConfig
 import dev.dpatel.passthrough.core.IrohInfo
 import dev.dpatel.passthrough.core.IrohShellDialer
+import dev.dpatel.passthrough.core.MacControl
+import dev.dpatel.passthrough.core.MacState
+import dev.dpatel.passthrough.core.MacStates
+import dev.dpatel.passthrough.core.MacTimeline
 import dev.dpatel.passthrough.core.PairedClient
 import dev.dpatel.passthrough.core.PtLog
 import dev.dpatel.passthrough.core.ShellClient
@@ -98,6 +102,22 @@ class ShellViewModel(app: Application) : AndroidViewModel(app) {
     /** How the ready connection is carried, when known. */
     private val _path = MutableStateFlow<ShellPath?>(null)
     val path: StateFlow<ShellPath?> = _path.asStateFlow()
+
+    /** The selected Mac's state as it last said (kept while it can't be reached); null from an older Mac. */
+    private val _macState = MutableStateFlow<MacState?>(null)
+    val macState: StateFlow<MacState?> = _macState.asStateFlow()
+    /** A Keep awake or VPN change sent and not yet answered. */
+    private val _pendingControl = MutableStateFlow<MacControl?>(null)
+    val pendingControl: StateFlow<MacControl?> = _pendingControl.asStateFlow()
+    /** Why the Mac refused the last Keep awake or VPN change. */
+    private val _controlError = MutableStateFlow<ShellError?>(null)
+    val controlError: StateFlow<ShellError?> = _controlError.asStateFlow()
+    /** What happened on the selected Mac, as of the last [loadTimeline]. */
+    private val _timeline = MutableStateFlow<MacTimeline?>(null)
+    val timeline: StateFlow<MacTimeline?> = _timeline.asStateFlow()
+    private val _timelineUnsupported = MutableStateFlow(false)
+    val timelineUnsupported: StateFlow<Boolean> = _timelineUnsupported.asStateFlow()
+    private var timelineLoading = false
     /** Whether the current (or last) connect also tried iroh, for the unreachable copy. */
     private val _triedFromAnywhere = MutableStateFlow(false)
     val triedFromAnywhere: StateFlow<Boolean> = _triedFromAnywhere.asStateFlow()
@@ -435,6 +455,39 @@ class ShellViewModel(app: Application) : AndroidViewModel(app) {
         if (_activeSession.value == id) _activeSession.value = null
     }
 
+    /** Asks the Mac to turn Keep awake or its VPN on or off; [macState] follows. The caller asked for the biometric before VPN off. */
+    fun control(change: MacControl) {
+        _controlError.value = null
+        if (demo != null) {
+            _macState.value = _macState.value?.let {
+                when (change) {
+                    is MacControl.Awake -> it.copy(awake = change.on)
+                    is MacControl.Vpn -> it.copy(vpn = if (change.on) MacStates.VPN_ON else MacStates.VPN_OFF)
+                }
+            }
+            return
+        }
+        val conn = connection ?: return
+        if (_reach.value != ShellReach.READY) return
+        _pendingControl.value = change
+        when (change) {
+            is MacControl.Awake -> conn.setAwake(change.on)
+            is MacControl.Vpn -> conn.setVPN(change.on)
+        }
+    }
+
+    /** Asks the Mac what happened since [sinceSeconds] (Unix); [timeline] follows. */
+    fun loadTimeline(sinceSeconds: Double) {
+        if (demo != null) {
+            _timeline.value = ShellDemo.timeline(sinceSeconds)
+            return
+        }
+        val conn = connection ?: return
+        if (_reach.value != ShellReach.READY) return
+        timelineLoading = true
+        conn.requestEvents(sinceSeconds)
+    }
+
     fun loadHistory() {
         if (demo != null) return handle(ShellEvent.History(ShellDemo.history()))
         val conn = connection ?: return
@@ -474,6 +527,15 @@ class ShellViewModel(app: Application) : AndroidViewModel(app) {
                 }
             }
             is ShellEvent.MacInfo -> apply(event)
+            is ShellEvent.MacStateChanged -> {
+                _macState.value = event.state
+                _pendingControl.value = null
+            }
+            is ShellEvent.Events -> {
+                _timeline.value = MacTimeline(event.since, event.events, event.battery, System.currentTimeMillis() / 1000.0)
+                _timelineUnsupported.value = false
+                timelineLoading = false
+            }
             is ShellEvent.Sessions -> {
                 _sessions.value = event.sessions
                 val ids = event.sessions.map { it.id }.toSet()
@@ -516,6 +578,16 @@ class ShellViewModel(app: Application) : AndroidViewModel(app) {
                 if (event.done) finishTranscript(pending.replay.chunks())
             }
             is ShellEvent.Failed -> {
+                if (event.error == ShellError.NOT_ALLOWED || event.error == ShellError.VPN_NOT_SET_UP) {
+                    _pendingControl.value = null
+                    _controlError.value = event.error
+                    return
+                }
+                if (event.error == ShellError.BAD_REQUEST && event.session == null && timelineLoading) {
+                    timelineLoading = false
+                    _timelineUnsupported.value = true
+                    return
+                }
                 _lastError.value = event.error
                 if (event.error == ShellError.NOT_AUTHORIZED) _reach.value = ShellReach.NO_ACCESS
                 // Only a failure naming the requested session ends that request.
@@ -608,6 +680,12 @@ class ShellViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     private fun resetSessions() {
+        _macState.value = null
+        _pendingControl.value = null
+        _controlError.value = null
+        _timeline.value = null
+        _timelineUnsupported.value = false
+        timelineLoading = false
         _sessions.value = emptyList()
         _history.value = emptyList()
         _openTabs.value = emptyList()
@@ -648,6 +726,7 @@ class ShellViewModel(app: Application) : AndroidViewModel(app) {
         handle(ShellEvent.Ready(ShellDemo.path))
         handle(ShellEvent.Sessions(ShellDemo.sessions(_openTabs.value.filter { it.startsWith("demo-new") })))
         handle(ShellEvent.History(ShellDemo.history()))
+        if (_macState.value == null) handle(ShellEvent.MacStateChanged(ShellDemo.macState))
     }
 
     private fun demoAttach(id: String) {

@@ -33,7 +33,8 @@ import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import dev.dpatel.passthrough.service.Runtime
 import dev.dpatel.passthrough.ui.AppViewModel
-import dev.dpatel.passthrough.ui.HomeScreen
+import dev.dpatel.passthrough.ui.MainTab
+import dev.dpatel.passthrough.ui.MainTabs
 import dev.dpatel.passthrough.ui.PairSheet
 import dev.dpatel.passthrough.ui.PassthroughTheme
 import dev.dpatel.passthrough.ui.SettingsScreen
@@ -74,6 +75,8 @@ class MainActivity : FragmentActivity() {
         var screen by rememberSaveable { mutableStateOf(Screen.HOME) }
         var terminalIntent by rememberSaveable { mutableStateOf(TerminalIntent.RESUME) }
         var showPairing by rememberSaveable { mutableStateOf(false) }
+        // Debug builds only: which tab to open on, for screenshots (pt.demo.tab = mac|shells|activity|phone).
+        val startTab = if (BuildConfig.DEBUG) intent?.getStringExtra("pt.demo.tab")?.let { v -> MainTab.entries.firstOrNull { it.name.equals(v, true) } } ?: MainTab.MAC else MainTab.MAC
         // Hoisted so Home keeps its place after Settings, the terminal or history.
         val homeScroll = rememberSaveable(saver = ScrollState.Saver) { ScrollState(0) }
         val prefs = Runtime.settings.prefs
@@ -136,14 +139,15 @@ class MainActivity : FragmentActivity() {
                     onClose = { screen = Screen.HOME },
                 )
                 Screen.HISTORY -> ShellHistoryScreen(shell, onDone = { screen = Screen.HOME })
-                Screen.HOME -> HomeScreen(
-                    vm, shell, onPower = onPower, onPair = { showPairing = true }, onSettings = { screen = Screen.SETTINGS },
+                Screen.HOME -> MainTabs(
+                    vm, shell, initial = startTab,
+                    onPower = onPower, onPair = { showPairing = true }, onSettings = { screen = Screen.SETTINGS },
                     onOpenTerminal = { session ->
                         terminalIntent = session?.let(TerminalIntent::attach) ?: TerminalIntent.NEW
                         screen = Screen.TERMINAL
                     },
                     onShellHistory = { screen = Screen.HISTORY },
-                    scroll = homeScroll,
+                    phoneScroll = homeScroll,
                 )
             }
         }

@@ -1,5 +1,10 @@
 package dev.dpatel.passthrough.ui.shell
 
+import dev.dpatel.passthrough.core.BatterySample
+import dev.dpatel.passthrough.core.MacEvent
+import dev.dpatel.passthrough.core.MacState
+import dev.dpatel.passthrough.core.MacStates
+import dev.dpatel.passthrough.core.MacTimeline
 import dev.dpatel.passthrough.core.ShellCredential
 import dev.dpatel.passthrough.core.ShellEvent
 import dev.dpatel.passthrough.core.ShellHistoryEntry
@@ -38,10 +43,35 @@ internal object ShellDemo {
     fun sessions(extra: List<String> = emptyList()): List<ShellSessionInfo> {
         val t = now()
         return listOf(
+            ShellSessionInfo("8F3A1C2E-5B7D-4E60-8F21-3C4D5E6F7A8B", "claude", startedAt = t - 1900, lastOutputAt = t - 40, running = true,
+                waiting = "Do you want to make this edit to HomeView.swift?"),
             ShellSessionInfo("demo-1", "zsh — ~/dev/passthrough", startedAt = t - 4 * 60, lastOutputAt = t - 5, running = true),
             ShellSessionInfo("demo-2", "htop", startedAt = t - 3 * 3600, lastOutputAt = t - 60, running = true),
             ShellSessionInfo("demo-3", "npm run build", startedAt = t - 2 * 3600, lastOutputAt = t - 3600, running = false, exitStatus = 0),
         ) + extra.map { ShellSessionInfo(it, "zsh", startedAt = t, lastOutputAt = t, running = true) }
+    }
+
+    val macState = MacState(awake = true, battery = 0.64, charging = false, minutesLeft = 190, batteryFloor = 0.2, hot = false,
+        vpn = MacStates.VPN_ON, vpnName = "NordVPN Germany", killSwitch = true, control = true)
+
+    fun timeline(since: Double): MacTimeline {
+        val start = now() - (2 * 3600 + 14 * 60)
+        fun at(minutes: Double) = start + minutes * 60
+        val events = listOf(
+            MacEvent(at(0.0), "awake", "Pixel 9 turned Keep awake on"),
+            MacEvent(at(0.2), "link", "Off Pixel 9's connection"),
+            MacEvent(at(18.0), "vpn", "VPN dropped", "Reconnecting", warning = true),
+            MacEvent(at(18.05), "vpn", "VPN reconnected after 2 s", "Kill switch held: nothing left without it"),
+            MacEvent(at(38.0), "shell", "npm run build finished", "exit 0 · 34 min", session = "demo-3"),
+            MacEvent(at(66.0), "asked", "claude asked", "Do you want to make this edit to HomeView.swift?", session = "demo-1"),
+            MacEvent(at(67.0), "answered", "claude got an answer", session = "demo-1"),
+            MacEvent(at(131.0), "power", "Plugged in at 41%"),
+        )
+        val battery = (0..26).map { i ->
+            val m = i * 5.0
+            BatterySample(at(m), if (m < 131) 0.64 - 0.23 * m / 131 else 0.41 + 0.004 * (m - 131), if (m >= 131) true else null)
+        }
+        return MacTimeline(since, events.filter { it.t >= since }, battery, now())
     }
 
     fun history(): List<ShellHistoryEntry> {

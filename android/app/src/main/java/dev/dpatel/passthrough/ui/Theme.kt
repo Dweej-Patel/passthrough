@@ -52,6 +52,13 @@ object PT {
     val danger = Color(0xFFFF6B6B)
     val success = Color(0xFF5CE68F)
 
+    // The redesign's tint and "needs you", as on iOS and the Mac (PTColor in PassthroughUI).
+    /** Text on a mint fill. */
+    val onTint = Color(0xFF06281C)
+    val attention = Color(0xFFFFB84D)
+    /** Text on an amber fill. */
+    val onAttention = Color(0xFF2A1A00)
+
     val accent: Brush get() = Brush.linearGradient(listOf(accentStart, accentEnd))
 
     @OptIn(ExperimentalTextApi::class)
@@ -77,9 +84,17 @@ data class PTColors(val dark: Boolean) {
     val primary = if (dark) Color.White else Color.Black
     val secondary = if (dark) Color(0x99EBEBF5) else Color(0x993C3C43)
     val tertiary = if (dark) Color(0x4DEBEBF5) else Color(0x4D3C3C43)
-    val background = if (dark) Color(0xFF0D0F17) else Color(0xFFF2F5FA)
-    val card = if (dark) Color(0xB31C1F2B) else Color(0xCCFFFFFF)
-    val cardBorder = if (dark) Color.White.copy(alpha = 0.08f) else Color.White.copy(alpha = 0.5f)
+    val background = if (dark) Color(0xFF0A0B0E) else Color(0xFFF2F2F7)
+    /** Solid content cards; glass is left to floating bars and sheets. */
+    val card = if (dark) Color(0xFF15171C) else Color.White
+    val cardBorder = if (dark) Color.White.copy(alpha = 0.08f) else Color.Black.copy(alpha = 0.06f)
+    /** Mint, the "on" fill; darker in light mode so it reads on white. */
+    val tint = if (dark) Color(0xFF5EE6B5) else Color(0xFF3DD9A0)
+    /** Mint as text: deeper in light mode for contrast. */
+    val tintText = if (dark) Color(0xFF5EE6B5) else Color(0xFF0B7A55)
+    /** A card that is switched on. */
+    val cardOn = if (dark) Color(0xFF10251E) else Color(0xFFE2F7EE)
+    val attentionText = if (dark) Color(0xFFFFCE85) else Color(0xFF8A5300)
     val fill = if (dark) Color.White.copy(alpha = 0.08f) else Color.Black.copy(alpha = 0.06f)
     val thinFill = if (dark) Color.White.copy(alpha = 0.06f) else Color.White.copy(alpha = 0.7f)
 }
@@ -91,12 +106,14 @@ fun PassthroughTheme(content: @Composable () -> Unit) {
     val dark = isSystemInDarkTheme()
     val colors = PTColors(dark)
     val scheme = if (dark) darkColorScheme(
-        primary = PT.accentEnd, secondary = PT.accentStart, background = colors.background, surface = Color(0xFF161925),
-        onPrimary = Color.White, onBackground = Color.White, onSurface = Color.White, error = PT.danger,
-        surfaceContainerHigh = Color(0xFF1E2130), surfaceContainerLow = Color(0xFF161925),
+        primary = colors.tint, secondary = PT.accentStart, background = colors.background, surface = Color(0xFF15171C),
+        onPrimary = PT.onTint, onBackground = Color.White, onSurface = Color.White, error = PT.danger,
+        surfaceContainerHigh = Color(0xFF1E2027), surfaceContainerLow = Color(0xFF15171C), surfaceContainer = Color(0xFF15171C),
+        secondaryContainer = colors.cardOn, onSecondaryContainer = colors.tintText,
     ) else lightColorScheme(
-        primary = Color(0xFF7B4FE0), secondary = Color(0xFF14A89B), background = colors.background, surface = Color.White,
-        onPrimary = Color.White, onBackground = Color.Black, onSurface = Color.Black, error = Color(0xFFD93A3A),
+        primary = colors.tint, secondary = Color(0xFF14A89B), background = colors.background, surface = Color.White,
+        onPrimary = PT.onTint, onBackground = Color.Black, onSurface = Color.Black, error = Color(0xFFD93A3A),
+        surfaceContainer = Color.White, secondaryContainer = colors.cardOn, onSecondaryContainer = colors.tintText,
     )
     val base = MaterialTheme.typography
     val typography = base.copy(

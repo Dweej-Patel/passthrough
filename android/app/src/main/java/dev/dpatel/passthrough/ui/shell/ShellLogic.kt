@@ -117,6 +117,7 @@ data class ShellEndedSessions(
 object ShellFormat {
     /** "running · 4m" (since it started) or "exited 0 · 1h" (since its last output). Times in Unix seconds. */
     fun status(session: ShellSessionInfo, nowSeconds: Double): String {
+        if (session.running) session.waiting?.let { return "needs you · $it" }
         if (session.running) return "running · " + age(nowSeconds - session.startedAt)
         val exited = session.exitStatus?.let { "exited $it" } ?: "exited"
         return exited + " · " + age(nowSeconds - session.lastOutputAt)

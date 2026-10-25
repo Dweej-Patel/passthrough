@@ -7,7 +7,6 @@ import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
-import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.clickable
@@ -154,14 +153,14 @@ fun StatusRing(mode: RingMode, size: Dp = 196.dp, lineWidth: Dp = 11.dp) {
 fun PowerButton(isOn: Boolean, busy: Boolean, onClick: () -> Unit) {
     val c = LocalPT.current
     var pressed by remember { mutableStateOf(false) }
-    val scale by animateFloatAsState(if (pressed) 0.94f else 1f, spring(dampingRatio = 0.6f, stiffness = 400f), label = "press")
+    val scale by animateFloatAsState(if (pressed) 0.94f else 1f, tween(150), label = "press")
     val haptics = LocalHapticFeedback.current
     Box(
         Modifier
             .size(128.dp)
             .scale(scale)
             .clip(CircleShape)
-            .background(if (isOn) PT.accent else Brush.linearGradient(listOf(c.fill, c.fill)))
+            .background(if (isOn) c.tint else c.fill)
             .semantics { contentDescription = if (isOn) "Stop passthrough" else "Start passthrough" }
             .pointerInput(busy) {
                 detectTapGestures(
@@ -173,7 +172,7 @@ fun PowerButton(isOn: Boolean, busy: Boolean, onClick: () -> Unit) {
     ) {
         Icon(
             Icons.Filled.PowerSettingsNew, null,
-            tint = if (isOn) Color.White else c.primary.copy(alpha = 0.6f),
+            tint = if (isOn) PT.onTint else c.primary.copy(alpha = 0.6f),
             modifier = Modifier.size(52.dp).alpha(if (busy) 0.4f else 1f),
         )
     }

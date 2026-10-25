@@ -20,6 +20,7 @@ import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawing
+import androidx.compose.foundation.layout.statusBars
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.rememberScrollState
@@ -71,8 +72,6 @@ import androidx.lifecycle.compose.currentStateAsState
 import dev.dpatel.passthrough.core.ByteFormat
 import dev.dpatel.passthrough.core.PairedClient
 import dev.dpatel.passthrough.service.ServiceState
-import dev.dpatel.passthrough.ui.shell.RemoteShellCard
-import dev.dpatel.passthrough.ui.shell.ShellViewModel
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -80,19 +79,16 @@ import java.util.Locale
 @Composable
 fun HomeScreen(
     vm: AppViewModel,
-    shell: ShellViewModel,
     onPower: () -> Unit,
     onPair: () -> Unit,
     onSettings: () -> Unit,
-    onOpenTerminal: (String?) -> Unit,
-    onShellHistory: () -> Unit,
     scroll: ScrollState = rememberScrollState(),
 ) {
     val state by vm.state.collectAsStateWithLifecycle()
     PTBackground(glow = if (state == ServiceState.Running) 1f else 0.45f) {
         Column(
             Modifier
-                .windowInsetsPadding(WindowInsets.safeDrawing)
+                .windowInsetsPadding(WindowInsets.statusBars)
                 .verticalScroll(scroll)
                 // Phone-width column on tablets and in landscape, centred.
                 .fillMaxWidth().wrapContentWidth().widthIn(max = 640.dp)
@@ -105,7 +101,6 @@ fun HomeScreen(
             FlowCard(vm)
             ThroughputCard(vm)
             UsageCard(vm)
-            RemoteShellCard(shell, onOpen = onOpenTerminal, onHistory = onShellHistory)
             MacsCard(vm, onPair)
             Text(
                 "Traffic between the Mac and this phone travels only over the USB cable. The Mac's connections are opened by this phone's own network stack.",
