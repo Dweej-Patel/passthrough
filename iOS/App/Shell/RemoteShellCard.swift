@@ -157,7 +157,11 @@ struct RemoteShellCard: View {
         HStack(spacing: 12) {
             Button { router.terminal = .attach(session.id) } label: {
                 HStack(spacing: 12) {
-                    PTStatusDot(color: session.running ? PTColor.tint : .secondary.opacity(0.5), live: session.running)
+                    if session.running, session.waiting != nil {
+                        NeedsYouDot().frame(width: 16, height: 16)
+                    } else {
+                        PTStatusDot(color: session.running ? PTColor.tint : .secondary.opacity(0.5), live: session.running)
+                    }
                     VStack(alignment: .leading, spacing: 2) {
                         Text(session.title).font(.subheadline.weight(.semibold)).lineLimit(1)
                         Text(Self.status(session, now: now)).font(.caption).foregroundStyle(.secondary)
@@ -186,6 +190,7 @@ struct RemoteShellCard: View {
 
     /// "running · 4m" (since it started) or "exited 0 · 1h" (since its last output).
     static func status(_ session: ShellSessionInfo, now: Date) -> String {
+        if session.running, let question = session.waiting { return "needs you · " + question }
         if session.running {
             return "running · " + age(now.timeIntervalSince1970 - session.startedAt)
         }

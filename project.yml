@@ -39,6 +39,8 @@ targets:
     sources:
       - path: iOS/App
         excludes: ["Info.plist", "*.entitlements"]
+      # Shared with the widget extension: links, the Mac snapshot, the Live Activity's data.
+      - path: iOS/Shared
     dependencies:
       - package: PassthroughCore
         product: PassthroughCore
@@ -52,6 +54,7 @@ targets:
       - package: SwiftTerm
         product: SwiftTerm
       - target: PassthroughTunnel
+      - target: PassthroughWidgets
     info:
       path: iOS/App/Info.plist
       properties:
@@ -67,6 +70,12 @@ targets:
         NSLocalNetworkUsageDescription: Passthrough finds your linked Mac on this iPhone's Personal Hotspot, or over peer-to-peer Wi-Fi, when the wireless link is on, and reaches your Mac's shell on the same network.
         NSFaceIDUsageDescription: Passthrough uses Face ID to keep your Mac's shell and settings private.
         NSBonjourServices: [_passthrough._tcp, _passthrough-sh._tcp]
+        # Step away's Live Activity: started and updated by the app only (no push).
+        NSSupportsLiveActivities: true
+        # passthrough:// links from the Live Activity, widgets and Control Center (AppLink).
+        CFBundleURLTypes:
+          - CFBundleURLName: $(PASSTHROUGH_ID).ios
+            CFBundleURLSchemes: [passthrough]
     entitlements:
       path: iOS/App/Passthrough.entitlements
       properties:
@@ -109,6 +118,37 @@ targets:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: $(PASSTHROUGH_ID).ios.tunnel
         PRODUCT_NAME: PassthroughTunnel
+
+  # The Live Activity, the Home Screen widget and the Control Center buttons.
+  # It never reaches the Mac: it shows what the app last saw (app group) and opens the app.
+  PassthroughWidgets:
+    type: app-extension
+    platform: iOS
+    sources:
+      - path: iOS/Widgets
+        excludes: ["Info.plist", "*.entitlements"]
+      - path: iOS/Shared
+    dependencies:
+      - package: PassthroughCore
+        product: PassthroughCore
+      - package: PassthroughCore
+        product: PassthroughUI
+    info:
+      path: iOS/Widgets/Info.plist
+      properties:
+        PassthroughID: $(PASSTHROUGH_ID)
+        CFBundleDisplayName: Passthrough
+        NSExtension:
+          NSExtensionPointIdentifier: com.apple.widgetkit-extension
+    entitlements:
+      path: iOS/Widgets/PassthroughWidgets.entitlements
+      properties:
+        com.apple.security.application-groups: [group.$(PASSTHROUGH_ID)]
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: $(PASSTHROUGH_ID).ios.widgets
+        PRODUCT_NAME: PassthroughWidgets
+        TARGETED_DEVICE_FAMILY: "1"
 
   # ───────────────────────── macOS ─────────────────────────
   PassthroughMac:

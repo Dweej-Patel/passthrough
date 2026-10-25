@@ -322,6 +322,9 @@
         "line": "{\"t\":\"sessions\",\"sessions\":[{\"id\":\"3F2B8C1A-7D4E-4A55-9C0B-1E6F2A9D8B34\",\"title\":\"zsh\",\"startedAt\":1758062400.5,\"lastOutputAt\":1758062461.25,\"running\":true}]}"
       },
       {
+        "line": "{\"t\":\"sessions\",\"sessions\":[{\"id\":\"9A1C2E3F-5B7D-4E60-8F21-3C4D5E6F7A8B\",\"title\":\"claude\",\"startedAt\":1758062400.5,\"lastOutputAt\":1758062461.25,\"running\":true,\"waiting\":\"Do you want to make this edit to HomeView.swift?\"}]}"
+      },
+      {
         "line": "{\"t\":\"open\",\"cols\":80,\"rows\":24}"
       },
       {

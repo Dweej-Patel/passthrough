@@ -107,6 +107,10 @@ public final class ShellListener: @unchecked Sendable {
     /// Sends every connected phone the Mac's state again (it changed).
     public func pushMacState() { gate.pushMacState() }
 
+    /// Sends every connected phone the session list (it changed: a session
+    /// opened, ended, or started or stopped waiting on a question).
+    public func pushSessions() { gate.pushSessions() }
+
     /// The listener stopped for good (the port is taken, say); it will not
     /// accept again, so make a new one. On the listener's queue.
     public var onFailure: (@Sendable (Error) -> Void)? {
@@ -585,6 +589,13 @@ final class ShellGate: @unchecked Sendable {
         }
     }
 
+    func pushSessions() {
+        queue.async { [self] in
+            let list = manager.sessions
+            connections.values.filter { !$0.isScreen }.forEach { $0.sendSessions(list) }
+        }
+    }
+
     func control(_ phoneID: String, _ label: String, _ change: MacControl) -> ShellError? {
         guard let handler = macControl.get() else { return .badRequest }
         return handler(phoneID, label, change)
@@ -658,6 +669,14 @@ final class ShellConnection: ShellAttachment, @unchecked Sendable {
         send(list)
         received(initialBytes)
         if busy { readPaused = true } else { receive() }
+    }
+
+    /// On the queue: the session list, unasked.
+    func sendSessions(_ list: [ShellSessionInfo]) {
+        guard !closed, !isScreen else { return }
+        var message = ShellEnvelope(t: ShellEnvelope.sessions)
+        message.sessions = list
+        send(message)
     }
 
     /// On the queue: the Mac's state as this phone may see it, if there is any.

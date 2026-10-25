@@ -1118,6 +1118,17 @@ final class ShellListenerTests: XCTestCase {
         XCTAssertTrue(Self.state(probe.events.get()).isEmpty)
     }
 
+    func testSessionsArePushedUnasked() throws {
+        let listener = startListener()
+        let (_, probe) = readyClient(listener)
+        wait(for: [probe.expect(self, "first list") { $0.contains { if case .sessions = $0 { true } else { false } } }], timeout: 5)
+        let id = try manager.open(phoneLabel: "Test iPhone", cols: 80, rows: 24)
+        listener.pushSessions()
+        wait(for: [probe.expect(self, "pushed") { events in
+            events.contains { if case .sessions(let list) = $0 { list.map(\.id) == [id] } else { false } }
+        }], timeout: 5)
+    }
+
     func testControlRequestsReachTheHandlerWithThePhone() {
         let listener = startListener()
         let asked = Locked<[String]>([])

@@ -18,6 +18,17 @@
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>
 	<string>1.0</string>
+	<key>CFBundleURLTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleURLName</key>
+			<string>$(PASSTHROUGH_ID).ios</string>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>passthrough</string>
+			</array>
+		</dict>
+	</array>
 	<key>CFBundleVersion</key>
 	<string>1</string>
 	<key>ITSAppUsesNonExemptEncryption</key>
@@ -31,6 +42,8 @@
 	<string>Passthrough uses Face ID to keep your Mac's shell and settings private.</string>
 	<key>NSLocalNetworkUsageDescription</key>
 	<string>Passthrough finds your linked Mac on this iPhone's Personal Hotspot, or over peer-to-peer Wi-Fi, when the wireless link is on, and reaches your Mac's shell on the same network.</string>
+	<key>NSSupportsLiveActivities</key>
+	<true/>
 	<key>PassthroughID</key>
 	<string>$(PASSTHROUGH_ID)</string>
 	<key>UIApplicationSceneManifest</key>

@@ -17,7 +17,7 @@ struct MacHomeView: View {
     /// A picked moment that turns the VPN off, waiting for Face ID.
     @State private var momentNeedingFaceID: Moment?
     @State private var momentNote: String?
-    @State private var showStepAway = false
+    @ObservedObject private var links = PendingLinks.shared
 
     /// The Mac on screen: the shell's selection, else the first paired Mac.
     private var macID: String? { shell.selectedMacID ?? model.pairedClients.first?.id }
@@ -32,6 +32,7 @@ struct MacHomeView: View {
                 VStack(spacing: 14) {
                     MacHeroCard(shell: shell, paired: !model.pairedClients.isEmpty || !shell.macs.isEmpty, online: onlineThroughPhone,
                                 lastSeen: model.pairedClients.first { $0.id == macID }?.lastSeen, showPairing: $showPairing)
+                    if shell.reach == .ready { needsYou }
                     if let state, canControl { moments(state) }
                     tiles
                     if shell.reach == .noAccess, !model.pairedClients.isEmpty { setupCard }
@@ -64,8 +65,11 @@ struct MacHomeView: View {
                 apply(moment)
             }
         }
-        .sheet(isPresented: $showStepAway) {
-            StepAwaySheet(shell: shell, macName: macName, online: onlineThroughPhone) { apply(.away) }
+        .sheet(isPresented: $router.showStepAway) {
+            StepAwaySheet(shell: shell, macName: macName, online: onlineThroughPhone) {
+                apply(.away)
+                MacActivityController.shared.stepAway(macName: macName, state: shell.macState, sessions: shell.sessions)
+            }
         }
         #if DEBUG
         .onAppear {
@@ -74,10 +78,42 @@ struct MacHomeView: View {
                 DispatchQueue.main.asyncAfter(deadline: .now() + 1) { confirmVPNOff = true }
             }
             if env["PASSTHROUGH_SHOW_STEP_AWAY"] == "1" {
-                DispatchQueue.main.asyncAfter(deadline: .now() + 1) { showStepAway = true }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1) { router.showStepAway = true }
             }
         }
         #endif
+    }
+
+    // MARK: Needs you
+
+    /// Shells that went quiet on a question; the answer is typed in the terminal, as always.
+    @ViewBuilder private var needsYou: some View {
+        let waiting = shell.sessions.filter { $0.running && $0.waiting != nil }
+        ForEach(waiting, id: \.id) { session in
+            Button { router.terminal = .attach(session.id) } label: {
+                HStack(spacing: 12) {
+                    NeedsYouDot()
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text("\(session.title) is asking").font(.subheadline.weight(.semibold)).lineLimit(1)
+                        Text(session.waiting ?? "")
+                            .font(.system(.caption, design: .monospaced))
+                            .foregroundStyle(.secondary)
+                            .lineLimit(2)
+                    }
+                    Spacer(minLength: 8)
+                    Text("Answer").font(.subheadline.weight(.semibold)).foregroundStyle(PTColor.attentionText)
+                }
+                .padding(14)
+                .frame(minHeight: 60)
+                .background(PTColor.attention.opacity(0.1), in: RoundedRectangle(cornerRadius: 20, style: .continuous))
+                .overlay(RoundedRectangle(cornerRadius: 20, style: .continuous).strokeBorder(PTColor.attention.opacity(0.35)))
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityHint("Opens the terminal at that session")
+            .transition(.move(edge: .top).combined(with: .opacity))
+        }
+        .sensoryFeedback(.warning, trigger: waiting.count) { old, new in new > old }
     }
 
     // MARK: Moments
@@ -102,7 +138,7 @@ struct MacHomeView: View {
                 .fixedSize(horizontal: false, vertical: true)
                 .contentTransition(.opacity)
                 .padding(.horizontal, 4)
-            Button { showStepAway = true } label: {
+            Button { router.showStepAway = true } label: {
                 HStack(spacing: 12) {
                     Image(systemName: "figure.walk")
                         .font(.system(size: 15, weight: .semibold))
@@ -195,7 +231,7 @@ struct MacHomeView: View {
             .sensoryFeedback(.selection, trigger: state?.awake)
             .sensoryFeedback(.selection, trigger: state?.vpn)
 
-            if let message = shell.controlError?.message ?? controlNote {
+            if let message = shell.controlError?.message ?? links.note ?? controlNote {
                 Label(message, systemImage: "info.circle")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
@@ -508,6 +544,24 @@ private struct BatteryLine: View {
         if let floor = state.batteryFloor { limits.append("at \(MacHeroCard.percent(floor))") }
         limits.append("if it gets hot")
         return "\(level) now · sleeps " + limits.joined(separator: " or ")
+    }
+}
+
+/// The one thing that keeps moving: a shell is waiting on you. Still under Reduce Motion.
+struct NeedsYouDot: View {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var pulse = false
+
+    var body: some View {
+        Circle()
+            .fill(PTColor.attention)
+            .frame(width: 10, height: 10)
+            .background(Circle().fill(PTColor.attention.opacity(0.35)).scaleEffect(pulse ? 2.2 : 1).opacity(pulse ? 0 : 1))
+            .onAppear {
+                guard !reduceMotion else { return }
+                withAnimation(.easeOut(duration: 1.6).repeatForever(autoreverses: false)) { pulse = true }
+            }
+            .accessibilityHidden(true)
     }
 }
 

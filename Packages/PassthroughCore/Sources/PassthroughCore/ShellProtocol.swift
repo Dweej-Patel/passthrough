@@ -141,10 +141,14 @@ public struct ShellSessionInfo: Codable, Equatable, Sendable {
     public var lastOutputAt: Double
     public var running: Bool
     public var exitStatus: Int32?
+    /// The question a running session went quiet on, as the Mac reads its
+    /// screen ("Do you want to make this edit?"); absent when it isn't waiting.
+    public var waiting: String?
 
-    public init(id: String, title: String, startedAt: Double, lastOutputAt: Double, running: Bool, exitStatus: Int32? = nil) {
+    public init(id: String, title: String, startedAt: Double, lastOutputAt: Double, running: Bool, exitStatus: Int32? = nil,
+                waiting: String? = nil) {
         self.id = id; self.title = title; self.startedAt = startedAt; self.lastOutputAt = lastOutputAt
-        self.running = running; self.exitStatus = exitStatus
+        self.running = running; self.exitStatus = exitStatus; self.waiting = waiting
     }
 }
 

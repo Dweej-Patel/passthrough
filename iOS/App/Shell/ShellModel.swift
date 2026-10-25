@@ -666,6 +666,8 @@ extension ShellModel {
         }
         if state == "ready", sessions.isEmpty {
             sessions = [
+                ShellSessionInfo(id: "8F3A1C2E-5B7D-4E60-8F21-3C4D5E6F7A8B", title: "claude", startedAt: now - 1900, lastOutputAt: now - 40, running: true,
+                                 waiting: "Do you want to make this edit to HomeView.swift?"),
                 ShellSessionInfo(id: "demo-1", title: "zsh — ~/dev/passthrough", startedAt: now - 760, lastOutputAt: now - 20, running: true),
                 ShellSessionInfo(id: "demo-2", title: "npm run build", startedAt: now - 5400, lastOutputAt: now - 3600, running: false, exitStatus: 0),
             ]

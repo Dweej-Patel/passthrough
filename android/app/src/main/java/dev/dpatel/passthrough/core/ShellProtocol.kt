@@ -130,6 +130,8 @@ data class ShellSessionInfo(
     val lastOutputAt: Double,
     val running: Boolean,
     val exitStatus: Int? = null,
+    /** The question a running session went quiet on, as the Mac reads its screen; absent when it isn't waiting. */
+    val waiting: String? = null,
 )
 
 /** A past session in the Mac's history. Times are Unix seconds. */

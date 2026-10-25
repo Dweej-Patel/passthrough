@@ -80,6 +80,9 @@ public final class IrohShellListener: @unchecked Sendable {
     /// As `ShellListener.pushMacState()`.
     public func pushMacState() { gate.pushMacState() }
 
+    /// As `ShellListener.pushSessions()`.
+    public func pushSessions() { gate.pushSessions() }
+
     /// The endpoint stopped accepting (it was shut down underneath the
     /// listener); it will not accept again. On the listener's queue.
     public var onFailure: (@Sendable (Error) -> Void)? {

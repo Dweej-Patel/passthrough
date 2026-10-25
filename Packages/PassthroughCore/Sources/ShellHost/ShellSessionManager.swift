@@ -53,6 +53,12 @@ public final class ShellSessionManager: @unchecked Sendable {
         /// the text, where its output starts, and until when it may show up.
         var pendingTitle: (text: String, from: Int, until: Int)?
         var lastOutputAt: Date
+        /// The last few KB of output, to look for a question once it goes quiet.
+        var tail = Data()
+        /// The question it seems to be waiting on (`ShellQuestion`); nil once output or input moves on.
+        var waiting: String?
+        /// Looked for a question since the last output.
+        var checkedSinceOutput = true
         var exitStatus: Int32?
         var running = true
         var attachment: ShellAttachment?
@@ -66,7 +72,8 @@ public final class ShellSessionManager: @unchecked Sendable {
 
         var info: ShellSessionInfo {
             ShellSessionInfo(id: id, title: title, startedAt: startedAt.timeIntervalSince1970,
-                             lastOutputAt: lastOutputAt.timeIntervalSince1970, running: running, exitStatus: exitStatus)
+                             lastOutputAt: lastOutputAt.timeIntervalSince1970, running: running, exitStatus: exitStatus,
+                             waiting: running ? waiting : nil)
         }
     }
 
@@ -89,6 +96,9 @@ public final class ShellSessionManager: @unchecked Sendable {
     private let environment: () -> [String: String]
     private let directory: URL
     private let endedRetention: TimeInterval
+    /// How long output must stay quiet before the last lines are read for a question.
+    private let quietBeforeAsking: TimeInterval
+    private static let tailBytes = 4096
 
     /// Guards everything below.
     private let queue = DispatchQueue(label: "passthrough.shell.sessions")
@@ -106,12 +116,14 @@ public final class ShellSessionManager: @unchecked Sendable {
                 command: @escaping () -> (String, [String]) = { LoginShell.command() },
                 environment: @escaping () -> [String: String] = { LoginShell.environment() },
                 directory: URL = FileManager.default.homeDirectoryForCurrentUser,
-                endedRetention: TimeInterval = 600) {
+                endedRetention: TimeInterval = 600,
+                quietBeforeAsking: TimeInterval = 1.5) {
         self.transcripts = transcripts
         self.command = command
         self.environment = environment
         self.directory = directory
         self.endedRetention = endedRetention
+        self.quietBeforeAsking = quietBeforeAsking
     }
 
     public var sessions: [ShellSessionInfo] {
@@ -207,6 +219,11 @@ public final class ShellSessionManager: @unchecked Sendable {
             guard let session = table[id], session.running else { return }
             session.process.write(data)
             if !session.titleKnown { learnTitle(from: data, session: session) }
+            // Someone answered: it isn't waiting any more.
+            if session.waiting != nil {
+                session.waiting = nil
+                notifyChange()
+            }
         }
     }
 
@@ -263,10 +280,34 @@ public final class ShellSessionManager: @unchecked Sendable {
         session.writer.append(data, at: now)
         session.lastOutputAt = now
         if session.pendingTitle != nil { adoptEchoedTitle(session) }
+        noteOutput(data, session: session)
         if let client = session.attachment, table[session.id] === session {
             let id = session.id
             callouts.async { client.shellOutput(data, session: id) }
         }
+    }
+
+    /// Keeps the tail, clears a question the output moved past, and looks
+    /// again once the output has been quiet for `quietBeforeAsking`.
+    private func noteOutput(_ data: Data, session: Session) {
+        session.tail.append(data)
+        if session.tail.count > Self.tailBytes { session.tail = session.tail.suffix(Self.tailBytes) }
+        session.checkedSinceOutput = false
+        let count = session.outputCount
+        queue.asyncAfter(deadline: .now() + quietBeforeAsking) { [weak self, weak session] in
+            // A later output scheduled its own look.
+            guard let self, let session, session.outputCount == count else { return }
+            lookForQuestion(session)
+        }
+    }
+
+    private func lookForQuestion(_ session: Session) {
+        guard session.running, !session.checkedSinceOutput, table[session.id] === session else { return }
+        session.checkedSinceOutput = true
+        let question = ShellQuestion.find(in: session.tail)
+        guard question != session.waiting else { return }
+        session.waiting = question
+        notifyChange()
     }
 
     private func ended(_ session: Session, status: Int32) {

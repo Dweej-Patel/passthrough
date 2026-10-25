@@ -159,7 +159,12 @@ final class RemoteShellController: ObservableObject {
             self.transcripts = transcripts
             self.manager = manager
             manager.onChange = { [weak self] in
-                Task { @MainActor in self?.refreshSessions() }
+                Task { @MainActor in
+                    self?.refreshSessions()
+                    // Phones hear of new, ended and waiting sessions without asking.
+                    self?.listener?.pushSessions()
+                    self?.iroh?.listener?.pushSessions()
+                }
             }
         } catch {
             ptLog(.error, "shell: could not open the history folder: \(error.localizedDescription)")
