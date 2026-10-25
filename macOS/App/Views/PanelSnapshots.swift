@@ -24,6 +24,7 @@ enum PanelSnapshots {
         for (name, configure) in states {
             let session = SessionCoordinator()
             configure(session)
+            session.keepAwake.showAsHeldForSnapshot()
             for scheme in [ColorScheme.dark, .light] {
                 let view = MenuPanelView().environmentObject(session).environmentObject(session.vpnLayer).environmentObject(session.keepAwake).environmentObject(session.shell)
                     .background(Color(nsColor: .windowBackgroundColor))

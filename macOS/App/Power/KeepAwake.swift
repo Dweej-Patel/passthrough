@@ -51,6 +51,12 @@ final class KeepAwakeController: ObservableObject {
         }
     }
 
+    /// Snapshot runs start no helper: draw Keep awake as it looks once the helper holds lid-close sleep.
+    func showAsHeldForSnapshot() {
+        guard SessionCoordinator.isSnapshotRun else { return }
+        lidCloseHeld = isOn
+    }
+
     /// Re-asserts lid-close sleep once the helper is known to be current.
     func resume() { applyLidClose(isOn) }
 
