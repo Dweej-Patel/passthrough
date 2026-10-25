@@ -1091,6 +1091,109 @@ final class ShellListenerTests: XCTestCase {
         XCTAssertFalse(probe.disconnected, "a hand-over is not a disconnect")
     }
 
+    // MARK: Mac state and control
+
+    private static func state(_ events: [ShellClient.Event]) -> [MacState] {
+        events.compactMap { if case .macState(let s) = $0 { s } else { nil } }
+    }
+
+    func testMacStateFollowsReadyAndIsPushedAgain() {
+        let listener = startListener()
+        let awake = Locked(false)
+        listener.macState = { $0 == "phone-1" ? MacState(awake: awake.get(), control: true) : nil }
+        let (_, probe) = readyClient(listener)
+        wait(for: [probe.expect(self, "state") { Self.state($0) == [MacState(awake: false, control: true)] }], timeout: 5)
+        awake.set(true)
+        listener.pushMacState()
+        wait(for: [probe.expect(self, "pushed") { Self.state($0).last == MacState(awake: true, control: true) }], timeout: 5)
+    }
+
+    func testNoMacStateWithoutAProvider() {
+        let listener = startListener()
+        let (_, probe) = readyClient(listener)
+        wait(for: [probe.expect(self, "sessions") { $0.contains { if case .sessions = $0 { true } else { false } } }], timeout: 5)
+        listener.pushMacState()
+        let (_, second) = readyClient(listener)
+        wait(for: [second.expect(self, "sessions") { $0.contains { if case .sessions = $0 { true } else { false } } }], timeout: 5)
+        XCTAssertTrue(Self.state(probe.events.get()).isEmpty)
+    }
+
+    func testSessionsArePushedUnasked() throws {
+        let listener = startListener()
+        let (_, probe) = readyClient(listener)
+        wait(for: [probe.expect(self, "first list") { $0.contains { if case .sessions = $0 { true } else { false } } }], timeout: 5)
+        let id = try manager.open(phoneLabel: "Test iPhone", cols: 80, rows: 24)
+        listener.pushSessions()
+        wait(for: [probe.expect(self, "pushed") { events in
+            events.contains { if case .sessions(let list) = $0 { list.map(\.id) == [id] } else { false } }
+        }], timeout: 5)
+    }
+
+    func testEventsAreAnsweredFromTheProvider() {
+        let listener = startListener()
+        listener.macEvents = { phoneID, since in
+            ([MacEvent(t: since + 1, kind: "awake", title: "\(phoneID) asked")], [BatterySample(t: since, level: 0.5)])
+        }
+        let (client, probe) = readyClient(listener)
+        client.requestEvents(since: Date(timeIntervalSince1970: 1_800_000_000))
+        wait(for: [probe.expect(self, "events") { events in
+            events.contains { if case let .events(since, list, battery) = $0 {
+                since == 1_800_000_000 && list.map(\.title) == ["phone-1 asked"] && battery.map(\.level) == [0.5]
+            } else { false } }
+        }], timeout: 5)
+    }
+
+    func testEventsWithoutAProviderAreABadRequest() {
+        let listener = startListener()
+        let (client, probe) = readyClient(listener)
+        client.requestEvents(since: .now)
+        wait(for: [probe.expect(self, "refused") { _ in probe.failures == [.badRequest] }], timeout: 5)
+    }
+
+    func testControlRequestsReachTheHandlerWithThePhone() {
+        let listener = startListener()
+        let asked = Locked<[String]>([])
+        listener.onMacControl = { phoneID, label, change in
+            asked.set(asked.get() + ["\(phoneID) \(label) \(change)"])
+            return nil
+        }
+        let (client, probe) = readyClient(listener)
+        client.setAwake(true)
+        client.setVPN(false)
+        waitUntil("both asked") { asked.get().count == 2 }
+        XCTAssertEqual(asked.get(), ["phone-1 Test iPhone awake(true)", "phone-1 Test iPhone vpn(false)"])
+        XCTAssertTrue(probe.failures.isEmpty)
+    }
+
+    /// The Mac holding its state (a limit refusing Keep awake) still answers
+    /// the phone that asked, so its spinner always stops.
+    func testAnAcceptedRequestIsAnsweredEvenWhenNothingChanges() {
+        let listener = startListener()
+        listener.macState = { _ in MacState(awake: false, awakeStopped: MacState.stoppedBattery, control: true) }
+        listener.onMacControl = { _, _, _ in nil }
+        let (client, probe) = readyClient(listener)
+        wait(for: [probe.expect(self, "state") { Self.state($0).count == 1 }], timeout: 5)
+        client.setAwake(true)
+        wait(for: [probe.expect(self, "answered") { Self.state($0).count == 2 }], timeout: 5)
+        XCTAssertTrue(probe.failures.isEmpty)
+    }
+
+    func testARefusedControlRequestIsAnswered() {
+        let listener = startListener()
+        listener.onMacControl = { _, _, _ in .notAllowed }
+        let (client, probe) = readyClient(listener)
+        client.setVPN(false)
+        wait(for: [probe.expect(self, "refused") { _ in probe.failures == [.notAllowed] }], timeout: 5)
+        XCTAssertFalse(probe.disconnected, "the connection carries on")
+    }
+
+    func testControlWithoutAHandlerIsABadRequest() {
+        let listener = startListener()
+        let (client, probe) = readyClient(listener)
+        client.setAwake(true)
+        wait(for: [probe.expect(self, "refused") { _ in probe.failures == [.badRequest] }], timeout: 5)
+    }
+
     func testClientIsToldWhenTheScreenIsNotAllowed() {
         let listener = startListener()
         let (client, probe) = readyClient(listener)

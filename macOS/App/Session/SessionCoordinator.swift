@@ -100,6 +100,12 @@ final class SessionCoordinator: ObservableObject {
     /// The Mac's Wi-Fi is a metered network, which is how macOS marks a phone's hotspot.
     @Published private(set) var onPhoneHotspot = false
     private let wifiMonitor = NWPathMonitor(requiredInterfaceType: .wifi)
+    /// The user turned Internet off: nothing connects on its own (auto-connect,
+    /// a wireless re-link, the helper coming back) until they turn it on again
+    /// or plug a phone in.
+    @Published private(set) var heldOff = false
+    /// A failed connection is waiting to try again on its own.
+    @Published private(set) var retrying = false
 
     /// Also watch for Android phones through adb. On by default; harmless without platform-tools.
     @Published var androidEnabled: Bool = UserDefaults.standard.object(forKey: "androidEnabled") as? Bool ?? true {
@@ -142,6 +148,10 @@ final class SessionCoordinator: ObservableObject {
     let appUsage = NettopSampler()
     let keepAwake: KeepAwakeController
     let shell = RemoteShellController()
+    /// What phones see of Keep awake and the VPN, and their requests to change them.
+    private var macStateBridge: MacStateBridge?
+    /// Writes the timeline phones read.
+    private var eventRecorder: MacEventRecorder?
 
     private let helper = HelperClient()
     private let directory: DeviceDirectory
@@ -193,7 +203,8 @@ final class SessionCoordinator: ObservableObject {
         if storedClientID.isEmpty { storedClientID = UUID().uuidString }
         return storedClientID
     }
-    var macName: String { Host.current().localizedName ?? "Mac" }
+    /// A neutral name in snapshot runs: their images may end up in the README.
+    var macName: String { Self.isSnapshotRun ? "MacBook Pro" : Host.current().localizedName ?? "Mac" }
     /// Keychain slot of the attached phone's pairing token (the slot iPhones
     /// once shared when none is attached).
     private var pairingSlot: String { device?.pairingSlot ?? PhoneDevice.sharediPhonePairingSlot }
@@ -279,6 +290,9 @@ final class SessionCoordinator: ObservableObject {
             guard let self, !self.phase.isConnected else { return }
             self.phase = .helperRequired
         }
+        let recorder = MacEventRecorder(log: shell.events, session: self)
+        eventRecorder = recorder
+        macStateBridge = MacStateBridge(session: self, recorder: recorder)
         directory.onChange = { [weak self] change in self?.devicesChanged(change) }
         helper.onInterrupted = { [weak self] in Task { @MainActor in self?.syncHotspotGuard() } }
         androidWatcher.onStatusChange = { [weak self] status in self?.androidWatch = status }
@@ -353,7 +367,8 @@ final class SessionCoordinator: ObservableObject {
         switch change {
         case .attached(let d):
             retryAttempts = 0
-            if d.medium == .usb { helperRecovery.reset() }
+            // Plugging a phone in is asking for it again.
+            if d.medium == .usb { helperRecovery.reset(); heldOff = false }
             ptLog(.info, "\(d.kindName) \(d.medium == .usb ? "attached over USB" : "reachable wirelessly") (\(d.label))")
             reconsiderDevice()
         case .detached(let gone):
@@ -383,7 +398,7 @@ final class SessionCoordinator: ObservableObject {
             shellControlRetryAt = .distantPast
             shellControlBackoff.succeeded()
             ensureShellControl()
-            if autoConnect, !suppressAutoConnect { beginConnect() }
+            if autoConnect, !suppressAutoConnect, !heldOff { beginConnect() }
         } else {
             phase = .noDevice
         }
@@ -565,8 +580,26 @@ final class SessionCoordinator: ObservableObject {
 
     /// The user asked to connect: a new series of attempts.
     func connect() {
+        heldOff = false
         helperRecovery.reset()
         beginConnect()
+    }
+
+    /// Online through a phone, or on its way there (`MacState.internet`).
+    var internetShared: Bool { phase.isConnected || phase.isBusy }
+
+    /// The last attempt found the phone's app closed (it refused the link).
+    var phoneAppClosed: Bool {
+        guard case .error(let message) = phase else { return false }
+        return message.contains("refused") || message.hasPrefix("Passthrough isn't running")
+    }
+
+    /// What to say before letting the Mac sleep while phones' shells run; nil when none do.
+    var sleepWarning: String? {
+        let running = shell.sessions.filter(\.running).count
+        guard running > 0 else { return nil }
+        let shells = running == 1 ? "A shell from your phone is" : "\(running) shells from your phone are"
+        return "\(shells) running. Asleep, the Mac pauses \(running == 1 ? "it" : "them") until it wakes."
     }
 
     private func beginConnect() {
@@ -579,6 +612,7 @@ final class SessionCoordinator: ObservableObject {
         guard !phase.isConnected, !phase.isBusy else { return }
         wantsConnection = true
         retryTask?.cancel()
+        retrying = false
         generation += 1
         let gen = generation
         phase = .connecting("Checking helper")
@@ -854,9 +888,13 @@ final class SessionCoordinator: ObservableObject {
         control.pair(code: code)
     }
 
+    /// The user turned Internet off (or cancelled pairing): it stays off until
+    /// they turn it on or plug a phone in (`heldOff`).
     func disconnect() {
         wantsConnection = false
+        heldOff = true
         retryTask?.cancel()
+        retrying = false
         connectAfterHelperRetry = false
         // Cancelling a pairing shown over a helper that isn't ready shows the helper again.
         let helperPending = phase == .pairingRequired && !tunnelUsesControl && helper.availability != .ready
@@ -882,6 +920,7 @@ final class SessionCoordinator: ObservableObject {
         helperRetryInFlight = true
         connectAfterHelperRetry = false
         retryTask?.cancel()
+        retrying = false
         if phase == .helperRequired { teardown(to: device == nil ? .noDevice : .deviceFound) }
         helperNote = "Registering the helper again…"
         Task {
@@ -905,7 +944,7 @@ final class SessionCoordinator: ObservableObject {
                     // Connect now; finishHelperRetry then has nothing left to run.
                     helperRetryInFlight = false
                     connectAfterHelperRetry = false
-                    if device != nil, !phase.isConnected, !phase.isBusy { beginConnect() }
+                    if device != nil, !heldOff, !phase.isConnected, !phase.isBusy { beginConnect() }
                 }
             case .needsApproval:
                 helperNote = "Registered again; approve Passthrough in Login Items in System Settings."
@@ -978,10 +1017,11 @@ final class SessionCoordinator: ObservableObject {
         let delay = min(30, 2 * retryAttempts)
         ptLog(.info, "Retrying in \(delay)s")
         retryTask?.cancel()
+        retrying = true
         retryTask = Task { [weak self] in
             try? await Task.sleep(for: .seconds(delay))
-            guard !Task.isCancelled else { return }
-            self?.beginConnect()
+            guard !Task.isCancelled, let self, self.wantsConnection else { return }
+            self.beginConnect()
         }
     }
 
@@ -1081,7 +1121,7 @@ final class SessionCoordinator: ObservableObject {
         let availability = helper.availability
         if availability != helperAvailability {
             helperAvailability = availability
-            if availability == .ready, phase == .helperRequired { beginConnect() }
+            if availability == .ready, phase == .helperRequired, !heldOff { beginConnect() }
         }
         ensureShellControl()
     }
@@ -1146,11 +1186,14 @@ final class SessionCoordinator: ObservableObject {
     static let isSnapshotRun = CommandLine.arguments.contains("--snapshot")
 
     /// Puts the coordinator into a synthetic state for previews and snapshots.
-    func debugApply(phase: Phase, device: Bool = false, status: DeviceStatus? = nil, traffic: Bool = false, vpn vpnState: String? = nil, underlay: String = "iPhone") {
+    func debugApply(phase: Phase, device: Bool = false, status: DeviceStatus? = nil, traffic: Bool = false, vpn vpnState: String? = nil,
+                    underlay: String = "iPhone", retrying: Bool = false, heldOff: Bool = false) {
         ticker?.cancel()
         for watcher in directory.watchers { watcher.onDevicesChange = nil; watcher.stop() }
         panelVisible = true
         self.phase = phase
+        self.retrying = retrying
+        self.heldOff = heldOff
         if let vpnState { vpnLayer.debugApply(state: vpnState, underlay: underlay) }
         self.device = device ? .iPhone(deviceID: 1, udid: "preview") : nil
         phoneStatus = status

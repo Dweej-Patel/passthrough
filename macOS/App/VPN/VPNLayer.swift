@@ -319,10 +319,17 @@ final class VPNLayer: ObservableObject {
     }
 
     func debugApply(state: String, underlay: String) {
-        isWanted = true
+        isWanted = state != "off"
         var v = VPNStatus(state: state, name: "NordVPN · us9591", engine: "openvpn")
         v.interface = "utun9"; v.underlay = underlay; v.since = Date().addingTimeInterval(-612)
-        status = v
+        status = isWanted ? v : VPNStatus()
+    }
+
+    /// Snapshots: one made-up profile (or none), never the Mac's own, and an error to show.
+    func debugApply(profile: Bool, error: String? = nil) {
+        // `activeProfile` falls back to the first: no need to write the stored choice.
+        profiles = profile ? [VPNProfile(name: "NordVPN · us9591", engine: .openvpn)] : []
+        self.error = error
     }
 }
 
@@ -367,6 +374,11 @@ struct VPNStatus: Equatable {
     var isBusy: Bool { state == "starting" || state == "reconnecting" || state == "blocked" }
     /// Traffic is held back by the kill switch.
     var isBlocking: Bool { state == "blocked" || state == "held" }
+    /// Failed, or still held by the kill switch from before Passthrough
+    /// stopped: stays so until someone acts (the menu-bar "!").
+    var isFailing: Bool { state == "failed" || state == "held" }
+    /// Wanted but not carrying traffic: failing, or reconnecting (the tile's amber).
+    var isDown: Bool { isFailing || state == "reconnecting" || state == "blocked" }
     var engineLabel: String { engine == "wireguard" ? "WireGuard" : engine == "openvpn" ? "OpenVPN" : engine }
     var duration: TimeInterval? { since.map { Date().timeIntervalSince($0) } }
 }

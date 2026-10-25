@@ -26,8 +26,14 @@ struct PairSheet: View {
                 }
                 if model.state != .running {
                     PTCard {
-                        Label("Start the proxy first so the Mac can reach this phone.", systemImage: "exclamationmark.triangle.fill")
-                            .font(.footnote).foregroundStyle(PTTheme.warning)
+                        VStack(alignment: .leading, spacing: 10) {
+                            Label("This iPhone's internet sharing is off, so the Mac can't reach it to pair.", systemImage: "exclamationmark.triangle.fill")
+                                .font(.footnote).foregroundStyle(PTTheme.warning)
+                                .fixedSize(horizontal: false, vertical: true)
+                            Button(model.state == .starting ? "Turning on…" : "Turn on sharing") { model.start() }
+                                .buttonStyle(.bordered)
+                                .disabled(model.state == .starting || model.state == .stopping)
+                        }
                     }
                     .padding(.horizontal, 24)
                 }

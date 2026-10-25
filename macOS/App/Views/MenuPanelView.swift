@@ -2,18 +2,22 @@ import SwiftUI
 import PassthroughCore
 import PassthroughUI
 
-/// The menu bar panel: everything you need at a glance, one click to connect.
+/// The menu bar panel, read top to bottom: what the Mac is doing, the three
+/// switches (each saying why when it can't turn on, and what fixes it), what
+/// your phone is doing here, then the details: the link, speeds, top apps.
 struct MenuPanelView: View {
     @EnvironmentObject private var session: SessionCoordinator
+    @EnvironmentObject private var keepAwake: KeepAwakeController
+    @EnvironmentObject private var vpnLayer: VPNLayer
     @Environment(\.openSettings) private var openSettings
 
     var body: some View {
         Group {
-            if session.panelVisible {
+            if session.panelVisible || SessionCoordinator.isSnapshotRun {
                 panel
             } else {
                 // Closed: MenuBarExtra keeps this view alive; don't lay out or
-                // rasterise the chart and blur for a panel nobody can see.
+                // rasterise the chart for a panel nobody can see.
                 Color.clear.frame(width: 356, height: 120)
             }
         }
@@ -23,333 +27,560 @@ struct MenuPanelView: View {
     }
 
     private var panel: some View {
-        ZStack {
-            PTBackground(glow: session.phase.isConnected ? 1 : 0.5)
-            VStack(spacing: 14) {
-                header
-                switch session.phase {
-                case .helperRequired: HelperCard()
-                case .pairingRequired: PairingCard()
-                default: hero
+        VStack(spacing: 12) {
+            header
+            AskingRows()
+            ScrollView {
+                VStack(spacing: 12) {
+                    if session.phase == .pairingRequired { PairingCard() }
+                    Switches()
+                    PhoneHereSection()
+                    Details()
                 }
-                FlowCard()
-                VPNRow()
-                KeepAwakeRow()
-                ShellSessionsRow()
-                ScreenViewersRow()
-                ThroughputPanel()
-                TopAppsPanel(usage: session.appUsage)
-                footer
+                .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { bodyHeight = $0 }
             }
-            .padding(16)
+            .scrollBounceBehavior(.basedOnSize)
+            .frame(height: min(bodyHeight, maxBodyHeight))
+            Divider().opacity(0.6)
+            footer
         }
+        .padding(14)
         .frame(width: 356)
     }
 
+    /// The middle of the panel scrolls once it's taller than the screen leaves
+    /// room for, under the header and above the footer.
+    @State private var bodyHeight: CGFloat = 600
+    private var maxBodyHeight: CGFloat { max(240, (NSScreen.screens.first?.visibleFrame.height ?? 800) - 150) }
+
     // MARK: Header
+
+    private var phoneName: String { session.phoneStatus?.deviceName ?? session.phoneKindName }
 
     private var header: some View {
         HStack(spacing: 10) {
-            ZStack {
-                RoundedRectangle(cornerRadius: 10, style: .continuous).fill(PTTheme.accent).frame(width: 36, height: 36)
-                Image(systemName: session.device?.kind == .android ? "smartphone" : "iphone.gen3").font(.system(size: 18, weight: .semibold)).foregroundStyle(.white)
+            Image(systemName: session.device?.kind == .android ? "smartphone" : "iphone.gen3")
+                .font(.system(size: 16, weight: .semibold))
+                .foregroundStyle(session.phase.isConnected ? PTColor.onTint : Color.secondary)
+                .frame(width: 34, height: 34)
+                .background(session.phase.isConnected ? PTColor.tint : Color.primary.opacity(0.08), in: Circle())
+            VStack(alignment: .leading, spacing: 1) {
+                Text(title).font(.headline).lineLimit(1).contentTransition(.opacity)
+                Text(subtitle).font(.caption).foregroundStyle(.secondary).lineLimit(1).contentTransition(.opacity)
             }
-            VStack(alignment: .leading, spacing: 2) {
-                Text(session.phoneStatus?.deviceName ?? (session.device == nil ? "No phone" : session.phoneKindName))
-                    .font(.headline)
-                Text(statusLine).font(.caption).foregroundStyle(.secondary).lineLimit(1)
-                    .contentTransition(.opacity)
-            }
-            Spacer()
-            HStack(spacing: 6) {
-                if let radio = session.phoneStatus?.radio { PTPill(radio, tint: PTTheme.down) }
-                if let battery = session.phoneStatus?.battery {
-                    PTPill("\(Int(battery * 100))%", icon: batterySymbol(battery), tint: battery < 0.2 ? PTTheme.warning : .secondary)
-                }
-            }
+            Spacer(minLength: 0)
         }
+        .accessibilityElement(children: .combine)
     }
 
-    private func batterySymbol(_ level: Double) -> String {
-        switch level {
-        case ..<0.15: return "battery.0percent"
-        case ..<0.4: return "battery.25percent"
-        case ..<0.65: return "battery.50percent"
-        case ..<0.9: return "battery.75percent"
-        default: return "battery.100percent"
-        }
-    }
-
-    private var statusLine: String {
+    private var title: String {
         switch session.phase {
-        case .noDevice: return session.connectionMode == .wireless ? "Looking for a linked phone nearby" : "Plug an iPhone or Android phone into USB"
-        case .deviceFound: return "Ready to connect \(session.linkName)"
-        case .helperRequired: return "Helper needs approval"
+        case .connected: "Online through \(phoneName)"
+        case .connecting: "Connecting to \(phoneName)…"
+        case .pairingRequired: "Pair with \(phoneName)"
+        default: "Not using your \(session.phoneKindName)"
+        }
+    }
+
+    /// "VPN on · USB · 5G · iPhone 82%" while online; else which network the Mac is on.
+    private var subtitle: String {
+        let vpnOn = vpnLayer.isWanted && vpnLayer.status.isConnected
+        switch session.phase {
+        case .connected:
+            var parts = vpnOn ? ["VPN on"] : []
+            parts.append(session.device?.medium == .wireless ? (session.wirelessCarrier ?? "Wireless") : "USB")
+            if let radio = session.phoneStatus?.radio { parts.append(radio) }
+            if let battery = session.phoneStatus?.battery { parts.append("\(session.phoneKindName) \(MacFormat.percent(battery))") }
+            return parts.joined(separator: " · ")
         case .connecting(let step): return step
-        case .pairingRequired: return "Enter the code from the \(session.phoneKindName)"
-        case .connected:
-            let n = session.phoneActiveConnections
-            return "Online \(session.linkName) · \(n) open connection\(n == 1 ? "" : "s")"
-        case .error(let message): return message
-        }
-    }
-
-    // MARK: Hero
-
-    private var hero: some View {
-        PTCard(padding: 14) {
-            HStack(spacing: 14) {
-                ZStack {
-                    StatusRing(mode: ringMode, size: 64, lineWidth: 5)
-                    Image(systemName: session.phase.isConnected ? "checkmark" : (session.device == nil ? "cable.connector.slash" : "cable.connector"))
-                        .font(.system(size: 20, weight: .bold))
-                        .foregroundStyle(session.phase.isConnected ? AnyShapeStyle(PTTheme.accent) : AnyShapeStyle(Color.secondary))
-                }
-                VStack(alignment: .leading, spacing: 4) {
-                    Text(heroTitle).font(.subheadline.weight(.semibold))
-                    Text(heroDetail).font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
-                }
-                Spacer(minLength: 0)
-                ConnectToggle(isOn: session.phase.isConnected || session.phase.isBusy, busy: session.phase.isBusy, enabled: session.device != nil) {
-                    session.toggle()
-                }
-            }
-        }
-    }
-
-    private var ringMode: StatusRing.Mode {
-        switch session.phase {
-        case .connected: return .live
-        case .connecting: return .busy
-        case .error: return .error
-        default: return .idle
-        }
-    }
-
-    private var heroTitle: String {
-        switch session.phase {
-        case .connected: return "Passthrough is on"
-        case .connecting: return "Connecting…"
-        case .error: return "Not connected"
-        case .noDevice: return session.connectionMode == .wireless ? "Waiting for the phone" : "Waiting for USB"
-        default: return "Passthrough is off"
-        }
-    }
-
-    private var heroDetail: String {
-        switch session.phase {
-        case .connected:
-            if session.phoneStatus?.radio == "Wi-Fi" {
-                return "The \(session.phoneKindName) is on Wi-Fi, so this Mac uses its Wi-Fi, not cellular. Turn off Wi-Fi on the phone to use cellular."
-            }
-            if let iface = session.tunnelInterface, let d = session.sessionDuration {
-                return "All traffic routes through \(iface) for \(ByteFormat.duration(d))."
-            }
-            return "All traffic routes through the \(session.phoneKindName)."
-        case .connecting: return "Setting up the link and routing. Open connections will switch over."
-        case .error(let message): return message
-        case .noDevice:
-            if session.connectionMode == .wireless {
-                return "Turn on Wireless link in Passthrough on the phone and keep it nearby. A phone links the first time it connects over USB."
-            }
-            return session.androidHint ?? "Connect the cable and unlock the phone. Trust this Mac if asked; Android phones need USB debugging on."
-        default: return session.hasToken ? "Flip the switch to route this Mac through the \(session.phoneKindName)." : "First connection will ask for a pairing code."
+        case .pairingRequired: return "Type the code shown on the \(session.phoneKindName)"
+        default: return vpnOn ? "VPN on, over this Mac's own network" : "This Mac is on its own network"
         }
     }
 
     // MARK: Footer
 
     private var footer: some View {
-        HStack {
-            Button { session.autoConnect.toggle() } label: {
-                HStack(spacing: 7) {
-                    MiniSwitch(isOn: session.autoConnect)
-                    Text("Auto-connect").font(.caption)
-                }
-            }
-            .buttonStyle(.plain)
-            .help("Connect as soon as a phone is plugged in")
+        HStack(spacing: 10) {
+            Text(macHealth).font(.caption).foregroundStyle(.secondary).lineLimit(1)
             Spacer()
+            Toggle(isOn: $session.autoConnect) { Text("Connect on plug-in").lineLimit(1).fixedSize() }
+                .toggleStyle(MintSwitchStyle(small: true))
+                .font(.caption)
+                .help("Go online through the phone as soon as it's plugged in. Turning Internet off keeps it off until you plug the phone in again.")
             Button { SettingsWindow.show(openSettings) } label: { Image(systemName: "gearshape").font(.system(size: 13, weight: .semibold)) }
                 .buttonStyle(.plain).foregroundStyle(.secondary)
-                .help("Settings")
+                .help("Settings (⌘,)")
+                .keyboardShortcut(",", modifiers: .command)
             Button { NSApp.terminate(nil) } label: { Image(systemName: "power").font(.system(size: 13, weight: .semibold)) }
-                .buttonStyle(.plain).foregroundStyle(.secondary).padding(.leading, 10)
-                .help("Quit Passthrough")
+                .buttonStyle(.plain).foregroundStyle(.secondary)
+                .help("Quit Passthrough (⌘Q)")
+                .keyboardShortcut("q", modifiers: .command)
         }
-        .padding(.top, 2)
+    }
+
+    /// "Mac 64% · charging", "Mac 30% · running hot"; "heat normal" on a desktop Mac.
+    private var macHealth: String {
+        let battery = keepAwake.battery
+        var parts: [String] = []
+        if battery.hasBattery, battery.percent >= 0 { parts.append("Mac \(battery.percent)%\(battery.isOnAC ? " · charging" : "")") }
+        if KeepAwakeController.isHot(keepAwake.thermal) {
+            parts.append("running \(KeepAwakeController.describe(keepAwake.thermal))")
+        } else if parts.isEmpty {
+            parts.append("heat normal")
+        }
+        return parts.joined(separator: " · ")
     }
 }
 
-/// Tiny SwiftUI switch used in the footer.
-struct MiniSwitch: View {
-    let isOn: Bool
-    var body: some View {
-        ZStack(alignment: isOn ? .trailing : .leading) {
-            Capsule().fill(isOn ? AnyShapeStyle(PTTheme.accent) : AnyShapeStyle(Color.primary.opacity(0.15))).frame(width: 30, height: 17)
-            Circle().fill(.white).frame(width: 13, height: 13).padding(2).shadow(color: .black.opacity(0.2), radius: 1, y: 0.5)
-        }
-        .animation(.spring(response: 0.25, dampingFraction: 0.8), value: isOn)
-    }
-}
+// MARK: - The three switches
 
-/// Custom capsule switch with the accent gradient.
-struct ConnectToggle: View {
-    let isOn: Bool
-    let busy: Bool
-    let enabled: Bool
-    let action: () -> Void
-
-    var body: some View {
-        Button(action: action) {
-            ZStack(alignment: isOn ? .trailing : .leading) {
-                Capsule()
-                    .fill(isOn ? AnyShapeStyle(PTTheme.accent) : AnyShapeStyle(Color.primary.opacity(0.12)))
-                    .frame(width: 52, height: 30)
-                    .shadow(color: isOn ? PTTheme.accentStart.opacity(0.5) : .clear, radius: 10)
-                Circle()
-                    .fill(.white)
-                    .frame(width: 24, height: 24)
-                    .shadow(color: .black.opacity(0.25), radius: 2, y: 1)
-                    .padding(3)
-                    .overlay {
-                        if busy { ProgressView().controlSize(.mini) }
-                    }
-            }
-            .animation(.spring(response: 0.3, dampingFraction: 0.7), value: isOn)
-        }
-        .buttonStyle(.plain)
-        .disabled(!enabled)
-        .opacity(enabled ? 1 : 0.5)
-        .accessibilityLabel(isOn ? "Disconnect" : "Connect")
-    }
-}
-
-/// A quick toggle to keep the Mac awake for long sessions.
-struct KeepAwakeRow: View {
+/// Internet through the phone, Keep awake and the VPN. Each shows what is so,
+/// never what was asked for: a switch that can't turn on flips back off and
+/// says why under it, with what fixes it.
+struct Switches: View {
+    @EnvironmentObject private var session: SessionCoordinator
+    @EnvironmentObject private var vpnLayer: VPNLayer
     @EnvironmentObject private var keepAwake: KeepAwakeController
-    private var keepAwakeSubtitle: String {
-        guard keepAwake.isOn else { return "Sleeps normally" }
-        if !keepAwake.lidCloseHeld { return "Idle sleep held (approve helper for lid-close)" }
-        if keepAwake.batteryAutoOff, keepAwake.battery.hasBattery, !keepAwake.battery.isOnAC {
-            return "Awake with lid closed · off at \(keepAwake.batteryAutoOffThreshold)%"
-        }
-        return "Stays awake even with the lid closed"
-    }
+    @Environment(\.openSettings) private var openSettings
+    /// Keep awake turning off with shells running, waiting on "Let it sleep".
+    @State private var askingSleep = false
+
     var body: some View {
-        VStack(spacing: 0) {
-        Button { keepAwake.set(!keepAwake.isOn) } label: {
-            HStack(spacing: 10) {
-                Image(systemName: keepAwake.isOn ? "cup.and.saucer.fill" : "cup.and.saucer")
-                    .font(.system(size: 14, weight: .semibold))
-                    .foregroundStyle(keepAwake.isOn ? AnyShapeStyle(PTTheme.accent) : AnyShapeStyle(Color.secondary))
-                    .frame(width: 20)
-                VStack(alignment: .leading, spacing: 1) {
-                    Text("Keep Mac awake").font(.subheadline.weight(.medium))
-                    Text(keepAwakeSubtitle)
-                        .font(.caption2).foregroundStyle(keepAwake.isOn && !keepAwake.lidCloseHeld ? PTTheme.warning : .secondary)
-                }
-                Spacer()
-                MiniSwitch(isOn: keepAwake.isOn)
+        PTSurface(padding: 4) {
+            VStack(spacing: 0) {
+                internet
+                Divider().padding(.leading, 50)
+                awake
+                Divider().padding(.leading, 50)
+                vpn
             }
-            .padding(.horizontal, 12).padding(.vertical, 9)
-            .background(Color.primary.opacity(0.04), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
         }
-        .buttonStyle(.plain)
-        .help("Keeps the Mac awake for long sessions, including with the lid closed. Warning: a closed, running Mac in a bag can overheat and drain the battery.")
-        if let reason = keepAwake.blockedReason {
-            HStack(alignment: .top, spacing: 6) {
-                Image(systemName: "exclamationmark.triangle.fill").font(.caption2)
-                Text(reason).font(.caption2)
-                Spacer(minLength: 0)
+        .onChange(of: keepAwake.isOn) { _, on in if !on { askingSleep = false } }
+    }
+
+    // MARK: Internet
+
+    private var kind: String { session.phoneKindName }
+
+    private var internet: some View {
+        let phase = session.phase
+        return SwitchRow(title: "Internet through \(session.phoneStatus?.deviceName ?? kind)", symbol: "antenna.radiowaves.left.and.right",
+                         status: internetStatus, isOn: phase.isConnected || phase.isBusy, busy: phase.isBusy,
+                         reason: internetReason, set: setInternet) {
+            if phase == .helperRequired {
+                Button("Open System Settings") { session.openLoginItems() }.buttonStyle(PTPillButtonStyle())
+                Button("Try again") { session.retryHelper() }.buttonStyle(.link)
+            } else if case .error = phase {
+                Button("Try again") { session.connect() }.buttonStyle(PTPillButtonStyle())
+                if session.retrying { Button("Stop trying") { session.disconnect() }.buttonStyle(.link) }
             }
-            .foregroundStyle(PTTheme.warning)
-            .padding(.horizontal, 12).padding(.top, 6)
-            .transition(.opacity)
         }
+        .help("Send all of this Mac's traffic through the \(kind)'s connection")
+    }
+
+    private var internetStatus: String {
+        switch session.phase {
+        case .connected:
+            if session.phoneStatus?.radio == "Wi-Fi" { return "On · the \(kind) is on Wi-Fi, so that's what the Mac uses" }
+            return "On · \(session.linkName)\(session.phoneStatus?.radio.map { " · \($0)" } ?? "")"
+        case .connecting: return "Connecting…"
+        case .pairingRequired: return "Waiting for the pairing code"
+        case .error where session.retrying: return "Off · trying again by itself"
+        default:
+            if session.device != nil, session.heldOff { return "Off until you turn it on or plug the \(kind) in again" }
+            return "Off · the Mac uses its own Wi-Fi or Ethernet"
         }
-        .animation(.easeInOut(duration: 0.2), value: keepAwake.blockedReason)
+    }
+
+    /// Why Internet can't be on right now, in the user's terms.
+    private var internetReason: String? {
+        switch session.phase {
+        case .noDevice:
+            if session.connectionMode == .wireless {
+                return "Bring your phone near, with Passthrough open and Wireless link on."
+            }
+            return "Plug in your iPhone or Android phone with a cable. " + (session.androidHint ?? "Unlock it, and tap Trust if it asks.")
+        case .helperRequired:
+            if case .failed(let why) = session.helperAvailability { return "Passthrough's helper couldn't start: \(why)" }
+            return "Allow Passthrough's helper in System Settings ▸ Login Items ▸ Allow in the Background."
+        case .error(let message):
+            if session.phoneAppClosed { return "Open Passthrough on your \(kind) and tap its power button." }
+            return message
+        default: return nil
+        }
+    }
+
+    private func setInternet(_ on: Bool) -> Bool {
+        guard on else { session.disconnect(); return true }
+        guard session.device != nil, session.phase != .helperRequired else { return false }
+        session.connect()
+        return true
+    }
+
+    // MARK: Keep awake
+
+    private var awake: some View {
+        SwitchRow(title: "Keep Mac awake", symbol: "cup.and.saucer", status: awakeStatus, isOn: keepAwake.isOn,
+                  reason: awakeReason, set: setAwake) {
+            if keepAwake.blockedReason != nil {
+                Button(keepAwake.blockedByBattery ? "Change the limit" : "Settings") { SettingsWindow.show(openSettings, tab: .general) }
+                    .buttonStyle(PTPillButtonStyle())
+            } else if lidNotHeld {
+                Button("Open System Settings") { session.openLoginItems() }.buttonStyle(PTPillButtonStyle())
+            }
+        } below: {
+            if askingSleep, let warning = session.sleepWarning {
+                SleepConfirm(warning: warning, action: "Let it sleep") {
+                    askingSleep = false
+                    keepAwake.set(false)
+                } cancel: { askingSleep = false }
+            }
+        }
+        .help(keepAwake.hasLid
+              ? "Keeps the Mac awake for long sessions, even with the lid closed. A closed, running Mac in a bag can overheat and drain the battery."
+              : "Keeps the Mac awake for long sessions. The screen still turns off and locks.")
+    }
+
+    private var lidNotHeld: Bool { keepAwake.isOn && keepAwake.hasLid && !keepAwake.lidCloseHeld }
+
+    private var awakeStatus: String {
+        guard keepAwake.isOn else { return "Off · the Mac sleeps as usual" }
+        guard keepAwake.hasLid else { return "On · the screen still turns off" }
+        if !keepAwake.lidCloseHeld { return "On while the lid is open" }
+        if keepAwake.batteryAutoOff, !keepAwake.battery.isOnAC { return "On, lid closed too · turns off at \(keepAwake.batteryAutoOffThreshold)%" }
+        return "On, even with the lid closed"
+    }
+
+    private var awakeReason: String? {
+        if keepAwake.blockedReason != nil {
+            if keepAwake.blockedByBattery {
+                return "Battery at \(keepAwake.battery.percent)%: plug in, or lower the \(keepAwake.batteryAutoOffThreshold)% limit."
+            }
+            return "The Mac is running \(KeepAwakeController.describe(keepAwake.thermal)): let it cool down, or turn off the heat limit."
+        }
+        if lidNotHeld { return "Closing the lid still sleeps the Mac until you allow Passthrough's helper." }
+        return nil
+    }
+
+    private func setAwake(_ on: Bool) -> Bool {
+        if !on, session.sleepWarning != nil {
+            askingSleep = true
+            return false
+        }
+        askingSleep = false
+        keepAwake.set(on)
+        return keepAwake.isOn == on
+    }
+
+    // MARK: VPN
+
+    private var vpn: some View {
+        let v = vpnLayer.status
+        return SwitchRow(title: "VPN", symbol: "lock.shield", status: vpnStatus, isOn: vpnLayer.isWanted,
+                         busy: vpnLayer.isWanted && v.isBusy, attention: vpnLayer.isWanted && v.isFailing,
+                         reason: vpnReason, set: setVPN) {
+            if vpnLayer.activeProfile == nil {
+                Button("Set up a VPN") { SettingsWindow.show(openSettings, tab: .vpn) }.buttonStyle(PTPillButtonStyle())
+            } else if vpnLayer.error != nil {
+                Button("Try again") { vpnLayer.set(true) }.buttonStyle(PTPillButtonStyle())
+                Button("VPN settings") { SettingsWindow.show(openSettings, tab: .vpn) }.buttonStyle(.link)
+            }
+        }
+        .help("Wraps everything the Mac sends in one encrypted VPN connection (WireGuard or OpenVPN), so the network only ever sees the VPN.")
+    }
+
+    private var vpnStatus: String {
+        guard let profile = vpnLayer.activeProfile else { return "Off · not set up" }
+        guard vpnLayer.isWanted else { return "Off · \(profile.name)" }
+        let name = vpnLayer.status.name.isEmpty ? profile.name : vpnLayer.status.name
+        switch vpnLayer.status.state {
+        case "connected": return "On · \(name)"
+        case "starting": return "Connecting to \(name)…"
+        case "reconnecting", "blocked": return "Reconnecting · traffic waits until it's back"
+        case "failed", "held": return "Not connected · traffic is blocked"
+        default: return name
+        }
+    }
+
+    private var vpnReason: String? {
+        if vpnLayer.activeProfile == nil { return "Add a VPN (WireGuard, OpenVPN or NordVPN) first." }
+        if let error = vpnLayer.error { return error }
+        if vpnLayer.isWanted, vpnLayer.status.state == "held" { return "Passthrough stopped while the VPN was on. Turn the VPN off to let traffic through." }
+        if vpnLayer.isWanted, let warning = vpnLayer.status.warning { return warning }
+        return nil
+    }
+
+    private func setVPN(_ on: Bool) -> Bool {
+        guard vpnLayer.activeProfile != nil else {
+            SettingsWindow.show(openSettings, tab: .vpn)
+            return false
+        }
+        vpnLayer.set(on)
+        return vpnLayer.isWanted == on
     }
 }
 
-/// Remote shell at a glance while it is on (or a shell is still open): who is
-/// in, or what setup is left. Opens the Remote Shell settings.
-struct ShellSessionsRow: View {
+/// One switch: icon, name, a one-line status and a real on/off switch. When
+/// a tap can't take, the switch snaps back and the reason under it flashes,
+/// so no tap goes unanswered.
+struct SwitchRow<Fix: View, Below: View>: View {
+    let title: String
+    let symbol: String
+    let status: String
+    let isOn: Bool
+    var busy = false
+    /// On but not working (a VPN blocking traffic): amber.
+    var attention = false
+    /// Why it's off (or not working), and what fixes it.
+    var reason: String?
+    /// Asks for `on`; false when that couldn't happen.
+    let set: (Bool) -> Bool
+    @ViewBuilder var fix: () -> Fix
+    @ViewBuilder var below: () -> Below
+    /// A tap that didn't take: the reason flashes.
+    @State private var flash = false
+
+    init(title: String, symbol: String, status: String, isOn: Bool, busy: Bool = false, attention: Bool = false, reason: String?,
+         set: @escaping (Bool) -> Bool, @ViewBuilder fix: @escaping () -> Fix, @ViewBuilder below: @escaping () -> Below = { EmptyView() }) {
+        self.title = title; self.symbol = symbol; self.status = status; self.isOn = isOn
+        self.busy = busy; self.attention = attention; self.reason = reason; self.set = set; self.fix = fix; self.below = below
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 10) {
+                Image(systemName: attention ? "exclamationmark.triangle.fill" : symbol)
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(attention ? PTColor.onAttention : isOn ? PTColor.onTint : Color.secondary)
+                    .frame(width: 30, height: 30)
+                    .background(attention ? PTColor.attention : isOn ? PTColor.tint : Color.primary.opacity(0.07), in: Circle())
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(title).font(.system(size: 13, weight: .semibold)).lineLimit(1)
+                    Text(status).font(.system(size: 11)).foregroundStyle(.secondary).lineLimit(2)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .contentTransition(.opacity)
+                }
+                Spacer(minLength: 6)
+                if busy { ProgressView().controlSize(.small) }
+                Toggle(isOn: Binding(get: { isOn }, set: tap)) { EmptyView() }
+                    .toggleStyle(MintSwitchStyle(fill: attention ? PTColor.attention : PTColor.tint))
+                    .accessibilityLabel(title)
+            }
+            if let reason {
+                VStack(alignment: .leading, spacing: 7) {
+                    Text(reason)
+                        .font(.caption)
+                        .foregroundStyle(PTColor.attentionText)
+                        .fixedSize(horizontal: false, vertical: true)
+                    HStack(spacing: 10) { fix() }.font(.caption)
+                }
+                .padding(.horizontal, 10)
+                .padding(.vertical, 8)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(PTColor.attention.opacity(flash ? 0.32 : 0.1), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+                .transition(.opacity)
+            }
+            below()
+        }
+        .padding(10)
+        .animation(.easeOut(duration: 0.2), value: reason)
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel("\(title), \(status)")
+    }
+
+    private func tap(_ on: Bool) {
+        guard !set(on) else { return }
+        withAnimation(.easeOut(duration: 0.15)) { flash = true }
+        withAnimation(.easeOut(duration: 0.6).delay(0.3)) { flash = false }
+    }
+}
+
+/// An on/off switch drawn in the app's mint: unmistakable at a glance, and
+/// the same in a window that isn't key (a native switch greys out there).
+/// It only ever shows the bound value, so a refused tap leaves it where it was.
+struct MintSwitchStyle: ToggleStyle {
+    var small = false
+    /// Amber for on but not working.
+    var fill = PTColor.tint
+
+    func makeBody(configuration: Configuration) -> some View {
+        let size = small ? CGSize(width: 26, height: 15) : CGSize(width: 36, height: 21)
+        HStack(spacing: 6) {
+            configuration.label
+            Capsule()
+                .fill(configuration.isOn ? fill : Color.primary.opacity(0.16))
+                .overlay(alignment: configuration.isOn ? .trailing : .leading) {
+                    Circle().fill(.white).shadow(color: .black.opacity(0.25), radius: 1, y: 0.5).padding(2)
+                }
+                .frame(width: size.width, height: size.height)
+                .animation(.easeOut(duration: 0.15), value: configuration.isOn)
+        }
+        .contentShape(Rectangle())
+        .onTapGesture { configuration.isOn.toggle() }
+        .accessibilityElement(children: .combine)
+        .accessibilityAddTraits(.isToggle)
+        .accessibilityValue(configuration.isOn ? "On" : "Off")
+        .accessibilityAction { configuration.isOn.toggle() }
+    }
+}
+
+/// Asks before letting the Mac sleep while phones' shells run: asleep, it pauses them.
+struct SleepConfirm: View {
+    let warning: String
+    let action: String
+    let confirm: () -> Void
+    let cancel: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Label(warning, systemImage: "exclamationmark.triangle.fill")
+                .font(.caption)
+                .foregroundStyle(PTColor.attentionText)
+                .fixedSize(horizontal: false, vertical: true)
+            HStack(spacing: 8) {
+                Button(action, action: confirm).buttonStyle(PTPillButtonStyle())
+                Button("Keep it awake", action: cancel)
+                    .controlSize(.small)
+                    .buttonStyle(.plain)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .padding(10)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(PTColor.attention.opacity(0.1), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+    }
+}
+
+// MARK: - Details
+
+/// The secondary part: the link from Mac to phone to internet, and while
+/// online, speeds and the busiest apps.
+struct Details: View {
+    @EnvironmentObject private var session: SessionCoordinator
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Details")
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(.secondary)
+                .padding(.horizontal, 4)
+            FlowCard()
+            if session.phase.isConnected {
+                ThroughputPanel()
+                TopAppsPanel(usage: session.appUsage)
+            }
+        }
+    }
+}
+
+// MARK: - Your phone is here
+
+/// Shells waiting on a question, just under the header: the most urgent thing
+/// in the panel. The answer is typed on the phone.
+struct AskingRows: View {
+    @EnvironmentObject private var shell: RemoteShellController
+
+    var body: some View {
+        let asking = shell.sessions.filter(\.isAsking)
+        if !asking.isEmpty {
+            VStack(spacing: 4) {
+                ForEach(asking, id: \.id) { s in
+                    HStack(spacing: 10) {
+                        Circle().fill(PTColor.attention).frame(width: 8, height: 8).frame(width: 18)
+                        VStack(alignment: .leading, spacing: 1) {
+                            Text("\(s.title) is asking").font(.system(size: 12.5, weight: .medium)).lineLimit(1).truncationMode(.middle)
+                            Text(s.waiting ?? "").font(.system(size: 11, design: .monospaced)).foregroundStyle(.secondary).lineLimit(1)
+                        }
+                        Spacer(minLength: 6)
+                    }
+                    .padding(.horizontal, 10)
+                    .frame(minHeight: 36)
+                    .background(PTColor.attention.opacity(0.1), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+                    .help("Answer it from your phone: Passthrough shows it there.")
+                    .accessibilityElement(children: .combine)
+                }
+            }
+        }
+    }
+}
+
+/// What phones are doing on this Mac right now: someone viewing the screen
+/// (with Stop), shells running, or what Remote shell still needs.
+struct PhoneHereSection: View {
     @EnvironmentObject private var session: SessionCoordinator
     @EnvironmentObject private var shell: RemoteShellController
     @Environment(\.openSettings) private var openSettings
     @State private var fullDiskAccess = true
 
     var body: some View {
-        let open = shell.sessions.filter(\.running).count
-        if session.remoteShellEnabled || open > 0 {
-            let (subtitle, attention) = status(open: open)
-            Button { SettingsWindow.show(openSettings, tab: .remoteShell) } label: {
-                HStack(spacing: 10) {
-                    Image(systemName: open > 0 ? "apple.terminal.fill" : "apple.terminal")
-                        .font(.system(size: 14, weight: .semibold))
-                        .foregroundStyle(open > 0 ? AnyShapeStyle(PTTheme.accent) : AnyShapeStyle(Color.secondary))
-                        .frame(width: 20)
-                    VStack(alignment: .leading, spacing: 1) {
-                        Text("Remote shell").font(.subheadline.weight(.medium))
-                        Text(subtitle)
-                            .font(.caption2).foregroundStyle(attention ? PTTheme.warning : .secondary)
-                    }
+        let running = shell.sessions.filter(\.running)
+        if session.remoteShellEnabled || !running.isEmpty || !shell.screenViewers.isEmpty {
+            VStack(alignment: .leading, spacing: 2) {
+                HStack {
+                    Text("From your phone")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(.secondary)
                     Spacer()
-                    if open > 0 {
-                        Text("\(open)")
-                            .font(.caption2.weight(.bold)).monospacedDigit()
-                            .foregroundStyle(.white)
-                            .padding(.horizontal, 7).padding(.vertical, 2)
-                            .background(PTTheme.accent, in: Capsule())
-                    }
-                    Image(systemName: "chevron.right").font(.caption2.weight(.semibold)).foregroundStyle(.secondary)
+                    Button("What phones may change") { SettingsWindow.show(openSettings, tab: .remoteShell) }
+                        .buttonStyle(.link)
+                        .font(.system(size: 11))
+                        .help("Keep awake, the VPN and the screen, for each phone: Settings ▸ Remote Shell")
                 }
-                .padding(.horizontal, 12).padding(.vertical, 9)
-                .background(Color.primary.opacity(0.04), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
-                .contentShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+                .padding(.horizontal, 4)
+                .padding(.bottom, 2)
+                ForEach(shell.screenViewers) { viewer in
+                    row(symbol: "eye", attention: false) {
+                        Text("\(viewer.label) is viewing this screen").font(.system(size: 12.5, weight: .medium))
+                    } trailing: {
+                        Button("Stop") { shell.endScreen(for: viewer.phoneID) }
+                            .controlSize(.small)
+                            .help("Disconnect \(viewer.label) from the screen. Its shells stay open.")
+                    }
+                }
+                Button { SettingsWindow.show(openSettings, tab: .remoteShell) } label: {
+                    row(symbol: "apple.terminal", attention: shellNeedsSetup) {
+                        Text(shellStatus(open: running.count)).font(.system(size: 12.5, weight: .medium))
+                            .foregroundStyle(shellNeedsSetup ? PTColor.attentionText : .primary)
+                    } trailing: {
+                        Image(systemName: "chevron.right").font(.caption2.weight(.semibold)).foregroundStyle(.secondary)
+                    }
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .help("Open Remote Shell settings")
             }
-            .buttonStyle(.plain)
-            .help("Open Remote Shell settings")
             .task { fullDiskAccess = FullDiskAccess.isGranted }
         }
     }
 
-    private func status(open: Int) -> (String, Bool) {
-        if open > 0 { return ("\(open) session\(open == 1 ? "" : "s") open from your phone", false) }
-        if shell.listenerError != nil { return ("Not running. Open settings to see why.", true) }
-        if shell.phones.isEmpty { return ("Plug in a paired phone to give it access", true) }
-        if !fullDiskAccess { return ("Ready · Full Disk Access recommended", true) }
-        return ("Ready for \(shell.phones.count) phone\(shell.phones.count == 1 ? "" : "s")", false)
+    private var shellNeedsSetup: Bool {
+        shell.sessions.allSatisfy { !$0.running } && (shell.listenerError != nil || shell.phones.isEmpty || !fullDiskAccess)
     }
-}
 
-/// Shown only while a phone sees the screen: who, and a way to end it at once.
-struct ScreenViewersRow: View {
-    @EnvironmentObject private var shell: RemoteShellController
+    private func shellStatus(open: Int) -> String {
+        if open > 0 { return open == 1 ? "1 shell running" : "\(open) shells running" }
+        if shell.listenerError != nil { return "Remote shell isn't running. Open settings to see why." }
+        if shell.phones.isEmpty { return "Plug in a paired phone to give it shell access" }
+        if !fullDiskAccess { return "Remote shell ready · Full Disk Access recommended" }
+        return "Remote shell ready for \(shell.phones.count) phone\(shell.phones.count == 1 ? "" : "s")"
+    }
 
-    var body: some View {
-        ForEach(shell.screenViewers) { viewer in
-            HStack(spacing: 10) {
-                Image(systemName: "eye.fill")
-                    .font(.system(size: 13, weight: .semibold))
-                    .foregroundStyle(PTTheme.warning)
-                    .frame(width: 20)
-                VStack(alignment: .leading, spacing: 1) {
-                    Text("\(viewer.label) is viewing this screen").font(.subheadline.weight(.medium))
-                    Text("Through Screen Sharing").font(.caption2).foregroundStyle(.secondary)
-                }
-                Spacer()
-                Button("Stop") { shell.endScreen(for: viewer.phoneID) }
-                    .controlSize(.small)
-                    .help("Disconnect \(viewer.label) from the screen. Its shells stay open.")
-            }
-            .padding(.horizontal, 12).padding(.vertical, 9)
-            .background(PTTheme.warning.opacity(0.10), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
-            .accessibilityElement(children: .contain)
+    private func row<Content: View, Trailing: View>(symbol: String, attention: Bool, @ViewBuilder content: () -> Content,
+                                                    @ViewBuilder trailing: () -> Trailing) -> some View {
+        HStack(spacing: 10) {
+            Image(systemName: symbol).font(.system(size: 12, weight: .semibold)).foregroundStyle(.secondary)
+                .frame(width: 18)
+            content()
+            Spacer(minLength: 6)
+            trailing()
         }
+        .padding(.horizontal, 10)
+        .frame(minHeight: 36)
+        .background(attention ? PTColor.attention.opacity(0.1) : Color.clear, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
     }
 }
+
 
 /// Live picture of the route traffic takes right now.
 struct FlowCard: View {
@@ -380,100 +611,9 @@ struct FlowCard: View {
     }
 
     var body: some View {
-        PTCard(padding: 8) {
+        PTSurface(padding: 8) {
             FlowMap(state: flowState, height: 84, active: session.panelVisible)
         }
-    }
-}
-
-/// The VPN layer toggle: one encrypted flow on top of the passthrough.
-struct VPNRow: View {
-    @EnvironmentObject private var session: SessionCoordinator
-    @EnvironmentObject private var vpnLayer: VPNLayer
-    @Environment(\.openSettings) private var openSettings
-
-    private var hasProfile: Bool { vpnLayer.activeProfile != nil }
-    private var isOn: Bool { vpnLayer.isWanted }
-
-    private var subtitle: String {
-        let v = vpnLayer.status
-        guard isOn else {
-            if let p = vpnLayer.activeProfile { return "Off · \(p.name)" }
-            return "No profile yet · set one up in Settings"
-        }
-        switch v.state {
-        case "starting": return "Connecting to \(v.name)…"
-        case "connected":
-            var parts = [v.name]
-            if let u = v.underlay { parts.append("over \(u == "iPhone" ? session.phoneKindName : u)") }
-            if let d = v.duration { parts.append(ByteFormat.duration(d)) }
-            return parts.joined(separator: " · ")
-        case "reconnecting": return "Session dropped · reconnecting…"
-        case "blocked": return "Down · traffic blocked · reconnecting…"
-        case "held": return "Traffic blocked since Passthrough stopped · turn off to release"
-        case "failed": return vpnLayer.killSwitch ? "Failed · traffic blocked · turn off to release" : "Failed"
-        default: return v.name
-        }
-    }
-
-    private var tint: Color {
-        guard isOn else { return .secondary }
-        switch vpnLayer.status.state {
-        case "connected": return PTTheme.success
-        case "blocked", "reconnecting": return PTTheme.warning
-        case "failed", "held": return PTTheme.danger
-        default: return .secondary
-        }
-    }
-
-    var body: some View {
-        VStack(spacing: 0) {
-            Button {
-                if hasProfile { vpnLayer.set(!isOn) } else { SettingsWindow.show(openSettings, tab: .vpn) }
-            } label: {
-                HStack(spacing: 10) {
-                    Group {
-                        if vpnLayer.status.isBusy {
-                            ProgressView().controlSize(.small)
-                        } else {
-                            Image(systemName: vpnLayer.status.isConnected ? "lock.shield.fill" : "lock.shield")
-                                .font(.system(size: 15, weight: .semibold))
-                                .foregroundStyle(vpnLayer.status.isConnected ? AnyShapeStyle(PTTheme.accent) : AnyShapeStyle(Color.secondary))
-                        }
-                    }
-                    .frame(width: 20)
-                    VStack(alignment: .leading, spacing: 1) {
-                        HStack(spacing: 6) {
-                            Text("VPN layer").font(.subheadline.weight(.medium))
-                            if vpnLayer.status.isConnected {
-                                PTPill(vpnLayer.status.engineLabel, tint: PTTheme.success)
-                            } else if vpnLayer.killSwitch, isOn {
-                                PTPill("Kill switch", tint: .secondary)
-                            }
-                        }
-                        Text(subtitle).font(.caption2).foregroundStyle(tint).lineLimit(1)
-                    }
-                    Spacer()
-                    MiniSwitch(isOn: isOn)
-                }
-                .padding(.horizontal, 12).padding(.vertical, 9)
-                .background(Color.primary.opacity(0.04), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
-            }
-            .buttonStyle(.plain)
-            .help("Wraps everything the Mac sends in one encrypted VPN flow (WireGuard or OpenVPN) on top of the passthrough, so the carrier only ever sees a VPN.")
-            if let error = vpnLayer.error ?? (isOn ? vpnLayer.status.warning : nil) {
-                HStack(alignment: .top, spacing: 6) {
-                    Image(systemName: "exclamationmark.triangle.fill").font(.caption2)
-                    Text(error).font(.caption2)
-                    Spacer(minLength: 0)
-                }
-                .foregroundStyle(PTTheme.warning)
-                .padding(.horizontal, 12).padding(.top, 6)
-                .transition(.opacity)
-            }
-        }
-        .animation(.easeInOut(duration: 0.2), value: vpnLayer.error)
-        .animation(.easeInOut(duration: 0.2), value: vpnLayer.status.state)
     }
 }
 
@@ -482,7 +622,7 @@ struct ThroughputPanel: View {
     @EnvironmentObject private var session: SessionCoordinator
 
     var body: some View {
-        PTCard(padding: 14) {
+        PTSurface(padding: 14) {
             VStack(alignment: .leading, spacing: 10) {
                 HStack(alignment: .firstTextBaseline) {
                     RateReadout(session.meter.downRate, direction: .down, size: 24)
@@ -508,7 +648,7 @@ struct TopAppsPanel: View {
 
     var body: some View {
         if session.phase.isConnected, usage.unavailable || !usage.top.isEmpty {
-            PTCard(padding: 14) {
+            PTSurface(padding: 14) {
                 VStack(alignment: .leading, spacing: 8) {
                     Text("Top apps this session").font(.caption).foregroundStyle(.secondary)
                     if usage.unavailable {
@@ -517,7 +657,7 @@ struct TopAppsPanel: View {
                             Text("Per-app usage unavailable: nettop isn't running").font(.caption2)
                             Spacer(minLength: 0)
                         }
-                        .foregroundStyle(PTTheme.warning)
+                        .foregroundStyle(PTColor.attentionText)
                     } else {
                         let shown = usage.breakdown(sessionTotal: session.sessionRx + session.sessionTx)
                         ForEach(shown.top, id: \.app.key) { entry in
@@ -551,9 +691,9 @@ struct PairingCard: View {
     @FocusState private var focused: Bool
 
     var body: some View {
-        PTCard(padding: 16) {
+        PTSurface(padding: 16) {
             VStack(spacing: 12) {
-                Image(systemName: "laptopcomputer.and.iphone").font(.system(size: 28, weight: .medium)).foregroundStyle(PTTheme.accent)
+                Image(systemName: "laptopcomputer.and.iphone").font(.system(size: 28, weight: .medium)).foregroundStyle(PTColor.tintText)
                 Text("Pair with \(session.phoneStatus?.deviceName ?? session.phoneKindName)").font(.headline)
                 Text("On the \(session.phoneKindName), tap Pair in Passthrough and type the six digits here.")
                     .font(.caption).foregroundStyle(.secondary).multilineTextAlignment(.center)
@@ -573,35 +713,12 @@ struct PairingCard: View {
                 if session.pairingInFlight {
                     ProgressView().controlSize(.small)
                 } else if let error = session.pairingError {
-                    Text(error).font(.caption).foregroundStyle(PTTheme.danger).multilineTextAlignment(.center)
+                    Text(error).font(.caption).foregroundStyle(PTColor.problem).multilineTextAlignment(.center)
                 }
                 Button("Cancel") { session.disconnect() }.buttonStyle(.plain).font(.caption).foregroundStyle(.secondary)
             }
         }
         .onAppear { focused = true; code = "" }
         .onChange(of: session.pairingError) { _, new in if new != nil { code = "" } }
-    }
-}
-
-/// Shown until the privileged helper is approved in System Settings.
-struct HelperCard: View {
-    @EnvironmentObject private var session: SessionCoordinator
-
-    var body: some View {
-        PTCard(padding: 16) {
-            VStack(spacing: 10) {
-                Image(systemName: "lock.shield").font(.system(size: 28, weight: .medium)).foregroundStyle(PTTheme.warning)
-                Text("Allow the tunnel helper").font(.headline)
-                Text("Routing the Mac needs a small helper that runs in the background. Approve “Passthrough” under Login Items & Extensions ▸ Allow in the Background.")
-                    .font(.caption).foregroundStyle(.secondary).multilineTextAlignment(.center)
-                if case .failed(let why) = session.helperAvailability {
-                    Text(why).font(.caption2).foregroundStyle(PTTheme.danger).multilineTextAlignment(.center)
-                }
-                HStack {
-                    Button("Open System Settings") { session.openLoginItems() }.buttonStyle(.borderedProminent).tint(PTTheme.accentEnd)
-                    Button("Try again") { session.retryHelper() }.buttonStyle(.bordered)
-                }
-            }
-        }
     }
 }

@@ -55,6 +55,14 @@ data class ShellEnvelope(
     var irohRelay: String? = null,
     var relayToken: String? = null,
     var addresses: List<String>? = null,
+    /** macState: how the Mac is doing, as this phone may see it. */
+    var state: MacState? = null,
+    /** setAwake / setVPN: what the phone asks for. */
+    var on: Boolean? = null,
+    /** events: from when (Unix seconds). eventList: what happened since, oldest first, and the battery meanwhile. */
+    var since: Double? = null,
+    var events: List<MacEvent>? = null,
+    var battery: List<BatterySample>? = null,
 ) {
     fun encodeLine(): ByteArray =
         (ControlEnvelope.json.encodeToString(serializer(), this) + "\n").toByteArray(Charsets.UTF_8)
@@ -81,6 +89,14 @@ data class ShellEnvelope(
         const val HISTORY_LIST = "historyList"
         const val TRANSCRIPT = "transcript"
         const val TRANSCRIPT_DATA = "transcriptData"
+        /** The Mac's state ([MacState]), after `ready` and whenever it changes. */
+        const val MAC_STATE = "macState"
+        /** A phone turning Keep awake or the VPN on or off (`on`). */
+        const val SET_AWAKE = "setAwake"
+        const val SET_VPN = "setVPN"
+        /** A phone asking what happened on the Mac since a time (`since`); answered `eventList`. */
+        const val EVENTS = "events"
+        const val EVENT_LIST = "eventList"
         const val PING = "ping"
         const val PONG = "pong"
         const val ERROR = "error"
@@ -121,6 +137,8 @@ data class ShellSessionInfo(
     val lastOutputAt: Double,
     val running: Boolean,
     val exitStatus: Int? = null,
+    /** The question a running session went quiet on, as the Mac reads its screen; absent when it isn't waiting. */
+    val waiting: String? = null,
 )
 
 /** A past session in the Mac's history. Times are Unix seconds. */
@@ -144,6 +162,88 @@ enum class ShellError(val wire: String) {
     TOO_MANY_SESSIONS("too_many_sessions"),
     NO_SUCH_SESSION("no_such_session"),
     BAD_REQUEST("bad_request"),
+    /** The owner hasn't let this phone change Keep awake and the VPN. */
+    NOT_ALLOWED("not_allowed"),
+    /** The VPN can't turn on: the Mac has no VPN set up. */
+    VPN_NOT_SET_UP("vpn_not_set_up"),
+}
+
+/** Something that happened on the Mac, for the phone's timeline. Mirrors MacEvent in ShellProtocol.swift. */
+@Serializable
+data class MacEvent(
+    /** Unix seconds. */
+    val t: Double,
+    /** `awake`, `vpn`, `link`, `power`, `sleep`, `shell`, `asked` or `answered`; others are shown plainly. */
+    val kind: String,
+    val title: String,
+    val detail: String? = null,
+    val session: String? = null,
+    /** Something went wrong or less safe. */
+    val warning: Boolean? = null,
+) {
+    companion object {
+        const val KIND_AWAKE = "awake"
+        const val KIND_VPN = "vpn"
+        const val KIND_LINK = "link"
+        const val KIND_POWER = "power"
+        const val KIND_SLEEP = "sleep"
+        const val KIND_SHELL = "shell"
+        const val KIND_ASKED = "asked"
+        const val KIND_ANSWERED = "answered"
+    }
+}
+
+/** The Mac's battery at a moment, for the timeline's battery line. */
+@Serializable
+data class BatterySample(
+    /** Unix seconds. */
+    val t: Double,
+    /** 0 to 1. */
+    val level: Double,
+    val charging: Boolean? = null,
+)
+
+/**
+ * How the Mac is doing, sent in `macState`. Every field is optional: a Mac
+ * leaves out what it doesn't know or doesn't have. Mirrors MacState in ShellProtocol.swift.
+ */
+@Serializable
+data class MacState(
+    /** Keep awake is on. */
+    val awake: Boolean? = null,
+    /** Why Keep awake turned itself off or refused to turn on: `battery` or `heat`. */
+    val awakeStopped: String? = null,
+    /** 0 to 1; absent on a Mac without a battery. */
+    val battery: Double? = null,
+    /** On power, not the battery. */
+    val charging: Boolean? = null,
+    /** Minutes until Keep awake's battery limit, on battery, when macOS has an estimate. */
+    val minutesLeft: Int? = null,
+    /** The battery level (0 to 1) where Keep awake turns itself off; absent when that limit is off. */
+    val batteryFloor: Double? = null,
+    /** macOS says the Mac is running hot. */
+    val hot: Boolean? = null,
+    /** `off`, `connecting`, `on` or `failed`; absent when the Mac has no VPN set up. */
+    val vpn: String? = null,
+    /** The VPN profile in use, as the Mac names it. */
+    val vpnName: String? = null,
+    val killSwitch: Boolean? = null,
+    /** This phone may change Keep awake and the VPN (`setAwake`, `setVPN`). */
+    val control: Boolean? = null,
+    /** The Mac is online through a phone, or on its way there. Absent from older Macs. */
+    val internet: Boolean? = null,
+)
+
+/** The `vpn` and `awakeStopped` values in [MacState]. */
+object MacStates {
+    const val VPN_OFF = "off"
+    const val VPN_CONNECTING = "connecting"
+    const val VPN_ON = "on"
+    const val VPN_FAILED = "failed"
+
+    /** `awakeStopped`: the battery limit, or the Mac running hot. */
+    const val STOPPED_BATTERY = "battery"
+    const val STOPPED_HEAT = "heat"
 }
 
 /**

@@ -8,8 +8,10 @@ import PassthroughCore
 /// runs hot, so a closed laptop can sleep instead. Off by default.
 @MainActor
 final class KeepAwakeController: ObservableObject {
-    @Published private(set) var isOn: Bool = UserDefaults.standard.bool(forKey: "keepAwake") {
+    /// Off in snapshot runs, which only draw: they mustn't read or hold the real Mac's.
+    @Published private(set) var isOn: Bool = !SessionCoordinator.isSnapshotRun && UserDefaults.standard.bool(forKey: "keepAwake") {
         didSet {
+            guard !SessionCoordinator.isSnapshotRun else { return }
             UserDefaults.standard.set(isOn, forKey: "keepAwake")
             power.apply(isOn)
             applyLidClose(isOn)
@@ -20,7 +22,9 @@ final class KeepAwakeController: ObservableObject {
     /// Auto-disable when the battery falls to the threshold (on battery power).
     @AppStorage("batteryAutoOff") var batteryAutoOff = true
     @AppStorage("batteryAutoOffThreshold") var batteryAutoOffThreshold = 20
-    @Published private(set) var battery = BatteryReading(percent: -1, isOnAC: true, hasBattery: false)
+    @Published private(set) var battery = BatteryMonitor.read()
+    /// A laptop: a desktop Mac has no battery and no lid to close.
+    var hasLid: Bool { battery.hasBattery }
     /// Auto-disable when macOS reports the Mac running hot.
     @AppStorage("thermalAutoOff") var thermalAutoOff = true
     @Published private(set) var thermal = ProcessInfo.processInfo.thermalState
@@ -28,7 +32,17 @@ final class KeepAwakeController: ObservableObject {
     @Published private(set) var blockedReason: String?
     private enum Cause { case battery, heat }
     /// What `blockedReason` is about, so each check clears only its own.
-    private var blockedBy: Cause?
+    @Published private var blockedBy: Cause?
+    /// Keep awake turned itself off, or refused to turn on, for low battery (else for heat).
+    var blockedByBattery: Bool { blockedBy == .battery }
+    /// Why keep-awake last turned itself off or refused to turn on: `MacState.stoppedBattery` or `stoppedHeat`.
+    var stoppedBy: String? {
+        switch blockedBy {
+        case .battery: MacState.stoppedBattery
+        case .heat: MacState.stoppedHeat
+        case nil: nil
+        }
+    }
     private var thermalObserver: NSObjectProtocol?
 
     private let helper: HelperClient
@@ -37,10 +51,26 @@ final class KeepAwakeController: ObservableObject {
     init(helper: HelperClient) {
         self.helper = helper
         power.apply(isOn)
+        // Snapshot runs start no helper: draw a charging laptop, with lid-close sleep held once Keep awake is on.
+        if SessionCoordinator.isSnapshotRun {
+            battery = BatteryReading(percent: 82, isOnAC: true, hasBattery: true)
+            lidCloseHeld = isOn
+        }
         thermalObserver = NotificationCenter.default.addObserver(forName: ProcessInfo.thermalStateDidChangeNotification,
                                                                  object: nil, queue: .main) { [weak self] _ in
             Task { @MainActor in self?.checkThermal() }
         }
+    }
+
+    /// Puts Keep awake into a synthetic state for snapshots: on, or refused for low battery (`battery`) or heat.
+    func debugApply(on: Bool, battery percent: Int? = nil, hot: Bool = false) {
+        isOn = on
+        lidCloseHeld = on
+        if let percent {
+            battery = BatteryReading(percent: percent, isOnAC: false, hasBattery: true)
+            blockedBy = .battery; blockedReason = "battery"
+        }
+        if hot { thermal = .serious; blockedBy = .heat; blockedReason = "heat" }
     }
 
     /// Re-asserts lid-close sleep once the helper is known to be current.

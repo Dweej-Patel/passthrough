@@ -292,6 +292,27 @@
         "line": "{\"t\":\"macInfo\",\"irohID\":\"3f2a9c5e7b1d4a60c8e2f9b4d7a1035e6c8b2d4f9a1e3c5b7d0f2a4c6e8b1d3f\",\"irohRelay\":\"https://relay.example.com/\",\"relayToken\":\"relay-token-123\",\"addresses\":[\"192.168.1.20\",\"100.101.102.103\"]}"
       },
       {
+        "line": "{\"t\":\"macState\",\"state\":{\"awake\":true,\"battery\":0.64,\"charging\":false,\"minutesLeft\":190,\"batteryFloor\":0.2,\"hot\":false,\"vpn\":\"on\",\"vpnName\":\"NordVPN Germany\",\"killSwitch\":true,\"control\":true,\"internet\":true}}"
+      },
+      {
+        "line": "{\"t\":\"macState\",\"state\":{\"awake\":false,\"awakeStopped\":\"battery\",\"battery\":0.19,\"charging\":false,\"batteryFloor\":0.2,\"control\":false}}"
+      },
+      {
+        "line": "{\"t\":\"setAwake\",\"on\":false}"
+      },
+      {
+        "line": "{\"t\":\"events\",\"since\":1758060000}"
+      },
+      {
+        "line": "{\"t\":\"eventList\",\"since\":1758060000,\"events\":[{\"t\":1758060120,\"kind\":\"vpn\",\"title\":\"VPN reconnected after 2 s\",\"detail\":\"Kill switch held: nothing left without it\"},{\"t\":1758062400.5,\"kind\":\"shell\",\"title\":\"npm run build finished\",\"detail\":\"exit 0, 34 min\",\"session\":\"3F2B8C1A-7D4E-4A55-9C0B-1E6F2A9D8B34\"},{\"t\":1758062500,\"kind\":\"vpn\",\"title\":\"VPN dropped\",\"warning\":true}],\"battery\":[{\"t\":1758059900,\"level\":0.64},{\"t\":1758060300,\"level\":0.62,\"charging\":true}]}"
+      },
+      {
+        "line": "{\"t\":\"setVPN\",\"on\":true}"
+      },
+      {
+        "line": "{\"t\":\"error\",\"reason\":\"not_allowed\"}"
+      },
+      {
         "line": "{\"t\":\"challenge\",\"nonce\":\"ICEiIyQlJicoKSorLC0uLzAxMjM0NTY3ODk6Ozw9Pj8=\"}"
       },
       {
@@ -305,6 +326,9 @@
       },
       {
         "line": "{\"t\":\"sessions\",\"sessions\":[{\"id\":\"3F2B8C1A-7D4E-4A55-9C0B-1E6F2A9D8B34\",\"title\":\"zsh\",\"startedAt\":1758062400.5,\"lastOutputAt\":1758062461.25,\"running\":true}]}"
+      },
+      {
+        "line": "{\"t\":\"sessions\",\"sessions\":[{\"id\":\"9A1C2E3F-5B7D-4E60-8F21-3C4D5E6F7A8B\",\"title\":\"claude\",\"startedAt\":1758062400.5,\"lastOutputAt\":1758062461.25,\"running\":true,\"waiting\":\"Do you want to make this edit to HomeView.swift?\"}]}"
       },
       {
         "line": "{\"t\":\"open\",\"cols\":80,\"rows\":24}"

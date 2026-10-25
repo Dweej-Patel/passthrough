@@ -143,6 +143,15 @@ final class RemoteShellController: ObservableObject {
     /// the pairing slots of the phones that lost it.
     var onAccessRevoked: ((Set<String>) -> Void)?
 
+    /// What happened on this Mac, for phones' timelines (`MacEventRecorder` writes it).
+    let events: MacEventLog = (try? MacEventLog.defaultFile()).map { MacEventLog(file: $0) } ?? MacEventLog(file: nil)
+
+    /// A phone allowed to change Keep awake and the VPN asked to (`MacStateBridge` carries it out).
+    var onMacControl: ((_ label: String, _ change: MacControl) -> Void)?
+    /// The Mac's state as phones see it, without each phone's own `control`;
+    /// read on the listeners' queues. Nil until the app sets one.
+    private let macState = Locked<MacState?>(nil)
+
     /// The port the listener is on, once listening.
     var port: UInt16? { listener?.port }
 
@@ -153,7 +162,12 @@ final class RemoteShellController: ObservableObject {
             self.transcripts = transcripts
             self.manager = manager
             manager.onChange = { [weak self] in
-                Task { @MainActor in self?.refreshSessions() }
+                Task { @MainActor in
+                    self?.refreshSessions()
+                    // Phones hear of new, ended and waiting sessions without asking.
+                    self?.listener?.pushSessions()
+                    self?.iroh?.listener?.pushSessions()
+                }
             }
         } catch {
             ptLog(.error, "shell: could not open the history folder: \(error.localizedDescription)")
@@ -186,6 +200,9 @@ final class RemoteShellController: ObservableObject {
         listener.screenVideo = Self.screenVideoSource
         listener.screenViews = screenViews
         listener.onScreenViewer = screenViewerHandler()
+        listener.macState = macStateProvider()
+        listener.onMacControl = macControlHandler()
+        listener.macEvents = macEventsProvider()
         listener.onFailure = { [weak self, weak listener] error in
             Task { @MainActor in
                 guard let self, let listener, self.listener === listener else { return }
@@ -262,6 +279,7 @@ final class RemoteShellController: ObservableObject {
         irohStatus = IrohStatus(state: .starting)
         let store = self.store, reach = self.reach, relay = self.relay, onScreenViewer = screenViewerHandler()
         let screenViews = self.screenViews
+        let macState = macStateProvider(), onMacControl = macControlHandler(), macEvents = macEventsProvider()
         let screenSharingVerified = screenSharingVerifier()
         lifecycle.async { [weak self] in
             let host: IrohEndpointHost
@@ -300,6 +318,9 @@ final class RemoteShellController: ObservableObject {
             listener.screenVideo = Self.screenVideoSource
             listener.screenViews = screenViews
             listener.onScreenViewer = onScreenViewer
+            listener.macState = macState
+            listener.onMacControl = onMacControl
+            listener.macEvents = macEvents
             listener.onFailure = { [weak self] error in
                 Task { @MainActor in
                     guard let self, self.iroh === run else { return }
@@ -525,6 +546,64 @@ final class RemoteShellController: ObservableObject {
         }
         if !allowed { endScreen(for: phoneID) }
         refreshPhones()
+    }
+
+    // MARK: Mac state and control
+
+    /// The Mac's state changed: tell every connected phone.
+    func updateMacState(_ state: MacState) {
+        guard macState.get() != state else { return }
+        macState.set(state)
+        pushMacState()
+    }
+
+    private func pushMacState() {
+        listener?.pushMacState()
+        iroh?.listener?.pushMacState()
+    }
+
+    private func macStateProvider() -> @Sendable (String) -> MacState? {
+        let store = self.store, macState = self.macState
+        return { phoneID in
+            guard var state = macState.get() else { return nil }
+            state.control = store.controlAllowed(forPhone: phoneID)
+            return state
+        }
+    }
+
+    /// The timeline since a time. Every phone with shell access reads the
+    /// same one, so the listeners' phone ID goes unused.
+    private func macEventsProvider() -> @Sendable (String, Double) -> (events: [MacEvent], battery: [BatterySample]) {
+        let events = self.events
+        return { _, since in events.since(since) }
+    }
+
+    private func macControlHandler() -> @Sendable (String, String, MacControl) -> ShellError? {
+        let store = self.store, macState = self.macState
+        return { [weak self] phoneID, label, change in
+            guard store.controlAllowed(forPhone: phoneID) else { return .notAllowed }
+            if change == .vpn(true), macState.get()?.vpn == nil { return .vpnNotSetUp }
+            Task { @MainActor in self?.onMacControl?(label, change) }
+            return nil
+        }
+    }
+
+    /// Lets the phone change Keep awake and the VPN, or stops it; as
+    /// `setScreenAllowed`, stopping holds even when it can't be saved.
+    func setControlAllowed(_ allowed: Bool, for phoneID: String) {
+        let label = phones.first { $0.phoneID == phoneID }?.label ?? "a phone"
+        if store.setControlAllowed(allowed, forPhone: phoneID) {
+            ptLog(.info, "shell: \(allowed ? "allowed" : "stopped allowing") \(label) to change Keep awake and the VPN")
+        } else if allowed {
+            ptLog(.error, "shell: could not change what \(label) may change")
+            listenerError = "Could not let \(label) change Keep awake and the VPN."
+        } else {
+            ptLog(.error, "shell: could not save that \(label) may no longer change Keep awake and the VPN; off until Passthrough quits")
+            listenerError = "\(label) can no longer change Keep awake and the VPN, but that could not be saved in the Keychain: "
+                + "it may come back when Passthrough restarts. Turn it off again, or remove the phone."
+        }
+        refreshPhones()
+        pushMacState()
     }
 
     /// Ends the phone's views of the screen; its shells stay.

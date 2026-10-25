@@ -100,6 +100,11 @@ final class AppLock: ObservableObject {
 
     /// Unlocks without a prompt only when the device has no passcode (nothing to check).
     func unlockIfNothingToCheck() {
+        #if DEBUG && targetEnvironment(simulator)
+        // Screenshots of the demo screens: the demo touches no keys, and this
+        // never exists on a phone or in a Release build.
+        if !isUnlocked, ShellModel.demoState != nil { return open(with: LAContext()) }
+        #endif
         guard !isUnlocked, method == .none else { return }
         Task { await unlock() }
     }

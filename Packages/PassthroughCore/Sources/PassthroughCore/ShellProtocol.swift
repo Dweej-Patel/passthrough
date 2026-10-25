@@ -53,6 +53,14 @@ public struct ShellEnvelope: Codable, Equatable, Sendable {
     public var irohRelay: String?
     public var relayToken: String?
     public var addresses: [String]?
+    /// macState: how the Mac is doing, as this phone may see it.
+    public var state: MacState?
+    /// setAwake / setVPN: what the phone asks for.
+    public var on: Bool?
+    /// events: from when (Unix seconds). eventList: what happened since, oldest first, and the battery meanwhile.
+    public var since: Double?
+    public var events: [MacEvent]?
+    public var battery: [BatterySample]?
 
     public init(t: String) { self.t = t }
 
@@ -82,6 +90,14 @@ public struct ShellEnvelope: Codable, Equatable, Sendable {
     /// The Mac's own H.264 stream of its screen (`ScreenVideoWire`), rather than Screen Sharing.
     public static let screenVideo = "screenVideo"
     public static let screenVideoReady = "screenVideoReady"
+    /// The Mac's state (`MacState`), after `ready` and whenever it changes.
+    public static let macState = "macState"
+    /// A phone turning Keep awake or the VPN on or off (`on`).
+    public static let setAwake = "setAwake"
+    public static let setVPN = "setVPN"
+    /// A phone asking what happened on the Mac since a time (`since`); answered `eventList`.
+    public static let events = "events"
+    public static let eventList = "eventList"
     public static let ping = "ping"
     public static let pong = "pong"
     public static let error = "error"
@@ -132,10 +148,14 @@ public struct ShellSessionInfo: Codable, Equatable, Sendable {
     public var lastOutputAt: Double
     public var running: Bool
     public var exitStatus: Int32?
+    /// The question a running session went quiet on, as the Mac reads its
+    /// screen ("Do you want to make this edit?"); absent when it isn't waiting.
+    public var waiting: String?
 
-    public init(id: String, title: String, startedAt: Double, lastOutputAt: Double, running: Bool, exitStatus: Int32? = nil) {
+    public init(id: String, title: String, startedAt: Double, lastOutputAt: Double, running: Bool, exitStatus: Int32? = nil,
+                waiting: String? = nil) {
         self.id = id; self.title = title; self.startedAt = startedAt; self.lastOutputAt = lastOutputAt
-        self.running = running; self.exitStatus = exitStatus
+        self.running = running; self.exitStatus = exitStatus; self.waiting = waiting
     }
 }
 
@@ -177,6 +197,109 @@ public enum ShellError: String, Error, Sendable {
     /// The Mac already shows its screen to as many views as it allows
     /// (`RemoteShell.maxScreenViewsPerPhone`, `maxScreenViews`).
     case tooManyScreens = "too_many_screens"
+    /// The owner hasn't let this phone change Keep awake and the VPN.
+    case notAllowed = "not_allowed"
+    /// The VPN can't turn on: the Mac has no VPN set up.
+    case vpnNotSetUp = "vpn_not_set_up"
+}
+
+/// How the Mac is doing, sent to a phone in `macState`. Every field is
+/// optional: a Mac leaves out what it doesn't know or doesn't have.
+public struct MacState: Codable, Equatable, Sendable {
+    /// Keep awake is on.
+    public var awake: Bool?
+    /// Why Keep awake turned itself off or refused to turn on: `battery` or `heat`.
+    public var awakeStopped: String?
+    /// 0 to 1; absent on a Mac without a battery.
+    public var battery: Double?
+    /// On power, not the battery.
+    public var charging: Bool?
+    /// Minutes until Keep awake's battery limit, on battery, when macOS has an estimate.
+    public var minutesLeft: Int?
+    /// The battery level (0 to 1) where Keep awake turns itself off; absent when that limit is off.
+    public var batteryFloor: Double?
+    /// macOS says the Mac is running hot.
+    public var hot: Bool?
+    /// `off`, `connecting`, `on` or `failed`; absent when the Mac has no VPN set up.
+    public var vpn: String?
+    /// The VPN profile in use, as the Mac names it.
+    public var vpnName: String?
+    public var killSwitch: Bool?
+    /// This phone may change Keep awake and the VPN (`setAwake`, `setVPN`).
+    public var control: Bool?
+    /// The Mac is online through a phone, or on its way there. Absent from older Macs.
+    public var internet: Bool?
+
+    public init(awake: Bool? = nil, awakeStopped: String? = nil, battery: Double? = nil, charging: Bool? = nil,
+                minutesLeft: Int? = nil, batteryFloor: Double? = nil, hot: Bool? = nil, vpn: String? = nil,
+                vpnName: String? = nil, killSwitch: Bool? = nil, control: Bool? = nil, internet: Bool? = nil) {
+        self.awake = awake; self.awakeStopped = awakeStopped; self.battery = battery; self.charging = charging
+        self.minutesLeft = minutesLeft; self.batteryFloor = batteryFloor; self.hot = hot; self.vpn = vpn
+        self.vpnName = vpnName; self.killSwitch = killSwitch; self.control = control
+        self.internet = internet
+    }
+
+    public static let vpnOff = "off"
+    public static let vpnConnecting = "connecting"
+    public static let vpnOn = "on"
+    public static let vpnFailed = "failed"
+
+    /// `awakeStopped`: the battery limit, or the Mac running hot.
+    public static let stoppedBattery = "battery"
+    public static let stoppedHeat = "heat"
+}
+
+/// Something that happened on the Mac, for the phone's timeline. `title` and
+/// `detail` are written by the Mac, ready to show; `kind` picks the icon.
+public struct MacEvent: Codable, Equatable, Sendable {
+    /// Unix seconds.
+    public var t: Double
+    /// `awake`, `vpn`, `link`, `power`, `sleep`, `shell`, `asked` or `answered`; a phone shows others plainly.
+    public var kind: String
+    public var title: String
+    public var detail: String?
+    /// The shell session it's about, if any.
+    public var session: String?
+    /// Something went wrong or less safe (a VPN drop, a limit stopping Keep awake).
+    public var warning: Bool?
+
+    public init(t: Double, kind: String, title: String, detail: String? = nil, session: String? = nil, warning: Bool? = nil) {
+        self.t = t; self.kind = kind; self.title = title; self.detail = detail; self.session = session; self.warning = warning
+    }
+
+    /// How far back a Mac keeps events, and the most one `eventList` carries (the newest).
+    public static let kept: TimeInterval = 7 * 86_400
+    public static let maxPerList = 500
+
+    public static let kindAwake = "awake"
+    public static let kindVPN = "vpn"
+    public static let kindLink = "link"
+    public static let kindPower = "power"
+    public static let kindSleep = "sleep"
+    public static let kindShell = "shell"
+    public static let kindAsked = "asked"
+    public static let kindAnswered = "answered"
+}
+
+/// The Mac's battery at a moment, for the timeline's battery line.
+public struct BatterySample: Codable, Equatable, Sendable {
+    /// Unix seconds.
+    public var t: Double
+    /// 0 to 1.
+    public var level: Double
+    public var charging: Bool?
+
+    public init(t: Double, level: Double, charging: Bool? = nil) { self.t = t; self.level = level; self.charging = charging }
+
+    /// One sample every 5 minutes at most; a list carries at most a day's worth past `since`.
+    public static let interval: TimeInterval = 300
+    public static let maxPerList = 600
+}
+
+/// A change a phone asked the Mac for.
+public enum MacControl: Equatable, Sendable {
+    case awake(Bool)
+    case vpn(Bool)
 }
 
 /// Which peers may reach the shell, and which of the Mac's addresses a phone

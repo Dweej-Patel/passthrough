@@ -125,6 +125,10 @@ sealed interface ShellEvent {
         override fun toString() = "MacInfo(irohID=$irohID, irohRelay=$irohRelay, relayToken=${if (relayToken == null) "none" else "<redacted>"}, addresses=$addresses)"
     }
     data class Sessions(val sessions: List<ShellSessionInfo>) : ShellEvent
+    /** How the Mac is doing (after `ready`, and whenever it changes). */
+    data class MacStateChanged(val state: MacState) : ShellEvent
+    /** The answer to [ShellConnection.requestEvents]: what happened since then, oldest first, and the battery meanwhile. */
+    data class Events(val since: Double, val events: List<MacEvent>, val battery: List<BatterySample>) : ShellEvent
     /** A session this connection opened; it is attached to it. */
     data class Opened(val session: String) : ShellEvent
     class Output(val session: String, val data: ByteArray) : ShellEvent {
@@ -267,6 +271,15 @@ class ShellConnection(
 
     fun requestHistory() = enqueue(ShellEnvelope(ShellEnvelope.HISTORY))
 
+    /** Asks the Mac to turn Keep awake on or off; the new state comes back as [ShellEvent.MacStateChanged]. */
+    fun setAwake(on: Boolean) = enqueue(ShellEnvelope(ShellEnvelope.SET_AWAKE, on = on))
+
+    /** As [setAwake], for the Mac's VPN. */
+    fun setVPN(on: Boolean) = enqueue(ShellEnvelope(ShellEnvelope.SET_VPN, on = on))
+
+    /** What happened on the Mac since [sinceSeconds] (Unix): [ShellEvent.Events], or `BAD_REQUEST` from an older Mac. */
+    fun requestEvents(sinceSeconds: Double) = enqueue(ShellEnvelope(ShellEnvelope.EVENTS, since = kotlin.math.floor(sinceSeconds)))
+
     fun requestTranscript(session: String) = enqueue(ShellEnvelope(ShellEnvelope.TRANSCRIPT, session = session))
 
     /** Hangs up. Emits `Disconnected(null)` unless the connection had already ended. */
@@ -357,6 +370,8 @@ class ShellConnection(
         when (m.t) {
             ShellEnvelope.MAC_INFO -> emit(ShellEvent.MacInfo(m.irohID, m.irohRelay, m.relayToken, m.addresses))
             ShellEnvelope.SESSIONS -> emit(ShellEvent.Sessions(m.sessions.orEmpty()))
+            ShellEnvelope.MAC_STATE -> m.state?.let { emit(ShellEvent.MacStateChanged(it)) }
+            ShellEnvelope.EVENT_LIST -> emit(ShellEvent.Events(m.since ?: 0.0, m.events.orEmpty(), m.battery.orEmpty()))
             ShellEnvelope.OPENED -> {
                 val id = m.session ?: return
                 synchronized(lock) { current = id }

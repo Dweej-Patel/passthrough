@@ -268,28 +268,29 @@ private struct PhonesSection: View {
                 Text("No phones yet.").foregroundStyle(.secondary)
             }
             ForEach(shell.phones, id: \.phoneID) { phone in
-                HStack(spacing: 12) {
-                    Image(systemName: "iphone")
-                        .font(.system(size: 17))
-                        .foregroundStyle(.secondary)
-                        .frame(width: 22)
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text(phone.label)
-                        Text(detail(for: phone)).font(.caption).foregroundStyle(.secondary)
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack(spacing: 12) {
+                        Image(systemName: "iphone")
+                            .font(.system(size: 17))
+                            .foregroundStyle(.secondary)
+                            .frame(width: 22)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(phone.label)
+                            Text(detail(for: phone)).font(.caption).foregroundStyle(.secondary)
+                        }
+                        Spacer()
+                        Button("Revoke…") { revoking = phone }
                     }
-                    Spacer()
-                    // Label beside the switch: a form spreads a toggle's own label across the row.
-                    HStack(spacing: 6) {
-                        Text("Screen").font(.callout).foregroundStyle(.secondary)
-                        Toggle("Screen", isOn: Binding(get: { phone.screenAllowed },
-                                                       set: { shell.setScreenAllowed($0, for: phone.phoneID) }))
-                            .toggleStyle(.switch)
-                            .controlSize(.small)
-                            .labelsHidden()
+                    // What else this phone may do, under its name so long details don't squeeze it.
+                    HStack(spacing: 18) {
+                        permission("Screen", isOn: Binding(get: { phone.screenAllowed },
+                                                           set: { shell.setScreenAllowed($0, for: phone.phoneID) }))
+                            .help("Also let \(phone.label) see and control this screen.")
+                        permission("Awake & VPN", isOn: Binding(get: { phone.controlAllowed },
+                                                                set: { shell.setControlAllowed($0, for: phone.phoneID) }))
+                            .help("Let \(phone.label) turn Keep awake and the VPN on or off. Turning the VPN off asks for Face ID on the phone and shows a notice here. Battery and heat limits, VPN accounts and the kill switch setting stay on this Mac.")
                     }
-                    .fixedSize()
-                    .help("Also let \(phone.label) see and control this screen.")
-                    Button("Revoke…") { revoking = phone }
+                    .padding(.leading, 34)
                 }
                 .padding(.vertical, 1)
             }
@@ -303,6 +304,18 @@ private struct PhonesSection: View {
         } message: { _ in
             Text("Its shells and any view of the screen close, and its key stops working. Plug it in again to give it a new one.")
         }
+    }
+
+    /// Label beside the switch: a form spreads a toggle's own label across the row.
+    private func permission(_ title: String, isOn: Binding<Bool>) -> some View {
+        HStack(spacing: 6) {
+            Toggle(title, isOn: isOn)
+                .toggleStyle(.switch)
+                .controlSize(.mini)
+                .labelsHidden()
+            Text(title).font(.callout).foregroundStyle(.secondary)
+        }
+        .fixedSize()
     }
 
     private func detail(for phone: ShellPhone) -> String {

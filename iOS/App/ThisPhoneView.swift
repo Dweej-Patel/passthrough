@@ -2,113 +2,43 @@ import SwiftUI
 import PassthroughCore
 import PassthroughUI
 
-struct HomeView: View {
+/// This phone's own side, one tap in from the Mac tab: its sharing, its
+/// traffic and data use, and the Macs it's paired with.
+struct ThisPhoneView: View {
     @EnvironmentObject private var model: AppModel
-    @EnvironmentObject private var lock: AppLock
-    @State private var showPairing = false
-    @State private var showSettings = false
+    @Binding var showPairing: Bool
+    @Binding var showSettings: Bool
 
     var body: some View {
-        ZStack {
-            PTBackground(glow: model.state == .running ? 1 : 0.45)
-            ScrollView {
-                VStack(spacing: 18) {
-                    header
-                    HeroCard(showPairing: $showPairing)
-                    FlowCard()
-                    ThroughputCard()
-                    UsageCard()
-                    RemoteShellCard(shell: model.shell)
-                    MacsCard(showPairing: $showPairing)
-                    footer
-                }
-                .padding(.horizontal, 18)
-                .padding(.top, 8)
-                .padding(.bottom, 32)
+        ScrollView {
+            VStack(spacing: 14) {
+                HeroCard(showPairing: $showPairing)
+                MacsCard(showPairing: $showPairing)
+                FlowCard()
+                ThroughputCard()
+                UsageCard()
+                footer
             }
-            .softTopEdge()
+            .padding(.horizontal, 16)
+            .padding(.top, 4)
+            .padding(.bottom, 24)
         }
-        .sheet(isPresented: $showPairing, onDismiss: { model.endPairing() }) {
-            PairSheet().environmentObject(model)
-        }
-        .sheet(isPresented: $showSettings) {
-            SettingsView().environmentObject(model).environmentObject(lock)
-        }
-        .onChange(of: lock.isUnlocked) { _, unlocked in
-            // Tear presentations down deterministically when the app locks.
-            if !unlocked {
-                showPairing = false
-                showSettings = false
-                model.endPairing()
+        .background(PTColor.background)
+        .navigationTitle("This iPhone")
+        .toolbar {
+            ToolbarItem(placement: .topBarTrailing) {
+                Button { showSettings = true } label: { Image(systemName: "gearshape") }
+                    .accessibilityLabel("Settings")
             }
-        }
-        .onAppear {
-            let env = ProcessInfo.processInfo.environment
-            if env["PASSTHROUGH_AUTOSTART"] == "1" { model.start() }
-            if env["PASSTHROUGH_SHOW_PAIRING"] == "1" { DispatchQueue.main.asyncAfter(deadline: .now() + 1) { showPairing = true } }
-            if env["PASSTHROUGH_SHOW_SETTINGS"] == "1" { DispatchQueue.main.asyncAfter(deadline: .now() + 1) { showSettings = true } }
-        }
-    }
-
-    private var header: some View {
-        HStack(alignment: .center) {
-            VStack(alignment: .leading, spacing: 2) {
-                Text("Passthrough").font(PTTheme.display(30))
-                Text(subtitle).font(.subheadline).foregroundStyle(.secondary)
-                    .contentTransition(.opacity)
-            }
-            Spacer()
-            Button { showSettings = true } label: {
-                Image(systemName: "gearshape.fill")
-                    .font(.title3.weight(.semibold))
-                    .foregroundStyle(.secondary)
-                    .frame(width: 44, height: 44)
-                    .background(.regularMaterial, in: Circle())
-            }
-            .accessibilityLabel("Settings")
-        }
-        .padding(.top, 6)
-    }
-
-    private var subtitle: String {
-        switch model.state {
-        case .running:
-            let n = model.stats.macs.count
-            let how = model.servingWirelessly ? "over \(model.stats.wirelessCarrier ?? "Wi-Fi")" : "over USB"
-            return n == 0 ? (model.wireless ? "Waiting for a Mac" : "Waiting for a Mac on USB") : "Serving \(n == 1 ? "1 Mac" : "\(n) Macs") \(how)"
-        case .starting: return "Starting…"
-        case .stopping: return "Stopping…"
-        case .failed: return "Something went wrong"
-        case .stopped: return "USB internet for your Mac"
         }
     }
 
     private var footer: some View {
-        VStack(spacing: 6) {
-            Text("Traffic between the Mac and this iPhone travels only over the USB cable. The Mac's connections are opened by this phone's own network stack.")
-                .font(.caption)
-                .foregroundStyle(.tertiary)
-                .multilineTextAlignment(.center)
-        }
-        .padding(.horizontal, 12)
-    }
-}
-
-private extension View {
-    /// Frosts content scrolling under the status bar so the clock stays readable.
-    func softTopEdge() -> some View {
-        overlay(alignment: .top) {
-            GeometryReader { geo in
-                Rectangle()
-                    .fill(.ultraThinMaterial)
-                    .mask(LinearGradient(stops: [.init(color: .black, location: 0), .init(color: .black, location: 0.6),
-                                                 .init(color: .clear, location: 1)], startPoint: .top, endPoint: .bottom))
-                    .frame(height: geo.safeAreaInsets.top + 10)
-                    .ignoresSafeArea(edges: .top)
-            }
-            .allowsHitTesting(false)
-            .accessibilityHidden(true)
-        }
+        Text("Traffic between the Mac and this iPhone travels only over the USB cable. The Mac's connections are opened by this phone's own network stack.")
+            .font(.caption)
+            .foregroundStyle(.secondary)
+            .multilineTextAlignment(.center)
+            .padding(.horizontal, 12)
     }
 }
 
@@ -130,7 +60,7 @@ struct FlowCard: View {
     }
 
     var body: some View {
-        PTCard(padding: 10) {
+        PTSurface(padding: 10) {
             VStack(alignment: .leading, spacing: 4) {
                 PTSectionTitle("How it flows", icon: "point.3.connected.trianglepath.dotted").padding(.leading, 6)
                 FlowMap(state: flowState, height: 90, active: scenePhase == .active)
@@ -155,7 +85,7 @@ struct HeroCard: View {
     }
 
     var body: some View {
-        PTCard(padding: 22) {
+        PTSurface(padding: 22) {
             VStack(spacing: 18) {
                 ZStack {
                     StatusRing(mode: ringMode, size: 196, lineWidth: 11)
@@ -171,11 +101,11 @@ struct HeroCard: View {
                         .multilineTextAlignment(.center)
                         .contentTransition(.opacity)
                     if case .failed(let message) = model.state {
-                        Text(message).font(.caption).foregroundStyle(PTTheme.danger).multilineTextAlignment(.center)
+                        Text(message).font(.caption).foregroundStyle(PTColor.problem).multilineTextAlignment(.center)
                     }
                     if model.sharingWiFiInsteadOfCellular {
                         Label("This iPhone is on Wi-Fi, so your Mac uses its Wi-Fi, not cellular. Turn off Wi-Fi to share cellular.", systemImage: "wifi")
-                            .font(.caption).foregroundStyle(PTTheme.warning).multilineTextAlignment(.center)
+                            .font(.caption).foregroundStyle(PTColor.attentionText).multilineTextAlignment(.center)
                     }
                     HStack(spacing: 8) {
                         if let radio = model.radio { PTPill(radio, icon: "antenna.radiowaves.left.and.right", tint: PTTheme.down) }
@@ -191,12 +121,8 @@ struct HeroCard: View {
                 if model.pairedClients.isEmpty && model.state == .running {
                     Button { showPairing = true } label: {
                         Label("Pair your Mac", systemImage: "laptopcomputer.and.iphone")
-                            .font(.subheadline.weight(.semibold))
-                            .frame(maxWidth: .infinity)
-                            .padding(.vertical, 12)
                     }
-                    .buttonStyle(.borderedProminent)
-                    .tint(PTTheme.accentEnd)
+                    .buttonStyle(PTProminentButtonStyle())
                 }
             }
         }
@@ -204,13 +130,13 @@ struct HeroCard: View {
 
     private var statusLine: String {
         switch model.state {
-        case .stopped: return "Tap to start sharing this iPhone's connection"
-        case .starting: return "Bringing the proxy up"
-        case .stopping: return "Shutting down"
-        case .failed: return "Could not start"
+        case .stopped: return "Off. Tap to share this iPhone's internet with your Mac"
+        case .starting: return "Turning on…"
+        case .stopping: return "Turning off…"
+        case .failed: return "Couldn't turn on"
         case .running:
             if let mac = model.stats.macs.first { return "\(mac.name) is online through this iPhone" }
-            return "Ready. Plug in your Mac and connect from the menu bar."
+            return "Sharing. Plug in your Mac and connect from its menu bar."
         }
     }
 
@@ -233,22 +159,22 @@ struct PowerButton: View {
         Button(action: action) {
             ZStack {
                 Circle()
-                    .fill(isOn ? AnyShapeStyle(PTTheme.accent) : AnyShapeStyle(Color.primary.opacity(0.08)))
+                    .fill(isOn ? PTColor.tint : Color.primary.opacity(0.08))
                     .frame(width: 128, height: 128)
-                    .shadow(color: isOn ? PTTheme.accentStart.opacity(0.45) : .clear, radius: 24)
+                    .shadow(color: isOn ? PTColor.tint.opacity(0.35) : .clear, radius: 20, y: 6)
                 Image(systemName: "power")
                     .font(.system(size: 44, weight: .bold))
-                    .foregroundStyle(isOn ? Color.white : Color.primary.opacity(0.6))
+                    .foregroundStyle(isOn ? PTColor.onTint : Color.primary.opacity(0.6))
                     .opacity(busy ? 0.4 : 1)
             }
             .scaleEffect(pressed ? 0.94 : 1)
-            .animation(.spring(response: 0.3, dampingFraction: 0.6), value: pressed)
+            .animation(.easeOut(duration: 0.15), value: pressed)
             .animation(.easeInOut(duration: 0.4), value: isOn)
         }
         .buttonStyle(.plain)
         .disabled(busy)
         .simultaneousGesture(DragGesture(minimumDistance: 0).onChanged { _ in pressed = true }.onEnded { _ in pressed = false })
-        .accessibilityLabel(isOn ? "Stop passthrough" : "Start passthrough")
+        .accessibilityLabel(isOn ? "Stop sharing this iPhone's internet" : "Share this iPhone's internet")
         .sensoryFeedback(.impact(weight: .medium), trigger: isOn)
     }
 }
@@ -259,7 +185,7 @@ struct ThroughputCard: View {
     @EnvironmentObject private var model: AppModel
 
     var body: some View {
-        PTCard {
+        PTSurface {
             VStack(alignment: .leading, spacing: 12) {
                 HStack {
                     PTSectionTitle("Live throughput", icon: "waveform.path.ecg")
@@ -291,7 +217,7 @@ struct UsageCard: View {
     @State private var confirmReset = false
 
     var body: some View {
-        PTCard {
+        PTSurface {
             VStack(alignment: .leading, spacing: 12) {
                 HStack {
                     PTSectionTitle("Data used", icon: "chart.bar.fill")
@@ -350,7 +276,7 @@ struct MacsCard: View {
     @Binding var showPairing: Bool
 
     var body: some View {
-        PTCard {
+        PTSurface {
             VStack(alignment: .leading, spacing: 12) {
                 HStack {
                     PTSectionTitle("Paired Macs", icon: "laptopcomputer")
@@ -360,17 +286,17 @@ struct MacsCard: View {
                     }
                     .buttonStyle(.bordered)
                     .buttonBorderShape(.capsule)
-                    .tint(PTTheme.accentEnd)
+                    .tint(PTColor.tintText)
                     .controlSize(.small)
                 }
                 if model.pairedClients.isEmpty {
-                    Text("No Mac paired yet. Start the proxy, then tap Pair and enter the code in Passthrough on your Mac.")
+                    Text("No Mac paired yet. Tap Pair and enter the code in Passthrough on your Mac, with the cable plugged in.")
                         .font(.subheadline).foregroundStyle(.secondary)
                 } else {
                     ForEach(model.pairedClients) { client in
                         let live = model.connectedMacIDs.contains(client.id)
                         HStack(spacing: 12) {
-                            PTStatusDot(color: live ? PTTheme.success : .secondary.opacity(0.5), live: live)
+                            PTStatusDot(color: live ? PTColor.tint : .secondary.opacity(0.5), live: live)
                             VStack(alignment: .leading, spacing: 2) {
                                 Text(client.name).font(.subheadline.weight(.semibold))
                                 Text(live ? "Connected now" : lastSeen(client)).font(.caption).foregroundStyle(.secondary)

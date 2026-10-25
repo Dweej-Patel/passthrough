@@ -33,9 +33,11 @@ import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import dev.dpatel.passthrough.service.Runtime
 import dev.dpatel.passthrough.ui.AppViewModel
-import dev.dpatel.passthrough.ui.HomeScreen
+import dev.dpatel.passthrough.ui.MainTab
+import dev.dpatel.passthrough.ui.MainTabs
 import dev.dpatel.passthrough.ui.PairSheet
 import dev.dpatel.passthrough.ui.PassthroughTheme
+import dev.dpatel.passthrough.ui.PhoneScreen
 import dev.dpatel.passthrough.ui.SettingsScreen
 import dev.dpatel.passthrough.ui.lock.LockGate
 import dev.dpatel.passthrough.ui.lock.LockModel
@@ -66,16 +68,26 @@ class MainActivity : FragmentActivity() {
         return wanted.filter { ContextCompat.checkSelfPermission(this, it) != PackageManager.PERMISSION_GRANTED }.toTypedArray()
     }
 
-    private enum class Screen { HOME, SETTINGS, TERMINAL, HISTORY }
+    /** [depth]: how far in from the tabs, so going back slides the way it came. */
+    private enum class Screen(val depth: Int) { HOME(0), PHONE(1), HISTORY(1), SETTINGS(2), TERMINAL(1) }
 
     /** Composed only while unlocked: relocking tears down every screen (terminal and history included). */
     @Composable
     private fun AppRoot(vm: AppViewModel, shell: ShellViewModel) {
-        var screen by rememberSaveable { mutableStateOf(Screen.HOME) }
+        // Debug builds only: where to open, for screenshots (pt.demo.tab = mac|shells|activity, or phone for This phone).
+        val demoTab = if (BuildConfig.DEBUG) intent?.getStringExtra("pt.demo.tab") else null
+        var screen by rememberSaveable { mutableStateOf(if (demoTab.equals("phone", true)) Screen.PHONE else Screen.HOME) }
+        // Where Settings goes back to: the tabs or This phone.
+        var settingsFrom by rememberSaveable { mutableStateOf(Screen.HOME) }
         var terminalIntent by rememberSaveable { mutableStateOf(TerminalIntent.RESUME) }
         var showPairing by rememberSaveable { mutableStateOf(false) }
-        // Hoisted so Home keeps its place after Settings, the terminal or history.
-        val homeScroll = rememberSaveable(saver = ScrollState.Saver) { ScrollState(0) }
+        val startTab = demoTab?.let { v -> MainTab.entries.firstOrNull { it.name.equals(v, true) } } ?: MainTab.MAC
+        // Hoisted so the tabs keep their tab and place, and This phone its place, after the screens that replace them.
+        var tab by rememberSaveable { mutableStateOf(startTab) }
+        val macScroll = rememberSaveable(saver = ScrollState.Saver) { ScrollState(0) }
+        val phoneScroll = rememberSaveable(saver = ScrollState.Saver) { ScrollState(0) }
+        fun openSettings(from: Screen) { settingsFrom = from; screen = Screen.SETTINGS }
+        fun back() { screen = if (screen == Screen.SETTINGS) settingsFrom else Screen.HOME }
         val prefs = Runtime.settings.prefs
         val permissions = rememberLauncherForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { vm.start() }
         val onPower = {
@@ -115,35 +127,41 @@ class MainActivity : FragmentActivity() {
             lifecycleOwner.lifecycle.addObserver(observer)
             onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
         }
-        BackHandler(enabled = screen != Screen.HOME) { screen = Screen.HOME }
+        BackHandler(enabled = screen != Screen.HOME) { back() }
         AnimatedContent(
             targetState = screen,
             transitionSpec = {
                 when {
                     targetState == Screen.TERMINAL -> slideInVertically { it } togetherWith fadeOut()
                     initialState == Screen.TERMINAL -> fadeIn() togetherWith slideOutVertically { it }
-                    targetState != Screen.HOME -> slideInHorizontally { it } togetherWith fadeOut()
+                    targetState.depth > initialState.depth -> slideInHorizontally { it } togetherWith fadeOut()
                     else -> fadeIn() togetherWith slideOutHorizontally { it }
                 }
             },
             label = "screen",
         ) { target ->
             when (target) {
-                Screen.SETTINGS -> SettingsScreen(vm, shell, onDone = { screen = Screen.HOME })
+                Screen.SETTINGS -> SettingsScreen(vm, shell, onDone = { back() })
+                Screen.PHONE -> PhoneScreen(
+                    vm, onPower = onPower, onPair = { showPairing = true }, onSettings = { openSettings(Screen.PHONE) },
+                    onDone = { screen = Screen.HOME }, scroll = phoneScroll,
+                )
                 Screen.TERMINAL -> TerminalScreen(
                     shell, terminalIntent,
                     onIntentStarted = { terminalIntent = TerminalIntent.RESUME },
                     onClose = { screen = Screen.HOME },
                 )
                 Screen.HISTORY -> ShellHistoryScreen(shell, onDone = { screen = Screen.HOME })
-                Screen.HOME -> HomeScreen(
-                    vm, shell, onPower = onPower, onPair = { showPairing = true }, onSettings = { screen = Screen.SETTINGS },
+                Screen.HOME -> MainTabs(
+                    vm, shell, tab = tab, onTab = { tab = it },
+                    onPower = onPower, onPair = { showPairing = true }, onSettings = { openSettings(Screen.HOME) },
+                    onThisPhone = { screen = Screen.PHONE },
                     onOpenTerminal = { session ->
                         terminalIntent = session?.let(TerminalIntent::attach) ?: TerminalIntent.NEW
                         screen = Screen.TERMINAL
                     },
                     onShellHistory = { screen = Screen.HISTORY },
-                    scroll = homeScroll,
+                    macScroll = macScroll,
                 )
             }
         }

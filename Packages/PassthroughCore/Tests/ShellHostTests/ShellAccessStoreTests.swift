@@ -39,6 +39,38 @@ final class ShellAccessStoreTests: XCTestCase {
         XCTAssertFalse(store.screenAllowed(forPhone: "a"), "a phone granted again after a revoke starts without it")
     }
 
+    /// Keep awake and the VPN: on unless the owner turns it off, kept across a re-grant.
+    func testControlAccess() {
+        let store = ShellAccessStore(secrets: InMemorySecrets())
+        store.record(phone("a"))
+        store.record(phone("b"))
+        XCTAssertTrue(store.controlAllowed(forPhone: "a"), "on by default")
+        XCTAssertTrue(store.setControlAllowed(false, forPhone: "a"))
+        XCTAssertFalse(store.controlAllowed(forPhone: "a"))
+        XCTAssertTrue(store.controlAllowed(forPhone: "b"))
+        store.record(phone("a"))
+        XCTAssertFalse(store.controlAllowed(forPhone: "a"), "kept across a re-grant")
+        XCTAssertFalse(store.controlAllowed(forPhone: "nobody"), "an unknown phone may change nothing")
+        XCTAssertFalse(store.setControlAllowed(true, forPhone: "nobody"))
+    }
+
+    /// As the screen: a failed "off" still holds in memory, and is written with the next write.
+    func testControlOffHoldsWhenTheWriteFails() {
+        let secrets = FlakySecrets()
+        let store = ShellAccessStore(secrets: secrets)
+        store.record(phone("a"))
+        store.record(phone("b"))
+        secrets.failing.set(true)
+        XCTAssertFalse(store.setControlAllowed(false, forPhone: "a"), "the failure is reported")
+        XCTAssertFalse(store.controlAllowed(forPhone: "a"), "but it is off at once")
+        XCTAssertFalse(store.record(phone("b")), "another write fails, so the list is read from the store again")
+        XCTAssertFalse(store.controlAllowed(forPhone: "a"), "the store still says on; memory says off")
+        secrets.failing.set(false)
+        XCTAssertTrue(store.record(phone("b")))
+        XCTAssertFalse(ShellAccessStore(secrets: secrets.inner).controlAllowed(forPhone: "a"), "written with the next write")
+        XCTAssertTrue(ShellAccessStore(secrets: secrets.inner).controlAllowed(forPhone: "b"))
+    }
+
     /// The phone ID in a grant answer is the phone's claim: a phone paired
     /// through one slot cannot replace the access of a phone from another.
     func testRecordRefusesAPhoneIDFromAnotherPairing() {

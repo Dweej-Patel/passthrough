@@ -1,4 +1,6 @@
 import SwiftUI
+import PassthroughCore
+import PassthroughUI
 
 @main
 struct PassthroughApp: App {
@@ -9,7 +11,11 @@ struct PassthroughApp: App {
 
     var body: some Scene {
         WindowGroup {
-            LockGate { HomeView() }
+            LockGate { RootView() }
+                // Here, not in RootView: that's built only after the first
+                // unlock, and a cold launch from a widget would lose its link.
+                .onOpenURL { PendingLinks.shared.open(AppLink(url: $0)) }
+                .tint(PTColor.tintText)
                 .environmentObject(model)
                 .environmentObject(lock)
                 .preferredColorScheme(nil)

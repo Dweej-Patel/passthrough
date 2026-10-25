@@ -74,8 +74,8 @@ pairing rules, update the fixtures first, then make both suites pass.
 ## Things to keep in mind
 
 * **Security posture matters here.** The Mac helper runs as root and the phone
-  app terminates every connection the Mac makes. Read the *Security* section of
-  the README before touching pairing, the SOCKS5 server, the OpenVPN profile
+  app terminates every connection the Mac makes. Read the *Security model* section of
+  [docs/GUIDE.md](docs/GUIDE.md#security-model) before touching pairing, the SOCKS5 server, the OpenVPN profile
   sanitiser or the helper's XPC surface. Changes that widen what the helper
   will execute, or what a profile can contain, will get extra scrutiny.
 * **Vendored binaries.** `Vendor/HevSocks5Tunnel` and `Vendor/VPNEngines` are
@@ -93,7 +93,7 @@ pairing rules, update the fixtures first, then make both suites pass.
 * [ ] `./gradlew testDebugUnitTest lintDebug` passes in `android/` (if you touched it)
 * [ ] Both apps build (`xcodegen generate`, then build the `Passthrough` and
       `PassthroughMac` schemes)
-* [ ] README updated if behaviour or setup changed
+* [ ] README and docs/GUIDE.md updated if behaviour or setup changed
 * [ ] No personal identifiers or credentials in the diff
 
 ## Reporting security issues

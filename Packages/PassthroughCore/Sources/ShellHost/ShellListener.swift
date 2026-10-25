@@ -87,6 +87,39 @@ public final class ShellListener: @unchecked Sendable {
         set { gate.screenViews.set(newValue) }
     }
 
+    /// What a phone is told about the Mac (`macState`): after `ready`, and
+    /// to every shell connection on `pushMacState()`. Nil sends nothing.
+    /// Asked on the listener's queue, so it must not block. Unset: never sent.
+    public var macState: (@Sendable (_ phoneID: String) -> MacState?)? {
+        get { gate.macStateProvider.get() }
+        set { gate.macStateProvider.set(newValue) }
+    }
+
+    /// A phone asked to change Keep awake or the VPN: nil accepts it (the
+    /// new state follows through `pushMacState()`, and that phone gets a
+    /// `macState` a second later either way), an error refuses it.
+    /// Asked on the listener's queue, so it must not block. Unset: refused
+    /// as `bad_request`, as a Mac that doesn't know the request would.
+    public var onMacControl: (@Sendable (_ phoneID: String, _ label: String, _ change: MacControl) -> ShellError?)? {
+        get { gate.macControl.get() }
+        set { gate.macControl.set(newValue) }
+    }
+
+    /// What happened on the Mac since a time, and its battery meanwhile, for
+    /// a phone's `events` request (oldest first). Asked on the listener's
+    /// queue, so it must not block. Unset: answered `bad_request`.
+    public var macEvents: (@Sendable (_ phoneID: String, _ since: Double) -> (events: [MacEvent], battery: [BatterySample]))? {
+        get { gate.eventsProvider.get() }
+        set { gate.eventsProvider.set(newValue) }
+    }
+
+    /// Sends every connected phone the Mac's state again (it changed).
+    public func pushMacState() { gate.pushMacState() }
+
+    /// Sends every connected phone the session list (it changed: a session
+    /// opened, ended, or started or stopped waiting on a question).
+    public func pushSessions() { gate.pushSessions() }
+
     /// The listener stopped for good (the port is taken, say); it will not
     /// accept again, so make a new one. On the listener's queue.
     public var onFailure: (@Sendable (Error) -> Void)? {
@@ -329,6 +362,9 @@ final class ShellGate: @unchecked Sendable {
     let screenSharingCheck = Locked<(@Sendable () async -> Bool)?>(nil)
     /// Where `screen` requests are relayed; another port in tests.
     let screenPort = Locked(RemoteShell.screenSharingPort)
+    let macStateProvider = Locked<(@Sendable (String) -> MacState?)?>(nil)
+    let macControl = Locked<(@Sendable (_ phoneID: String, _ label: String, _ change: MacControl) -> ShellError?)?>(nil)
+    let eventsProvider = Locked<(@Sendable (_ phoneID: String, _ since: Double) -> (events: [MacEvent], battery: [BatterySample]))?>(nil)
     private let shellKeys: @Sendable (String) -> [Data]
     private let keyConfirmed: @Sendable (_ phoneID: String, _ key: Data) -> Void
     private let phoneLabel: @Sendable (String) -> String
@@ -549,6 +585,32 @@ final class ShellGate: @unchecked Sendable {
         screenHandler.get()?(phoneID, label, viewing)
     }
 
+    /// `macState` for this phone, or nil when there is nothing to send.
+    func macStateMessage(for phoneID: String) -> ShellEnvelope? {
+        guard let state = macStateProvider.get()?(phoneID) else { return nil }
+        var message = ShellEnvelope(t: ShellEnvelope.macState)
+        message.state = state
+        return message
+    }
+
+    func pushMacState() {
+        queue.async { [self] in
+            connections.values.filter { !$0.isScreen }.forEach { $0.sendMacState() }
+        }
+    }
+
+    func pushSessions() {
+        queue.async { [self] in
+            let list = manager.sessions
+            connections.values.filter { !$0.isScreen }.forEach { $0.sendSessions(list) }
+        }
+    }
+
+    func control(_ phoneID: String, _ label: String, _ change: MacControl) -> ShellError? {
+        guard let handler = macControl.get() else { return .badRequest }
+        return handler(phoneID, label, change)
+    }
+
     static func send(_ message: ShellEnvelope, on stream: any ByteStream, then: (@Sendable () -> Void)? = nil) {
         guard let line = try? message.encodedLine() else { return }
         stream.send(line, isComplete: false) { _ in then?() }
@@ -606,17 +668,48 @@ final class ShellConnection: ShellAttachment, @unchecked Sendable {
         self.label = label
     }
 
-    /// Sends `ready`, then `macInfo` if the Mac has one, then the session list.
+    /// Sends `ready`, then `macInfo` if the Mac has one, then its state, then the session list.
     func start(initialBytes: Data, macInfo: ShellEnvelope? = nil) {
         stream.onTerminated = { [weak self] _ in self?.queue.async { self?.close() } }
         send(ShellEnvelope(t: ShellEnvelope.ready))
         if let macInfo { send(macInfo) }
+        sendMacState()
         var list = ShellEnvelope(t: ShellEnvelope.sessions)
         list.sessions = manager.sessions
         send(list)
         received(initialBytes)
         if busy { readPaused = true } else { receive() }
     }
+
+    /// The newest events and samples that fit in one line, oldest first.
+    private func sendEvents(_ found: (events: [MacEvent], battery: [BatterySample]), since: Double) {
+        var reply = ShellEnvelope(t: ShellEnvelope.eventList)
+        reply.since = since
+        reply.events = Array(found.events.suffix(MacEvent.maxPerList))
+        reply.battery = Array(found.battery.suffix(BatterySample.maxPerList))
+        // Long details could still overflow a line: drop the oldest until it fits.
+        while let line = try? reply.encodedLine(), line.count > RemoteShell.lineLimit, !(reply.events ?? []).isEmpty {
+            reply.events = Array((reply.events ?? []).dropFirst(max(1, (reply.events?.count ?? 0) / 10)))
+        }
+        send(reply)
+    }
+
+    /// On the queue: the session list, unasked.
+    func sendSessions(_ list: [ShellSessionInfo]) {
+        guard !closed, !isScreen else { return }
+        var message = ShellEnvelope(t: ShellEnvelope.sessions)
+        message.sessions = list
+        send(message)
+    }
+
+    /// On the queue: the Mac's state as this phone may see it, if there is any.
+    func sendMacState() {
+        guard !closed, !isScreen, let message = gate?.macStateMessage(for: phoneID) else { return }
+        send(message)
+    }
+
+    /// How long after an accepted `setAwake`/`setVPN` its `macState` answer goes out.
+    static let controlAnswerDelay: TimeInterval = 1
 
     /// Asked for the screen: being relayed to Screen Sharing, or about to be.
     var isScreen: Bool { screenChecking || screenDial != nil || screenRelay != nil || screenVideo != nil }
@@ -701,6 +794,17 @@ final class ShellConnection: ShellAttachment, @unchecked Sendable {
     private func handle(_ line: Data) {
         guard let message = try? ShellEnvelope.decode(line) else { return fail(.badRequest) }
         switch message.t {
+        case ShellEnvelope.events:
+            guard let since = message.since, since.isFinite, let provider = gate?.eventsProvider.get() else { return fail(.badRequest) }
+            sendEvents(provider(phoneID, since), since: since)
+        case ShellEnvelope.setAwake, ShellEnvelope.setVPN:
+            guard let on = message.on, let gate else { return fail(.badRequest) }
+            let change: MacControl = message.t == ShellEnvelope.setAwake ? .awake(on) : .vpn(on)
+            if let refused = gate.control(phoneID, label, change) { return fail(refused) }
+            // The Mac may hold its state (a limit refusing Keep awake, a VPN
+            // already on): answer anyway, once the change has had its moment,
+            // so the phone always hears back.
+            queue.asyncAfter(deadline: .now() + Self.controlAnswerDelay) { [weak self] in self?.sendMacState() }
         case ShellEnvelope.list:
             var reply = ShellEnvelope(t: ShellEnvelope.sessions)
             reply.sessions = manager.sessions

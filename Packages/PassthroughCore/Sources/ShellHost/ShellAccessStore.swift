@@ -19,14 +19,19 @@ public struct ShellPhone: Codable, Equatable, Sendable {
     /// The owner also let this phone see and control the screen (through
     /// Screen Sharing). Off unless turned on; absent in older lists.
     public var screen: Bool?
+    /// The owner lets this phone change Keep awake and the VPN. On unless
+    /// turned off (a phone with shell access can already run commands as the
+    /// owner); absent in older lists.
+    public var control: Bool?
 
     public init(phoneID: String, label: String, pairingSlot: String, key: Data, previousKey: Data? = nil, grantedAt: Date,
-                screen: Bool? = nil) {
+                screen: Bool? = nil, control: Bool? = nil) {
         self.phoneID = phoneID; self.label = label; self.pairingSlot = pairingSlot; self.key = key
-        self.previousKey = previousKey; self.grantedAt = grantedAt; self.screen = screen
+        self.previousKey = previousKey; self.grantedAt = grantedAt; self.screen = screen; self.control = control
     }
 
     public var screenAllowed: Bool { screen ?? false }
+    public var controlAllowed: Bool { control ?? true }
 }
 
 /// The phones allowed a shell, with their keys, kept in the Mac's secret store.
@@ -63,11 +68,12 @@ public final class ShellAccessStore: @unchecked Sendable {
     /// earlier does not install what it saw before that write.
     private var generation = 0
     /// Reductions not yet in the store (its write failed): phones revoked and
-    /// phones whose screen access was turned off. Applied to every list read
-    /// from the store; cleared once a list that includes them is written.
-    /// Guarded by `lock`.
+    /// phones whose screen access or control was turned off. Applied to every
+    /// list read from the store; cleared once a list that includes them is
+    /// written. Guarded by `lock`.
     private var unsavedRevokes: Set<String> = []
     private var unsavedScreenOff: Set<String> = []
+    private var unsavedControlOff: Set<String> = []
 
     /// `now` is for tests.
     public init(secrets: SecretStore, now: @escaping @Sendable () -> Date = Date.init) {
@@ -125,6 +131,7 @@ public final class ShellAccessStore: @unchecked Sendable {
             phone.previousKey = kept == phone.key ? nil : kept
             // Plugging the phone in again renews its key, not what it may do.
             phone.screen = earlier.screen
+            phone.control = earlier.control
         }
         list.removeAll { $0.phoneID == phone.phoneID }
         list.append(phone)
@@ -157,6 +164,26 @@ public final class ShellAccessStore: @unchecked Sendable {
         if write(list) { saved(); return true }
         ptLog(.error, "Could not store that a phone may no longer see the screen; it stays off until this Mac quits")
         lock.lock(); unsavedScreenOff.insert(phoneID); lock.unlock()
+        return false
+    }
+
+    /// From memory: asked for every `macState` and every `setAwake` / `setVPN`.
+    public func controlAllowed(forPhone phoneID: String) -> Bool {
+        phones.first { $0.phoneID == phoneID }?.controlAllowed ?? false
+    }
+
+    /// Lets the phone change Keep awake and the VPN, or stops it; as
+    /// `setScreenAllowed`, a failed stop still stops it in memory.
+    @discardableResult
+    public func setControlAllowed(_ allowed: Bool, forPhone phoneID: String) -> Bool {
+        writeLock.lock(); defer { writeLock.unlock() }
+        guard var list = loadForWrite(), let index = list.firstIndex(where: { $0.phoneID == phoneID }) else { return false }
+        list[index].control = allowed
+        if allowed { return store(list) }
+        setCache(list)
+        if write(list) { saved(); return true }
+        ptLog(.error, "Could not store that a phone may no longer change Keep awake and the VPN; it stays off until this Mac quits")
+        lock.lock(); unsavedControlOff.insert(phoneID); lock.unlock()
         return false
     }
 
@@ -236,7 +263,7 @@ public final class ShellAccessStore: @unchecked Sendable {
     /// A list built on the in-memory one (so with every unsaved reduction
     /// applied) was written, or nothing is stored at all: nothing is unsaved.
     private func saved() {
-        lock.lock(); unsavedRevokes.removeAll(); unsavedScreenOff.removeAll(); lock.unlock()
+        lock.lock(); unsavedRevokes.removeAll(); unsavedScreenOff.removeAll(); unsavedControlOff.removeAll(); lock.unlock()
     }
 
     /// Writes `list` to the store, no lock held.
@@ -268,9 +295,10 @@ public final class ShellAccessStore: @unchecked Sendable {
     private func readStore() -> [ShellPhone]? {
         guard let data = secrets.read(Self.account) else { return [] }
         guard var list = try? JSONDecoder().decode([ShellPhone].self, from: data) else { return nil }
-        lock.lock(); let revoked = unsavedRevokes, screenOff = unsavedScreenOff; lock.unlock()
+        lock.lock(); let revoked = unsavedRevokes, screenOff = unsavedScreenOff, controlOff = unsavedControlOff; lock.unlock()
         list.removeAll { revoked.contains($0.phoneID) }
         for index in list.indices where screenOff.contains(list[index].phoneID) { list[index].screen = false }
+        for index in list.indices where controlOff.contains(list[index].phoneID) { list[index].control = false }
         return list
     }
 }

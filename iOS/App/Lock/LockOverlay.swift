@@ -85,7 +85,7 @@ private struct OverlayView: View {
 
     var body: some View {
         ZStack {
-            PTBackground(glow: 0.6)
+            PTColor.background.ignoresSafeArea()
             if lock.isUnlocked {
                 // Privacy cover for the app switcher: identity only, nothing from the app.
                 AppIconView().frame(width: 96, height: 96)
@@ -130,7 +130,7 @@ private struct LockScreen: View {
         VStack(spacing: 18) {
             AppIconView()
                 .frame(width: 96, height: 96)
-                .shadow(color: PTTheme.accentEnd.opacity(0.3), radius: 22, y: 8)
+                .shadow(color: .black.opacity(0.18), radius: 18, y: 8)
                 .accessibilityHidden(true)
             VStack(spacing: 10) {
                 Text("Passthrough").font(PTTheme.display(32))
@@ -157,24 +157,19 @@ private struct LockScreen: View {
             } label: {
                 HStack(spacing: 10) {
                     if lock.isEvaluating {
-                        ProgressView().tint(.white)
+                        ProgressView().tint(PTColor.onTint)
                     } else {
                         Image(systemName: method.symbol).font(.title3.weight(.semibold))
                     }
                     Text("Unlock with \(method.title)")
                 }
-                .font(.headline)
-                .frame(maxWidth: .infinity, minHeight: 34)
             }
-            .buttonStyle(.borderedProminent)
-            .buttonBorderShape(.capsule)
-            .controlSize(.large)
-            .tint(PTTheme.accentEnd)
+            .buttonStyle(PTProminentButtonStyle())
             .disabled(lock.isEvaluating)
             if let failure = lock.failure {
                 Label(failure, systemImage: "exclamationmark.circle.fill")
                     .font(.footnote.weight(.semibold))
-                    .foregroundStyle(PTTheme.danger)
+                    .foregroundStyle(PTColor.problem)
                     .multilineTextAlignment(.center)
                     .transition(.opacity)
             }

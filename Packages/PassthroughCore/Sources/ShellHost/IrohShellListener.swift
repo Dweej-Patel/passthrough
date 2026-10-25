@@ -65,6 +65,30 @@ public final class IrohShellListener: @unchecked Sendable {
         set { gate.screenHandler.set(newValue) }
     }
 
+    /// As `ShellListener.macState`.
+    public var macState: (@Sendable (_ phoneID: String) -> MacState?)? {
+        get { gate.macStateProvider.get() }
+        set { gate.macStateProvider.set(newValue) }
+    }
+
+    /// As `ShellListener.onMacControl`.
+    public var onMacControl: (@Sendable (_ phoneID: String, _ label: String, _ change: MacControl) -> ShellError?)? {
+        get { gate.macControl.get() }
+        set { gate.macControl.set(newValue) }
+    }
+
+    /// As `ShellListener.macEvents`.
+    public var macEvents: (@Sendable (_ phoneID: String, _ since: Double) -> (events: [MacEvent], battery: [BatterySample]))? {
+        get { gate.eventsProvider.get() }
+        set { gate.eventsProvider.set(newValue) }
+    }
+
+    /// As `ShellListener.pushMacState()`.
+    public func pushMacState() { gate.pushMacState() }
+
+    /// As `ShellListener.pushSessions()`.
+    public func pushSessions() { gate.pushSessions() }
+
     /// The endpoint stopped accepting (it was shut down underneath the
     /// listener); it will not accept again. On the listener's queue.
     public var onFailure: (@Sendable (Error) -> Void)? {
