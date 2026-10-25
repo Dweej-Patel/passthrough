@@ -201,6 +201,7 @@ fun TerminalScreen(vm: ShellViewModel, intent: String, onIntentStarted: () -> Un
     val detached by vm.detachedSession.collectAsStateWithLifecycle()
     val lastError by vm.lastError.collectAsStateWithLifecycle()
     val fromAnywhere by vm.triedFromAnywhere.collectAsStateWithLifecycle()
+    val redialing by vm.redialing.collectAsStateWithLifecycle()
     val ended by vm.ended.collectAsStateWithLifecycle()
     /** Closes [id]'s tab and shows another, or leaves the terminal when none is left. */
     val closeTab = { id: String ->
@@ -239,7 +240,7 @@ fun TerminalScreen(vm: ShellViewModel, intent: String, onIntentStarted: () -> Un
                             }
                             val status = when (reach) {
                                 ShellReach.READY -> null
-                                ShellReach.CONNECTING -> "Connecting…"
+                                ShellReach.CONNECTING -> if (redialing) "Reconnecting…" else "Connecting…"
                                 else -> reach.message(fromAnywhere)
                             }
                             status?.let {

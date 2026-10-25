@@ -32,6 +32,7 @@ import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -100,6 +101,9 @@ class ShellViewModel(app: Application) : AndroidViewModel(app) {
     /** Whether the current (or last) connect also tried iroh, for the unreachable copy. */
     private val _triedFromAnywhere = MutableStateFlow(false)
     val triedFromAnywhere: StateFlow<Boolean> = _triedFromAnywhere.asStateFlow()
+    /** Connecting again by itself after a working connection dropped (shown while [reach] is connecting). */
+    private val _redialing = MutableStateFlow(false)
+    val redialing: StateFlow<Boolean> = _redialing.asStateFlow()
     /** "Connect using": this device's choice. */
     val connectMode: StateFlow<ShellConnectMode> = Runtime.settings.shellConnectMode
 
@@ -121,6 +125,12 @@ class ShellViewModel(app: Application) : AndroidViewModel(app) {
     private var foreground = true
     /** The Bonjour endpoint the current connect was given, to tell when a better one appears. */
     private var dialedDiscovered: Pair<String, Int>? = null
+    /**
+     * A working connection dropped (Wi-Fi lost, the Mac stopped answering):
+     * how many redials have been made since. Null when not redialling.
+     */
+    private var redialsMade: Int? = null
+    private var redialJob: Job? = null
     private var size = 80 to 24
     private var pendingTranscript: PendingTranscript? = null
     private val refreshes = Channel<Unit>(Channel.CONFLATED)
@@ -187,6 +197,7 @@ class ShellViewModel(app: Application) : AndroidViewModel(app) {
     /** Leaving the foreground: sockets don't survive long in the background, so leave cleanly. */
     fun onBackground() {
         foreground = false
+        stopRedialing()
         dropConnection()
         discovery.stop()
         // Not usable until the foreground refresh dials again (typing meanwhile would go nowhere).
@@ -321,8 +332,11 @@ class ShellViewModel(app: Application) : AndroidViewModel(app) {
     fun connect() {
         if (demo != null) return refresh()
         dropConnection()
+        redialJob?.cancel()
+        redialJob = null
         val credential = current()
         if (credential == null) {
+            stopRedialing()
             if (_macs.value.isEmpty()) _reach.value = ShellReach.NO_ACCESS
             return
         }
@@ -354,12 +368,13 @@ class ShellViewModel(app: Application) : AndroidViewModel(app) {
                 throw e
             } catch (e: ShellConnectError.Refused) {
                 if (gen == generation) {
+                    stopRedialing()
                     _lastError.value = e.reason
                     _reach.value = if (e.reason == ShellError.NOT_AUTHORIZED) ShellReach.NO_ACCESS else ShellReach.UNREACHABLE
                 }
                 return@launch
             } catch (_: Exception) {
-                if (gen == generation) _reach.value = ShellReach.UNREACHABLE
+                if (gen == generation) failed(dropped = false)
                 return@launch
             }
             if (gen != generation) {
@@ -448,6 +463,7 @@ class ShellViewModel(app: Application) : AndroidViewModel(app) {
     private fun handle(event: ShellEvent) {
         when (event) {
             is ShellEvent.Ready -> {
+                stopRedialing()
                 _reach.value = ShellReach.READY
                 _path.value = event.path
                 // No list(): the Mac sends `sessions` right after `ready`.
@@ -507,16 +523,50 @@ class ShellViewModel(app: Application) : AndroidViewModel(app) {
                     event.session != null && event.session == pendingTranscript?.id) finishTranscript(null)
             }
             is ShellEvent.Disconnected -> {
+                val dropped = _reach.value == ShellReach.READY
                 connection = null
                 _path.value = null
                 _historyLoading.value = false
                 finishTranscript(null)
-                if (event.error != null && _reach.value != ShellReach.NO_ACCESS) _reach.value = ShellReach.UNREACHABLE
+                if (event.error != null && _reach.value != ShellReach.NO_ACCESS) failed(dropped)
             }
         }
     }
 
     // Private
+
+    /**
+     * A connect failed, or a working connection dropped ([dropped]): after a
+     * drop, dial again on [REDIAL_DELAYS_MS] (showing Reconnecting; the open
+     * session re-attaches once ready, as on any connect). Unreachable, with
+     * Try again, once they run out or when not redialling.
+     */
+    private fun failed(dropped: Boolean) {
+        if (dropped) redialsMade = 0
+        val made = redialsMade
+        if (made == null || made >= REDIAL_DELAYS_MS.size || !foreground) {
+            stopRedialing()
+            _reach.value = ShellReach.UNREACHABLE
+            return
+        }
+        redialsMade = made + 1
+        _redialing.value = true
+        _reach.value = ShellReach.CONNECTING
+        redialJob?.cancel()
+        redialJob = viewModelScope.launch {
+            delay(REDIAL_DELAYS_MS[made])
+            redialJob = null
+            // Dropped if something else connected, locked or cleared meanwhile.
+            if (_reach.value == ShellReach.CONNECTING && connection == null && foreground) connect()
+        }
+    }
+
+    private fun stopRedialing() {
+        redialJob?.cancel()
+        redialJob = null
+        redialsMade = null
+        _redialing.value = false
+    }
 
     /**
      * Keeps what the connected Mac says about reaching it (iroh details,
@@ -572,6 +622,7 @@ class ShellViewModel(app: Application) : AndroidViewModel(app) {
      * next unlock reconnects and re-attaches.
      */
     private fun clear(reach: ShellReach) {
+        stopRedialing()
         dropConnection()
         keys = emptyMap()
         _macs.value = emptyList()
@@ -609,5 +660,14 @@ class ShellViewModel(app: Application) : AndroidViewModel(app) {
     override fun onCleared() {
         dropConnection()
         discovery.stop()
+    }
+
+    companion object {
+        /**
+         * The wait before each redial after a drop: the first at once
+         * (another path, iroh say, usually answers), then backing off.
+         * Mirrors ShellModel.redialDelays on iOS.
+         */
+        val REDIAL_DELAYS_MS = longArrayOf(0, 1_000, 2_000, 4_000, 8_000, 15_000)
     }
 }

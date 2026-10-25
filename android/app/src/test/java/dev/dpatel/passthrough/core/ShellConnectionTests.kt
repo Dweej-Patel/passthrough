@@ -9,6 +9,7 @@ import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.withTimeoutOrNull
 import org.junit.After
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
@@ -79,11 +80,12 @@ class ShellConnectionTests {
     }
 
     /** A connection to a fake Mac over two in-memory pipes (no sockets, no TLS). */
-    private fun piped(): Pair<ShellConnection, FakeMac> {
+    private fun piped(liveness: ShellLiveness = ShellLiveness()): Pair<ShellConnection, FakeMac> {
         val toMac = Pipe.open()
         val toPhone = Pipe.open()
         val connection = ShellConnection(
             Channels.newInputStream(toPhone.source()), Channels.newOutputStream(toMac.sink()), credential, scope,
+            liveness = liveness,
         )
         val mac = FakeMac(Channels.newInputStream(toMac.source()), Channels.newOutputStream(toPhone.sink()))
         cleanups += { connection.close() }
@@ -123,6 +125,37 @@ class ShellConnectionTests {
         events.next<ShellEvent.Ready>()
         t.join(5000)
         assertTrue("fake Mac accepted the proof", valid.get())
+    }
+
+    /** A ready connection the Mac stops answering on (its path died without closing) is given up. */
+    @Test fun aSilentConnectionIsGivenUp() = runBlocking {
+        val liveness = ShellLiveness(intervalMs = 200, silenceMs = 600)
+        val (connection, mac) = piped(liveness)
+        val events = events(connection)
+        macThread { mac.handshake() }   // then reads nothing and says nothing
+        events.next<ShellEvent.Ready>()
+        val readyAt = System.nanoTime()
+        val gone = events.next<ShellEvent.Disconnected>()
+        assertTrue(gone.error is ShellConnectError.StoppedAnswering)
+        assertTrue("within the silence limit", (System.nanoTime() - readyAt) / 1_000_000 < liveness.silenceMs + 600)
+    }
+
+    /** A quiet connection whose pings the Mac answers stays, well past the silence limit. */
+    @Test fun aQuietConnectionThatAnswersPingsStays() = runBlocking {
+        val (connection, mac) = piped(ShellLiveness(intervalMs = 200, silenceMs = 600))
+        val events = events(connection)
+        val pings = AtomicInteger(0)
+        macThread {
+            mac.handshake()
+            while (true) {
+                val m = runCatching { mac.receive() }.getOrNull() ?: break
+                if (m.t == ShellEnvelope.PING) { pings.incrementAndGet(); mac.send(ShellEnvelope(ShellEnvelope.PONG)) }
+            }
+        }
+        events.next<ShellEvent.Ready>()
+        val gone = withTimeoutOrNull(2000) { events.next<ShellEvent.Disconnected>() }
+        assertNull("still connected", gone)
+        assertTrue("it pinged", pings.get() > 0)
     }
 
     @Test fun outputEventsDecodeBase64() = runBlocking {
