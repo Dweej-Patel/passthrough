@@ -670,6 +670,104 @@ final class ShellListenerTests: XCTestCase {
         XCTAssertFalse(probe.disconnected)
     }
 
+    /// A ready connection whose path goes dead without closing (the cable
+    /// pulled while it used the cable's network) is given up once the Mac
+    /// has been silent for `Liveness.silence`, so the phone can dial again.
+    func testASilentConnectionIsGivenUp() throws {
+        let listener = startListener()
+        let proxy = try StallingProxy(to: listener.port!)
+        addTeardownBlock { proxy.stop() }
+        let liveness = ShellClient.Liveness(interval: 0.2, silence: 0.6, probe: 0.5)
+        let (c, probe) = proxiedClient(proxy, listener: listener, liveness: liveness)
+        wait(for: [probe.expect(self, "ready") { _ in probe.isReady }], timeout: 5)
+
+        proxy.stall()
+        let stalled = Date()
+        wait(for: [probe.expect(self, "given up") { _ in probe.disconnected }], timeout: 3)
+        XCTAssertLessThan(Date().timeIntervalSince(stalled), liveness.silence + 0.6)
+        let error = probe.events.get().compactMap { if case .disconnected(let e) = $0 { return e } else { return nil } }.first
+        XCTAssertEqual(error as? ShellClient.ConnectError, .stoppedAnswering)
+        _ = c
+    }
+
+    /// A quiet connection stays: the client pings and the Mac's pongs keep
+    /// it alive well past `Liveness.silence`.
+    func testAQuietConnectionThatAnswersPingsStays() throws {
+        let listener = startListener()
+        let proxy = try StallingProxy(to: listener.port!)
+        addTeardownBlock { proxy.stop() }
+        let (c, probe) = proxiedClient(proxy, listener: listener, liveness: ShellClient.Liveness(interval: 0.2, silence: 0.6, probe: 0.5))
+        wait(for: [probe.expect(self, "ready") { _ in probe.isReady }], timeout: 5)
+
+        let quiet = expectation(description: "quiet")
+        quiet.isInverted = true
+        wait(for: [quiet], timeout: 2)
+        XCTAssertFalse(probe.disconnected)
+        XCTAssertGreaterThan(proxy.forwardedToMac.get(), 0, "pings went to the Mac")
+        c.list()
+        wait(for: [probe.expect(self, "served") { $0.filter { if case .sessions = $0 { return true } else { return false } }.count >= 2 }],
+             timeout: 5)
+    }
+
+    private func proxiedClient(_ proxy: StallingProxy, listener: ShellListener, liveness: ShellClient.Liveness) -> (ShellClient, Probe) {
+        let credential = ShellCredential(macID: "mac", macName: "Test Mac", certSHA256: identity.fingerprint, shellKey: key,
+                                         phoneID: "phone-1", port: listener.port!, addresses: [])
+        let probe = Probe()
+        let client = ShellClient(credential: credential, queue: DispatchQueue(label: "probe"), liveness: liveness) { probe.record($0) }
+        addTeardownBlock { client.disconnect() }
+        client.connect(discovered: .hostPort(host: "127.0.0.1", port: NWEndpoint.Port(rawValue: proxy.port)!))
+        return (client, probe)
+    }
+
+    /// Forwards TCP to the listener until `stall()`, then forwards nothing
+    /// more either way and closes nothing: a path that died underneath.
+    private final class StallingProxy: @unchecked Sendable {
+        private let listener: NWListener
+        private let queue = DispatchQueue(label: "stalling-proxy")
+        private var stalled = false
+        private var connections: [NWConnection] = []
+        /// Bytes passed from the client to the listener.
+        let forwardedToMac = Locked(0)
+        var port: UInt16 { listener.port!.rawValue }
+
+        init(to target: UInt16) throws {
+            listener = try NWListener(using: .tcp)
+            listener.newConnectionHandler = { [unowned self] inbound in
+                let upstream = NWConnection(to: .hostPort(host: "127.0.0.1", port: NWEndpoint.Port(rawValue: target)!), using: .tcp)
+                connections += [inbound, upstream]
+                pump(inbound, to: upstream, counting: forwardedToMac)
+                pump(upstream, to: inbound, counting: nil)
+                inbound.start(queue: queue)
+                upstream.start(queue: queue)
+            }
+            let ready = DispatchSemaphore(value: 0)
+            listener.stateUpdateHandler = { if case .ready = $0 { ready.signal() } }
+            listener.start(queue: queue)
+            _ = ready.wait(timeout: .now() + 5)
+        }
+
+        private func pump(_ from: NWConnection, to: NWConnection, counting: Locked<Int>?) {
+            from.receive(minimumIncompleteLength: 1, maximumLength: 65536) { [weak self] data, _, complete, error in
+                guard let self, !self.stalled else { return }
+                if let data, !data.isEmpty {
+                    counting?.set(counting!.get() + data.count)
+                    to.send(content: data, completion: .contentProcessed { _ in })
+                }
+                if complete || error != nil { return }
+                self.pump(from, to: to, counting: counting)
+            }
+        }
+
+        func stall() { queue.sync { stalled = true } }
+
+        func stop() {
+            queue.sync {
+                listener.cancel()
+                connections.forEach { $0.cancel() }
+            }
+        }
+    }
+
     // MARK: Screen
 
     /// Reads from `stream` until `done` holds for everything read so far

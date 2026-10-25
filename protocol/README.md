@@ -327,7 +327,7 @@ disconnected; it can attach again and gets the scrollback.
 | `transcriptData` | Mac | `session`, `data`, `cols`?, `rows`?, `done`? | A piece of the transcript (same chunk size); `done: true` on the last. `cols`/`rows`, when present, are the size the recorded terminal had from this piece on: set it before feeding `data` (which may be empty when a size change ends the transcript). The first piece always carries the size its first byte was drawn at; older Macs send none. |
 | `screen` | phone | none | See and control the screen: the connection becomes a relay to Screen Sharing (below). |
 | `screenReady` | Mac | none | Reply to `screen`; every later byte, both ways, is Screen Sharing's. |
-| `ping` / `pong` | either | none | Liveness. |
+| `ping` / `pong` | either | none | Liveness; each side answers `ping` with `pong`. A phone pings after 5 s without hearing from the Mac and gives the connection up after 15 s of silence, or 2 s after a ping it sent because the system said the connection's path failed (the cable it used unplugged, Wi-Fi lost), and then dials again. |
 | `error` | Mac | `reason`, `session`? | `not_authorized`, `too_many_sessions` (8 at once), `no_such_session`, `bad_request`, `screen_not_allowed`, `screen_unavailable`, `screen_video_unavailable` or `too_many_screens`. |
 
 The Mac keeps 1 MiB of scrollback per session.

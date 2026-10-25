@@ -330,7 +330,7 @@ struct TerminalScreen: View {
     private var statusText: String? {
         switch shell.reach {
         case .ready: nil
-        case .connecting: "Connecting…"
+        case .connecting: shell.isRedialing ? "Reconnecting…" : "Connecting…"
         default: shell.reachMessage
         }
     }

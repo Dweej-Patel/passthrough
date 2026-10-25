@@ -132,6 +132,25 @@ public final class ShellClient: @unchecked Sendable {
         case noAddress
         case timedOut
         case protocolViolation
+        /// A ready connection went silent: nothing from the Mac within `Liveness`'s limits.
+        case stoppedAnswering
+    }
+
+    /// How a ready connection that died without closing (the cable pulled
+    /// while the shell used its network, Wi-Fi gone, the Mac asleep) is
+    /// told from a quiet one. The phone pings the Mac whenever it has heard
+    /// nothing for `interval`, and gives the connection up once it has heard
+    /// nothing for `silence`. When the system says the connection's path
+    /// failed (its interface went away), anything from the Mac must arrive
+    /// within `probe` of a ping instead.
+    public struct Liveness: Sendable {
+        public var interval: TimeInterval
+        public var silence: TimeInterval
+        public var probe: TimeInterval
+
+        public init(interval: TimeInterval = 5, silence: TimeInterval = 15, probe: TimeInterval = 2) {
+            self.interval = interval; self.silence = silence; self.probe = probe
+        }
     }
 
     /// How long one address gets to answer and authorize before it is given up.
@@ -160,6 +179,7 @@ public final class ShellClient: @unchecked Sendable {
     private let credential: ShellCredential
     private let iroh: (any ShellIrohDialing)?
     private let mode: ShellConnectMode
+    private let liveness: Liveness
     private let callbackQueue: DispatchQueue
     private let onEvent: (Event) -> Void
     /// All state below lives on this queue.
@@ -184,14 +204,21 @@ public final class ShellClient: @unchecked Sendable {
     private var current: String?
     /// `requestScreen` was called: lines are read only up to `screenReady`.
     private var screenRequested = false
+    /// When the winner last delivered anything.
+    private var lastHeard = DispatchTime.now()
+    /// A ping is out because the winner's path failed; cleared by anything heard.
+    private var probing = false
+    /// Bumped per probe, so an answered probe's timer can't end a later one early.
+    private var probeToken = 0
 
     /// `iroh` dials the Mac from anywhere (nil: TLS only); `mode` is the
     /// phone's "Connect using" setting.
     public init(credential: ShellCredential, queue: DispatchQueue = .main, iroh: (any ShellIrohDialing)? = nil,
-                mode: ShellConnectMode = .automatic, onEvent: @escaping (Event) -> Void) {
+                mode: ShellConnectMode = .automatic, liveness: Liveness = Liveness(), onEvent: @escaping (Event) -> Void) {
         self.credential = credential
         self.iroh = iroh
         self.mode = mode
+        self.liveness = liveness
         self.callbackQueue = queue
         self.onEvent = onEvent
     }
@@ -346,6 +373,10 @@ public final class ShellClient: @unchecked Sendable {
 
     private func dialTCP(_ id: Int, _ endpoint: NWEndpoint) {
         let connection = NWConnection(to: endpoint, using: WirelessLink.pinnedClientParameters(pin: credential.certSHA256, peerToPeer: false))
+        // TCP alone notices a vanished interface only after minutes of retries.
+        // Both run on `work`, where the stream starts the connection.
+        connection.viabilityUpdateHandler = { [weak self] viable in if !viable { self?.pathFailed(id) } }
+        connection.pathUpdateHandler = { [weak self] path in if path.status == .unsatisfied { self?.pathFailed(id) } }
         let stream = ConnectionStream(connection, queue: work)
         attempts[id] = Attempt(isIroh: false, stream: stream)
         watch(id, stream)
@@ -401,6 +432,7 @@ public final class ShellClient: @unchecked Sendable {
             self.work.async {
                 guard self.active, let attempt = self.attempts[id] else { return }
                 if let data, !data.isEmpty {
+                    if id == self.winner { self.heard() }
                     do {
                         // Past `screenReady` the bytes are Screen Sharing's, not lines.
                         let lines = self.screenRequested
@@ -443,6 +475,49 @@ public final class ShellClient: @unchecked Sendable {
         for (other, attempt) in attempts where other != id {
             drop(attempt)
             attempts[other] = nil
+        }
+        heard()
+        heartbeat(generation)
+    }
+
+    // MARK: Liveness (on `work`)
+
+    private func heard() {
+        lastHeard = .now()
+        probing = false
+    }
+
+    private var secondsSinceHeard: TimeInterval {
+        Double(DispatchTime.now().uptimeNanoseconds - lastHeard.uptimeNanoseconds) / 1e9
+    }
+
+    /// While ready: pings a quiet Mac and gives up on a silent one. The
+    /// Mac answers every `ping` with `pong`, and anything it sends counts.
+    private func heartbeat(_ gen: Int) {
+        let wait = min(liveness.interval, max(0.05, liveness.silence - secondsSinceHeard))
+        work.asyncAfter(deadline: .now() + wait) { [weak self] in
+            guard let self, self.active, self.ready, gen == self.generation else { return }
+            let quiet = self.secondsSinceHeard
+            if quiet >= self.liveness.silence { return self.finish(ConnectError.stoppedAnswering) }
+            if quiet >= self.liveness.interval { self.send(ShellEnvelope(t: ShellEnvelope.ping)) }
+            self.heartbeat(gen)
+        }
+    }
+
+    /// The system says the winner's path failed: its interface went away
+    /// (the cable unplugged, Wi-Fi lost). It may come back, so rather than
+    /// drop the connection at once, ping: one the Mac answers within
+    /// `liveness.probe` carries on, one it doesn't is given up, and the
+    /// caller dials again over whatever path is left.
+    private func pathFailed(_ id: Int) {
+        guard active, ready, id == winner, !probing else { return }
+        probing = true
+        probeToken += 1
+        let gen = generation, token = probeToken
+        send(ShellEnvelope(t: ShellEnvelope.ping))
+        work.asyncAfter(deadline: .now() + liveness.probe) { [weak self] in
+            guard let self, self.active, gen == self.generation, self.probing, token == self.probeToken else { return }
+            self.finish(ConnectError.stoppedAnswering)
         }
     }
 
@@ -579,6 +654,7 @@ public final class ShellClient: @unchecked Sendable {
         queued = []
         ready = false
         current = nil
+        probing = false
     }
 
     private func emit(_ event: Event) {

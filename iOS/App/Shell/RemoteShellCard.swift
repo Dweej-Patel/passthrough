@@ -115,7 +115,8 @@ struct RemoteShellCard: View {
         case .connecting:
             HStack(spacing: 10) {
                 ProgressView()
-                Text("Connecting to \(selectedMacName)…").font(.subheadline).foregroundStyle(.secondary)
+                Text(shell.isRedialing ? "Reconnecting to \(selectedMacName)…" : "Connecting to \(selectedMacName)…")
+                    .font(.subheadline).foregroundStyle(.secondary)
             }
             .padding(.vertical, 4)
         case .unreachable:
