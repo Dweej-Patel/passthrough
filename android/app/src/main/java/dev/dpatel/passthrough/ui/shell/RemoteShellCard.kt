@@ -80,6 +80,7 @@ fun RemoteShellCard(vm: ShellViewModel, onOpen: (String?) -> Unit, onHistory: ()
     val c = LocalPT.current
     val context = LocalContext.current
     val reach by vm.reach.collectAsStateWithLifecycle()
+    val redialing by vm.redialing.collectAsStateWithLifecycle()
     val macs by vm.macs.collectAsStateWithLifecycle()
     val selected by vm.selectedMacID.collectAsStateWithLifecycle()
     val sessions by vm.sessions.collectAsStateWithLifecycle()
@@ -116,7 +117,7 @@ fun RemoteShellCard(vm: ShellViewModel, onOpen: (String?) -> Unit, onHistory: ()
                     verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp),
                 ) {
                     CircularProgressIndicator(Modifier.size(18.dp), color = PT.accentEnd, strokeWidth = 2.dp)
-                    Text("Connecting to ${macName ?: "your Mac"}…", style = PT.display(15.sp, FontWeight.Normal), color = c.secondary)
+                    Text("${if (redialing) "Reconnecting" else "Connecting"} to ${macName ?: "your Mac"}…", style = PT.display(15.sp, FontWeight.Normal), color = c.secondary)
                 }
                 ShellReach.READY -> {
                     if (sessions.isEmpty()) {

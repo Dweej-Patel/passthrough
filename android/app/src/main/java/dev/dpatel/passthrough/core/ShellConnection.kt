@@ -10,6 +10,7 @@ import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.cancelChildren
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.asSharedFlow
@@ -149,6 +150,16 @@ sealed interface ShellEvent {
     data class Disconnected(val error: Throwable?) : ShellEvent
 }
 
+/**
+ * How a ready connection that died without closing (the Mac asleep, a path
+ * that dropped packets) is told from a quiet one: the phone pings the Mac
+ * whenever it has heard nothing for [intervalMs], and gives the connection up
+ * once it has heard nothing for [silenceMs]. Mirrors ShellClient.Liveness in
+ * PassthroughCore, without its path probe: Android itself closes the sockets
+ * of a network it lost.
+ */
+data class ShellLiveness(val intervalMs: Long = 5_000, val silenceMs: Long = 15_000)
+
 /** Why a connection could not be made or ended. */
 sealed class ShellConnectError(message: String) : IOException(message) {
     class NoAddress : ShellConnectError("no address to dial")
@@ -157,6 +168,8 @@ sealed class ShellConnectError(message: String) : IOException(message) {
     /** The Mac itself said no; every other address would get the same answer. */
     class Refused(val reason: ShellError) : ShellConnectError("refused: ${reason.wire}")
     class Closed : ShellConnectError("connection closed")
+    /** A ready connection went silent: nothing from the Mac within [ShellLiveness]'s limits. */
+    class StoppedAnswering : ShellConnectError("the Mac stopped answering")
 }
 
 /**
@@ -181,6 +194,7 @@ class ShellConnection(
     hello: Boolean = false,
     /** How the connection is carried, read when it becomes ready. */
     private val path: () -> ShellPath = { ShellPath.LOCAL },
+    private val liveness: ShellLiveness = ShellLiveness(),
 ) {
     private val _events = MutableSharedFlow<ShellEvent>(extraBufferCapacity = 64)
     val events: SharedFlow<ShellEvent> = _events.asSharedFlow()
@@ -193,6 +207,8 @@ class ShellConnection(
     private val queued = ArrayList<ShellEnvelope>()
     /** The session `input` and `resize` go to. */
     private var current: String? = null
+    /** When the last line from the Mac arrived ([System.nanoTime]). */
+    @Volatile private var lastHeard = System.nanoTime()
 
     private val finished = AtomicBoolean(false)
     private val readyResult = CompletableDeferred<Unit>()
@@ -291,6 +307,7 @@ class ShellConnection(
         val error: Throwable = try {
             while (true) {
                 val line = lines.next() ?: break
+                lastHeard = System.nanoTime()
                 handle(line)
                 if (finished.get()) return
             }
@@ -325,6 +342,7 @@ class ShellConnection(
                         queued.clear()
                     }
                     readyResult.complete(Unit)
+                    io.launch { heartbeat() }
                     emit(ShellEvent.Ready(runCatching(path).getOrDefault(ShellPath.UNKNOWN)))
                 }
                 m.t == ShellEnvelope.ERROR -> {
@@ -377,6 +395,19 @@ class ShellConnection(
             }
             ShellEnvelope.PING -> enqueue(ShellEnvelope(ShellEnvelope.PONG))
             else -> Unit
+        }
+    }
+
+    /**
+     * While ready: pings a quiet Mac and gives up on a silent one. The Mac
+     * answers every `ping` with `pong`, and any line it sends counts.
+     */
+    private suspend fun heartbeat() {
+        while (true) {
+            val quiet = (System.nanoTime() - lastHeard) / 1_000_000
+            if (quiet >= liveness.silenceMs) return finish(ShellConnectError.StoppedAnswering())
+            if (quiet >= liveness.intervalMs) enqueue(ShellEnvelope(ShellEnvelope.PING))
+            delay(minOf(liveness.intervalMs, (liveness.silenceMs - quiet).coerceAtLeast(50)))
         }
     }
 
@@ -473,6 +504,7 @@ object ShellClient {
         scope: CoroutineScope,
         iroh: ShellIrohDialing? = null,
         mode: ShellConnectMode = ShellConnectMode.AUTOMATIC,
+        liveness: ShellLiveness = ShellLiveness(),
     ): ShellConnection {
         val plan = schedule(credential, discovered, mode, irohAvailable = iroh != null)
         if (plan.isEmpty()) throw ShellConnectError.NoAddress()
@@ -483,8 +515,8 @@ object ShellClient {
             }
             try {
                 when (candidate) {
-                    is ShellCandidate.Tcp -> attempt(candidate.host, candidate.port, credential, scope, track)
-                    ShellCandidate.Iroh -> irohAttempt(credential, requireNotNull(iroh), scope, track)
+                    is ShellCandidate.Tcp -> attempt(candidate.host, candidate.port, credential, scope, liveness, track)
+                    ShellCandidate.Iroh -> irohAttempt(credential, requireNotNull(iroh), scope, liveness, track)
                 }
             } catch (e: ShellConnectError.Refused) {
                 ptLog(PtLog.Level.WARNING, "shell: ${credential.macName} refused this phone (${e.reason.wire})")
@@ -582,6 +614,7 @@ object ShellClient {
         credential: ShellCredential,
         iroh: ShellIrohDialing,
         scope: CoroutineScope,
+        liveness: ShellLiveness,
         track: (() -> Unit) -> Unit,
     ): ShellConnection {
         val irohID = credential.irohID ?: throw ShellConnectError.NoAddress()
@@ -604,7 +637,7 @@ object ShellClient {
                 }
                 stream = s
                 track { s.close() }
-                val c = ShellConnection(s.input, s.output, credential, scope, closeable = s, hello = true, path = s::path)
+                val c = ShellConnection(s.input, s.output, credential, scope, closeable = s, hello = true, path = s::path, liveness = liveness)
                 connection = c
                 track { c.close() }
                 c.awaitReady()
@@ -623,6 +656,7 @@ object ShellClient {
         port: Int,
         credential: ShellCredential,
         scope: CoroutineScope,
+        liveness: ShellLiveness,
         track: (() -> Unit) -> Unit,
     ): ShellConnection {
         val started = System.nanoTime()
@@ -633,7 +667,7 @@ object ShellClient {
                 socket = PinnedTls.socket(host, port, credential.certSHA256, ATTEMPT_TIMEOUT_MS) { raw -> track { raw.close() } }
             }
             val s = requireNotNull(socket)
-            val c = ShellConnection(s.inputStream, s.outputStream, credential, scope, closeable = s)
+            val c = ShellConnection(s.inputStream, s.outputStream, credential, scope, closeable = s, liveness = liveness)
             connection = c
             track { c.close() }
             val left = ATTEMPT_TIMEOUT_MS - (System.nanoTime() - started) / 1_000_000L
