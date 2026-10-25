@@ -197,7 +197,8 @@ final class SessionCoordinator: ObservableObject {
         if storedClientID.isEmpty { storedClientID = UUID().uuidString }
         return storedClientID
     }
-    var macName: String { Host.current().localizedName ?? "Mac" }
+    /// A neutral name in snapshot runs: their images may end up in the README.
+    var macName: String { Self.isSnapshotRun ? "MacBook Pro" : Host.current().localizedName ?? "Mac" }
     /// Keychain slot of the attached phone's pairing token (the slot iPhones
     /// once shared when none is attached).
     private var pairingSlot: String { device?.pairingSlot ?? PhoneDevice.sharediPhonePairingSlot }
