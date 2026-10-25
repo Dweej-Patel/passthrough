@@ -4,6 +4,8 @@
 Internet over the cable, a Mac that stays awake while you're gone, its shell from anywhere, and a VPN with a kill switch.<br>
 For iPhone and Android. No accounts, no Passthrough server.</p>
 
+<p align="center">Free and open source. If it saved your day (or your data plan), <a href="https://buymeacoffee.com/dwepat">buy me a coffee</a> ☕</p>
+
 <p align="center">
   <picture>
     <source media="(prefers-color-scheme: light)" srcset="docs/images/iphone-mac-light.png">
