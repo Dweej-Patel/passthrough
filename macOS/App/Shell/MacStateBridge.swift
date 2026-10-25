@@ -12,12 +12,14 @@ final class MacStateBridge {
     private let keepAwake: KeepAwakeController
     private let vpn: VPNLayer
     private let notice = NotchNotice()
+    private let recorder: MacEventRecorder?
     private var cancellables: Set<AnyCancellable> = []
 
-    init(shell: RemoteShellController, keepAwake: KeepAwakeController, vpn: VPNLayer) {
+    init(shell: RemoteShellController, keepAwake: KeepAwakeController, vpn: VPNLayer, recorder: MacEventRecorder?) {
         self.shell = shell
         self.keepAwake = keepAwake
         self.vpn = vpn
+        self.recorder = recorder
         shell.onMacControl = { [weak self] label, change in self?.apply(change, from: label) }
         // Each publisher fires before its value changes: read the state on the next turn.
         Publishers.MergeMany(
@@ -65,13 +67,16 @@ final class MacStateBridge {
             ptLog(.info, "\(label) turned Keep awake \(on ? "on" : "off")")
             keepAwake.set(on)
             if on, let refused = keepAwake.blockedReason {
+                recorder?.phoneRefused(change, by: label, reason: refused)
                 notice.show(.quiet(title: "\(label) asked to keep the Mac awake", detail: refused, symbol: "cup.and.saucer"))
             } else {
+                recorder?.phoneChanged(change, by: label)
                 notice.show(.quiet(title: "\(label) turned Keep awake \(on ? "on" : "off")", detail: nil, symbol: "cup.and.saucer"))
             }
         case .vpn(let on):
             ptLog(.info, "\(label) turned the VPN \(on ? "on" : "off")")
             guard on != vpn.isWanted else { return publish() }
+            recorder?.phoneChanged(change, by: label)
             vpn.set(on)
             if on {
                 notice.show(.quiet(title: "\(label) turned the VPN on", detail: vpn.activeProfile?.name, symbol: "lock.shield"))

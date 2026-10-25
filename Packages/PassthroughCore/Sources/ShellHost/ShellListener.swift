@@ -104,6 +104,14 @@ public final class ShellListener: @unchecked Sendable {
         set { gate.macControl.set(newValue) }
     }
 
+    /// What happened on the Mac since a time, and its battery meanwhile, for
+    /// a phone's `events` request (oldest first). Asked on the listener's
+    /// queue, so it must not block. Unset: answered `bad_request`.
+    public var macEvents: (@Sendable (_ phoneID: String, _ since: Double) -> (events: [MacEvent], battery: [BatterySample]))? {
+        get { gate.eventsProvider.get() }
+        set { gate.eventsProvider.set(newValue) }
+    }
+
     /// Sends every connected phone the Mac's state again (it changed).
     public func pushMacState() { gate.pushMacState() }
 
@@ -355,6 +363,7 @@ final class ShellGate: @unchecked Sendable {
     let screenPort = Locked(RemoteShell.screenSharingPort)
     let macStateProvider = Locked<(@Sendable (String) -> MacState?)?>(nil)
     let macControl = Locked<(@Sendable (_ phoneID: String, _ label: String, _ change: MacControl) -> ShellError?)?>(nil)
+    let eventsProvider = Locked<(@Sendable (_ phoneID: String, _ since: Double) -> (events: [MacEvent], battery: [BatterySample]))?>(nil)
     private let shellKeys: @Sendable (String) -> [Data]
     private let keyConfirmed: @Sendable (_ phoneID: String, _ key: Data) -> Void
     private let phoneLabel: @Sendable (String) -> String
@@ -671,6 +680,19 @@ final class ShellConnection: ShellAttachment, @unchecked Sendable {
         if busy { readPaused = true } else { receive() }
     }
 
+    /// The newest events and samples that fit in one line, oldest first.
+    private func sendEvents(_ found: (events: [MacEvent], battery: [BatterySample]), since: Double) {
+        var reply = ShellEnvelope(t: ShellEnvelope.eventList)
+        reply.since = since
+        reply.events = Array(found.events.suffix(MacEvent.maxPerList))
+        reply.battery = Array(found.battery.suffix(BatterySample.maxPerList))
+        // Long details could still overflow a line: drop the oldest until it fits.
+        while let line = try? reply.encodedLine(), line.count > RemoteShell.lineLimit, !(reply.events ?? []).isEmpty {
+            reply.events = Array((reply.events ?? []).dropFirst(max(1, (reply.events?.count ?? 0) / 10)))
+        }
+        send(reply)
+    }
+
     /// On the queue: the session list, unasked.
     func sendSessions(_ list: [ShellSessionInfo]) {
         guard !closed, !isScreen else { return }
@@ -768,6 +790,9 @@ final class ShellConnection: ShellAttachment, @unchecked Sendable {
     private func handle(_ line: Data) {
         guard let message = try? ShellEnvelope.decode(line) else { return fail(.badRequest) }
         switch message.t {
+        case ShellEnvelope.events:
+            guard let since = message.since, since.isFinite, let provider = gate?.eventsProvider.get() else { return fail(.badRequest) }
+            sendEvents(provider(phoneID, since), since: since)
         case ShellEnvelope.setAwake, ShellEnvelope.setVPN:
             guard let on = message.on, let gate else { return fail(.badRequest) }
             let change: MacControl = message.t == ShellEnvelope.setAwake ? .awake(on) : .vpn(on)

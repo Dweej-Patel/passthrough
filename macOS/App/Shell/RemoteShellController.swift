@@ -143,6 +143,9 @@ final class RemoteShellController: ObservableObject {
     /// the pairing slots of the phones that lost it.
     var onAccessRevoked: ((Set<String>) -> Void)?
 
+    /// What happened on this Mac, for phones' timelines (`MacEventRecorder` writes it).
+    let events: MacEventLog = (try? MacEventLog.defaultFile()).map { MacEventLog(file: $0) } ?? MacEventLog(file: nil)
+
     /// A phone allowed to change Keep awake and the VPN asked to (`MacStateBridge` carries it out).
     var onMacControl: ((_ label: String, _ change: MacControl) -> Void)?
     /// The Mac's state as phones see it, without each phone's own `control`;
@@ -199,6 +202,7 @@ final class RemoteShellController: ObservableObject {
         listener.onScreenViewer = screenViewerHandler()
         listener.macState = macStateProvider()
         listener.onMacControl = macControlHandler()
+        listener.macEvents = { [events] _, since in events.since(since) }
         listener.onFailure = { [weak self, weak listener] error in
             Task { @MainActor in
                 guard let self, let listener, self.listener === listener else { return }
@@ -275,7 +279,7 @@ final class RemoteShellController: ObservableObject {
         irohStatus = IrohStatus(state: .starting)
         let store = self.store, reach = self.reach, relay = self.relay, onScreenViewer = screenViewerHandler()
         let screenViews = self.screenViews
-        let macState = macStateProvider(), onMacControl = macControlHandler()
+        let macState = macStateProvider(), onMacControl = macControlHandler(), events = self.events
         let screenSharingVerified = screenSharingVerifier()
         lifecycle.async { [weak self] in
             let host: IrohEndpointHost
@@ -316,6 +320,7 @@ final class RemoteShellController: ObservableObject {
             listener.onScreenViewer = onScreenViewer
             listener.macState = macState
             listener.onMacControl = onMacControl
+            listener.macEvents = { _, since in events.since(since) }
             listener.onFailure = { [weak self] error in
                 Task { @MainActor in
                     guard let self, self.iroh === run else { return }

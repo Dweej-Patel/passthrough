@@ -73,6 +73,11 @@ final class ShellModel: ObservableObject {
     @Published private(set) var pendingControl: MacControl?
     /// Why the Mac refused the last Keep awake or VPN change.
     @Published private(set) var controlError: ShellError?
+    /// What happened on the selected Mac, as of the last `loadTimeline`.
+    @Published private(set) var timeline: MacTimeline?
+    @Published private(set) var timelineLoading = false
+    /// The Mac answered `events` with `bad_request`: it keeps no log yet.
+    @Published private(set) var timelineUnsupported = false
     /// "Connect using": this device's choice, kept in the app's own defaults.
     @Published var connectMode: ShellConnectMode {
         didSet {
@@ -353,6 +358,16 @@ final class ShellModel: ObservableObject {
 
     func loadHistory() { client?.requestHistory() }
 
+    /// Asks the Mac what happened since `since`; `timeline` follows.
+    func loadTimeline(since: Date) {
+        #if DEBUG
+        if Self.demoState != nil { return demoTimeline(since: since) }
+        #endif
+        guard reach == .ready, let client else { return }
+        timelineLoading = true
+        client.requestEvents(since: since)
+    }
+
     /// Asks the Mac to turn Keep awake or its VPN on or off; `macState` follows.
     /// The caller has already asked for Face ID before turning the VPN off.
     func control(_ change: MacControl) {
@@ -410,6 +425,10 @@ final class ShellModel: ObservableObject {
         case let .macState(state):
             macState = state
             pendingControl = nil
+        case let .events(since, events, battery):
+            timeline = MacTimeline(since: Date(timeIntervalSince1970: since), events: events, battery: battery, loadedAt: .now)
+            timelineLoading = false
+            timelineUnsupported = false
         case let .sessions(list):
             sessions = list
             let ids = Set(list.map(\.id))
@@ -449,6 +468,9 @@ final class ShellModel: ObservableObject {
             guard pendingTranscript?.id == session else { return }
             pendingTranscript?.replay.add(data)
             if done { finishTranscript(pendingTranscript?.replay.chunks) }
+        case .failed(.badRequest, nil) where timelineLoading:
+            timelineLoading = false
+            timelineUnsupported = true
         case let .failed(error, _) where error == .notAllowed || error == .vpnNotSetUp:
             pendingControl = nil
             controlError = error
@@ -512,6 +534,9 @@ final class ShellModel: ObservableObject {
 
     private func resetSessions() {
         macState = nil
+        timeline = nil
+        timelineLoading = false
+        timelineUnsupported = false
         pendingControl = nil
         controlError = nil
         sessions = []
@@ -684,6 +709,25 @@ extension ShellModel {
         }
     }
 
+    fileprivate func demoTimeline(since: Date) {
+        let start = Date.now - 2 * 3600 - 14 * 60
+        func at(_ minutes: Double) -> Double { start.timeIntervalSince1970 + minutes * 60 }
+        let events = [
+            MacEvent(t: at(0), kind: "awake", title: "iPhone turned Keep awake on"),
+            MacEvent(t: at(0.2), kind: "link", title: "Off iPhone's connection"),
+            MacEvent(t: at(18), kind: "vpn", title: "VPN dropped", detail: "Reconnecting", warning: true),
+            MacEvent(t: at(18.05), kind: "vpn", title: "VPN reconnected after 2 s", detail: "Kill switch held: nothing left without it"),
+            MacEvent(t: at(38), kind: "shell", title: "npm run build finished", detail: "exit 0 · 34 min", session: "demo-2"),
+            MacEvent(t: at(66), kind: "asked", title: "claude asked", detail: "Do you want to make this edit to HomeView.swift?", session: "demo-1"),
+            MacEvent(t: at(67), kind: "answered", title: "claude got an answer", session: "demo-1"),
+            MacEvent(t: at(131), kind: "power", title: "Plugged in at 41%"),
+        ]
+        let battery = stride(from: 0.0, through: 134, by: 5).map { m in
+            BatterySample(t: at(m), level: m < 131 ? 0.64 - 0.23 * m / 131 : 0.41 + 0.004 * (m - 131), charging: m >= 131 ? true : nil)
+        }
+        timeline = MacTimeline(since: since, events: events.filter { $0.t >= since.timeIntervalSince1970 }, battery: battery, loadedAt: .now)
+    }
+
     fileprivate func demoControl(_ change: MacControl) {
         switch change {
         case .awake(let on): macState?.awake = on
@@ -708,3 +752,11 @@ extension ShellModel {
     }
 }
 #endif
+
+/// What happened on a Mac since a time, as it last said.
+struct MacTimeline: Equatable {
+    var since: Date
+    var events: [MacEvent]
+    var battery: [BatterySample]
+    var loadedAt: Date
+}

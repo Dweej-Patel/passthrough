@@ -77,6 +77,12 @@ public final class IrohShellListener: @unchecked Sendable {
         set { gate.macControl.set(newValue) }
     }
 
+    /// As `ShellListener.macEvents`.
+    public var macEvents: (@Sendable (_ phoneID: String, _ since: Double) -> (events: [MacEvent], battery: [BatterySample]))? {
+        get { gate.eventsProvider.get() }
+        set { gate.eventsProvider.set(newValue) }
+    }
+
     /// As `ShellListener.pushMacState()`.
     public func pushMacState() { gate.pushMacState() }
 

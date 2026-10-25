@@ -301,6 +301,12 @@
         "line": "{\"t\":\"setAwake\",\"on\":false}"
       },
       {
+        "line": "{\"t\":\"events\",\"since\":1758060000}"
+      },
+      {
+        "line": "{\"t\":\"eventList\",\"since\":1758060000,\"events\":[{\"t\":1758060120,\"kind\":\"vpn\",\"title\":\"VPN reconnected after 2 s\",\"detail\":\"Kill switch held: nothing left without it\"},{\"t\":1758062400.5,\"kind\":\"shell\",\"title\":\"npm run build finished\",\"detail\":\"exit 0, 34 min\",\"session\":\"3F2B8C1A-7D4E-4A55-9C0B-1E6F2A9D8B34\"},{\"t\":1758062500,\"kind\":\"vpn\",\"title\":\"VPN dropped\",\"warning\":true}],\"battery\":[{\"t\":1758059900,\"level\":0.64},{\"t\":1758060300,\"level\":0.62,\"charging\":true}]}"
+      },
+      {
         "line": "{\"t\":\"setVPN\",\"on\":true}"
       },
       {

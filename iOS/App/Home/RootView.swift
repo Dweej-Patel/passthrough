@@ -19,7 +19,7 @@ final class ShellRouter: ObservableObject {
     }
 }
 
-enum RootTab: Hashable { case mac, shells, phone }
+enum RootTab: Hashable { case mac, shells, activity, phone }
 
 /// The app's sections: the Mac first, its shells, then this iPhone's own sharing.
 struct RootView: View {
@@ -39,6 +39,9 @@ struct RootView: View {
             ShellsTab(shell: model.shell)
                 .tabItem { Label("Shells", systemImage: "terminal") }
                 .tag(RootTab.shells)
+            ActivityTab(shell: model.shell)
+                .tabItem { Label("Activity", systemImage: "clock") }
+                .tag(RootTab.activity)
             HomeView(showPairing: $showPairing, showSettings: $showSettings)
                 .tabItem { Label("iPhone", systemImage: "iphone") }
                 .tag(RootTab.phone)
@@ -83,7 +86,7 @@ struct RootView: View {
             if env["PASSTHROUGH_AUTOSTART"] == "1" { model.start() }
             if env["PASSTHROUGH_SHOW_PAIRING"] == "1" { DispatchQueue.main.asyncAfter(deadline: .now() + 1) { showPairing = true } }
             if env["PASSTHROUGH_SHOW_SETTINGS"] == "1" { DispatchQueue.main.asyncAfter(deadline: .now() + 1) { showSettings = true } }
-            if let start = env["PASSTHROUGH_TAB"] { tab = start == "shells" ? .shells : start == "phone" ? .phone : .mac }
+            if let start = env["PASSTHROUGH_TAB"] { tab = ["shells": .shells, "activity": .activity, "phone": .phone][start] ?? .mac }
             #if DEBUG
             if env["PASSTHROUGH_START_ACTIVITY"] == "1" {
                 DispatchQueue.main.asyncAfter(deadline: .now() + 2) {

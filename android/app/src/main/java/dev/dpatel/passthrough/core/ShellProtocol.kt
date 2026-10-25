@@ -59,6 +59,10 @@ data class ShellEnvelope(
     var state: MacState? = null,
     /** setAwake / setVPN: what the phone asks for. */
     var on: Boolean? = null,
+    /** events: from when (Unix seconds). eventList: what happened since, oldest first, and the battery meanwhile. */
+    var since: Double? = null,
+    var events: List<MacEvent>? = null,
+    var battery: List<BatterySample>? = null,
 ) {
     fun encodeLine(): ByteArray =
         (ControlEnvelope.json.encodeToString(serializer(), this) + "\n").toByteArray(Charsets.UTF_8)
@@ -90,6 +94,9 @@ data class ShellEnvelope(
         /** A phone turning Keep awake or the VPN on or off (`on`). */
         const val SET_AWAKE = "setAwake"
         const val SET_VPN = "setVPN"
+        /** A phone asking what happened on the Mac since a time (`since`); answered `eventList`. */
+        const val EVENTS = "events"
+        const val EVENT_LIST = "eventList"
         const val PING = "ping"
         const val PONG = "pong"
         const val ERROR = "error"
@@ -160,6 +167,30 @@ enum class ShellError(val wire: String) {
     /** The VPN can't turn on: the Mac has no VPN set up. */
     VPN_NOT_SET_UP("vpn_not_set_up"),
 }
+
+/** Something that happened on the Mac, for the phone's timeline. Mirrors MacEvent in ShellProtocol.swift. */
+@Serializable
+data class MacEvent(
+    /** Unix seconds. */
+    val t: Double,
+    /** `awake`, `vpn`, `link`, `power`, `sleep`, `shell`, `asked` or `answered`; others are shown plainly. */
+    val kind: String,
+    val title: String,
+    val detail: String? = null,
+    val session: String? = null,
+    /** Something went wrong or less safe. */
+    val warning: Boolean? = null,
+)
+
+/** The Mac's battery at a moment, for the timeline's battery line. */
+@Serializable
+data class BatterySample(
+    /** Unix seconds. */
+    val t: Double,
+    /** 0 to 1. */
+    val level: Double,
+    val charging: Boolean? = null,
+)
 
 /**
  * How the Mac is doing, sent in `macState`. Every field is optional: a Mac

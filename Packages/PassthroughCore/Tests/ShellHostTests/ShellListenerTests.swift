@@ -1129,6 +1129,27 @@ final class ShellListenerTests: XCTestCase {
         }], timeout: 5)
     }
 
+    func testEventsAreAnsweredFromTheProvider() {
+        let listener = startListener()
+        listener.macEvents = { phoneID, since in
+            ([MacEvent(t: since + 1, kind: "awake", title: "\(phoneID) asked")], [BatterySample(t: since, level: 0.5)])
+        }
+        let (client, probe) = readyClient(listener)
+        client.requestEvents(since: Date(timeIntervalSince1970: 1_800_000_000))
+        wait(for: [probe.expect(self, "events") { events in
+            events.contains { if case let .events(since, list, battery) = $0 {
+                since == 1_800_000_000 && list.map(\.title) == ["phone-1 asked"] && battery.map(\.level) == [0.5]
+            } else { false } }
+        }], timeout: 5)
+    }
+
+    func testEventsWithoutAProviderAreABadRequest() {
+        let listener = startListener()
+        let (client, probe) = readyClient(listener)
+        client.requestEvents(since: .now)
+        wait(for: [probe.expect(self, "refused") { _ in probe.failures == [.badRequest] }], timeout: 5)
+    }
+
     func testControlRequestsReachTheHandlerWithThePhone() {
         let listener = startListener()
         let asked = Locked<[String]>([])

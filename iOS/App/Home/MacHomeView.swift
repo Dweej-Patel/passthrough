@@ -68,6 +68,7 @@ struct MacHomeView: View {
         .sheet(isPresented: $router.showStepAway) {
             StepAwaySheet(shell: shell, macName: macName, online: onlineThroughPhone) {
                 apply(.away)
+                UserDefaults.standard.set(Date.now.timeIntervalSince1970, forKey: ActivityTab.steppedAwayKey)
                 MacActivityController.shared.stepAway(macName: macName, state: shell.macState, sessions: shell.sessions)
             }
         }

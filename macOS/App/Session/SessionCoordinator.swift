@@ -144,6 +144,8 @@ final class SessionCoordinator: ObservableObject {
     let shell = RemoteShellController()
     /// What phones see of Keep awake and the VPN, and their requests to change them.
     private var macStateBridge: MacStateBridge?
+    /// Writes the timeline phones read.
+    private var eventRecorder: MacEventRecorder?
 
     private let helper = HelperClient()
     private let directory: DeviceDirectory
@@ -281,7 +283,9 @@ final class SessionCoordinator: ObservableObject {
             guard let self, !self.phase.isConnected else { return }
             self.phase = .helperRequired
         }
-        macStateBridge = MacStateBridge(shell: shell, keepAwake: keepAwake, vpn: vpnLayer)
+        let recorder = MacEventRecorder(log: shell.events, session: self)
+        eventRecorder = recorder
+        macStateBridge = MacStateBridge(shell: shell, keepAwake: keepAwake, vpn: vpnLayer, recorder: recorder)
         directory.onChange = { [weak self] change in self?.devicesChanged(change) }
         helper.onInterrupted = { [weak self] in Task { @MainActor in self?.syncHotspotGuard() } }
         androidWatcher.onStatusChange = { [weak self] status in self?.androidWatch = status }

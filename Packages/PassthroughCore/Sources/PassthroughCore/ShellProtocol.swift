@@ -57,6 +57,10 @@ public struct ShellEnvelope: Codable, Equatable, Sendable {
     public var state: MacState?
     /// setAwake / setVPN: what the phone asks for.
     public var on: Bool?
+    /// events: from when (Unix seconds). eventList: what happened since, oldest first, and the battery meanwhile.
+    public var since: Double?
+    public var events: [MacEvent]?
+    public var battery: [BatterySample]?
 
     public init(t: String) { self.t = t }
 
@@ -91,6 +95,9 @@ public struct ShellEnvelope: Codable, Equatable, Sendable {
     /// A phone turning Keep awake or the VPN on or off (`on`).
     public static let setAwake = "setAwake"
     public static let setVPN = "setVPN"
+    /// A phone asking what happened on the Mac since a time (`since`); answered `eventList`.
+    public static let events = "events"
+    public static let eventList = "eventList"
     public static let ping = "ping"
     public static let pong = "pong"
     public static let error = "error"
@@ -233,6 +240,44 @@ public struct MacState: Codable, Equatable, Sendable {
     public static let vpnConnecting = "connecting"
     public static let vpnOn = "on"
     public static let vpnFailed = "failed"
+}
+
+/// Something that happened on the Mac, for the phone's timeline. `title` and
+/// `detail` are written by the Mac, ready to show; `kind` picks the icon.
+public struct MacEvent: Codable, Equatable, Sendable {
+    /// Unix seconds.
+    public var t: Double
+    /// `awake`, `vpn`, `link`, `power`, `sleep`, `shell`, `asked` or `answered`; a phone shows others plainly.
+    public var kind: String
+    public var title: String
+    public var detail: String?
+    /// The shell session it's about, if any.
+    public var session: String?
+    /// Something went wrong or less safe (a VPN drop, a limit stopping Keep awake).
+    public var warning: Bool?
+
+    public init(t: Double, kind: String, title: String, detail: String? = nil, session: String? = nil, warning: Bool? = nil) {
+        self.t = t; self.kind = kind; self.title = title; self.detail = detail; self.session = session; self.warning = warning
+    }
+
+    /// How far back a Mac keeps events, and the most one `eventList` carries (the newest).
+    public static let kept: TimeInterval = 7 * 86_400
+    public static let maxPerList = 500
+}
+
+/// The Mac's battery at a moment, for the timeline's battery line.
+public struct BatterySample: Codable, Equatable, Sendable {
+    /// Unix seconds.
+    public var t: Double
+    /// 0 to 1.
+    public var level: Double
+    public var charging: Bool?
+
+    public init(t: Double, level: Double, charging: Bool? = nil) { self.t = t; self.level = level; self.charging = charging }
+
+    /// One sample every 5 minutes at most; a list carries at most a day's worth past `since`.
+    public static let interval: TimeInterval = 300
+    public static let maxPerList = 600
 }
 
 /// A change a phone asked the Mac for.

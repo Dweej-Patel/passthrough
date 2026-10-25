@@ -103,6 +103,8 @@ public final class ShellClient: @unchecked Sendable {
         case macInfo(ShellEnvelope)
         /// How the Mac is doing (after `ready`, and whenever it changes).
         case macState(MacState)
+        /// The answer to `requestEvents`: what happened since then, oldest first, and the battery meanwhile.
+        case events(since: Double, [MacEvent], battery: [BatterySample])
         case sessions([ShellSessionInfo])
         /// A session this client opened; it is attached to it.
         case opened(String)
@@ -323,6 +325,13 @@ public final class ShellClient: @unchecked Sendable {
     public func setAwake(_ on: Bool) {
         var m = ShellEnvelope(t: ShellEnvelope.setAwake)
         m.on = on
+        command(m)
+    }
+
+    /// Asks what happened on the Mac since `since`: `.events` follows, or `.failed(.badRequest)` from an older Mac.
+    public func requestEvents(since: Date) {
+        var m = ShellEnvelope(t: ShellEnvelope.events)
+        m.since = since.timeIntervalSince1970.rounded(.down)
         command(m)
     }
 
@@ -586,6 +595,8 @@ public final class ShellClient: @unchecked Sendable {
         case ShellEnvelope.macState:
             guard let state = message.state else { return }
             emit(.macState(state))
+        case ShellEnvelope.eventList:
+            emit(.events(since: message.since ?? 0, message.events ?? [], battery: message.battery ?? []))
         case ShellEnvelope.sessions:
             emit(.sessions(message.sessions ?? []))
         case ShellEnvelope.opened:
