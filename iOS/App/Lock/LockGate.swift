@@ -14,7 +14,7 @@ struct LockGate<Content: View>: View {
 
     var body: some View {
         ZStack {
-            PTBackground(glow: 0.45)
+            PTColor.background.ignoresSafeArea()
             if built {
                 content()
                     .allowsHitTesting(lock.isUnlocked)

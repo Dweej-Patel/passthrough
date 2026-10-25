@@ -1,4 +1,5 @@
 import SwiftUI
+import PassthroughUI
 
 @main
 struct PassthroughApp: App {
@@ -9,7 +10,8 @@ struct PassthroughApp: App {
 
     var body: some Scene {
         WindowGroup {
-            LockGate { HomeView() }
+            LockGate { RootView() }
+                .tint(PTColor.tintText)
                 .environmentObject(model)
                 .environmentObject(lock)
                 .preferredColorScheme(nil)

@@ -42,7 +42,15 @@ final class ShellModel: ObservableObject {
     @Published var selectedMacID: String? {
         didSet { if selectedMacID != oldValue, !applyingRefresh { connect() } }
     }
-    @Published private(set) var reach: Reach = .noAccess
+    @Published private(set) var reach: Reach = .noAccess {
+        didSet {
+            // Remember when each Mac last answered, for "last heard" while it can't be reached.
+            guard reach == .ready || oldValue == .ready, let mac = clientMacID else { return }
+            var heard = Self.lastHeardStore
+            heard[mac] = Date().timeIntervalSince1970
+            UserDefaults.standard.set(heard, forKey: Self.lastHeardKey)
+        }
+    }
     @Published private(set) var sessions: [ShellSessionInfo] = []
     @Published private(set) var history: [ShellHistoryEntry] = []
     /// The Mac has answered a history request since this Mac was selected.
@@ -188,6 +196,18 @@ final class ShellModel: ObservableObject {
 
     /// What `.unreachable` says for the selected Mac.
     var reachMessage: String? { reach.message(fromAnywhere: clientTriesIroh) }
+
+    /// When the selected Mac last answered, if it ever has on this phone.
+    var lastHeard: Date? {
+        guard let mac = selectedMacID, let at = Self.lastHeardStore[mac] else { return nil }
+        return Date(timeIntervalSince1970: at)
+    }
+
+    private static let lastHeardKey = "PTShellLastHeard"
+    private static var lastHeardStore: [String: Double] {
+        UserDefaults.standard.dictionary(forKey: lastHeardKey) as? [String: Double] ?? [:]
+    }
+
     /// Connecting again by itself after a working connection dropped.
     var isRedialing: Bool { redialsMade != nil && reach == .connecting }
 
@@ -218,6 +238,9 @@ final class ShellModel: ObservableObject {
         if selectedMacID == macID { selectedMacID = macs.first?.macID }
         applyingRefresh = false
         if macs.isEmpty { clear(.noAccess) } else if client == nil { connect() }
+        var heard = Self.lastHeardStore
+        heard[macID] = nil
+        UserDefaults.standard.set(heard, forKey: Self.lastHeardKey)
     }
 
     func forgetAll() {
@@ -227,6 +250,7 @@ final class ShellModel: ObservableObject {
         }
         granted = [:]
         clear(.noAccess)
+        UserDefaults.standard.removeObject(forKey: Self.lastHeardKey)
     }
 
     // MARK: Connection

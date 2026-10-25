@@ -67,7 +67,7 @@ private struct CaptureCover: ViewModifier {
     /// The app switcher's privacy cover (LockOverlay), with a way out.
     private var cover: some View {
         ZStack {
-            PTBackground(glow: 0.6)
+            PTColor.background.ignoresSafeArea()
             VStack(spacing: 18) {
                 AppIconView().frame(width: 96, height: 96).accessibilityHidden(true)
                 Text("Hidden while this iPhone's screen is recorded or shared.")
@@ -79,7 +79,7 @@ private struct CaptureCover: ViewModifier {
                     .font(.subheadline.weight(.semibold))
                     .buttonStyle(.bordered)
                     .buttonBorderShape(.capsule)
-                    .tint(PTTheme.accentEnd)
+                    .tint(PTColor.tintText)
             }
             .padding(32)
             .frame(maxWidth: 440)
