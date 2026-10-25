@@ -14,7 +14,9 @@ import ScreenClient
 /// says so, and the same connection asks for Screen Sharing instead, handed
 /// to an `RFBClient` with the Mac's login ("Screen"). That fallback sends a
 /// saved login only once the user agrees (`confirmScreenSharing`), or chose
-/// "Always" for that Mac: whatever answers as Screen Sharing gets it. Frames go straight to
+/// "Always" for that Mac: whatever answers as Screen Sharing gets it. While
+/// on Screen Sharing it keeps trying the stream on a second connection
+/// (`upgrade`) and switches to it as soon as one shows the screen. Frames go straight to
 /// the canvas (`onFrame`, `onVideoFrame`; not published: a frame must not
 /// re-render the SwiftUI screen around it); takes pointer and key input.
 @MainActor
@@ -71,6 +73,17 @@ final class ScreenModel: ObservableObject {
     /// Bumped by every start and stop, so a stale connection's events are dropped.
     private var generation = 0
     private var pendingLogin: (login: RFBClient.Login, remember: Bool)?
+    /// While on Screen Sharing: a second connection trying the Mac's own
+    /// stream, swapped in once it shows its size (`promote`).
+    private var upgrade: (client: ShellClient?, dialer: IrohShellDialer?, video: ScreenVideoClient?)?
+    private var upgradeTask: Task<Void, Never>?
+    /// Bumped per upgrade attempt; the promoted one's stream keeps its token.
+    private var upgradeToken = 0
+    private var promotedToken: Int?
+    private var upgradeAttempts = 0
+    /// The wait before each try of the stream while on Screen Sharing; the
+    /// last repeats for as long as the view lasts.
+    static let upgradeDelays: [TimeInterval] = [3, 5, 10, 20, 30]
 
     /// Uses the saved login if there is one, else asks for it.
     func begin(shell: ShellModel, context: LAContext) {
@@ -108,6 +121,7 @@ final class ScreenModel: ObservableObject {
         wantsVideo = video
         videoStarted = false
         lastPointer = nil
+        upgradeAttempts = 0
         phase = .connecting
         guard let connection = shell.screenConnection(onEvent: { [weak self] event in
             MainActor.assumeIsolated { self?.handle(event, generation: gen) }
@@ -177,6 +191,8 @@ final class ScreenModel: ObservableObject {
         client = nil
         dialer?.shutdown()
         dialer = nil
+        dropUpgrade()
+        promotedToken = nil
     }
 
     private func handle(_ event: ShellClient.Event, generation gen: Int) {
@@ -241,8 +257,9 @@ final class ScreenModel: ObservableObject {
             let worked = videoStarted
             stop()
             guard worked else {
-                // The Mac said yes but couldn't capture or encode after all.
-                slowReason = "Slower: \(macName) couldn't stream its screen. Reopening Passthrough on it may help."
+                // The Mac said yes but couldn't capture or encode after all
+                // (its display didn't come on in time, say). `upgrade` tries again.
+                slowReason = "Slower: \(macName) couldn't stream its screen just then. This switches to the smooth view once it can."
                 if let macID, Self.alwaysUsesScreenSharing(macID: macID), let context,
                    let saved = ScreenLoginStore.read(macID: macID, context: context) {
                     return connect(saved, remember: false)
@@ -255,7 +272,8 @@ final class ScreenModel: ObservableObject {
     }
 
     private func handle(_ event: RFBClient.Event, generation gen: Int) {
-        guard gen == generation else { return }
+        // No `rfb`: the stream took over and closed it; nothing it still says counts.
+        guard gen == generation, rfb != nil else { return }
         switch event {
         case let .connected(width, height, _):
             screenSize = CGSize(width: width, height: height)
@@ -264,6 +282,7 @@ final class ScreenModel: ObservableObject {
                 ScreenLoginStore.save(pending.login, macID: macID, context: context)
             }
             pendingLogin = nil
+            scheduleUpgrade()
         case let .frame(image):
             self.image = image
             let size = CGSize(width: image.width, height: image.height)
@@ -294,6 +313,111 @@ final class ScreenModel: ObservableObject {
                 phase = .failed("The connection to \(macName) was lost.")
             }
         }
+    }
+
+    // MARK: Back to the stream
+
+    /// Tries the Mac's own stream again after the next delay, while Screen
+    /// Sharing shows the screen. Whatever kept it from streaming (a display
+    /// that was off, permissions granted since) may be gone by then.
+    private func scheduleUpgrade() {
+        guard rfb != nil, upgrade == nil, upgradeTask == nil else { return }
+        let delay = Self.upgradeDelays[min(upgradeAttempts, Self.upgradeDelays.count - 1)]
+        upgradeAttempts += 1
+        let gen = generation
+        upgradeTask = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(delay))
+            guard !Task.isCancelled, let self, gen == self.generation else { return }
+            self.upgradeTask = nil
+            self.startUpgrade()
+        }
+    }
+
+    /// A second connection asks for the stream; Screen Sharing carries on
+    /// meanwhile (the Mac allows two views per phone).
+    private func startUpgrade() {
+        guard rfb != nil, phase == .live, let shell else { return }
+        upgradeToken += 1
+        let gen = generation, token = upgradeToken
+        guard let connection = shell.screenConnection(onEvent: { [weak self] event in
+            MainActor.assumeIsolated { self?.handleUpgrade(event, token: token, generation: gen) }
+        }) else { return }
+        upgrade = (connection.client, connection.dialer, nil)
+    }
+
+    private func handleUpgrade(_ event: ShellClient.Event, token: Int, generation gen: Int) {
+        guard gen == generation, token == upgradeToken, upgrade != nil else {
+            if case let .screen(stream, _) = event { stream.cancel() }
+            return
+        }
+        switch event {
+        case .ready:
+            upgrade?.client?.requestScreen(video: true)
+        case let .screen(stream, initialBytes):
+            upgrade?.client = nil   // it let go of the stream; the dialer stays up for it
+            let native = UIScreen.main.nativeBounds.size
+            let video = ScreenVideoClient(stream: stream, initialBytes: initialBytes, maxSide: Int(max(native.width, native.height))) { [weak self] event in
+                MainActor.assumeIsolated { self?.handleUpgrade(event, token: token, generation: gen) }
+            }
+            upgrade?.video = video
+            video.start()
+        case .failed, .disconnected:
+            upgradeFailed()
+        default:
+            break
+        }
+    }
+
+    private func handleUpgrade(_ event: ScreenVideoClient.Event, token: Int, generation gen: Int) {
+        guard gen == generation else { return }
+        // Promoted: this is the view's own stream now.
+        if token == promotedToken { return handle(event, generation: gen) }
+        guard token == upgradeToken, upgrade?.video != nil else { return }
+        switch event {
+        case .size:
+            promote(token)
+            handle(event, generation: gen)
+        case .closed:
+            upgradeFailed()
+        case .frame, .copied:
+            break   // none before the size
+        }
+    }
+
+    /// The stream shows the screen: it takes over and Screen Sharing ends.
+    private func promote(_ token: Int) {
+        guard let candidate = upgrade, let stream = candidate.video else { return }
+        upgrade = nil
+        promotedToken = token
+        let screenSharing = rfb
+        rfb = nil
+        screenSharing?.close()
+        dialer?.shutdown()
+        dialer = candidate.dialer
+        video = stream
+        wantsVideo = true
+        slowReason = nil
+        image = nil
+        lastPointer = nil
+        scrollRemainder = .zero
+        lastPaste = nil
+        if copying { copyTimeout?.cancel(); copying = false }
+        show("Switched to the smooth view")
+    }
+
+    private func upgradeFailed() {
+        dropUpgrade()
+        scheduleUpgrade()
+    }
+
+    private func dropUpgrade() {
+        upgradeTask?.cancel()
+        upgradeTask = nil
+        guard let candidate = upgrade else { return }
+        upgrade = nil
+        candidate.video?.close()
+        candidate.client?.disconnect()
+        candidate.dialer?.shutdown()
     }
 
     // MARK: Input
