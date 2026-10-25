@@ -99,9 +99,22 @@ It is **off by default**, sits directly under the passthrough switch, and works 
 
 **Heat auto-off** (Settings ▸ General ▸ Heat, on by default): macOS reports how hard it is working to stay cool. When that reaches *serious*, the point where it starts slowing the Mac down, keep-awake switches itself off so a closed laptop can sleep and cool, and turning it on is refused until the Mac has cooled. It uses the public thermal state rather than raw sensor temperatures.
 
-The menu-bar icon composes the three toggles: a phone (plain when passthrough is off, radiating when connected), a lock while the VPN layer is connected, and a coffee cup while keep-awake is on.
+The menu-bar icon is one phone glyph with a few marks: radio waves while online through the phone, an underline while keep-awake holds the Mac, a shield while the VPN layer is connected, an amber dot when a remote shell is waiting on a question, and amber with "!" when the VPN failed and is blocking traffic.
 
 Caution: the heat and battery limits are a safety net, not a licence. A closed, running Mac in a bag can still get very hot; use lid-closed on power or in open air.
+
+## Moments, Step away and the timeline
+
+The phone apps open on the Mac: how it's reached, its battery and how long Keep awake has left, shells waiting on a question, and three switches (Internet through this phone, Keep awake, VPN). The menu panel on the Mac has the same switches.
+
+* **Moments** set the three together: **Desk** (online through the phone, the Mac sleeps as usual, VPN off), **Away** (Keep awake on, off the phone's connection, VPN left as it is) and **Public** (online through the phone with the VPN on). A moment is read off the switches as they are, so a change on either side shows on both; any other mix is Custom.
+* **Changing the Mac from a phone** goes over the remote shell connection (`macState`, `setAwake`, `setVPN`; protocol/README.md). Each phone has an *Awake & VPN* switch in Settings ▸ Remote Shell, on unless you turn it off: a phone with shell access can already run commands as you. Turning things on never asks; turning the VPN off (or picking a moment that does) is in-app only, asks for Face ID, a fingerprint or the screen lock first, and leaves a notice on the Mac, grown out of the notch or as a capsule under the menu bar on screens without one, until someone dismisses it or turns the VPN back on. The battery and heat limits still apply whoever asks.
+* **Step away** is a checklist before leaving the Mac: Keep awake, battery time left (from macOS's own estimate), whether the Mac is online through the phone you're about to take (with *Switch now*), whether it's reachable from anywhere, and the shells that keep running. It then switches to Away, and on iPhone starts a Live Activity.
+* **Needs you**: the Mac marks a shell that went quiet on a question near the bottom of its screen (a line ending in `?`, a `[y/N]` choice, a password prompt). The phone shows it as a card that opens the terminal at that session; the Mac panel lists it too. It's a heuristic and only ever a nudge.
+* **Activity** shows what happened on the Mac since you stepped away (or the last 24 hours): Keep awake and the limit that stopped it, the VPN dropping and reconnecting, the phone's connection, power, sleep and wake, shells finishing, asking and being answered, and the battery as a line. The Mac keeps seven days of it in `~/Library/Application Support/Passthrough/events.json`.
+* **On the iPhone outside the app**: the Live Activity (Dynamic Island, Lock Screen, a banner on phones without the island) counts down the Mac's awake time by itself and shows shells and "needs you" as of the app's last look; a Home Screen widget shows the Mac as last seen; Control Center buttons (iOS 18) and Shortcuts / Siri / the Action button offer Keep Mac awake, Mac VPN on and Step away. There is no push server: these show what the app last saw, and each action opens the app, which unlocks (the shell keys need Face ID) and acts once the Mac is reachable. Only session titles appear on the Lock Screen, never their output.
+
+On first launch a Mac that has never been set up asks what the phone should do for it (get online, stay awake, be reachable, use a VPN) and lists what each needs now or at first use.
 
 ## Remote shell
 
@@ -227,6 +240,8 @@ Packages/PassthroughCore   Swift package:
   CPTY, CZlib, CResolv       small C shims (PTY spawn, zlib, resolver)
 iOS/App                    SwiftUI iPhone app
 iOS/Tunnel                 Packet tunnel extension hosting the servers
+iOS/Widgets                Widget extension: the Step away Live Activity, the Home Screen widget, Control Center buttons
+iOS/Shared                 Shared by the app and the widget extension: passthrough:// links, the Mac snapshot, the Live Activity's data
 macOS/App                  SwiftUI menu bar app: Session/, VPN/, Power/, Views/
 macOS/Helper               Root helper: utun + tun2socks + routes + DNS
 macOS/Shared               XPC protocol shared by app and helper
