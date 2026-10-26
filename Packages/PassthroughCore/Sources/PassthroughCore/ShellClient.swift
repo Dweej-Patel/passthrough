@@ -744,10 +744,11 @@ public final class ShellClient: @unchecked Sendable {
     /// (no `attach` since overtook it).
     private func takesOver(_ ref: Int?) -> Bool {
         opensLock.lock(); defer { opensLock.unlock() }
-        // A Mac that doesn't echo `ref` answers in order: count it as the latest.
+        // A Mac that doesn't echo `ref` answers in order: count it as the
+        // latest (none made yet: no attach can have overtaken it).
         let ref = ref ?? lastOpenRef
         answeredThrough = max(answeredThrough, ref)
-        return ref > overtakenThrough
+        return ref == 0 || ref > overtakenThrough
     }
 
     private func answered(_ ref: Int) {

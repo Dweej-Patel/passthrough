@@ -483,10 +483,11 @@ class ShellConnection(
     private fun delivered(event: ShellEvent): ShellEvent = synchronized(lock) {
         when {
             event is ShellEvent.Opened -> {
-                // A Mac that doesn't echo `ref` answers in order: count it as the latest.
+                // A Mac that doesn't echo `ref` answers in order: count it as the latest (none
+                // made yet: no attach can have overtaken it).
                 val ref = event.ref ?: lastOpenRef
                 answeredThrough = maxOf(answeredThrough, ref)
-                if (ref <= overtakenThrough) return@synchronized ShellEvent.OpenedDetached(event.session)
+                if (ref != 0 && ref <= overtakenThrough) return@synchronized ShellEvent.OpenedDetached(event.session)
                 current = if (event.session in goneSessions) null else event.session
                 event
             }
