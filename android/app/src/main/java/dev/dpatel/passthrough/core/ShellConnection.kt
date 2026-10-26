@@ -11,10 +11,11 @@ import kotlinx.coroutines.cancelChildren
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableSharedFlow
-import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.job
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -129,11 +130,10 @@ sealed interface ShellEvent {
     data class MacStateChanged(val state: MacState) : ShellEvent
     /** The answer to [ShellConnection.requestEvents]: what happened since then, oldest first, and the battery meanwhile. */
     data class Events(val since: Double, val events: List<MacEvent>, val battery: List<BatterySample>) : ShellEvent
-    /**
-     * A session this connection opened, answering `open` [ref]. Whether it is the attached one
-     * is [ShellConnection.takesOver]'s to say, as the app handles this.
-     */
+    /** A session this connection opened, answering `open` [ref]; it is attached to it. */
     data class Opened(val session: String, val ref: Int? = null) : ShellEvent
+    /** A session this connection opened after all, though an `attach` made before the Mac answered took its place: it runs detached. */
+    data class OpenedDetached(val session: String) : ShellEvent
     class Output(val session: String, val data: ByteArray) : ShellEvent {
         override fun toString() = "Output(session=$session, ${data.size} bytes)"
     }
@@ -205,7 +205,11 @@ class ShellConnection(
     private val liveness: ShellLiveness = ShellLiveness(),
 ) {
     private val _events = MutableSharedFlow<ShellEvent>(extraBufferCapacity = 64)
-    val events: SharedFlow<ShellEvent> = _events.asSharedFlow()
+    /**
+     * Collected once, by the app. An answer to an `open` is judged as it's delivered there, in
+     * order with the app's own [attach] calls ([delivered]).
+     */
+    val events: Flow<ShellEvent> = _events.asSharedFlow().map(::delivered)
 
     private val lock = Any()
     private var active = true
@@ -215,10 +219,12 @@ class ShellConnection(
     private val queued = ArrayList<ShellEnvelope>()
     /** The session `input` goes to. */
     private var current: String? = null
+    /** Sessions that ended or were taken over: an [ShellEvent.Opened] judged after that leaves nothing [current] (the Mac attached it, then lost it). */
+    private val goneSessions = HashSet<String>()
     /**
      * Numbers `open`s (the Mac echoes the number in the answer). An `attach` overtakes every open
-     * numbered up to [overtakenThrough]: the Mac attaches it after the sessions they make. The
-     * app reports answers ([takesOver], [openRefused]) as it handles them, in order with its own calls.
+     * numbered up to [overtakenThrough]: the Mac attaches it after the sessions they make.
+     * [answeredThrough] is the last whose answer the app has been given.
      */
     private var lastOpenRef = 0
     private var overtakenThrough = 0
@@ -407,12 +413,18 @@ class ShellConnection(
             ShellEnvelope.ATTACHED -> emit(ShellEvent.Attached(m.session ?: return))
             ShellEnvelope.ENDED -> {
                 val id = m.session ?: return
-                synchronized(lock) { if (current == id) current = null }
+                synchronized(lock) {
+                    if (current == id) current = null
+                    goneSessions += id
+                }
                 emit(ShellEvent.Ended(id, m.exitStatus ?: -1))
             }
             ShellEnvelope.DETACHED -> {
                 val id = m.session ?: return
-                synchronized(lock) { if (current == id) current = null }
+                synchronized(lock) {
+                    if (current == id) current = null
+                    goneSessions += id
+                }
                 emit(ShellEvent.Detached(id))
             }
             ShellEnvelope.HISTORY_LIST -> emit(ShellEvent.History(m.history.orEmpty()))
@@ -465,20 +477,28 @@ class ShellConnection(
     }
 
     /**
-     * As the app handles [opened]: whether that session is the one the Mac has attached (no
-     * `attach` since overtook its open), and if so input goes to it.
+     * As [event] reaches the app: an `opened` whose open an `attach` since overtook arrives as
+     * [ShellEvent.OpenedDetached]; otherwise input goes to its session.
      */
-    fun takesOver(opened: ShellEvent.Opened): Boolean = synchronized(lock) {
-        // A Mac that doesn't echo `ref` answers in order: count it as the latest.
-        val ref = opened.ref ?: lastOpenRef
-        answeredThrough = maxOf(answeredThrough, ref)
-        (ref > overtakenThrough).also { if (it) current = opened.session }
+    private fun delivered(event: ShellEvent): ShellEvent = synchronized(lock) {
+        when {
+            event is ShellEvent.Opened -> {
+                // A Mac that doesn't echo `ref` answers in order: count it as the latest.
+                val ref = event.ref ?: lastOpenRef
+                answeredThrough = maxOf(answeredThrough, ref)
+                if (ref <= overtakenThrough) return@synchronized ShellEvent.OpenedDetached(event.session)
+                current = if (event.session in goneSessions) null else event.session
+                event
+            }
+            event is ShellEvent.Failed && event.ref != null -> {
+                answeredThrough = maxOf(answeredThrough, event.ref)
+                event
+            }
+            else -> event
+        }
     }
 
-    /** As the app handles the refusal of `open` [ref]. */
-    fun openRefused(ref: Int): Unit = synchronized(lock) { answeredThrough = maxOf(answeredThrough, ref) }
-
-    /** An `open` is unanswered, and no `attach` has overtaken it: its session will be the attached one. */
+    /** An `open` is unanswered, and no `attach` has overtaken it: its session will be the attached one. As of the events delivered so far. */
     val openPending: Boolean get() = synchronized(lock) { lastOpenRef > maxOf(answeredThrough, overtakenThrough) }
 
     private fun shutdown() {

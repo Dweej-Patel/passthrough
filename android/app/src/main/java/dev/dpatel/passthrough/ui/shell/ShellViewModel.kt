@@ -156,12 +156,22 @@ class ShellViewModel(app: Application) : AndroidViewModel(app) {
     private var redialJob: Job? = null
     private var size = 80 to 24
     /**
-     * A new session asked for while connecting: opened on Ready, after re-attaching the active one
-     * (an open queued before that attach would be overtaken by it). Dropped with the connection.
+     * A new session asked for while connecting (or waiting to redial): opened on Ready. Dropped
+     * once the Mac can't be reached, or for another Mac or a tab chosen meanwhile.
      */
     private var openWhenReady = false
-    /** A rebuilt terminal skipped re-attaching while a new session opened: re-attach if that open is refused. */
-    private var resumeAfterOpen = false
+    /**
+     * The active session wasn't (re-)attached because a new one was opening (on Ready, or a
+     * terminal rebuilt meanwhile): re-attach it if that open is refused.
+     */
+    private var reattachIfRefused = false
+
+    init {
+        // Unreachable, no access, another Mac…: nobody is waiting for that new session any more.
+        viewModelScope.launch {
+            _reach.collect { if (it != ShellReach.CONNECTING && it != ShellReach.READY) openWhenReady = false }
+        }
+    }
     private var pendingTranscript: PendingTranscript? = null
     private val refreshes = Channel<Unit>(Channel.CONFLATED)
     /** Debug builds only: the [ShellDemo] state shown instead of a real Mac (null normally). */
@@ -432,7 +442,7 @@ class ShellViewModel(app: Application) : AndroidViewModel(app) {
         }
         val conn = connection
         if (conn == null || _reach.value != ShellReach.READY) {
-            if (connectJob?.isActive == true) openWhenReady = true
+            if (_reach.value == ShellReach.CONNECTING) openWhenReady = true
             return
         }
         conn.open(cols, rows)
@@ -446,7 +456,7 @@ class ShellViewModel(app: Application) : AndroidViewModel(app) {
     fun resume(cols: Int, rows: Int) {
         if (openWhenReady || connection?.openPending == true) {
             size = cols to rows
-            resumeAfterOpen = true
+            reattachIfRefused = _activeSession.value != null
             connection?.resize(cols, rows)
             return
         }
@@ -456,7 +466,7 @@ class ShellViewModel(app: Application) : AndroidViewModel(app) {
     fun attach(id: String, cols: Int, rows: Int) {
         size = cols to rows
         openWhenReady = false
-        resumeAfterOpen = false
+        reattachIfRefused = false
         if (id !in _openTabs.value) _openTabs.value = _openTabs.value + id
         _activeSession.value = id
         _detachedSession.value = null
@@ -576,15 +586,17 @@ class ShellViewModel(app: Application) : AndroidViewModel(app) {
                 publishControls()
                 // No list(): the Mac sends `sessions` right after `ready`.
                 // An ended session's log is already on screen; it has nothing more to send.
-                _activeSession.value?.takeUnless { _ended.value.isEnded(it) }?.let { active ->
+                val active = _activeSession.value?.takeUnless { _ended.value.isEnded(it) }
+                if (openWhenReady) {
+                    // Not the active one first: it would take the keystrokes meant for the new one
+                    // until the Mac answers.
+                    openWhenReady = false
+                    reattachIfRefused = active != null
+                    connection?.open(size.first, size.second)
+                } else if (active != null) {
+                    reattachIfRefused = false
                     listeners.toList().forEach { it.streamStarting(active, true) }
                     connection?.attach(active, size.first, size.second)
-                }
-                // After the attach, so the new session is the one left attached; a refused open
-                // leaves the active one working.
-                if (openWhenReady) {
-                    openWhenReady = false
-                    connection?.open(size.first, size.second)
                 }
             }
             is ShellEvent.MacInfo -> apply(event)
@@ -610,15 +622,17 @@ class ShellViewModel(app: Application) : AndroidViewModel(app) {
             }
             is ShellEvent.Opened -> {
                 if (event.session !in _openTabs.value) _openTabs.value = _openTabs.value + event.session
-                resumeAfterOpen = false
-                // The user went to another tab before the Mac answered: the new one waits beside
-                // it, and the tab on screen stays.
-                if (connection?.takesOver(event) == false) return
+                reattachIfRefused = false
                 listeners.toList().forEach { it.streamStarting(event.session, false) }
                 _activeSession.value = event.session
                 _detachedSession.value = null
                 _lastError.value = null
                 connection?.list()
+            }
+            is ShellEvent.OpenedDetached -> {
+                // The user went to another tab before the Mac answered: the new one waits beside it,
+                // and the tab on screen stays.
+                if (event.session !in _openTabs.value) _openTabs.value = _openTabs.value + event.session
             }
             is ShellEvent.Output -> listeners.toList().forEach { it.output(event.session, event.data) }
             is ShellEvent.Attached -> listeners.toList().forEach { it.replayFinished(event.session) }
@@ -644,12 +658,10 @@ class ShellViewModel(app: Application) : AndroidViewModel(app) {
                 if (event.done) finishTranscript(pending.replay.chunks())
             }
             is ShellEvent.Failed -> {
-                event.ref?.let { ref ->
-                    connection?.openRefused(ref)
-                    if (resumeAfterOpen) {
-                        resumeAfterOpen = false
-                        _activeSession.value?.let { attach(it, size.first, size.second) }
-                    }
+                // A refused open: unless another is coming (re-attaching would overtake it).
+                if (event.ref != null && reattachIfRefused && connection?.openPending == false) {
+                    reattachIfRefused = false
+                    _activeSession.value?.let { attach(it, size.first, size.second) }
                 }
                 if (event.error == ShellError.NOT_ALLOWED || event.error == ShellError.VPN_NOT_SET_UP) {
                     controls.refused(event.error)
@@ -670,8 +682,7 @@ class ShellViewModel(app: Application) : AndroidViewModel(app) {
             is ShellEvent.Disconnected -> {
                 val dropped = _reach.value == ShellReach.READY
                 connection = null
-                openWhenReady = false
-                resumeAfterOpen = false
+                reattachIfRefused = false
                 _path.value = null
                 _historyLoading.value = false
                 timelineLoading = false
@@ -747,8 +758,7 @@ class ShellViewModel(app: Application) : AndroidViewModel(app) {
         connectJob = null
         connection?.let(::closeQuietly)
         connection = null
-        openWhenReady = false
-        resumeAfterOpen = false
+        reattachIfRefused = false
         _path.value = null
         _historyLoading.value = false
         timelineLoading = false
@@ -763,6 +773,7 @@ class ShellViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     private fun resetSessions() {
+        openWhenReady = false
         _macState.value = null
         controls.reset()
         publishControls()

@@ -2,10 +2,10 @@
 import Foundation
 import Network
 import XCTest
-import PassthroughCore
 import PhoneTransport
 import ScreenClient
 import TestSupport
+@testable import PassthroughCore
 @testable import ShellHost
 
 /// The remote shell end to end over loopback: TLS 1.3 pinned to a test
@@ -424,19 +424,16 @@ final class ShellListenerTests: XCTestCase {
     /// does: the attach still overtakes the open, since that's judged as
     /// `opened` is delivered to the app, in order with its own calls.
     func testAnAttachMadeBeforeOpenedIsDeliveredOvertakesIt() {
-        let events = Locked<[String]>([])
-        let listener = startListener(events: events)
+        let listener = startListener()
         let delivery = DispatchQueue(label: "delivery")
         let (c, probe) = readyClient(listener, queue: delivery)
         let first = openSession(c, probe)
+        let readOpened = expectation(description: "the client read opened")
+        c.lineHandled.set { if $0 == ShellEnvelope.opened { readOpened.fulfill() } }
         delivery.suspend()
         c.open(cols: 80, rows: 24)
-        // The Mac has opened it, and its `opened` has had time to reach the client.
-        let deadline = Date().addingTimeInterval(5)
-        while events.get().filter({ $0 == "Test iPhone opened a session" }).count < 2, Date() < deadline {
-            Thread.sleep(forTimeInterval: 0.01)
-        }
-        Thread.sleep(forTimeInterval: 0.3)
+        wait(for: [readOpened], timeout: 5)
+        // The client has read `opened`, but the app hasn't been given it, and attaches first.
         c.attach(first, cols: 80, rows: 24)
         delivery.resume()
         wait(for: [probe.expect(self, "opened detached") {
@@ -445,6 +442,41 @@ final class ShellListenerTests: XCTestCase {
         c.input(Data("echo still-$((6*7))\n".utf8))
         wait(for: [probe.expect(self, "typed into the tab attached") { _ in probe.output(first).contains("still-42\r\n") }], timeout: 10)
         XCTAssertEqual(probe.failures, [])
+    }
+
+    /// The new session ends before the app is given its `opened`: the Mac
+    /// has nothing attached, so typing goes nowhere (not to it, nor to the
+    /// tab before).
+    func testANewSessionEndedBeforeItsOpenedIsDeliveredTakesNoInput() {
+        let listener = startListener()
+        let delivery = DispatchQueue(label: "delivery")
+        let (c, probe) = readyClient(listener, queue: delivery)
+        let first = openSession(c, probe)
+        let readOpened = expectation(description: "the client read opened")
+        let readEnded = expectation(description: "the client read ended")
+        c.lineHandled.set {
+            if $0 == ShellEnvelope.opened { readOpened.fulfill() }
+            if $0 == ShellEnvelope.ended { readEnded.fulfill() }
+        }
+        delivery.suspend()
+        c.open(cols: 80, rows: 24)
+        wait(for: [readOpened], timeout: 5)
+        let second = manager.sessions.first { $0.id != first && $0.running }!.id
+        manager.close(second)
+        wait(for: [readEnded], timeout: 10)
+        delivery.resume()
+        wait(for: [probe.expect(self, "opened, then ended") {
+            $0.contains { if case .ended(second, _) = $0 { return true } else { return false } }
+        }], timeout: 5)
+        c.lineHandled.set(nil)
+        let listed = probe.events.get().filter { if case .sessions = $0 { return true } else { return false } }.count
+        c.input(Data("echo nowhere-$((6*7))\n".utf8))
+        c.list()   // answered after any refusal of that input
+        wait(for: [probe.expect(self, "listed") {
+            $0.filter { if case .sessions = $0 { return true } else { return false } }.count > listed
+        }], timeout: 5)
+        XCTAssertEqual(probe.failures, [])
+        XCTAssertFalse(probe.output(first).contains("nowhere-42"))
     }
 
     /// A refused `open` is answered too: it doesn't leave the next one
@@ -460,7 +492,9 @@ final class ShellListenerTests: XCTestCase {
             wait(for: [probe.expect(self, "opened \(n)") { opened($0).count == n }], timeout: 5)
         }
         c.open(cols: 80, rows: 24)
-        wait(for: [probe.expect(self, "refused") { _ in probe.failures == [.tooManySessions] }], timeout: 5)
+        wait(for: [probe.expect(self, "refused") { $0.contains { if case .openFailed(.tooManySessions) = $0 { return true } else { return false } } }], timeout: 5)
+        XCTAssertEqual(probe.failures, [], "a refused open isn't reported as any other failure")
+        XCTAssertFalse(c.openPending)
         let ids = opened(probe.events.get())
         c.close(ids.last!)
         wait(for: [probe.expect(self, "ended") { $0.contains { if case .ended(ids.last!, _) = $0 { return true } else { return false } } }], timeout: 10)

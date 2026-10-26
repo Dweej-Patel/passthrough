@@ -274,9 +274,7 @@ class ShellConnectionTests {
         }
         connection.open(80, 24)
         connection.attach("s1", 80, 24)
-        val opened = events.next<ShellEvent.Opened>()
-        assertEquals("s2", opened.session)
-        assertFalse(connection.takesOver(opened))
+        assertEquals("s2", events.next<ShellEvent.OpenedDetached>().session)
         // The Mac attached s1 after making s2: keystrokes still go to s1.
         connection.input("ls\n".toByteArray())
         t.join(5000)
@@ -300,47 +298,102 @@ class ShellConnectionTests {
         connection.attach("s1", 80, 24)
         connection.open(80, 24)
         // The open after the attach isn't overtaken by it: s3 is attached.
-        val opened = events.next<ShellEvent.Opened>()
-        assertEquals("s3", opened.session)
-        assertTrue(connection.takesOver(opened))
+        val opened = withTimeout(5000) {
+            var e: ShellEvent
+            do { e = events.receive() } while (e !is ShellEvent.Opened && e !is ShellEvent.OpenedDetached)
+            e
+        }
+        assertEquals("s3", (opened as ShellEvent.Opened).session)
         t.join(5000)
     }
 
-    @Test fun anAttachMadeBeforeOpenedIsHandledOvertakesIt() = runBlocking {
+    @Test fun anAttachMadeBeforeOpenedIsDeliveredOvertakesIt() = runBlocking {
         val (connection, mac) = piped()
-        val events = events(connection)
+        // The app's collector, held after Ready: what it's given next waits until the gate opens.
+        val events = Channel<ShellEvent>(Channel.UNLIMITED)
+        val gate = CompletableDeferred<Unit>()
+        scope.launch { connection.events.collect { events.send(it); if (it is ShellEvent.Ready) gate.await() } }
         val received = mutableListOf<ShellEnvelope>()
+        val readOpened = java.util.concurrent.CountDownLatch(1)
         val t = macThread {
             mac.handshake()
             received += mac.receive() // open
             mac.send(ShellEnvelope(ShellEnvelope.OPENED, session = "s2", ref = received[0].ref))
+            mac.send(ShellEnvelope(ShellEnvelope.PING))
+            received += mac.receive() // pong: the client has read `opened`
+            readOpened.countDown()
             repeat(2) { received += mac.receive() } // attach, input
         }
+        events.next<ShellEvent.Ready>()
         connection.open(80, 24)
-        // Opened has arrived, but the app attaches before handling it.
-        val opened = events.next<ShellEvent.Opened>()
+        assertTrue(readOpened.await(5, TimeUnit.SECONDS))
+        // The client has read `opened`, but the app hasn't been given it, and attaches first.
         connection.attach("s1", 80, 24)
-        assertFalse(connection.takesOver(opened))
+        gate.complete(Unit)
+        assertEquals("s2", events.next<ShellEvent.OpenedDetached>().session)
         connection.input("ls\n".toByteArray())
         t.join(5000)
-        assertEquals(listOf(ShellEnvelope.OPEN, ShellEnvelope.ATTACH, ShellEnvelope.INPUT), received.map { it.t })
-        assertEquals("s1", received[2].session)
+        assertEquals(listOf(ShellEnvelope.OPEN, ShellEnvelope.PONG, ShellEnvelope.ATTACH, ShellEnvelope.INPUT), received.map { it.t })
+        assertEquals("s1", received[3].session)
     }
 
-    @Test fun openPendingFollowsTheAnswersTheAppHandles() {
-        val (connection, _) = piped()
+    @Test fun aNewSessionEndedBeforeItsOpenedIsDeliveredTakesNoInput() = runBlocking {
+        val (connection, mac) = piped()
+        val events = Channel<ShellEvent>(Channel.UNLIMITED)
+        val gate = CompletableDeferred<Unit>()
+        scope.launch { connection.events.collect { events.send(it); if (it is ShellEvent.Ready) gate.await() } }
+        val received = mutableListOf<ShellEnvelope>()
+        val readEnded = java.util.concurrent.CountDownLatch(1)
+        val t = macThread {
+            mac.handshake()
+            received += mac.receive() // attach s1
+            received += mac.receive() // open
+            mac.send(ShellEnvelope(ShellEnvelope.OPENED, session = "s2", ref = received[1].ref))
+            mac.send(ShellEnvelope(ShellEnvelope.ENDED, session = "s2", exitStatus = 0))
+            mac.send(ShellEnvelope(ShellEnvelope.PING))
+            received += mac.receive() // pong: the client has read both
+            readEnded.countDown()
+            received += mac.receive() // list: the input before it went nowhere
+        }
+        events.next<ShellEvent.Ready>()
+        connection.attach("s1", 80, 24)
+        connection.open(80, 24)
+        assertTrue(readEnded.await(5, TimeUnit.SECONDS))
+        gate.complete(Unit)
+        assertEquals("s2", events.next<ShellEvent.Opened>().session)
+        // The Mac attached s2, then lost it: nothing is attached, not s2 and not s1.
+        connection.input("ls\n".toByteArray())
+        connection.list()
+        t.join(5000)
+        assertEquals(listOf(ShellEnvelope.ATTACH, ShellEnvelope.OPEN, ShellEnvelope.PONG, ShellEnvelope.LIST), received.map { it.t })
+    }
+
+    @Test fun openPendingFollowsTheAnswersDelivered() = runBlocking {
+        val (connection, mac) = piped()
+        val events = events(connection)
+        val t = macThread {
+            mac.handshake()
+            mac.receive() // open 1, overtaken: left unanswered here
+            mac.receive() // attach
+            val second = mac.receive()
+            mac.send(ShellEnvelope(ShellEnvelope.OPENED, session = "s2", ref = second.ref))
+            val third = mac.receive()
+            mac.send(ShellEnvelope(ShellEnvelope.ERROR, reason = "too_many_sessions", ref = third.ref))
+        }
         assertFalse(connection.openPending)
         connection.open(80, 24)
         assertTrue(connection.openPending)
-        connection.attach("s1", 80, 24) // overtakes it
+        connection.attach("s1", 80, 24)
         assertFalse(connection.openPending)
         connection.open(80, 24)
         assertTrue(connection.openPending)
-        assertTrue(connection.takesOver(ShellEvent.Opened("s2", ref = 2)))
+        events.next<ShellEvent.Opened>()
         assertFalse(connection.openPending)
         connection.open(80, 24)
-        connection.openRefused(3)
+        assertTrue(connection.openPending)
+        assertEquals(3, events.next<ShellEvent.Failed>().ref)
         assertFalse(connection.openPending)
+        t.join(5000)
     }
 
     @Test fun refusalFailsAndDisconnects() = runBlocking {
