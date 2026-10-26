@@ -367,6 +367,50 @@ final class ShellListenerTests: XCTestCase {
         XCTAssertEqual(probe.failures, [])
     }
 
+    /// Two opens before the first is answered: the resize is for the last,
+    /// the one the Mac leaves attached.
+    func testAResizeAfterTwoQuickOpensReachesTheLast() {
+        let listener = startListener()
+        let (c, probe) = readyClient(listener)
+        c.open(cols: 80, rows: 40)
+        c.open(cols: 80, rows: 40)
+        c.resize(cols: 80, rows: 20)
+        func opened(_ events: [ShellClient.Event]) -> [String] {
+            events.compactMap { if case .opened(let id) = $0 { return id } else { return nil } }
+        }
+        wait(for: [probe.expect(self, "both opened") { opened($0).count == 2 }], timeout: 5)
+        let last = opened(probe.events.get())[1]
+        c.input(Data("stty size\n".utf8))
+        wait(for: [probe.expect(self, "resized") { _ in probe.output(last).contains("20 80\r\n") }], timeout: 10)
+        XCTAssertEqual(probe.failures, [])
+    }
+
+    /// A refusal of something else, answered before `opened`, doesn't
+    /// change where the resize goes.
+    func testAResizeWhileOpeningSurvivesAnUnrelatedRefusal() {
+        let listener = startListener()
+        let (c, probe) = readyClient(listener)
+        c.requestEvents(since: Date())   // no timeline here: refused, with no session
+        c.open(cols: 80, rows: 40)
+        c.resize(cols: 80, rows: 20)
+        wait(for: [probe.expect(self, "opened") { _ in probe.opened != nil }], timeout: 5)
+        let id = probe.opened!
+        c.input(Data("stty size\n".utf8))
+        wait(for: [probe.expect(self, "resized") { _ in probe.output(id).contains("20 80\r\n") }], timeout: 10)
+        XCTAssertEqual(probe.failures, [.badRequest])
+    }
+
+    /// With nothing attached, a resize has nowhere to go and isn't refused.
+    func testAResizeWithNothingAttachedIsIgnored() {
+        let listener = startListener()
+        let (c, probe) = readyClient(listener)
+        c.resize(cols: 80, rows: 20)
+        let id = openSession(c, probe)
+        c.input(Data("stty size\n".utf8))
+        wait(for: [probe.expect(self, "sized by open") { _ in probe.output(id).contains("24 80\r\n") }], timeout: 10)
+        XCTAssertEqual(probe.failures, [])
+    }
+
     func testReattachReplaysOverTheWire() {
         let listener = startListener()
         let (first, firstProbe) = readyClient(listener)

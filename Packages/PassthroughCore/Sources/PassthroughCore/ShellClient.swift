@@ -204,11 +204,8 @@ public final class ShellClient: @unchecked Sendable {
     private var active = false
     /// Commands made before `ready`, sent once it arrives.
     private var queued: [ShellEnvelope] = []
-    /// The session `input` and `resize` go to.
+    /// The session `input` goes to.
     private var current: String?
-    /// An `open` the Mac hasn't answered: the grid it sent, and the latest
-    /// one asked for since (e.g. the keyboard coming up), sent once it's opened.
-    private var opening: (sent: (cols: Int, rows: Int), latest: (cols: Int, rows: Int))?
     /// `requestScreen` was called: lines are read only up to `screenReady`.
     private var screenRequested = false
     /// When the winner last delivered anything.
@@ -280,17 +277,11 @@ public final class ShellClient: @unchecked Sendable {
     public func open(cols: Int, rows: Int) {
         var m = ShellEnvelope(t: ShellEnvelope.open)
         m.cols = cols; m.rows = rows
-        work.async { [self] in
-            opening = ((cols, rows), (cols, rows))
-            enqueue(m)
-        }
+        command(m)
     }
 
     public func attach(_ session: String, cols: Int, rows: Int) {
-        work.async { [self] in
-            current = session
-            opening = nil   // the Mac attaches this after any open before it
-        }
+        work.async { [self] in current = session }
         var m = ShellEnvelope(t: ShellEnvelope.attach)
         m.session = session; m.cols = cols; m.rows = rows
         command(m)
@@ -312,16 +303,12 @@ public final class ShellClient: @unchecked Sendable {
         }
     }
 
-    /// Held while an `open` is unanswered: it's for the new session, which
-    /// `current` isn't yet (the Mac would refuse it for the old one).
+    /// The terminal's size, for whatever session the Mac has attached when
+    /// it reads this, so also one an unanswered `open` is about to attach.
     public func resize(cols: Int, rows: Int) {
-        work.async { [self] in
-            if opening != nil { opening?.latest = (cols, rows); return }
-            guard let session = current else { return }
-            var m = ShellEnvelope(t: ShellEnvelope.resize)
-            m.session = session; m.cols = cols; m.rows = rows
-            enqueue(m)
-        }
+        var m = ShellEnvelope(t: ShellEnvelope.resize)
+        m.cols = cols; m.rows = rows
+        command(m)
     }
 
     public func close(_ session: String) {
@@ -614,7 +601,6 @@ public final class ShellClient: @unchecked Sendable {
         case ShellEnvelope.opened:
             guard let id = message.session else { return }
             current = id
-            finishOpening()
             emit(.opened(id))
         case ShellEnvelope.output:
             guard let id = message.session, let data = message.data.flatMap({ Data(base64Encoded: $0) }) else { return }
@@ -642,8 +628,6 @@ public final class ShellClient: @unchecked Sendable {
             let reason = ShellError(rawValue: message.reason ?? "") ?? .badRequest
             // The Mac did not attach the session `attach` named: stop sending it input it would refuse.
             if reason == .noSuchSession, let id = message.session, current == id { current = nil }
-            // The open failed: a size held for it goes to the session still attached.
-            if message.session == nil { finishOpening() }
             emit(.failed(reason, session: message.session))
         case ShellEnvelope.ping:
             send(ShellEnvelope(t: ShellEnvelope.pong))
@@ -690,16 +674,6 @@ public final class ShellClient: @unchecked Sendable {
         emit(.disconnected(error))
     }
 
-    /// Ends `opening`, sending `current` the latest grid if it changed since `open`.
-    private func finishOpening() {
-        guard let opening else { return }
-        self.opening = nil
-        guard opening.latest != opening.sent, let session = current else { return }
-        var m = ShellEnvelope(t: ShellEnvelope.resize)
-        m.session = session; m.cols = opening.latest.cols; m.rows = opening.latest.rows
-        enqueue(m)
-    }
-
     private func teardown() {
         active = false
         generation += 1
@@ -710,7 +684,6 @@ public final class ShellClient: @unchecked Sendable {
         queued = []
         ready = false
         current = nil
-        opening = nil
         probing = false
     }
 

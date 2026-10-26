@@ -60,8 +60,8 @@ final class ShellTerminalController: ObservableObject {
                 self.driver.setReadOnly(!ended.isWritable(self.shown, openTabs: tabs))
             }
             .store(in: &subscriptions)
-        // Also with no session active yet: a new tab's keyboard coming up
-        // resizes it before the Mac has opened it (`ShellClient` holds that).
+        // Also with no session active yet: a new tab's keyboard comes up
+        // before the Mac has opened it, and the Mac sizes the new session.
         driver.onResize = { [weak self] cols, rows in
             guard self != nil else { return }
             shell.resize(cols: cols, rows: rows)

@@ -241,6 +241,25 @@ class ShellConnectionTests {
         assertEquals(30, received[1].rows)
     }
 
+    @Test fun resizeNamesNoSession() = runBlocking {
+        val (connection, mac) = piped()
+        val received = mutableListOf<ShellEnvelope>()
+        val t = macThread {
+            mac.handshake()
+            repeat(3) { received += mac.receive() }
+        }
+        connection.attach("s1", 80, 24)
+        connection.open(80, 40)
+        connection.resize(80, 20)
+        withTimeout(5000) { connection.awaitReady() }
+        t.join(5000)
+        assertEquals(listOf(ShellEnvelope.ATTACH, ShellEnvelope.OPEN, ShellEnvelope.RESIZE), received.map { it.t })
+        // For whatever the Mac has attached when it reads it: here the session the open makes, not s1.
+        assertNull(received[2].session)
+        assertEquals(80, received[2].cols)
+        assertEquals(20, received[2].rows)
+    }
+
     @Test fun refusalFailsAndDisconnects() = runBlocking {
         val (connection, mac) = piped()
         val events = events(connection)

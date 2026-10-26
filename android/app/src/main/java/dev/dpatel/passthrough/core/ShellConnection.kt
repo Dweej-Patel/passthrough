@@ -209,14 +209,8 @@ class ShellConnection(
     private var challenged = false
     /** Commands made before `ready`, sent once it arrives. */
     private val queued = ArrayList<ShellEnvelope>()
-    /** The session `input` and `resize` go to. */
+    /** The session `input` goes to. */
     private var current: String? = null
-    /**
-     * An `open` the Mac hasn't answered: the grid it sent, and the latest one
-     * asked for since (e.g. the keyboard coming up), sent once it's opened.
-     */
-    private class Opening(val sent: Pair<Int, Int>, var latest: Pair<Int, Int>)
-    private var opening: Opening? = null
     /** When the last line from the Mac arrived ([System.nanoTime]). */
     @Volatile private var lastHeard = System.nanoTime()
 
@@ -249,14 +243,10 @@ class ShellConnection(
 
     fun list() = enqueue(ShellEnvelope(ShellEnvelope.LIST))
 
-    fun open(cols: Int, rows: Int): Unit = synchronized(lock) {
-        opening = Opening(cols to rows, cols to rows)
-        enqueue(ShellEnvelope(ShellEnvelope.OPEN, cols = cols, rows = rows))
-    }
+    fun open(cols: Int, rows: Int) = enqueue(ShellEnvelope(ShellEnvelope.OPEN, cols = cols, rows = rows))
 
     fun attach(session: String, cols: Int, rows: Int): Unit = synchronized(lock) {
         current = session
-        opening = null   // the Mac attaches this after any open before it
         enqueue(ShellEnvelope(ShellEnvelope.ATTACH, session = session, cols = cols, rows = rows))
     }
 
@@ -272,14 +262,10 @@ class ShellConnection(
     }
 
     /**
-     * Held while an `open` is unanswered: it's for the new session, which
-     * `current` isn't yet (the Mac would refuse it for the old one).
+     * The terminal's size, for whatever session the Mac has attached when it
+     * reads this, so also one an unanswered `open` is about to attach.
      */
-    fun resize(cols: Int, rows: Int): Unit = synchronized(lock) {
-        opening?.let { it.latest = cols to rows; return }
-        val session = current ?: return
-        enqueue(ShellEnvelope(ShellEnvelope.RESIZE, session = session, cols = cols, rows = rows))
-    }
+    fun resize(cols: Int, rows: Int) = enqueue(ShellEnvelope(ShellEnvelope.RESIZE, cols = cols, rows = rows))
 
     /** Ends a session on the Mac (its shell is hung up). */
     fun close(session: String) = enqueue(ShellEnvelope(ShellEnvelope.CLOSE, session = session))
@@ -389,10 +375,7 @@ class ShellConnection(
             ShellEnvelope.EVENT_LIST -> emit(ShellEvent.Events(m.since ?: 0.0, m.events.orEmpty(), m.battery.orEmpty()))
             ShellEnvelope.OPENED -> {
                 val id = m.session ?: return
-                synchronized(lock) {
-                    current = id
-                    finishOpening()
-                }
+                synchronized(lock) { current = id }
                 emit(ShellEvent.Opened(id))
             }
             ShellEnvelope.OUTPUT -> {
@@ -424,8 +407,6 @@ class ShellConnection(
                 if (reason == ShellError.NO_SUCH_SESSION && m.session != null) {
                     synchronized(lock) { if (current == m.session) current = null }
                 }
-                // The open failed: a size held for it goes to the session still attached.
-                if (m.session == null) synchronized(lock) { finishOpening() }
                 emit(ShellEvent.Failed(reason, m.session))
             }
             ShellEnvelope.PING -> enqueue(ShellEnvelope(ShellEnvelope.PONG))
@@ -462,21 +443,11 @@ class ShellConnection(
         job.cancel()
     }
 
-    /** Ends [opening], sending [current] the latest grid if it changed since `open`. Holds [lock]. */
-    private fun finishOpening() {
-        val o = opening ?: return
-        opening = null
-        val session = current ?: return
-        if (o.latest == o.sent) return
-        enqueue(ShellEnvelope(ShellEnvelope.RESIZE, session = session, cols = o.latest.first, rows = o.latest.second))
-    }
-
     private fun shutdown() {
         synchronized(lock) {
             active = false
             queued.clear()
             current = null
-            opening = null
         }
         outgoing.close()
         runCatching { closeable?.close() }
