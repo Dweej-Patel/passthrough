@@ -335,6 +335,38 @@ final class ShellListenerTests: XCTestCase {
         wait(for: [probe.expect(self, "ended") { $0.contains { if case .ended(id, _) = $0 { return true } else { return false } } }], timeout: 10)
     }
 
+    /// A new tab's keyboard comes up before the Mac answers `open`: the
+    /// smaller grid reaches the new session once it's opened.
+    func testAResizeWhileOpeningReachesTheNewSession() {
+        let listener = startListener()
+        let (c, probe) = readyClient(listener)
+        c.open(cols: 80, rows: 40)
+        c.resize(cols: 80, rows: 20)
+        wait(for: [probe.expect(self, "opened") { _ in probe.opened != nil }], timeout: 5)
+        let id = probe.opened!
+        c.input(Data("stty size\n".utf8))
+        wait(for: [probe.expect(self, "resized") { _ in probe.output(id).contains("20 80\r\n") }], timeout: 10)
+        XCTAssertEqual(probe.failures, [])
+    }
+
+    /// With a session already attached, a resize made while a new one opens
+    /// is for the new one: sent for the old one, the Mac would refuse it.
+    func testAResizeWhileOpeningIsNotSentToTheOldSession() {
+        let listener = startListener()
+        let (c, probe) = readyClient(listener)
+        let first = openSession(c, probe)
+        c.open(cols: 80, rows: 40)
+        c.resize(cols: 80, rows: 20)
+        func newID(_ events: [ShellClient.Event]) -> String? {
+            events.lazy.compactMap { if case .opened(let id) = $0, id != first { return id } else { return nil } }.first
+        }
+        wait(for: [probe.expect(self, "second opened") { newID($0) != nil }], timeout: 5)
+        let second = newID(probe.events.get())!
+        c.input(Data("stty size\n".utf8))
+        wait(for: [probe.expect(self, "resized") { _ in probe.output(second).contains("20 80\r\n") }], timeout: 10)
+        XCTAssertEqual(probe.failures, [])
+    }
+
     func testReattachReplaysOverTheWire() {
         let listener = startListener()
         let (first, firstProbe) = readyClient(listener)

@@ -123,8 +123,10 @@ class ShellTerminalController(context: Context, private val vm: ShellViewModel) 
             val active = vm.activeSession.value
             if (active != null && active == shown) vm.send(data)
         }
-        // A read-only log (ended session) has nothing on the Mac to resize.
-        view.onResize = { cols, rows -> if (vm.activeSession.value != null && !readOnly) vm.resize(cols, rows) }
+        // A read-only log (ended session) has nothing on the Mac to resize. With no session active
+        // yet it still goes: a new tab's keyboard resizes it before the Mac has opened it
+        // (ShellConnection holds that).
+        view.onResize = { cols, rows -> if (!readOnly) vm.resize(cols, rows) }
         view.onCtrlChanged = { ctrl = it }
         view.onLongPress = { menu = true }
         view.macName = { vm.macs.value.firstOrNull { it.macID == vm.selectedMacID.value }?.macName ?: "your Mac" }
