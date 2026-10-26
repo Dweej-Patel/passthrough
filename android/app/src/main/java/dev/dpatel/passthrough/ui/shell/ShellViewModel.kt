@@ -155,6 +155,8 @@ class ShellViewModel(app: Application) : AndroidViewModel(app) {
     private var redialsMade: Int? = null
     private var redialJob: Job? = null
     private var size = 80 to 24
+    /** A new session asked for while not connected: opened on Ready, instead of attaching the active one (which would overtake it). */
+    private var openWhenReady = false
     private var pendingTranscript: PendingTranscript? = null
     private val refreshes = Channel<Unit>(Channel.CONFLATED)
     /** Debug builds only: the [ShellDemo] state shown instead of a real Mac (null normally). */
@@ -423,11 +425,17 @@ class ShellViewModel(app: Application) : AndroidViewModel(app) {
             handle(ShellEvent.Output(id, ShellDemo.output(id)))
             return
         }
-        connection?.open(cols, rows)
+        val conn = connection
+        if (conn == null || _reach.value != ShellReach.READY) {
+            openWhenReady = true
+            return
+        }
+        conn.open(cols, rows)
     }
 
     fun attach(id: String, cols: Int, rows: Int) {
         size = cols to rows
+        openWhenReady = false
         if (id !in _openTabs.value) _openTabs.value = _openTabs.value + id
         _activeSession.value = id
         _detachedSession.value = null
@@ -547,9 +555,14 @@ class ShellViewModel(app: Application) : AndroidViewModel(app) {
                 publishControls()
                 // No list(): the Mac sends `sessions` right after `ready`.
                 // An ended session's log is already on screen; it has nothing more to send.
-                _activeSession.value?.takeUnless { _ended.value.isEnded(it) }?.let { active ->
-                    listeners.toList().forEach { it.streamStarting(active, true) }
-                    connection?.attach(active, size.first, size.second)
+                if (openWhenReady) {
+                    openWhenReady = false
+                    connection?.open(size.first, size.second)
+                } else {
+                    _activeSession.value?.takeUnless { _ended.value.isEnded(it) }?.let { active ->
+                        listeners.toList().forEach { it.streamStarting(active, true) }
+                        connection?.attach(active, size.first, size.second)
+                    }
                 }
             }
             is ShellEvent.MacInfo -> apply(event)

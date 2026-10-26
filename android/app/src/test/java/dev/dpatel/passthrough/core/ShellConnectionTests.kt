@@ -241,23 +241,25 @@ class ShellConnectionTests {
         assertEquals(30, received[1].rows)
     }
 
-    @Test fun resizeNamesNoSession() = runBlocking {
+    @Test fun resizeWaitsForReadyAndGoesOutWhileAnOpenIsUnanswered() = runBlocking {
         val (connection, mac) = piped()
         val received = mutableListOf<ShellEnvelope>()
         val t = macThread {
             mac.handshake()
             repeat(3) { received += mac.receive() }
         }
+        connection.resize(100, 30) // nothing attached before ready: not sent
         connection.attach("s1", 80, 24)
         connection.open(80, 40)
-        connection.resize(80, 20)
         withTimeout(5000) { connection.awaitReady() }
+        connection.resize(80, 20)
         t.join(5000)
         assertEquals(listOf(ShellEnvelope.ATTACH, ShellEnvelope.OPEN, ShellEnvelope.RESIZE), received.map { it.t })
-        // For whatever the Mac has attached when it reads it: here the session the open makes, not s1.
-        assertNull(received[2].session)
+        // The Mac sizes the session the open makes; s1 is named only for Macs that required a session.
+        assertEquals("s1", received[2].session)
         assertEquals(80, received[2].cols)
         assertEquals(20, received[2].rows)
+        assertEquals(1, received[1].ref)
     }
 
     @Test fun anAttachBeforeOpenedLeavesTheNewSessionDetached() = runBlocking {
@@ -267,7 +269,7 @@ class ShellConnectionTests {
         val t = macThread {
             mac.handshake()
             repeat(2) { received += mac.receive() } // open, attach
-            mac.send(ShellEnvelope(ShellEnvelope.OPENED, session = "s2"))
+            mac.send(ShellEnvelope(ShellEnvelope.OPENED, session = "s2", ref = received[0].ref))
             received += mac.receive() // input
         }
         connection.open(80, 24)
@@ -280,16 +282,16 @@ class ShellConnectionTests {
         assertEquals("s1", received[2].session)
     }
 
-    @Test fun aRefusedOpenIsCountedAsAnswered() = runBlocking {
+    @Test fun aRefusedOpenIsAnswered() = runBlocking {
         val (connection, mac) = piped()
         val events = events(connection)
         val t = macThread {
             mac.handshake()
-            mac.receive() // open
-            mac.send(ShellEnvelope(ShellEnvelope.ERROR, reason = "too_many_sessions", request = ShellEnvelope.OPEN))
+            val refused = mac.receive() // open
+            mac.send(ShellEnvelope(ShellEnvelope.ERROR, reason = "too_many_sessions", ref = refused.ref))
             mac.receive() // attach
-            mac.receive() // open
-            mac.send(ShellEnvelope(ShellEnvelope.OPENED, session = "s3"))
+            val second = mac.receive() // open
+            mac.send(ShellEnvelope(ShellEnvelope.OPENED, session = "s3", ref = second.ref))
         }
         connection.open(80, 24)
         assertEquals(ShellError.TOO_MANY_SESSIONS, events.next<ShellEvent.Failed>().error)

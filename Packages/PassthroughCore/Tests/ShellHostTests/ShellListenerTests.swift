@@ -421,7 +421,7 @@ final class ShellListenerTests: XCTestCase {
 
     /// A refused `open` is answered too: it doesn't leave the next one
     /// looking overtaken.
-    func testARefusedOpenIsCountedAsAnswered() {
+    func testARefusedOpenIsAnswered() {
         let listener = startListener()
         let (c, probe) = readyClient(listener)
         func opened(_ events: [ShellClient.Event]) -> [String] {

@@ -46,8 +46,8 @@ public struct ShellEnvelope: Codable, Equatable, Sendable {
     public var history: [ShellHistoryEntry]?
     public var exitStatus: Int32?
     public var reason: String?
-    /// error: the request it refuses when that names no session (`open`).
-    public var request: String?
+    /// open: the phone's number for it, echoed in the `opened` or `error` answering it.
+    public var ref: Int?
     public var done: Bool?
     /// macInfo: the Mac's iroh endpoint id, its home relay and the relay's
     /// token (if any), and the addresses a phone can dial it on.

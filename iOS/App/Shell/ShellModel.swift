@@ -131,6 +131,9 @@ final class ShellModel: ObservableObject {
     /// The addresses each Mac granted, so a manual address can be applied without re-reading keys.
     private var granted: [String: [String]] = [:]
     private var size = (cols: 80, rows: 24)
+    /// A new session asked for while not connected: opened on `.ready`,
+    /// instead of attaching `activeSession` (which would overtake it).
+    private var openWhenReady = false
     private var browser: NWBrowser?
     private var browseResults: [NWEndpoint] = []
     /// The transcript request in flight; `token` tells it from a later request for the same session.
@@ -338,11 +341,13 @@ final class ShellModel: ObservableObject {
         #endif
         size = (cols, rows)
         lastError = nil
-        client?.open(cols: cols, rows: rows)
+        guard reach == .ready, let client else { openWhenReady = true; return }
+        client.open(cols: cols, rows: rows)
     }
 
     func attach(_ id: String, cols: Int, rows: Int) {
         size = (cols, rows)
+        openWhenReady = false
         if !openTabs.contains(id) { openTabs.append(id) }
         activeSession = id
         detachedSession = nil
@@ -482,7 +487,10 @@ final class ShellModel: ObservableObject {
             self.path = path
             // No `list`: the Mac sends `sessions` right after `ready`.
             // An ended session's log is already on screen; it has nothing more to send.
-            if let active = activeSession, !ended.isEnded(active) {
+            if openWhenReady {
+                openWhenReady = false
+                client?.open(cols: size.cols, rows: size.rows)
+            } else if let active = activeSession, !ended.isEnded(active) {
                 streamStarting.send((active, true))
                 client?.attach(active, cols: size.cols, rows: size.rows)
             }

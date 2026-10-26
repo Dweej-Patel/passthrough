@@ -209,10 +209,12 @@ public final class ShellClient: @unchecked Sendable {
     private var queued: [ShellEnvelope] = []
     /// The session `input` goes to.
     private var current: String?
-    /// `open`s the Mac hasn't answered (it answers each, in order), and how
-    /// many of the oldest an `attach` sent since has overtaken.
-    private var unansweredOpens = 0
-    private var overtakenOpens = 0
+    /// Numbers the next `open`; the Mac echoes it in the answer.
+    private var lastOpenRef = 0
+    /// `open`s the Mac hasn't answered, and those an `attach` sent since has
+    /// overtaken: the Mac attaches that after the sessions they make.
+    private var unansweredOpens: Set<Int> = []
+    private var overtakenOpens: Set<Int> = []
     /// `requestScreen` was called: lines are read only up to `screenReady`.
     private var screenRequested = false
     /// When the winner last delivered anything.
@@ -286,20 +288,21 @@ public final class ShellClient: @unchecked Sendable {
         m.cols = cols; m.rows = rows
         work.async { [self] in
             guard active else { return }
-            unansweredOpens += 1
+            lastOpenRef += 1
+            m.ref = lastOpenRef
+            unansweredOpens.insert(lastOpenRef)
             enqueue(m)
         }
     }
 
     public func attach(_ session: String, cols: Int, rows: Int) {
-        work.async { [self] in
-            current = session
-            // The Mac attaches this after the sessions those opens make.
-            overtakenOpens = unansweredOpens
-        }
         var m = ShellEnvelope(t: ShellEnvelope.attach)
         m.session = session; m.cols = cols; m.rows = rows
-        command(m)
+        work.async { [self] in
+            current = session
+            overtakenOpens.formUnion(unansweredOpens)
+            enqueue(m)
+        }
     }
 
     /// Keystrokes for the attached session, split into protocol-sized pieces.
@@ -320,10 +323,15 @@ public final class ShellClient: @unchecked Sendable {
 
     /// The terminal's size, for whatever session the Mac has attached when
     /// it reads this, so also one an unanswered `open` is about to attach.
+    /// It names `current` only for Macs before that, which required it.
+    /// Not sent before `ready`: nothing is attached then, and `attach` carries the size.
     public func resize(cols: Int, rows: Int) {
-        var m = ShellEnvelope(t: ShellEnvelope.resize)
-        m.cols = cols; m.rows = rows
-        command(m)
+        work.async { [self] in
+            guard ready else { return }
+            var m = ShellEnvelope(t: ShellEnvelope.resize)
+            m.session = current; m.cols = cols; m.rows = rows
+            enqueue(m)
+        }
     }
 
     public func close(_ session: String) {
@@ -615,7 +623,7 @@ public final class ShellClient: @unchecked Sendable {
             emit(.sessions(message.sessions ?? []))
         case ShellEnvelope.opened:
             guard let id = message.session else { return }
-            if openAnswered() {
+            if let ref = message.ref, openAnswered(ref) {
                 emit(.openedDetached(id))
             } else {
                 current = id
@@ -647,7 +655,7 @@ public final class ShellClient: @unchecked Sendable {
             let reason = ShellError(rawValue: message.reason ?? "") ?? .badRequest
             // The Mac did not attach the session `attach` named: stop sending it input it would refuse.
             if reason == .noSuchSession, let id = message.session, current == id { current = nil }
-            if message.request == ShellEnvelope.open { _ = openAnswered() }
+            if let ref = message.ref { _ = openAnswered(ref) }
             emit(.failed(reason, session: message.session))
         case ShellEnvelope.ping:
             send(ShellEnvelope(t: ShellEnvelope.pong))
@@ -694,12 +702,10 @@ public final class ShellClient: @unchecked Sendable {
         emit(.disconnected(error))
     }
 
-    /// Counts off the oldest unanswered `open`; true if an `attach` overtook it.
-    private func openAnswered() -> Bool {
-        unansweredOpens = max(unansweredOpens - 1, 0)
-        guard overtakenOpens > 0 else { return false }
-        overtakenOpens -= 1
-        return true
+    /// The Mac answered `open` `ref`; true if an `attach` overtook it.
+    private func openAnswered(_ ref: Int) -> Bool {
+        unansweredOpens.remove(ref)
+        return overtakenOpens.remove(ref) != nil
     }
 
     private func teardown() {
@@ -712,8 +718,8 @@ public final class ShellClient: @unchecked Sendable {
         queued = []
         ready = false
         current = nil
-        unansweredOpens = 0
-        overtakenOpens = 0
+        unansweredOpens = []
+        overtakenOpens = []
         probing = false
     }
 

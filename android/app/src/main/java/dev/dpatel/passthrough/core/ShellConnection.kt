@@ -213,9 +213,11 @@ class ShellConnection(
     private val queued = ArrayList<ShellEnvelope>()
     /** The session `input` goes to. */
     private var current: String? = null
-    /** `open`s the Mac hasn't answered (it answers each, in order), and how many of the oldest an `attach` sent since has overtaken. */
-    private var unansweredOpens = 0
-    private var overtakenOpens = 0
+    /** Numbers the next `open`; the Mac echoes it in the answer. */
+    private var lastOpenRef = 0
+    /** `open`s the Mac hasn't answered, and those an `attach` sent since has overtaken: the Mac attaches that after the sessions they make. */
+    private val unansweredOpens = HashSet<Int>()
+    private val overtakenOpens = HashSet<Int>()
     /** When the last line from the Mac arrived ([System.nanoTime]). */
     @Volatile private var lastHeard = System.nanoTime()
 
@@ -250,14 +252,14 @@ class ShellConnection(
 
     fun open(cols: Int, rows: Int): Unit = synchronized(lock) {
         if (!active) return
-        unansweredOpens++
-        enqueue(ShellEnvelope(ShellEnvelope.OPEN, cols = cols, rows = rows))
+        val ref = ++lastOpenRef
+        unansweredOpens += ref
+        enqueue(ShellEnvelope(ShellEnvelope.OPEN, cols = cols, rows = rows, ref = ref))
     }
 
     fun attach(session: String, cols: Int, rows: Int): Unit = synchronized(lock) {
         current = session
-        // The Mac attaches this after the sessions those opens make.
-        overtakenOpens = unansweredOpens
+        overtakenOpens += unansweredOpens
         enqueue(ShellEnvelope(ShellEnvelope.ATTACH, session = session, cols = cols, rows = rows))
     }
 
@@ -274,9 +276,14 @@ class ShellConnection(
 
     /**
      * The terminal's size, for whatever session the Mac has attached when it
-     * reads this, so also one an unanswered `open` is about to attach.
+     * reads this, so also one an unanswered `open` is about to attach. It
+     * names [current] only for Macs before that, which required it. Not sent
+     * before `ready`: nothing is attached then, and `attach` carries the size.
      */
-    fun resize(cols: Int, rows: Int) = enqueue(ShellEnvelope(ShellEnvelope.RESIZE, cols = cols, rows = rows))
+    fun resize(cols: Int, rows: Int): Unit = synchronized(lock) {
+        if (!ready) return
+        enqueue(ShellEnvelope(ShellEnvelope.RESIZE, session = current, cols = cols, rows = rows))
+    }
 
     /** Ends a session on the Mac (its shell is hung up). */
     fun close(session: String) = enqueue(ShellEnvelope(ShellEnvelope.CLOSE, session = session))
@@ -386,7 +393,7 @@ class ShellConnection(
             ShellEnvelope.EVENT_LIST -> emit(ShellEvent.Events(m.since ?: 0.0, m.events.orEmpty(), m.battery.orEmpty()))
             ShellEnvelope.OPENED -> {
                 val id = m.session ?: return
-                val overtaken = synchronized(lock) { openAnswered().also { if (!it) current = id } }
+                val overtaken = synchronized(lock) { (m.ref?.let(::openAnswered) ?: false).also { if (!it) current = id } }
                 emit(if (overtaken) ShellEvent.OpenedDetached(id) else ShellEvent.Opened(id))
             }
             ShellEnvelope.OUTPUT -> {
@@ -418,7 +425,7 @@ class ShellConnection(
                 if (reason == ShellError.NO_SUCH_SESSION && m.session != null) {
                     synchronized(lock) { if (current == m.session) current = null }
                 }
-                if (m.request == ShellEnvelope.OPEN) synchronized(lock) { openAnswered() }
+                m.ref?.let { synchronized(lock) { openAnswered(it) } }
                 emit(ShellEvent.Failed(reason, m.session))
             }
             ShellEnvelope.PING -> enqueue(ShellEnvelope(ShellEnvelope.PONG))
@@ -455,12 +462,10 @@ class ShellConnection(
         job.cancel()
     }
 
-    /** Counts off the oldest unanswered `open`; true if an `attach` overtook it. Holds [lock]. */
-    private fun openAnswered(): Boolean {
-        unansweredOpens = maxOf(unansweredOpens - 1, 0)
-        if (overtakenOpens == 0) return false
-        overtakenOpens--
-        return true
+    /** The Mac answered `open` [ref]; true if an `attach` overtook it. Holds [lock]. */
+    private fun openAnswered(ref: Int): Boolean {
+        unansweredOpens -= ref
+        return overtakenOpens.remove(ref)
     }
 
     private fun shutdown() {
@@ -468,8 +473,8 @@ class ShellConnection(
             active = false
             queued.clear()
             current = null
-            unansweredOpens = 0
-            overtakenOpens = 0
+            unansweredOpens.clear()
+            overtakenOpens.clear()
         }
         outgoing.close()
         runCatching { closeable?.close() }
