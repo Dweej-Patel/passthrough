@@ -400,6 +400,48 @@ final class ShellListenerTests: XCTestCase {
         XCTAssertEqual(probe.failures, [.badRequest])
     }
 
+    /// The user goes back to a tab before the Mac answers a new one's `open`:
+    /// the Mac ends up attached to that tab, and so does the client.
+    func testAnAttachBeforeOpenedKeepsTheTabItNames() {
+        let listener = startListener()
+        let (c, probe) = readyClient(listener)
+        let first = openSession(c, probe)
+        c.open(cols: 80, rows: 24)
+        c.attach(first, cols: 80, rows: 24)
+        func detachedID(_ events: [ShellClient.Event]) -> String? {
+            events.lazy.compactMap { if case .openedDetached(let id) = $0 { return id } else { return nil } }.first
+        }
+        wait(for: [probe.expect(self, "opened detached") { detachedID($0) != nil }], timeout: 5)
+        XCTAssertNotEqual(detachedID(probe.events.get()), first)
+        XCTAssertEqual(probe.events.get().filter { if case .opened = $0 { return true } else { return false } }.count, 1)
+        c.input(Data("echo still-$((6*7))\n".utf8))
+        wait(for: [probe.expect(self, "typed into the tab it named") { _ in probe.output(first).contains("still-42\r\n") }], timeout: 10)
+        XCTAssertEqual(probe.failures, [])
+    }
+
+    /// A refused `open` is answered too: it doesn't leave the next one
+    /// looking overtaken.
+    func testARefusedOpenIsCountedAsAnswered() {
+        let listener = startListener()
+        let (c, probe) = readyClient(listener)
+        func opened(_ events: [ShellClient.Event]) -> [String] {
+            events.compactMap { if case .opened(let id) = $0 { return id } else { return nil } }
+        }
+        for n in 1...RemoteShell.maxSessions {
+            c.open(cols: 80, rows: 24)
+            wait(for: [probe.expect(self, "opened \(n)") { opened($0).count == n }], timeout: 5)
+        }
+        c.open(cols: 80, rows: 24)
+        wait(for: [probe.expect(self, "refused") { _ in probe.failures == [.tooManySessions] }], timeout: 5)
+        let ids = opened(probe.events.get())
+        c.close(ids.last!)
+        wait(for: [probe.expect(self, "ended") { $0.contains { if case .ended(ids.last!, _) = $0 { return true } else { return false } } }], timeout: 10)
+        c.attach(ids[0], cols: 80, rows: 24)
+        c.open(cols: 80, rows: 24)
+        wait(for: [probe.expect(self, "opened again") { opened($0).count == ids.count + 1 }], timeout: 5)
+        XCTAssertFalse(probe.events.get().contains { if case .openedDetached = $0 { return true } else { return false } })
+    }
+
     /// With nothing attached, a resize has nowhere to go and isn't refused.
     func testAResizeWithNothingAttachedIsIgnored() {
         let listener = startListener()

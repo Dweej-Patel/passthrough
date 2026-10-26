@@ -260,6 +260,51 @@ class ShellConnectionTests {
         assertEquals(20, received[2].rows)
     }
 
+    @Test fun anAttachBeforeOpenedLeavesTheNewSessionDetached() = runBlocking {
+        val (connection, mac) = piped()
+        val events = events(connection)
+        val received = mutableListOf<ShellEnvelope>()
+        val t = macThread {
+            mac.handshake()
+            repeat(2) { received += mac.receive() } // open, attach
+            mac.send(ShellEnvelope(ShellEnvelope.OPENED, session = "s2"))
+            received += mac.receive() // input
+        }
+        connection.open(80, 24)
+        connection.attach("s1", 80, 24)
+        assertEquals("s2", events.next<ShellEvent.OpenedDetached>().session)
+        // The Mac attached s1 after making s2: keystrokes still go to s1.
+        connection.input("ls\n".toByteArray())
+        t.join(5000)
+        assertEquals(listOf(ShellEnvelope.OPEN, ShellEnvelope.ATTACH, ShellEnvelope.INPUT), received.map { it.t })
+        assertEquals("s1", received[2].session)
+    }
+
+    @Test fun aRefusedOpenIsCountedAsAnswered() = runBlocking {
+        val (connection, mac) = piped()
+        val events = events(connection)
+        val t = macThread {
+            mac.handshake()
+            mac.receive() // open
+            mac.send(ShellEnvelope(ShellEnvelope.ERROR, reason = "too_many_sessions", request = ShellEnvelope.OPEN))
+            mac.receive() // attach
+            mac.receive() // open
+            mac.send(ShellEnvelope(ShellEnvelope.OPENED, session = "s3"))
+        }
+        connection.open(80, 24)
+        assertEquals(ShellError.TOO_MANY_SESSIONS, events.next<ShellEvent.Failed>().error)
+        connection.attach("s1", 80, 24)
+        connection.open(80, 24)
+        // Nothing was left unanswered for the attach to overtake: s3 is attached.
+        val opened = withTimeout(5000) {
+            var e: ShellEvent
+            do { e = events.receive() } while (e !is ShellEvent.Opened && e !is ShellEvent.OpenedDetached)
+            e
+        }
+        assertEquals(ShellEvent.Opened("s3"), opened)
+        t.join(5000)
+    }
+
     @Test fun refusalFailsAndDisconnects() = runBlocking {
         val (connection, mac) = piped()
         val events = events(connection)

@@ -581,6 +581,12 @@ class ShellViewModel(app: Application) : AndroidViewModel(app) {
                 _lastError.value = null
                 connection?.list()
             }
+            is ShellEvent.OpenedDetached -> {
+                // The user went to another tab before the Mac answered: the new one waits beside it,
+                // and the tab on screen stays.
+                if (event.session !in _openTabs.value) _openTabs.value = _openTabs.value + event.session
+                connection?.list()
+            }
             is ShellEvent.Output -> listeners.toList().forEach { it.output(event.session, event.data) }
             is ShellEvent.Attached -> listeners.toList().forEach { it.replayFinished(event.session) }
             is ShellEvent.Ended -> {

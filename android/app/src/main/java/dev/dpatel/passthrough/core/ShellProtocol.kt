@@ -49,6 +49,8 @@ data class ShellEnvelope(
     var history: List<ShellHistoryEntry>? = null,
     var exitStatus: Int? = null,
     var reason: String? = null,
+    /** error: the request it refuses when that names no session (`open`). */
+    var request: String? = null,
     var done: Boolean? = null,
     /** macInfo: the Mac's iroh endpoint id, home relay, the relay's token and the addresses a phone can dial. */
     var irohID: String? = null,

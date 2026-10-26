@@ -108,6 +108,9 @@ public final class ShellClient: @unchecked Sendable {
         case sessions([ShellSessionInfo])
         /// A session this client opened; it is attached to it.
         case opened(String)
+        /// A session this client opened after all, though an `attach` made
+        /// before the Mac answered took its place: it runs detached.
+        case openedDetached(String)
         case output(session: String, Data)
         /// The replay after an `attach` is complete; later output is live.
         case attached(session: String)
@@ -206,6 +209,10 @@ public final class ShellClient: @unchecked Sendable {
     private var queued: [ShellEnvelope] = []
     /// The session `input` goes to.
     private var current: String?
+    /// `open`s the Mac hasn't answered (it answers each, in order), and how
+    /// many of the oldest an `attach` sent since has overtaken.
+    private var unansweredOpens = 0
+    private var overtakenOpens = 0
     /// `requestScreen` was called: lines are read only up to `screenReady`.
     private var screenRequested = false
     /// When the winner last delivered anything.
@@ -277,11 +284,19 @@ public final class ShellClient: @unchecked Sendable {
     public func open(cols: Int, rows: Int) {
         var m = ShellEnvelope(t: ShellEnvelope.open)
         m.cols = cols; m.rows = rows
-        command(m)
+        work.async { [self] in
+            guard active else { return }
+            unansweredOpens += 1
+            enqueue(m)
+        }
     }
 
     public func attach(_ session: String, cols: Int, rows: Int) {
-        work.async { [self] in current = session }
+        work.async { [self] in
+            current = session
+            // The Mac attaches this after the sessions those opens make.
+            overtakenOpens = unansweredOpens
+        }
         var m = ShellEnvelope(t: ShellEnvelope.attach)
         m.session = session; m.cols = cols; m.rows = rows
         command(m)
@@ -600,8 +615,12 @@ public final class ShellClient: @unchecked Sendable {
             emit(.sessions(message.sessions ?? []))
         case ShellEnvelope.opened:
             guard let id = message.session else { return }
-            current = id
-            emit(.opened(id))
+            if openAnswered() {
+                emit(.openedDetached(id))
+            } else {
+                current = id
+                emit(.opened(id))
+            }
         case ShellEnvelope.output:
             guard let id = message.session, let data = message.data.flatMap({ Data(base64Encoded: $0) }) else { return }
             emit(.output(session: id, data))
@@ -628,6 +647,7 @@ public final class ShellClient: @unchecked Sendable {
             let reason = ShellError(rawValue: message.reason ?? "") ?? .badRequest
             // The Mac did not attach the session `attach` named: stop sending it input it would refuse.
             if reason == .noSuchSession, let id = message.session, current == id { current = nil }
+            if message.request == ShellEnvelope.open { _ = openAnswered() }
             emit(.failed(reason, session: message.session))
         case ShellEnvelope.ping:
             send(ShellEnvelope(t: ShellEnvelope.pong))
@@ -674,6 +694,14 @@ public final class ShellClient: @unchecked Sendable {
         emit(.disconnected(error))
     }
 
+    /// Counts off the oldest unanswered `open`; true if an `attach` overtook it.
+    private func openAnswered() -> Bool {
+        unansweredOpens = max(unansweredOpens - 1, 0)
+        guard overtakenOpens > 0 else { return false }
+        overtakenOpens -= 1
+        return true
+    }
+
     private func teardown() {
         active = false
         generation += 1
@@ -684,6 +712,8 @@ public final class ShellClient: @unchecked Sendable {
         queued = []
         ready = false
         current = nil
+        unansweredOpens = 0
+        overtakenOpens = 0
         probing = false
     }
 

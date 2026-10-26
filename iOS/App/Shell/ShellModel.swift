@@ -511,6 +511,11 @@ final class ShellModel: ObservableObject {
             detachedSession = nil
             lastError = nil
             client?.list()
+        case let .openedDetached(id):
+            // The user went to another tab before the Mac answered: the new
+            // one waits beside it, and the tab on screen stays.
+            if !openTabs.contains(id) { openTabs.append(id) }
+            client?.list()
         case let .output(session, data):
             output.send((session, data))
         case let .attached(session):

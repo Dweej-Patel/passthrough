@@ -131,6 +131,8 @@ sealed interface ShellEvent {
     data class Events(val since: Double, val events: List<MacEvent>, val battery: List<BatterySample>) : ShellEvent
     /** A session this connection opened; it is attached to it. */
     data class Opened(val session: String) : ShellEvent
+    /** A session this connection opened after all, though an `attach` made before the Mac answered took its place: it runs detached. */
+    data class OpenedDetached(val session: String) : ShellEvent
     class Output(val session: String, val data: ByteArray) : ShellEvent {
         override fun toString() = "Output(session=$session, ${data.size} bytes)"
     }
@@ -211,6 +213,9 @@ class ShellConnection(
     private val queued = ArrayList<ShellEnvelope>()
     /** The session `input` goes to. */
     private var current: String? = null
+    /** `open`s the Mac hasn't answered (it answers each, in order), and how many of the oldest an `attach` sent since has overtaken. */
+    private var unansweredOpens = 0
+    private var overtakenOpens = 0
     /** When the last line from the Mac arrived ([System.nanoTime]). */
     @Volatile private var lastHeard = System.nanoTime()
 
@@ -243,10 +248,16 @@ class ShellConnection(
 
     fun list() = enqueue(ShellEnvelope(ShellEnvelope.LIST))
 
-    fun open(cols: Int, rows: Int) = enqueue(ShellEnvelope(ShellEnvelope.OPEN, cols = cols, rows = rows))
+    fun open(cols: Int, rows: Int): Unit = synchronized(lock) {
+        if (!active) return
+        unansweredOpens++
+        enqueue(ShellEnvelope(ShellEnvelope.OPEN, cols = cols, rows = rows))
+    }
 
     fun attach(session: String, cols: Int, rows: Int): Unit = synchronized(lock) {
         current = session
+        // The Mac attaches this after the sessions those opens make.
+        overtakenOpens = unansweredOpens
         enqueue(ShellEnvelope(ShellEnvelope.ATTACH, session = session, cols = cols, rows = rows))
     }
 
@@ -375,8 +386,8 @@ class ShellConnection(
             ShellEnvelope.EVENT_LIST -> emit(ShellEvent.Events(m.since ?: 0.0, m.events.orEmpty(), m.battery.orEmpty()))
             ShellEnvelope.OPENED -> {
                 val id = m.session ?: return
-                synchronized(lock) { current = id }
-                emit(ShellEvent.Opened(id))
+                val overtaken = synchronized(lock) { openAnswered().also { if (!it) current = id } }
+                emit(if (overtaken) ShellEvent.OpenedDetached(id) else ShellEvent.Opened(id))
             }
             ShellEnvelope.OUTPUT -> {
                 val id = m.session ?: return
@@ -407,6 +418,7 @@ class ShellConnection(
                 if (reason == ShellError.NO_SUCH_SESSION && m.session != null) {
                     synchronized(lock) { if (current == m.session) current = null }
                 }
+                if (m.request == ShellEnvelope.OPEN) synchronized(lock) { openAnswered() }
                 emit(ShellEvent.Failed(reason, m.session))
             }
             ShellEnvelope.PING -> enqueue(ShellEnvelope(ShellEnvelope.PONG))
@@ -443,11 +455,21 @@ class ShellConnection(
         job.cancel()
     }
 
+    /** Counts off the oldest unanswered `open`; true if an `attach` overtook it. Holds [lock]. */
+    private fun openAnswered(): Boolean {
+        unansweredOpens = maxOf(unansweredOpens - 1, 0)
+        if (overtakenOpens == 0) return false
+        overtakenOpens--
+        return true
+    }
+
     private fun shutdown() {
         synchronized(lock) {
             active = false
             queued.clear()
             current = null
+            unansweredOpens = 0
+            overtakenOpens = 0
         }
         outgoing.close()
         runCatching { closeable?.close() }

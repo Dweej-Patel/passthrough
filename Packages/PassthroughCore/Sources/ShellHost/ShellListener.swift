@@ -810,7 +810,7 @@ final class ShellConnection: ShellAttachment, @unchecked Sendable {
             reply.sessions = manager.sessions
             send(reply)
         case ShellEnvelope.open:
-            guard let cols = message.cols, let rows = message.rows else { return fail(.badRequest) }
+            guard let cols = message.cols, let rows = message.rows else { return fail(.badRequest, request: ShellEnvelope.open) }
             open(cols: cols, rows: rows)
         case ShellEnvelope.attach:
             guard let id = message.session, let cols = message.cols, let rows = message.rows else { return fail(.badRequest) }
@@ -862,8 +862,10 @@ final class ShellConnection: ShellAttachment, @unchecked Sendable {
     /// Starts a shell on the listener's work queue (spawning one must not hold
     /// up every other phone), then replies and attaches. This connection's
     /// later requests wait until then.
+    /// Every `open` is answered, `opened` or an error naming it: the phone
+    /// counts them to know which session ends up attached.
     private func open(cols: Int, rows: Int) {
-        guard let gate else { return }
+        guard let gate else { return fail(.badRequest, request: ShellEnvelope.open) }
         busy = true
         let manager = self.manager, label = self.label, phoneID = self.phoneID, isOpen = self.isOpen, accepting = gate.accepting
         let queue = self.queue
@@ -886,7 +888,7 @@ final class ShellConnection: ShellAttachment, @unchecked Sendable {
             send(reply)
             attach(id, cols: cols, rows: rows)
         case .failure(let error):
-            fail(error)
+            fail(error, request: ShellEnvelope.open)
         }
         resume()
     }
@@ -1098,14 +1100,15 @@ final class ShellConnection: ShellAttachment, @unchecked Sendable {
 
     /// Manager errors keep their reason; anything else (a shell that could not
     /// start) is reported as a bad request.
-    private func fail(_ error: Error, session: String? = nil) {
-        fail(error as? ShellError ?? .badRequest, session: session)
+    private func fail(_ error: Error, session: String? = nil, request: String? = nil) {
+        fail(error as? ShellError ?? .badRequest, session: session, request: request)
     }
 
-    private func fail(_ reason: ShellError, session: String? = nil) {
+    private func fail(_ reason: ShellError, session: String? = nil, request: String? = nil) {
         var reply = ShellEnvelope(t: ShellEnvelope.error)
         reply.reason = reason.rawValue
         reply.session = session
+        reply.request = request
         send(reply)
     }
 
