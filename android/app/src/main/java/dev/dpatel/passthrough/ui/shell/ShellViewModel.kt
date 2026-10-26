@@ -579,6 +579,9 @@ class ShellViewModel(app: Application) : AndroidViewModel(app) {
                 _activeSession.value = event.session
                 _detachedSession.value = null
                 _lastError.value = null
+                // A resize before Opened had no session to go to (the keyboard
+                // coming up, say): the Mac's grid is still the one open sent.
+                connection?.resize(size.first, size.second)
                 connection?.list()
             }
             is ShellEvent.Output -> listeners.toList().forEach { it.output(event.session, event.data) }

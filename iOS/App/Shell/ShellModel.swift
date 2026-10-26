@@ -510,6 +510,9 @@ final class ShellModel: ObservableObject {
             activeSession = id
             detachedSession = nil
             lastError = nil
+            // A resize before `opened` had no session to go to (the keyboard
+            // coming up, say): the Mac's grid is still the one `open` sent.
+            client?.resize(cols: size.cols, rows: size.rows)
             client?.list()
         case let .output(session, data):
             output.send((session, data))
