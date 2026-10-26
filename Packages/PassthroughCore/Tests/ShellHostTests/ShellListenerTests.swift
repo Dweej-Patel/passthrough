@@ -2,10 +2,10 @@
 import Foundation
 import Network
 import XCTest
-import PassthroughCore
 import PhoneTransport
 import ScreenClient
 import TestSupport
+@testable import PassthroughCore
 @testable import ShellHost
 
 /// The remote shell end to end over loopback: TLS 1.3 pinned to a test
@@ -103,18 +103,19 @@ final class ShellListenerTests: XCTestCase {
     }
 
     private func client(_ listener: ShellListener, phoneID: String = "phone-1", key: Data? = nil,
-                        pin: String? = nil) -> (ShellClient, Probe) {
+                        pin: String? = nil, queue: DispatchQueue = DispatchQueue(label: "probe")) -> (ShellClient, Probe) {
         let credential = ShellCredential(macID: "mac", macName: "Test Mac", certSHA256: pin ?? identity.fingerprint,
                                          shellKey: key ?? self.key, phoneID: phoneID, port: listener.port!, addresses: [])
         let probe = Probe()
-        let client = ShellClient(credential: credential, queue: DispatchQueue(label: "probe")) { probe.record($0) }
+        let client = ShellClient(credential: credential, queue: queue) { probe.record($0) }
         client.connect(discovered: .hostPort(host: "127.0.0.1", port: NWEndpoint.Port(rawValue: listener.port!)!))
         addTeardownBlock { client.disconnect() }
         return (client, probe)
     }
 
-    private func readyClient(_ listener: ShellListener, phoneID: String = "phone-1", key: Data? = nil) -> (ShellClient, Probe) {
-        let (c, probe) = client(listener, phoneID: phoneID, key: key)
+    private func readyClient(_ listener: ShellListener, phoneID: String = "phone-1", key: Data? = nil,
+                             queue: DispatchQueue = DispatchQueue(label: "probe")) -> (ShellClient, Probe) {
+        let (c, probe) = client(listener, phoneID: phoneID, key: key, queue: queue)
         wait(for: [probe.expect(self, "ready") { $0.contains { if case .ready = $0 { return true } else { return false } } }], timeout: 5)
         return (c, probe)
     }
@@ -333,6 +334,212 @@ final class ShellListenerTests: XCTestCase {
         XCTAssertFalse(events.get().joined().contains("over-tls"), "events never carry terminal bytes")
         c.close(id)
         wait(for: [probe.expect(self, "ended") { $0.contains { if case .ended(id, _) = $0 { return true } else { return false } } }], timeout: 10)
+    }
+
+    /// A new tab's keyboard comes up before the Mac answers `open`: the
+    /// smaller grid reaches the new session once it's opened.
+    func testAResizeWhileOpeningReachesTheNewSession() {
+        let listener = startListener()
+        let (c, probe) = readyClient(listener)
+        c.open(cols: 80, rows: 40)
+        c.resize(cols: 80, rows: 20)
+        wait(for: [probe.expect(self, "opened") { _ in probe.opened != nil }], timeout: 5)
+        let id = probe.opened!
+        c.input(Data("stty size\n".utf8))
+        wait(for: [probe.expect(self, "resized") { _ in probe.output(id).contains("20 80\r\n") }], timeout: 10)
+        XCTAssertEqual(probe.failures, [])
+    }
+
+    /// With a session already attached, a resize made while a new one opens
+    /// is for the new one: sent for the old one, the Mac would refuse it.
+    func testAResizeWhileOpeningIsNotSentToTheOldSession() {
+        let listener = startListener()
+        let (c, probe) = readyClient(listener)
+        let first = openSession(c, probe)
+        c.open(cols: 80, rows: 40)
+        c.resize(cols: 80, rows: 20)
+        func newID(_ events: [ShellClient.Event]) -> String? {
+            events.lazy.compactMap { if case .opened(let id) = $0, id != first { return id } else { return nil } }.first
+        }
+        wait(for: [probe.expect(self, "second opened") { newID($0) != nil }], timeout: 5)
+        let second = newID(probe.events.get())!
+        c.input(Data("stty size\n".utf8))
+        wait(for: [probe.expect(self, "resized") { _ in probe.output(second).contains("20 80\r\n") }], timeout: 10)
+        XCTAssertEqual(probe.failures, [])
+    }
+
+    /// Two opens before the first is answered: the resize is for the last,
+    /// the one the Mac leaves attached.
+    func testAResizeAfterTwoQuickOpensReachesTheLast() {
+        let listener = startListener()
+        let (c, probe) = readyClient(listener)
+        c.open(cols: 80, rows: 40)
+        c.open(cols: 80, rows: 40)
+        c.resize(cols: 80, rows: 20)
+        func opened(_ events: [ShellClient.Event]) -> [String] {
+            events.compactMap { if case .opened(let id) = $0 { return id } else { return nil } }
+        }
+        wait(for: [probe.expect(self, "both opened") { opened($0).count == 2 }], timeout: 5)
+        let last = opened(probe.events.get())[1]
+        c.input(Data("stty size\n".utf8))
+        wait(for: [probe.expect(self, "resized") { _ in probe.output(last).contains("20 80\r\n") }], timeout: 10)
+        XCTAssertEqual(probe.failures, [])
+    }
+
+    /// A refusal of something else, answered before `opened`, doesn't
+    /// change where the resize goes.
+    func testAResizeWhileOpeningSurvivesAnUnrelatedRefusal() {
+        let listener = startListener()
+        let (c, probe) = readyClient(listener)
+        c.requestEvents(since: Date())   // no timeline here: refused, with no session
+        c.open(cols: 80, rows: 40)
+        c.resize(cols: 80, rows: 20)
+        wait(for: [probe.expect(self, "opened") { _ in probe.opened != nil }], timeout: 5)
+        let id = probe.opened!
+        c.input(Data("stty size\n".utf8))
+        wait(for: [probe.expect(self, "resized") { _ in probe.output(id).contains("20 80\r\n") }], timeout: 10)
+        XCTAssertEqual(probe.failures, [.badRequest])
+    }
+
+    /// The user goes back to a tab before the Mac answers a new one's `open`:
+    /// the Mac ends up attached to that tab, and so does the client.
+    func testAnAttachBeforeOpenedKeepsTheTabItNames() {
+        let listener = startListener()
+        let (c, probe) = readyClient(listener)
+        let first = openSession(c, probe)
+        c.open(cols: 80, rows: 24)
+        c.attach(first, cols: 80, rows: 24)
+        func detachedID(_ events: [ShellClient.Event]) -> String? {
+            events.lazy.compactMap { if case .openedDetached(let id) = $0 { return id } else { return nil } }.first
+        }
+        wait(for: [probe.expect(self, "opened detached") { detachedID($0) != nil }], timeout: 5)
+        XCTAssertNotEqual(detachedID(probe.events.get()), first)
+        XCTAssertEqual(probe.events.get().filter { if case .opened = $0 { return true } else { return false } }.count, 1)
+        c.input(Data("echo still-$((6*7))\n".utf8))
+        wait(for: [probe.expect(self, "typed into the tab it named") { _ in probe.output(first).contains("still-42\r\n") }], timeout: 10)
+        XCTAssertEqual(probe.failures, [])
+    }
+
+    /// `opened` reaches the client before an `attach` the app made first
+    /// does: the attach still overtakes the open, since that's judged as
+    /// `opened` is delivered to the app, in order with its own calls.
+    func testAnAttachMadeBeforeOpenedIsDeliveredOvertakesIt() {
+        let listener = startListener()
+        let delivery = DispatchQueue(label: "delivery")
+        let (c, probe) = readyClient(listener, queue: delivery)
+        let first = openSession(c, probe)
+        let readOpened = expectation(description: "the client read opened")
+        c.lineHandled.set { if $0 == ShellEnvelope.opened { readOpened.fulfill() } }
+        delivery.suspend()
+        c.open(cols: 80, rows: 24)
+        wait(for: [readOpened], timeout: 5)
+        // The client has read `opened`, but the app hasn't been given it, and attaches first.
+        c.attach(first, cols: 80, rows: 24)
+        delivery.resume()
+        wait(for: [probe.expect(self, "opened detached") {
+            $0.contains { if case .openedDetached = $0 { return true } else { return false } }
+        }], timeout: 5)
+        c.input(Data("echo still-$((6*7))\n".utf8))
+        wait(for: [probe.expect(self, "typed into the tab attached") { _ in probe.output(first).contains("still-42\r\n") }], timeout: 10)
+        XCTAssertEqual(probe.failures, [])
+    }
+
+    /// The new session ends before the app is given its `opened`: the Mac
+    /// has nothing attached, so typing goes nowhere (not to it, nor to the
+    /// tab before).
+    func testANewSessionEndedBeforeItsOpenedIsDeliveredTakesNoInput() {
+        let listener = startListener()
+        let delivery = DispatchQueue(label: "delivery")
+        let (c, probe) = readyClient(listener, queue: delivery)
+        let first = openSession(c, probe)
+        let readOpened = expectation(description: "the client read opened")
+        let readEnded = expectation(description: "the client read ended")
+        c.lineHandled.set {
+            if $0 == ShellEnvelope.opened { readOpened.fulfill() }
+            if $0 == ShellEnvelope.ended { readEnded.fulfill() }
+        }
+        delivery.suspend()
+        c.open(cols: 80, rows: 24)
+        wait(for: [readOpened], timeout: 5)
+        let second = manager.sessions.first { $0.id != first && $0.running }!.id
+        manager.close(second)
+        wait(for: [readEnded], timeout: 10)
+        delivery.resume()
+        wait(for: [probe.expect(self, "opened, then ended") {
+            $0.contains { if case .ended(second, _) = $0 { return true } else { return false } }
+        }], timeout: 5)
+        XCTAssertTrue(probe.events.get().contains { if case .opened(second) = $0 { return true } else { return false } },
+                      "the new session is still the tab opened, not one left detached")
+        c.lineHandled.set(nil)
+        let listed = probe.events.get().filter { if case .sessions = $0 { return true } else { return false } }.count
+        c.input(Data("echo nowhere-$((6*7))\n".utf8))
+        c.list()   // answered after any refusal of that input
+        wait(for: [probe.expect(self, "listed") {
+            $0.filter { if case .sessions = $0 { return true } else { return false } }.count > listed
+        }], timeout: 5)
+        XCTAssertEqual(probe.failures, [], "the input wasn't sent, for the dead session or the tab before")
+    }
+
+    /// Keys typed after + but before the app is given `opened` go nowhere:
+    /// the Mac reads them after attaching the new session, and would refuse
+    /// them for the old one.
+    func testInputWhileAnOpenIsPendingIsDropped() {
+        let listener = startListener()
+        let delivery = DispatchQueue(label: "delivery")
+        let (c, probe) = readyClient(listener, queue: delivery)
+        let first = openSession(c, probe)
+        delivery.suspend()
+        c.open(cols: 80, rows: 24)
+        XCTAssertTrue(c.openPending)
+        c.input(Data("echo early-$((6*7))\n".utf8))
+        delivery.resume()
+        func opened(_ events: [ShellClient.Event]) -> [String] {
+            events.compactMap { if case .opened(let id) = $0 { return id } else { return nil } }
+        }
+        wait(for: [probe.expect(self, "opened") { opened($0).count == 2 }], timeout: 5)
+        let second = opened(probe.events.get())[1]
+        XCTAssertFalse(c.openPending)
+        c.input(Data("echo late-$((6*7))\n".utf8))
+        wait(for: [probe.expect(self, "typed into the new tab") { _ in probe.output(second).contains("late-42\r\n") }], timeout: 10)
+        XCTAssertEqual(probe.failures, [], "the early keys weren't sent for the old tab")
+        XCTAssertFalse(probe.output(first).contains("early-42"))
+        XCTAssertFalse(probe.output(second).contains("early-42"))
+    }
+
+    /// A refused `open` is answered too: it doesn't leave the next one
+    /// looking overtaken.
+    func testARefusedOpenIsAnswered() {
+        let listener = startListener()
+        let (c, probe) = readyClient(listener)
+        func opened(_ events: [ShellClient.Event]) -> [String] {
+            events.compactMap { if case .opened(let id) = $0 { return id } else { return nil } }
+        }
+        for n in 1...RemoteShell.maxSessions {
+            c.open(cols: 80, rows: 24)
+            wait(for: [probe.expect(self, "opened \(n)") { opened($0).count == n }], timeout: 5)
+        }
+        c.open(cols: 80, rows: 24)
+        wait(for: [probe.expect(self, "refused") { $0.contains { if case .openFailed(.tooManySessions) = $0 { return true } else { return false } } }], timeout: 5)
+        XCTAssertEqual(probe.failures, [], "a refused open isn't reported as any other failure")
+        XCTAssertFalse(c.openPending)
+        let ids = opened(probe.events.get())
+        c.close(ids.last!)
+        wait(for: [probe.expect(self, "ended") { $0.contains { if case .ended(ids.last!, _) = $0 { return true } else { return false } } }], timeout: 10)
+        c.attach(ids[0], cols: 80, rows: 24)
+        c.open(cols: 80, rows: 24)
+        wait(for: [probe.expect(self, "opened again") { opened($0).count == ids.count + 1 }], timeout: 5)
+        XCTAssertFalse(probe.events.get().contains { if case .openedDetached = $0 { return true } else { return false } })
+    }
+
+    /// With nothing attached, a resize has nowhere to go and isn't refused.
+    func testAResizeWithNothingAttachedIsIgnored() {
+        let listener = startListener()
+        let (c, probe) = readyClient(listener)
+        c.resize(cols: 80, rows: 20)
+        let id = openSession(c, probe)
+        c.input(Data("stty size\n".utf8))
+        wait(for: [probe.expect(self, "sized by open") { _ in probe.output(id).contains("24 80\r\n") }], timeout: 10)
+        XCTAssertEqual(probe.failures, [])
     }
 
     func testReattachReplaysOverTheWire() {

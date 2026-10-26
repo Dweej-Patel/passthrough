@@ -123,8 +123,10 @@ class ShellTerminalController(context: Context, private val vm: ShellViewModel) 
             val active = vm.activeSession.value
             if (active != null && active == shown) vm.send(data)
         }
-        // A read-only log (ended session) has nothing on the Mac to resize.
-        view.onResize = { cols, rows -> if (vm.activeSession.value != null && !readOnly) vm.resize(cols, rows) }
+        // Also with no session active yet, or an ended one shown: a new tab's keyboard comes up
+        // before the Mac has opened it, and the Mac sizes whatever this phone has attached
+        // (every tab shows in this one view, at its size).
+        view.onResize = { cols, rows -> vm.resize(cols, rows) }
         view.onCtrlChanged = { ctrl = it }
         view.onLongPress = { menu = true }
         view.macName = { vm.macs.value.firstOrNull { it.macID == vm.selectedMacID.value }?.macName ?: "your Mac" }
@@ -136,7 +138,7 @@ class ShellTerminalController(context: Context, private val vm: ShellViewModel) 
             when {
                 intent == TerminalIntent.NEW -> vm.newSession(cols, rows)
                 intent.startsWith("attach:") -> vm.attach(intent.removePrefix("attach:"), cols, rows)
-                else -> vm.activeSession.value?.let { vm.attach(it, cols, rows) }
+                else -> vm.resume(cols, rows)
             }
             started()
             if (!readOnly) view.showKeyboard()

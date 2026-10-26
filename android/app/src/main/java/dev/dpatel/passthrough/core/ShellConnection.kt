@@ -11,10 +11,11 @@ import kotlinx.coroutines.cancelChildren
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableSharedFlow
-import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.job
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -129,8 +130,10 @@ sealed interface ShellEvent {
     data class MacStateChanged(val state: MacState) : ShellEvent
     /** The answer to [ShellConnection.requestEvents]: what happened since then, oldest first, and the battery meanwhile. */
     data class Events(val since: Double, val events: List<MacEvent>, val battery: List<BatterySample>) : ShellEvent
-    /** A session this connection opened; it is attached to it. */
-    data class Opened(val session: String) : ShellEvent
+    /** A session this connection opened, answering `open` [ref]; it is attached to it. */
+    data class Opened(val session: String, val ref: Int? = null) : ShellEvent
+    /** A session this connection opened after all, though an `attach` made before the Mac answered took its place: it runs detached. */
+    data class OpenedDetached(val session: String) : ShellEvent
     class Output(val session: String, val data: ByteArray) : ShellEvent {
         override fun toString() = "Output(session=$session, ${data.size} bytes)"
     }
@@ -149,7 +152,8 @@ sealed interface ShellEvent {
     }
     /** The Mac refused something; after `NOT_AUTHORIZED` during the handshake the connection closes. */
     /** [session] is the one the refused request named, if it named one. */
-    data class Failed(val error: ShellError, val session: String? = null) : ShellEvent
+    /** [ref]: the `open` it refuses, if it does. */
+    data class Failed(val error: ShellError, val session: String? = null, val ref: Int? = null) : ShellEvent
     /** The connection is gone (null: [ShellConnection.close] was called). Sent once. */
     data class Disconnected(val error: Throwable?) : ShellEvent
 }
@@ -201,7 +205,11 @@ class ShellConnection(
     private val liveness: ShellLiveness = ShellLiveness(),
 ) {
     private val _events = MutableSharedFlow<ShellEvent>(extraBufferCapacity = 64)
-    val events: SharedFlow<ShellEvent> = _events.asSharedFlow()
+    /**
+     * Collected once, by the app. An answer to an `open` is judged as it's delivered there, in
+     * order with the app's own [attach] calls ([delivered]).
+     */
+    val events: Flow<ShellEvent> = _events.asSharedFlow().map(::delivered)
 
     private val lock = Any()
     private var active = true
@@ -209,8 +217,21 @@ class ShellConnection(
     private var challenged = false
     /** Commands made before `ready`, sent once it arrives. */
     private val queued = ArrayList<ShellEnvelope>()
-    /** The session `input` and `resize` go to. */
+    /** The session `input` goes to. */
     private var current: String? = null
+    /**
+     * Sessions that ended or were taken over while an `open` was unanswered: if one is that open's,
+     * its [ShellEvent.Opened] leaves nothing [current] (the Mac attached it, then lost it).
+     */
+    private val goneSessions = HashSet<String>()
+    /**
+     * Numbers `open`s (the Mac echoes the number in the answer). An `attach` overtakes every open
+     * numbered up to [overtakenThrough]: the Mac attaches it after the sessions they make.
+     * [answeredThrough] is the last whose answer the app has been given.
+     */
+    private var lastOpenRef = 0
+    private var overtakenThrough = 0
+    private var answeredThrough = 0
     /** When the last line from the Mac arrived ([System.nanoTime]). */
     @Volatile private var lastHeard = System.nanoTime()
 
@@ -243,15 +264,25 @@ class ShellConnection(
 
     fun list() = enqueue(ShellEnvelope(ShellEnvelope.LIST))
 
-    fun open(cols: Int, rows: Int) = enqueue(ShellEnvelope(ShellEnvelope.OPEN, cols = cols, rows = rows))
+    fun open(cols: Int, rows: Int): Unit = synchronized(lock) {
+        if (!active) return
+        val ref = ++lastOpenRef
+        enqueue(ShellEnvelope(ShellEnvelope.OPEN, cols = cols, rows = rows, ref = ref))
+    }
 
     fun attach(session: String, cols: Int, rows: Int): Unit = synchronized(lock) {
         current = session
+        overtakenThrough = lastOpenRef
         enqueue(ShellEnvelope(ShellEnvelope.ATTACH, session = session, cols = cols, rows = rows))
     }
 
-    /** Keystrokes for the attached session, split into protocol-sized pieces. Dropped when none is attached. */
+    /**
+     * Keystrokes for the attached session, split into protocol-sized pieces. Dropped when none is
+     * attached, and while an `open` is pending: the Mac reads them after attaching the new session,
+     * and would refuse them for the old one.
+     */
     fun input(bytes: ByteArray): Unit = synchronized(lock) {
+        if (openPending) return
         val session = current ?: return
         var offset = 0
         while (offset < bytes.size) {
@@ -261,9 +292,15 @@ class ShellConnection(
         }
     }
 
+    /**
+     * The terminal's size, for whatever session the Mac has attached when it
+     * reads this, so also one an unanswered `open` is about to attach. It
+     * names [current] only for Macs before that, which required it. Not sent
+     * before `ready`: nothing is attached then, and `attach` carries the size.
+     */
     fun resize(cols: Int, rows: Int): Unit = synchronized(lock) {
-        val session = current ?: return
-        enqueue(ShellEnvelope(ShellEnvelope.RESIZE, session = session, cols = cols, rows = rows))
+        if (!ready) return
+        enqueue(ShellEnvelope(ShellEnvelope.RESIZE, session = current, cols = cols, rows = rows))
     }
 
     /** Ends a session on the Mac (its shell is hung up). */
@@ -374,8 +411,7 @@ class ShellConnection(
             ShellEnvelope.EVENT_LIST -> emit(ShellEvent.Events(m.since ?: 0.0, m.events.orEmpty(), m.battery.orEmpty()))
             ShellEnvelope.OPENED -> {
                 val id = m.session ?: return
-                synchronized(lock) { current = id }
-                emit(ShellEvent.Opened(id))
+                emit(ShellEvent.Opened(id, m.ref))
             }
             ShellEnvelope.OUTPUT -> {
                 val id = m.session ?: return
@@ -385,12 +421,18 @@ class ShellConnection(
             ShellEnvelope.ATTACHED -> emit(ShellEvent.Attached(m.session ?: return))
             ShellEnvelope.ENDED -> {
                 val id = m.session ?: return
-                synchronized(lock) { if (current == id) current = null }
+                synchronized(lock) {
+                    if (current == id) current = null
+                    if (lastOpenRef > answeredThrough) goneSessions += id
+                }
                 emit(ShellEvent.Ended(id, m.exitStatus ?: -1))
             }
             ShellEnvelope.DETACHED -> {
                 val id = m.session ?: return
-                synchronized(lock) { if (current == id) current = null }
+                synchronized(lock) {
+                    if (current == id) current = null
+                    if (lastOpenRef > answeredThrough) goneSessions += id
+                }
                 emit(ShellEvent.Detached(id))
             }
             ShellEnvelope.HISTORY_LIST -> emit(ShellEvent.History(m.history.orEmpty()))
@@ -406,7 +448,7 @@ class ShellConnection(
                 if (reason == ShellError.NO_SUCH_SESSION && m.session != null) {
                     synchronized(lock) { if (current == m.session) current = null }
                 }
-                emit(ShellEvent.Failed(reason, m.session))
+                emit(ShellEvent.Failed(reason, m.session, m.ref))
             }
             ShellEnvelope.PING -> enqueue(ShellEnvelope(ShellEnvelope.PONG))
             else -> Unit
@@ -441,6 +483,33 @@ class ShellConnection(
         emit(ShellEvent.Disconnected(error))
         job.cancel()
     }
+
+    /**
+     * As [event] reaches the app: an `opened` whose open an `attach` since overtook arrives as
+     * [ShellEvent.OpenedDetached]; otherwise input goes to its session.
+     */
+    private fun delivered(event: ShellEvent): ShellEvent = synchronized(lock) {
+        when {
+            event is ShellEvent.Opened -> {
+                // A Mac that doesn't echo `ref` answers in order: count it as the latest (none
+                // made yet: no attach can have overtaken it).
+                val ref = event.ref ?: lastOpenRef
+                answeredThrough = maxOf(answeredThrough, ref)
+                val gone = goneSessions.remove(event.session)
+                if (ref != 0 && ref <= overtakenThrough) return@synchronized ShellEvent.OpenedDetached(event.session)
+                current = if (gone) null else event.session
+                event
+            }
+            event is ShellEvent.Failed && event.ref != null -> {
+                answeredThrough = maxOf(answeredThrough, event.ref)
+                event
+            }
+            else -> event
+        }
+    }
+
+    /** An `open` is unanswered, and no `attach` has overtaken it: its session will be the attached one. As of the events delivered so far. */
+    val openPending: Boolean get() = synchronized(lock) { lastOpenRef > maxOf(answeredThrough, overtakenThrough) }
 
     private fun shutdown() {
         synchronized(lock) {

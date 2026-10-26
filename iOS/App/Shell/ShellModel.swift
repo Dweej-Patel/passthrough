@@ -44,6 +44,8 @@ final class ShellModel: ObservableObject {
     }
     @Published private(set) var reach: Reach = .noAccess {
         didSet {
+            // Unreachable, no access, locked…: nobody is waiting for that new session any more.
+            if reach != .connecting && reach != .ready { openWhenReady = false }
             // Remember when each Mac last answered, for "last heard" while it can't be reached.
             guard reach == .ready || oldValue == .ready, let mac = clientMacID else { return }
             var heard = Self.lastHeardStore
@@ -131,6 +133,14 @@ final class ShellModel: ObservableObject {
     /// The addresses each Mac granted, so a manual address can be applied without re-reading keys.
     private var granted: [String: [String]] = [:]
     private var size = (cols: 80, rows: 24)
+    /// A new session asked for while connecting (or waiting to redial):
+    /// opened on `.ready`. Dropped once the Mac can't be reached, or for
+    /// another Mac or a tab chosen meanwhile.
+    private var openWhenReady = false
+    /// That open was sent instead of re-attaching `activeSession`: until
+    /// it's answered nothing is attached, and if it's refused the active tab
+    /// is re-attached.
+    private var reattachIfRefused = false
     private var browser: NWBrowser?
     private var browseResults: [NWEndpoint] = []
     /// The transcript request in flight; `token` tells it from a later request for the same session.
@@ -338,11 +348,17 @@ final class ShellModel: ObservableObject {
         #endif
         size = (cols, rows)
         lastError = nil
-        client?.open(cols: cols, rows: rows)
+        guard reach == .ready, let client else {
+            if reach == .connecting { openWhenReady = true }
+            return
+        }
+        client.open(cols: cols, rows: rows)
     }
 
     func attach(_ id: String, cols: Int, rows: Int) {
         size = (cols, rows)
+        openWhenReady = false
+        reattachIfRefused = false
         if !openTabs.contains(id) { openTabs.append(id) }
         activeSession = id
         detachedSession = nil
@@ -482,7 +498,15 @@ final class ShellModel: ObservableObject {
             self.path = path
             // No `list`: the Mac sends `sessions` right after `ready`.
             // An ended session's log is already on screen; it has nothing more to send.
-            if let active = activeSession, !ended.isEnded(active) {
+            let active = activeSession.flatMap { ended.isEnded($0) ? nil : $0 }
+            if openWhenReady {
+                // Not the active tab first: it would take the keystrokes
+                // meant for the new one until the Mac answers.
+                openWhenReady = false
+                reattachIfRefused = active != nil
+                client?.open(cols: size.cols, rows: size.rows)
+            } else if let active {
+                reattachIfRefused = false
                 streamStarting.send((active, true))
                 client?.attach(active, cols: size.cols, rows: size.rows)
             }
@@ -506,14 +530,23 @@ final class ShellModel: ObservableObject {
             if let detached = detachedSession, !ids.contains(detached) { detachedSession = nil }
         case let .opened(id):
             if !openTabs.contains(id) { openTabs.append(id) }
+            reattachIfRefused = false
             streamStarting.send((id, false))
             activeSession = id
             detachedSession = nil
             lastError = nil
-            // A resize before `opened` had no session to go to (the keyboard
-            // coming up, say): the Mac's grid is still the one `open` sent.
-            client?.resize(cols: size.cols, rows: size.rows)
             client?.list()
+        case let .openedDetached(id):
+            // The user went to another tab before the Mac answered: the new
+            // one waits beside it, and the tab on screen stays.
+            if !openTabs.contains(id) { openTabs.append(id) }
+        case let .openFailed(error):
+            // Unless another open is coming: re-attaching would overtake it.
+            if reattachIfRefused, client?.openPending == false, let active = activeSession {
+                reattachIfRefused = false
+                attach(active, cols: size.cols, rows: size.rows)
+            }
+            lastError = error
         case let .output(session, data):
             output.send((session, data))
         case let .attached(session):
@@ -552,6 +585,7 @@ final class ShellModel: ObservableObject {
         case let .disconnected(error):
             let dropped = reach == .ready
             client = nil
+            reattachIfRefused = false
             path = nil
             pendingControls = [:]
             controlMisses = [:]
@@ -601,6 +635,7 @@ final class ShellModel: ObservableObject {
         generation += 1
         client?.disconnect()
         client = nil
+        reattachIfRefused = false
         path = nil
         pendingControls = [:]
         controlMisses = [:]
@@ -609,6 +644,7 @@ final class ShellModel: ObservableObject {
     }
 
     private func resetSessions() {
+        openWhenReady = false
         macState = nil
         timeline = nil
         timelineLoading = false

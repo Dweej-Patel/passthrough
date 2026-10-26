@@ -60,8 +60,11 @@ final class ShellTerminalController: ObservableObject {
                 self.driver.setReadOnly(!ended.isWritable(self.shown, openTabs: tabs))
             }
             .store(in: &subscriptions)
+        // Also with no session active yet, or an ended one shown: a new tab's
+        // keyboard comes up before the Mac has opened it, and the Mac sizes
+        // whatever this phone has attached (every tab shows here, at this size).
         driver.onResize = { [weak self] cols, rows in
-            guard self != nil, shell.activeSession != nil else { return }
+            guard self != nil else { return }
             shell.resize(cols: cols, rows: rows)
         }
         driver.onClipboardCopy = { [weak self] in self?.showCopiedNotice() }

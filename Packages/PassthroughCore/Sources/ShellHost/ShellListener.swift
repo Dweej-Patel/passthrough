@@ -810,8 +810,8 @@ final class ShellConnection: ShellAttachment, @unchecked Sendable {
             reply.sessions = manager.sessions
             send(reply)
         case ShellEnvelope.open:
-            guard let cols = message.cols, let rows = message.rows else { return fail(.badRequest) }
-            open(cols: cols, rows: rows)
+            guard let cols = message.cols, let rows = message.rows else { return fail(.badRequest, ref: message.ref) }
+            open(cols: cols, rows: rows, ref: message.ref)
         case ShellEnvelope.attach:
             guard let id = message.session, let cols = message.cols, let rows = message.rows else { return fail(.badRequest) }
             if attach(id, cols: cols, rows: rows) { gate?.event("\(label) attached to a session") }
@@ -820,9 +820,13 @@ final class ShellConnection: ShellAttachment, @unchecked Sendable {
                   let data = message.data.flatMap({ Data(base64Encoded: $0) }) else { return fail(.badRequest, session: message.session) }
             manager.input(id, data)
         case ShellEnvelope.resize:
-            guard let id = message.session, id == attached, let cols = message.cols, let rows = message.rows else {
-                return fail(.badRequest, session: message.session)
-            }
+            // The phone's terminal size, for whatever this connection has
+            // attached when the line is read: lines wait behind an `open`, so a
+            // resize sent before `opened` (the keyboard coming up) reaches the
+            // new session. The `session` named is ignored (Macs before this
+            // required it): it may be the one an `open` or `attach` ahead just left.
+            guard let cols = message.cols, let rows = message.rows else { return fail(.badRequest, session: message.session) }
+            guard let id = attached else { return }
             manager.resize(id, cols: cols, rows: rows)
         case ShellEnvelope.close:
             guard let id = message.session else { return fail(.badRequest) }
@@ -857,9 +861,10 @@ final class ShellConnection: ShellAttachment, @unchecked Sendable {
 
     /// Starts a shell on the listener's work queue (spawning one must not hold
     /// up every other phone), then replies and attaches. This connection's
-    /// later requests wait until then.
-    private func open(cols: Int, rows: Int) {
-        guard let gate else { return }
+    /// later requests wait until then. The answer, `opened` or an error,
+    /// carries the phone's `ref` for the open.
+    private func open(cols: Int, rows: Int, ref: Int?) {
+        guard let gate else { return fail(.badRequest, ref: ref) }
         busy = true
         let manager = self.manager, label = self.label, phoneID = self.phoneID, isOpen = self.isOpen, accepting = gate.accepting
         let queue = self.queue
@@ -868,21 +873,21 @@ final class ShellConnection: ShellAttachment, @unchecked Sendable {
             let result = isOpen.get() && accepting.get()
                 ? Result { try manager.open(phoneLabel: label, phoneID: phoneID, cols: cols, rows: rows) }
                 : .failure(ShellError.badRequest)
-            queue.async { self?.opened(result, cols: cols, rows: rows) }
+            queue.async { self?.opened(result, cols: cols, rows: rows, ref: ref) }
         }
     }
 
-    private func opened(_ result: Result<String, Error>, cols: Int, rows: Int) {
+    private func opened(_ result: Result<String, Error>, cols: Int, rows: Int, ref: Int?) {
         guard !closed else { return }
         switch result {
         case .success(let id):
             gate?.event("\(label) opened a session")
             var reply = ShellEnvelope(t: ShellEnvelope.opened)
-            reply.session = id; reply.cols = cols; reply.rows = rows
+            reply.session = id; reply.cols = cols; reply.rows = rows; reply.ref = ref
             send(reply)
             attach(id, cols: cols, rows: rows)
         case .failure(let error):
-            fail(error)
+            fail(error, ref: ref)
         }
         resume()
     }
@@ -1094,14 +1099,15 @@ final class ShellConnection: ShellAttachment, @unchecked Sendable {
 
     /// Manager errors keep their reason; anything else (a shell that could not
     /// start) is reported as a bad request.
-    private func fail(_ error: Error, session: String? = nil) {
-        fail(error as? ShellError ?? .badRequest, session: session)
+    private func fail(_ error: Error, session: String? = nil, ref: Int? = nil) {
+        fail(error as? ShellError ?? .badRequest, session: session, ref: ref)
     }
 
-    private func fail(_ reason: ShellError, session: String? = nil) {
+    private func fail(_ reason: ShellError, session: String? = nil, ref: Int? = nil) {
         var reply = ShellEnvelope(t: ShellEnvelope.error)
         reply.reason = reason.rawValue
         reply.session = session
+        reply.ref = ref
         send(reply)
     }
 

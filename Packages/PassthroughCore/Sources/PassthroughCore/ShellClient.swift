@@ -108,6 +108,11 @@ public final class ShellClient: @unchecked Sendable {
         case sessions([ShellSessionInfo])
         /// A session this client opened; it is attached to it.
         case opened(String)
+        /// A session this client opened after all, though an `attach` made
+        /// before the Mac answered took its place: it runs detached.
+        case openedDetached(String)
+        /// The Mac refused an `open` this client made: no `opened` comes for it.
+        case openFailed(ShellError)
         case output(session: String, Data)
         /// The replay after an `attach` is complete; later output is live.
         case attached(session: String)
@@ -204,8 +209,25 @@ public final class ShellClient: @unchecked Sendable {
     private var active = false
     /// Commands made before `ready`, sent once it arrives.
     private var queued: [ShellEnvelope] = []
-    /// The session `input` and `resize` go to.
+    /// The session `input` goes to.
     private var current: String?
+    #if DEBUG
+    /// For tests: called on `work` with each line's `t` once it's handled.
+    let lineHandled = Locked<(@Sendable (String) -> Void)?>(nil)
+    #endif
+    /// Sessions that ended or were taken over while an `open` was unanswered:
+    /// if one is that open's, its `opened` leaves nothing `current` (the Mac
+    /// attached it, then lost it).
+    private var goneSessions: Set<String> = []
+    /// Numbers `open`s (the Mac echoes the number in the answer). An `attach`
+    /// overtakes every open numbered up to `overtakenThrough`: the Mac
+    /// attaches it after the sessions they make. `answeredThrough` is the
+    /// last whose answer the app has been given. Set by the app's own calls
+    /// and as answers are delivered, so under `opensLock`, not on `work`.
+    private let opensLock = NSLock()
+    private var lastOpenRef = 0
+    private var overtakenThrough = 0
+    private var answeredThrough = 0
     /// `requestScreen` was called: lines are read only up to `screenReady`.
     private var screenRequested = false
     /// When the winner last delivered anything.
@@ -277,18 +299,42 @@ public final class ShellClient: @unchecked Sendable {
     public func open(cols: Int, rows: Int) {
         var m = ShellEnvelope(t: ShellEnvelope.open)
         m.cols = cols; m.rows = rows
-        command(m)
+        opensLock.lock()
+        lastOpenRef += 1
+        let ref = lastOpenRef
+        opensLock.unlock()
+        m.ref = ref
+        work.async { [self] in
+            // Never sent, so never answered.
+            guard active else { return answered(ref) }
+            enqueue(m)
+        }
+    }
+
+    /// An `open` is unanswered, and no `attach` has overtaken it: the session
+    /// it makes will be the attached one. As of the events delivered so far.
+    public var openPending: Bool {
+        opensLock.lock(); defer { opensLock.unlock() }
+        return lastOpenRef > max(answeredThrough, overtakenThrough)
     }
 
     public func attach(_ session: String, cols: Int, rows: Int) {
-        work.async { [self] in current = session }
         var m = ShellEnvelope(t: ShellEnvelope.attach)
         m.session = session; m.cols = cols; m.rows = rows
-        command(m)
+        opensLock.lock()
+        overtakenThrough = lastOpenRef
+        opensLock.unlock()
+        work.async { [self] in
+            current = session
+            enqueue(m)
+        }
     }
 
     /// Keystrokes for the attached session, split into protocol-sized pieces.
+    /// Dropped while an `open` is pending: the Mac reads them after attaching
+    /// the new session, and would refuse them for the old one.
     public func input(_ data: Data) {
+        guard !openPending else { return }
         work.async { [self] in
             guard let session = current else { return }
             var offset = 0
@@ -303,11 +349,15 @@ public final class ShellClient: @unchecked Sendable {
         }
     }
 
+    /// The terminal's size, for whatever session the Mac has attached when
+    /// it reads this, so also one an unanswered `open` is about to attach.
+    /// It names `current` only for Macs before that, which required it.
+    /// Not sent before `ready`: nothing is attached then, and `attach` carries the size.
     public func resize(cols: Int, rows: Int) {
         work.async { [self] in
-            guard let session = current else { return }
+            guard ready else { return }
             var m = ShellEnvelope(t: ShellEnvelope.resize)
-            m.session = session; m.cols = cols; m.rows = rows
+            m.session = current; m.cols = cols; m.rows = rows
             enqueue(m)
         }
     }
@@ -589,6 +639,9 @@ public final class ShellClient: @unchecked Sendable {
             return
         }
         guard id == winner else { return }
+        #if DEBUG
+        defer { lineHandled.get()?(message.t) }
+        #endif
         switch message.t {
         case ShellEnvelope.macInfo:
             emit(.macInfo(message))
@@ -601,8 +654,19 @@ public final class ShellClient: @unchecked Sendable {
             emit(.sessions(message.sessions ?? []))
         case ShellEnvelope.opened:
             guard let id = message.session else { return }
-            current = id
-            emit(.opened(id))
+            // Judged as it's delivered, in order with the app's own `attach`
+            // calls: one made before then overtook the open, though `work`
+            // may not have seen it yet.
+            let ref = message.ref, onEvent = self.onEvent
+            callbackQueue.async { [self] in
+                if takesOver(ref) {
+                    work.async { [self] in current = goneSessions.remove(id) == nil ? id : nil }
+                    onEvent(.opened(id))
+                } else {
+                    work.async { [self] in goneSessions.remove(id) }
+                    onEvent(.openedDetached(id))
+                }
+            }
         case ShellEnvelope.output:
             guard let id = message.session, let data = message.data.flatMap({ Data(base64Encoded: $0) }) else { return }
             emit(.output(session: id, data))
@@ -612,10 +676,12 @@ public final class ShellClient: @unchecked Sendable {
         case ShellEnvelope.ended:
             guard let id = message.session else { return }
             if current == id { current = nil }
+            if openUnanswered { goneSessions.insert(id) }
             emit(.ended(session: id, exitStatus: message.exitStatus ?? -1))
         case ShellEnvelope.detached:
             guard let id = message.session else { return }
             if current == id { current = nil }
+            if openUnanswered { goneSessions.insert(id) }
             emit(.detached(session: id))
         case ShellEnvelope.historyList:
             emit(.history(message.history ?? []))
@@ -629,7 +695,15 @@ public final class ShellClient: @unchecked Sendable {
             let reason = ShellError(rawValue: message.reason ?? "") ?? .badRequest
             // The Mac did not attach the session `attach` named: stop sending it input it would refuse.
             if reason == .noSuchSession, let id = message.session, current == id { current = nil }
-            emit(.failed(reason, session: message.session))
+            if let ref = message.ref {
+                let onEvent = self.onEvent
+                callbackQueue.async { [self] in
+                    answered(ref)
+                    onEvent(.openFailed(reason))
+                }
+            } else {
+                emit(.failed(reason, session: message.session))
+            }
         case ShellEnvelope.ping:
             send(ShellEnvelope(t: ShellEnvelope.pong))
         case ShellEnvelope.screenReady where screenRequested, ShellEnvelope.screenVideoReady where screenRequested:
@@ -675,6 +749,28 @@ public final class ShellClient: @unchecked Sendable {
         emit(.disconnected(error))
     }
 
+    /// Whether the session `open` `ref` made is the one the Mac has attached
+    /// (no `attach` since overtook it).
+    private func takesOver(_ ref: Int?) -> Bool {
+        opensLock.lock(); defer { opensLock.unlock() }
+        // A Mac that doesn't echo `ref` answers in order: count it as the
+        // latest (none made yet: no attach can have overtaken it).
+        let ref = ref ?? lastOpenRef
+        answeredThrough = max(answeredThrough, ref)
+        return ref == 0 || ref > overtakenThrough
+    }
+
+    /// Some `open` has no answer delivered yet, overtaken or not.
+    private var openUnanswered: Bool {
+        opensLock.lock(); defer { opensLock.unlock() }
+        return lastOpenRef > answeredThrough
+    }
+
+    private func answered(_ ref: Int) {
+        opensLock.lock(); defer { opensLock.unlock() }
+        answeredThrough = max(answeredThrough, ref)
+    }
+
     private func teardown() {
         active = false
         generation += 1
@@ -685,6 +781,7 @@ public final class ShellClient: @unchecked Sendable {
         queued = []
         ready = false
         current = nil
+        goneSessions = []
         probing = false
     }
 
