@@ -129,10 +129,11 @@ sealed interface ShellEvent {
     data class MacStateChanged(val state: MacState) : ShellEvent
     /** The answer to [ShellConnection.requestEvents]: what happened since then, oldest first, and the battery meanwhile. */
     data class Events(val since: Double, val events: List<MacEvent>, val battery: List<BatterySample>) : ShellEvent
-    /** A session this connection opened; it is attached to it. */
-    data class Opened(val session: String) : ShellEvent
-    /** A session this connection opened after all, though an `attach` made before the Mac answered took its place: it runs detached. */
-    data class OpenedDetached(val session: String) : ShellEvent
+    /**
+     * A session this connection opened, answering `open` [ref]. Whether it is the attached one
+     * is [ShellConnection.takesOver]'s to say, as the app handles this.
+     */
+    data class Opened(val session: String, val ref: Int? = null) : ShellEvent
     class Output(val session: String, val data: ByteArray) : ShellEvent {
         override fun toString() = "Output(session=$session, ${data.size} bytes)"
     }
@@ -151,7 +152,8 @@ sealed interface ShellEvent {
     }
     /** The Mac refused something; after `NOT_AUTHORIZED` during the handshake the connection closes. */
     /** [session] is the one the refused request named, if it named one. */
-    data class Failed(val error: ShellError, val session: String? = null) : ShellEvent
+    /** [ref]: the `open` it refuses, if it does. */
+    data class Failed(val error: ShellError, val session: String? = null, val ref: Int? = null) : ShellEvent
     /** The connection is gone (null: [ShellConnection.close] was called). Sent once. */
     data class Disconnected(val error: Throwable?) : ShellEvent
 }
@@ -213,11 +215,14 @@ class ShellConnection(
     private val queued = ArrayList<ShellEnvelope>()
     /** The session `input` goes to. */
     private var current: String? = null
-    /** Numbers the next `open`; the Mac echoes it in the answer. */
+    /**
+     * Numbers `open`s (the Mac echoes the number in the answer). An `attach` overtakes every open
+     * numbered up to [overtakenThrough]: the Mac attaches it after the sessions they make. The
+     * app reports answers ([takesOver], [openRefused]) as it handles them, in order with its own calls.
+     */
     private var lastOpenRef = 0
-    /** `open`s the Mac hasn't answered, and those an `attach` sent since has overtaken: the Mac attaches that after the sessions they make. */
-    private val unansweredOpens = HashSet<Int>()
-    private val overtakenOpens = HashSet<Int>()
+    private var overtakenThrough = 0
+    private var answeredThrough = 0
     /** When the last line from the Mac arrived ([System.nanoTime]). */
     @Volatile private var lastHeard = System.nanoTime()
 
@@ -253,13 +258,12 @@ class ShellConnection(
     fun open(cols: Int, rows: Int): Unit = synchronized(lock) {
         if (!active) return
         val ref = ++lastOpenRef
-        unansweredOpens += ref
         enqueue(ShellEnvelope(ShellEnvelope.OPEN, cols = cols, rows = rows, ref = ref))
     }
 
     fun attach(session: String, cols: Int, rows: Int): Unit = synchronized(lock) {
         current = session
-        overtakenOpens += unansweredOpens
+        overtakenThrough = lastOpenRef
         enqueue(ShellEnvelope(ShellEnvelope.ATTACH, session = session, cols = cols, rows = rows))
     }
 
@@ -393,8 +397,7 @@ class ShellConnection(
             ShellEnvelope.EVENT_LIST -> emit(ShellEvent.Events(m.since ?: 0.0, m.events.orEmpty(), m.battery.orEmpty()))
             ShellEnvelope.OPENED -> {
                 val id = m.session ?: return
-                val overtaken = synchronized(lock) { (m.ref?.let(::openAnswered) ?: false).also { if (!it) current = id } }
-                emit(if (overtaken) ShellEvent.OpenedDetached(id) else ShellEvent.Opened(id))
+                emit(ShellEvent.Opened(id, m.ref))
             }
             ShellEnvelope.OUTPUT -> {
                 val id = m.session ?: return
@@ -425,8 +428,7 @@ class ShellConnection(
                 if (reason == ShellError.NO_SUCH_SESSION && m.session != null) {
                     synchronized(lock) { if (current == m.session) current = null }
                 }
-                m.ref?.let { synchronized(lock) { openAnswered(it) } }
-                emit(ShellEvent.Failed(reason, m.session))
+                emit(ShellEvent.Failed(reason, m.session, m.ref))
             }
             ShellEnvelope.PING -> enqueue(ShellEnvelope(ShellEnvelope.PONG))
             else -> Unit
@@ -462,19 +464,28 @@ class ShellConnection(
         job.cancel()
     }
 
-    /** The Mac answered `open` [ref]; true if an `attach` overtook it. Holds [lock]. */
-    private fun openAnswered(ref: Int): Boolean {
-        unansweredOpens -= ref
-        return overtakenOpens.remove(ref)
+    /**
+     * As the app handles [opened]: whether that session is the one the Mac has attached (no
+     * `attach` since overtook its open), and if so input goes to it.
+     */
+    fun takesOver(opened: ShellEvent.Opened): Boolean = synchronized(lock) {
+        // A Mac that doesn't echo `ref` answers in order: count it as the latest.
+        val ref = opened.ref ?: lastOpenRef
+        answeredThrough = maxOf(answeredThrough, ref)
+        (ref > overtakenThrough).also { if (it) current = opened.session }
     }
+
+    /** As the app handles the refusal of `open` [ref]. */
+    fun openRefused(ref: Int): Unit = synchronized(lock) { answeredThrough = maxOf(answeredThrough, ref) }
+
+    /** An `open` is unanswered, and no `attach` has overtaken it: its session will be the attached one. */
+    val openPending: Boolean get() = synchronized(lock) { lastOpenRef > maxOf(answeredThrough, overtakenThrough) }
 
     private fun shutdown() {
         synchronized(lock) {
             active = false
             queued.clear()
             current = null
-            unansweredOpens.clear()
-            overtakenOpens.clear()
         }
         outgoing.close()
         runCatching { closeable?.close() }

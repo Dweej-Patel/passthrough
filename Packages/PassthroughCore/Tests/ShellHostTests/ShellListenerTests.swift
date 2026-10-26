@@ -103,18 +103,19 @@ final class ShellListenerTests: XCTestCase {
     }
 
     private func client(_ listener: ShellListener, phoneID: String = "phone-1", key: Data? = nil,
-                        pin: String? = nil) -> (ShellClient, Probe) {
+                        pin: String? = nil, queue: DispatchQueue = DispatchQueue(label: "probe")) -> (ShellClient, Probe) {
         let credential = ShellCredential(macID: "mac", macName: "Test Mac", certSHA256: pin ?? identity.fingerprint,
                                          shellKey: key ?? self.key, phoneID: phoneID, port: listener.port!, addresses: [])
         let probe = Probe()
-        let client = ShellClient(credential: credential, queue: DispatchQueue(label: "probe")) { probe.record($0) }
+        let client = ShellClient(credential: credential, queue: queue) { probe.record($0) }
         client.connect(discovered: .hostPort(host: "127.0.0.1", port: NWEndpoint.Port(rawValue: listener.port!)!))
         addTeardownBlock { client.disconnect() }
         return (client, probe)
     }
 
-    private func readyClient(_ listener: ShellListener, phoneID: String = "phone-1", key: Data? = nil) -> (ShellClient, Probe) {
-        let (c, probe) = client(listener, phoneID: phoneID, key: key)
+    private func readyClient(_ listener: ShellListener, phoneID: String = "phone-1", key: Data? = nil,
+                             queue: DispatchQueue = DispatchQueue(label: "probe")) -> (ShellClient, Probe) {
+        let (c, probe) = client(listener, phoneID: phoneID, key: key, queue: queue)
         wait(for: [probe.expect(self, "ready") { $0.contains { if case .ready = $0 { return true } else { return false } } }], timeout: 5)
         return (c, probe)
     }
@@ -416,6 +417,33 @@ final class ShellListenerTests: XCTestCase {
         XCTAssertEqual(probe.events.get().filter { if case .opened = $0 { return true } else { return false } }.count, 1)
         c.input(Data("echo still-$((6*7))\n".utf8))
         wait(for: [probe.expect(self, "typed into the tab it named") { _ in probe.output(first).contains("still-42\r\n") }], timeout: 10)
+        XCTAssertEqual(probe.failures, [])
+    }
+
+    /// `opened` reaches the client before an `attach` the app made first
+    /// does: the attach still overtakes the open, since that's judged as
+    /// `opened` is delivered to the app, in order with its own calls.
+    func testAnAttachMadeBeforeOpenedIsDeliveredOvertakesIt() {
+        let events = Locked<[String]>([])
+        let listener = startListener(events: events)
+        let delivery = DispatchQueue(label: "delivery")
+        let (c, probe) = readyClient(listener, queue: delivery)
+        let first = openSession(c, probe)
+        delivery.suspend()
+        c.open(cols: 80, rows: 24)
+        // The Mac has opened it, and its `opened` has had time to reach the client.
+        let deadline = Date().addingTimeInterval(5)
+        while events.get().filter({ $0 == "Test iPhone opened a session" }).count < 2, Date() < deadline {
+            Thread.sleep(forTimeInterval: 0.01)
+        }
+        Thread.sleep(forTimeInterval: 0.3)
+        c.attach(first, cols: 80, rows: 24)
+        delivery.resume()
+        wait(for: [probe.expect(self, "opened detached") {
+            $0.contains { if case .openedDetached = $0 { return true } else { return false } }
+        }], timeout: 5)
+        c.input(Data("echo still-$((6*7))\n".utf8))
+        wait(for: [probe.expect(self, "typed into the tab attached") { _ in probe.output(first).contains("still-42\r\n") }], timeout: 10)
         XCTAssertEqual(probe.failures, [])
     }
 

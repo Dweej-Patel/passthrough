@@ -131,8 +131,9 @@ final class ShellModel: ObservableObject {
     /// The addresses each Mac granted, so a manual address can be applied without re-reading keys.
     private var granted: [String: [String]] = [:]
     private var size = (cols: 80, rows: 24)
-    /// A new session asked for while not connected: opened on `.ready`,
-    /// instead of attaching `activeSession` (which would overtake it).
+    /// A new session asked for while connecting: opened on `.ready`, after
+    /// re-attaching `activeSession` (an open queued before that attach would
+    /// be overtaken by it). Dropped with the connection.
     private var openWhenReady = false
     private var browser: NWBrowser?
     private var browseResults: [NWEndpoint] = []
@@ -341,7 +342,10 @@ final class ShellModel: ObservableObject {
         #endif
         size = (cols, rows)
         lastError = nil
-        guard reach == .ready, let client else { openWhenReady = true; return }
+        guard reach == .ready, let client else {
+            if client != nil { openWhenReady = true }
+            return
+        }
         client.open(cols: cols, rows: rows)
     }
 
@@ -487,12 +491,15 @@ final class ShellModel: ObservableObject {
             self.path = path
             // No `list`: the Mac sends `sessions` right after `ready`.
             // An ended session's log is already on screen; it has nothing more to send.
+            if let active = activeSession, !ended.isEnded(active) {
+                streamStarting.send((active, true))
+                client?.attach(active, cols: size.cols, rows: size.rows)
+            }
+            // After the attach, so the new session is the one left attached;
+            // a refused open leaves the active one working.
             if openWhenReady {
                 openWhenReady = false
                 client?.open(cols: size.cols, rows: size.rows)
-            } else if let active = activeSession, !ended.isEnded(active) {
-                streamStarting.send((active, true))
-                client?.attach(active, cols: size.cols, rows: size.rows)
             }
         case let .macInfo(info):
             apply(info)
@@ -523,7 +530,6 @@ final class ShellModel: ObservableObject {
             // The user went to another tab before the Mac answered: the new
             // one waits beside it, and the tab on screen stays.
             if !openTabs.contains(id) { openTabs.append(id) }
-            client?.list()
         case let .output(session, data):
             output.send((session, data))
         case let .attached(session):
@@ -562,6 +568,7 @@ final class ShellModel: ObservableObject {
         case let .disconnected(error):
             let dropped = reach == .ready
             client = nil
+            openWhenReady = false
             path = nil
             pendingControls = [:]
             controlMisses = [:]
@@ -611,6 +618,7 @@ final class ShellModel: ObservableObject {
         generation += 1
         client?.disconnect()
         client = nil
+        openWhenReady = false
         path = nil
         pendingControls = [:]
         controlMisses = [:]

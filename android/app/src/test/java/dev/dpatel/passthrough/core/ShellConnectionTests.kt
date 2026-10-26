@@ -274,7 +274,9 @@ class ShellConnectionTests {
         }
         connection.open(80, 24)
         connection.attach("s1", 80, 24)
-        assertEquals("s2", events.next<ShellEvent.OpenedDetached>().session)
+        val opened = events.next<ShellEvent.Opened>()
+        assertEquals("s2", opened.session)
+        assertFalse(connection.takesOver(opened))
         // The Mac attached s1 after making s2: keystrokes still go to s1.
         connection.input("ls\n".toByteArray())
         t.join(5000)
@@ -297,14 +299,48 @@ class ShellConnectionTests {
         assertEquals(ShellError.TOO_MANY_SESSIONS, events.next<ShellEvent.Failed>().error)
         connection.attach("s1", 80, 24)
         connection.open(80, 24)
-        // Nothing was left unanswered for the attach to overtake: s3 is attached.
-        val opened = withTimeout(5000) {
-            var e: ShellEvent
-            do { e = events.receive() } while (e !is ShellEvent.Opened && e !is ShellEvent.OpenedDetached)
-            e
-        }
-        assertEquals(ShellEvent.Opened("s3"), opened)
+        // The open after the attach isn't overtaken by it: s3 is attached.
+        val opened = events.next<ShellEvent.Opened>()
+        assertEquals("s3", opened.session)
+        assertTrue(connection.takesOver(opened))
         t.join(5000)
+    }
+
+    @Test fun anAttachMadeBeforeOpenedIsHandledOvertakesIt() = runBlocking {
+        val (connection, mac) = piped()
+        val events = events(connection)
+        val received = mutableListOf<ShellEnvelope>()
+        val t = macThread {
+            mac.handshake()
+            received += mac.receive() // open
+            mac.send(ShellEnvelope(ShellEnvelope.OPENED, session = "s2", ref = received[0].ref))
+            repeat(2) { received += mac.receive() } // attach, input
+        }
+        connection.open(80, 24)
+        // Opened has arrived, but the app attaches before handling it.
+        val opened = events.next<ShellEvent.Opened>()
+        connection.attach("s1", 80, 24)
+        assertFalse(connection.takesOver(opened))
+        connection.input("ls\n".toByteArray())
+        t.join(5000)
+        assertEquals(listOf(ShellEnvelope.OPEN, ShellEnvelope.ATTACH, ShellEnvelope.INPUT), received.map { it.t })
+        assertEquals("s1", received[2].session)
+    }
+
+    @Test fun openPendingFollowsTheAnswersTheAppHandles() {
+        val (connection, _) = piped()
+        assertFalse(connection.openPending)
+        connection.open(80, 24)
+        assertTrue(connection.openPending)
+        connection.attach("s1", 80, 24) // overtakes it
+        assertFalse(connection.openPending)
+        connection.open(80, 24)
+        assertTrue(connection.openPending)
+        assertTrue(connection.takesOver(ShellEvent.Opened("s2", ref = 2)))
+        assertFalse(connection.openPending)
+        connection.open(80, 24)
+        connection.openRefused(3)
+        assertFalse(connection.openPending)
     }
 
     @Test fun refusalFailsAndDisconnects() = runBlocking {

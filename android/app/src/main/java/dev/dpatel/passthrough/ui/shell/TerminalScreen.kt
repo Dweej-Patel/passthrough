@@ -138,7 +138,7 @@ class ShellTerminalController(context: Context, private val vm: ShellViewModel) 
             when {
                 intent == TerminalIntent.NEW -> vm.newSession(cols, rows)
                 intent.startsWith("attach:") -> vm.attach(intent.removePrefix("attach:"), cols, rows)
-                else -> vm.activeSession.value?.let { vm.attach(it, cols, rows) }
+                else -> vm.resume(cols, rows)
             }
             started()
             if (!readOnly) view.showKeyboard()

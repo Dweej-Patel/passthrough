@@ -209,12 +209,13 @@ public final class ShellClient: @unchecked Sendable {
     private var queued: [ShellEnvelope] = []
     /// The session `input` goes to.
     private var current: String?
-    /// Numbers the next `open`; the Mac echoes it in the answer.
+    /// Numbers `open`s (the Mac echoes the number in the answer). An `attach`
+    /// overtakes every open numbered up to `overtakenThrough`: the Mac
+    /// attaches it after the sessions they make. Set by the app's own calls
+    /// and read as `opened` is delivered, so under `opensLock`, not on `work`.
+    private let opensLock = NSLock()
     private var lastOpenRef = 0
-    /// `open`s the Mac hasn't answered, and those an `attach` sent since has
-    /// overtaken: the Mac attaches that after the sessions they make.
-    private var unansweredOpens: Set<Int> = []
-    private var overtakenOpens: Set<Int> = []
+    private var overtakenThrough = 0
     /// `requestScreen` was called: lines are read only up to `screenReady`.
     private var screenRequested = false
     /// When the winner last delivered anything.
@@ -286,21 +287,21 @@ public final class ShellClient: @unchecked Sendable {
     public func open(cols: Int, rows: Int) {
         var m = ShellEnvelope(t: ShellEnvelope.open)
         m.cols = cols; m.rows = rows
-        work.async { [self] in
-            guard active else { return }
-            lastOpenRef += 1
-            m.ref = lastOpenRef
-            unansweredOpens.insert(lastOpenRef)
-            enqueue(m)
-        }
+        opensLock.lock()
+        lastOpenRef += 1
+        m.ref = lastOpenRef
+        opensLock.unlock()
+        command(m)
     }
 
     public func attach(_ session: String, cols: Int, rows: Int) {
         var m = ShellEnvelope(t: ShellEnvelope.attach)
         m.session = session; m.cols = cols; m.rows = rows
+        opensLock.lock()
+        overtakenThrough = lastOpenRef
+        opensLock.unlock()
         work.async { [self] in
             current = session
-            overtakenOpens.formUnion(unansweredOpens)
             enqueue(m)
         }
     }
@@ -623,11 +624,17 @@ public final class ShellClient: @unchecked Sendable {
             emit(.sessions(message.sessions ?? []))
         case ShellEnvelope.opened:
             guard let id = message.session else { return }
-            if let ref = message.ref, openAnswered(ref) {
-                emit(.openedDetached(id))
-            } else {
-                current = id
-                emit(.opened(id))
+            // Judged as it's delivered, in order with the app's own `attach`
+            // calls: one made before then overtook the open, though `work`
+            // may not have seen it yet.
+            let ref = message.ref, onEvent = self.onEvent
+            callbackQueue.async { [self] in
+                if takesOver(ref) {
+                    work.async { [self] in current = id }
+                    onEvent(.opened(id))
+                } else {
+                    onEvent(.openedDetached(id))
+                }
             }
         case ShellEnvelope.output:
             guard let id = message.session, let data = message.data.flatMap({ Data(base64Encoded: $0) }) else { return }
@@ -655,7 +662,6 @@ public final class ShellClient: @unchecked Sendable {
             let reason = ShellError(rawValue: message.reason ?? "") ?? .badRequest
             // The Mac did not attach the session `attach` named: stop sending it input it would refuse.
             if reason == .noSuchSession, let id = message.session, current == id { current = nil }
-            if let ref = message.ref { _ = openAnswered(ref) }
             emit(.failed(reason, session: message.session))
         case ShellEnvelope.ping:
             send(ShellEnvelope(t: ShellEnvelope.pong))
@@ -702,10 +708,12 @@ public final class ShellClient: @unchecked Sendable {
         emit(.disconnected(error))
     }
 
-    /// The Mac answered `open` `ref`; true if an `attach` overtook it.
-    private func openAnswered(_ ref: Int) -> Bool {
-        unansweredOpens.remove(ref)
-        return overtakenOpens.remove(ref) != nil
+    /// Whether the session `open` `ref` made is the one the Mac has attached
+    /// (no `attach` since overtook it).
+    private func takesOver(_ ref: Int?) -> Bool {
+        opensLock.lock(); defer { opensLock.unlock() }
+        // A Mac that doesn't echo `ref` answers in order: count it as the latest.
+        return (ref ?? lastOpenRef) > overtakenThrough
     }
 
     private func teardown() {
@@ -718,8 +726,6 @@ public final class ShellClient: @unchecked Sendable {
         queued = []
         ready = false
         current = nil
-        unansweredOpens = []
-        overtakenOpens = []
         probing = false
     }
 
