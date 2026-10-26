@@ -468,6 +468,8 @@ final class ShellListenerTests: XCTestCase {
         wait(for: [probe.expect(self, "opened, then ended") {
             $0.contains { if case .ended(second, _) = $0 { return true } else { return false } }
         }], timeout: 5)
+        XCTAssertTrue(probe.events.get().contains { if case .opened(second) = $0 { return true } else { return false } },
+                      "the new session is still the tab opened, not one left detached")
         c.lineHandled.set(nil)
         let listed = probe.events.get().filter { if case .sessions = $0 { return true } else { return false } }.count
         c.input(Data("echo nowhere-$((6*7))\n".utf8))
@@ -475,8 +477,33 @@ final class ShellListenerTests: XCTestCase {
         wait(for: [probe.expect(self, "listed") {
             $0.filter { if case .sessions = $0 { return true } else { return false } }.count > listed
         }], timeout: 5)
-        XCTAssertEqual(probe.failures, [])
-        XCTAssertFalse(probe.output(first).contains("nowhere-42"))
+        XCTAssertEqual(probe.failures, [], "the input wasn't sent, for the dead session or the tab before")
+    }
+
+    /// Keys typed after + but before the app is given `opened` go nowhere:
+    /// the Mac reads them after attaching the new session, and would refuse
+    /// them for the old one.
+    func testInputWhileAnOpenIsPendingIsDropped() {
+        let listener = startListener()
+        let delivery = DispatchQueue(label: "delivery")
+        let (c, probe) = readyClient(listener, queue: delivery)
+        let first = openSession(c, probe)
+        delivery.suspend()
+        c.open(cols: 80, rows: 24)
+        XCTAssertTrue(c.openPending)
+        c.input(Data("echo early-$((6*7))\n".utf8))
+        delivery.resume()
+        func opened(_ events: [ShellClient.Event]) -> [String] {
+            events.compactMap { if case .opened(let id) = $0 { return id } else { return nil } }
+        }
+        wait(for: [probe.expect(self, "opened") { opened($0).count == 2 }], timeout: 5)
+        let second = opened(probe.events.get())[1]
+        XCTAssertFalse(c.openPending)
+        c.input(Data("echo late-$((6*7))\n".utf8))
+        wait(for: [probe.expect(self, "typed into the new tab") { _ in probe.output(second).contains("late-42\r\n") }], timeout: 10)
+        XCTAssertEqual(probe.failures, [], "the early keys weren't sent for the old tab")
+        XCTAssertFalse(probe.output(first).contains("early-42"))
+        XCTAssertFalse(probe.output(second).contains("early-42"))
     }
 
     /// A refused `open` is answered too: it doesn't leave the next one

@@ -219,7 +219,10 @@ class ShellConnection(
     private val queued = ArrayList<ShellEnvelope>()
     /** The session `input` goes to. */
     private var current: String? = null
-    /** Sessions that ended or were taken over: an [ShellEvent.Opened] judged after that leaves nothing [current] (the Mac attached it, then lost it). */
+    /**
+     * Sessions that ended or were taken over while an `open` was unanswered: if one is that open's,
+     * its [ShellEvent.Opened] leaves nothing [current] (the Mac attached it, then lost it).
+     */
     private val goneSessions = HashSet<String>()
     /**
      * Numbers `open`s (the Mac echoes the number in the answer). An `attach` overtakes every open
@@ -273,8 +276,13 @@ class ShellConnection(
         enqueue(ShellEnvelope(ShellEnvelope.ATTACH, session = session, cols = cols, rows = rows))
     }
 
-    /** Keystrokes for the attached session, split into protocol-sized pieces. Dropped when none is attached. */
+    /**
+     * Keystrokes for the attached session, split into protocol-sized pieces. Dropped when none is
+     * attached, and while an `open` is pending: the Mac reads them after attaching the new session,
+     * and would refuse them for the old one.
+     */
     fun input(bytes: ByteArray): Unit = synchronized(lock) {
+        if (openPending) return
         val session = current ?: return
         var offset = 0
         while (offset < bytes.size) {
@@ -415,7 +423,7 @@ class ShellConnection(
                 val id = m.session ?: return
                 synchronized(lock) {
                     if (current == id) current = null
-                    goneSessions += id
+                    if (lastOpenRef > answeredThrough) goneSessions += id
                 }
                 emit(ShellEvent.Ended(id, m.exitStatus ?: -1))
             }
@@ -423,7 +431,7 @@ class ShellConnection(
                 val id = m.session ?: return
                 synchronized(lock) {
                     if (current == id) current = null
-                    goneSessions += id
+                    if (lastOpenRef > answeredThrough) goneSessions += id
                 }
                 emit(ShellEvent.Detached(id))
             }
@@ -487,8 +495,9 @@ class ShellConnection(
                 // made yet: no attach can have overtaken it).
                 val ref = event.ref ?: lastOpenRef
                 answeredThrough = maxOf(answeredThrough, ref)
+                val gone = goneSessions.remove(event.session)
                 if (ref != 0 && ref <= overtakenThrough) return@synchronized ShellEvent.OpenedDetached(event.session)
-                current = if (event.session in goneSessions) null else event.session
+                current = if (gone) null else event.session
                 event
             }
             event is ShellEvent.Failed && event.ref != null -> {

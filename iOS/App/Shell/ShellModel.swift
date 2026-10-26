@@ -44,7 +44,8 @@ final class ShellModel: ObservableObject {
     }
     @Published private(set) var reach: Reach = .noAccess {
         didSet {
-            if reach == .unreachable || reach == .noAccess { openWhenReady = false }
+            // Unreachable, no access, locked…: nobody is waiting for that new session any more.
+            if reach != .connecting && reach != .ready { openWhenReady = false }
             // Remember when each Mac last answered, for "last heard" while it can't be reached.
             guard reach == .ready || oldValue == .ready, let mac = clientMacID else { return }
             var heard = Self.lastHeardStore
@@ -540,13 +541,12 @@ final class ShellModel: ObservableObject {
             // one waits beside it, and the tab on screen stays.
             if !openTabs.contains(id) { openTabs.append(id) }
         case let .openFailed(error):
-            lastError = error
             // Unless another open is coming: re-attaching would overtake it.
             if reattachIfRefused, client?.openPending == false, let active = activeSession {
                 reattachIfRefused = false
                 attach(active, cols: size.cols, rows: size.rows)
-                lastError = error
             }
+            lastError = error
         case let .output(session, data):
             output.send((session, data))
         case let .attached(session):

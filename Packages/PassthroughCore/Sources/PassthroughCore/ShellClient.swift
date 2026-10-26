@@ -211,10 +211,13 @@ public final class ShellClient: @unchecked Sendable {
     private var queued: [ShellEnvelope] = []
     /// The session `input` goes to.
     private var current: String?
+    #if DEBUG
     /// For tests: called on `work` with each line's `t` once it's handled.
     let lineHandled = Locked<(@Sendable (String) -> Void)?>(nil)
-    /// Sessions that ended or were taken over: an `opened` judged after that
-    /// leaves nothing `current` (the Mac attached it, then lost it).
+    #endif
+    /// Sessions that ended or were taken over while an `open` was unanswered:
+    /// if one is that open's, its `opened` leaves nothing `current` (the Mac
+    /// attached it, then lost it).
     private var goneSessions: Set<String> = []
     /// Numbers `open`s (the Mac echoes the number in the answer). An `attach`
     /// overtakes every open numbered up to `overtakenThrough`: the Mac
@@ -328,7 +331,10 @@ public final class ShellClient: @unchecked Sendable {
     }
 
     /// Keystrokes for the attached session, split into protocol-sized pieces.
+    /// Dropped while an `open` is pending: the Mac reads them after attaching
+    /// the new session, and would refuse them for the old one.
     public func input(_ data: Data) {
+        guard !openPending else { return }
         work.async { [self] in
             guard let session = current else { return }
             var offset = 0
@@ -633,7 +639,9 @@ public final class ShellClient: @unchecked Sendable {
             return
         }
         guard id == winner else { return }
+        #if DEBUG
         defer { lineHandled.get()?(message.t) }
+        #endif
         switch message.t {
         case ShellEnvelope.macInfo:
             emit(.macInfo(message))
@@ -652,9 +660,10 @@ public final class ShellClient: @unchecked Sendable {
             let ref = message.ref, onEvent = self.onEvent
             callbackQueue.async { [self] in
                 if takesOver(ref) {
-                    work.async { [self] in current = goneSessions.contains(id) ? nil : id }
+                    work.async { [self] in current = goneSessions.remove(id) == nil ? id : nil }
                     onEvent(.opened(id))
                 } else {
+                    work.async { [self] in goneSessions.remove(id) }
                     onEvent(.openedDetached(id))
                 }
             }
@@ -667,12 +676,12 @@ public final class ShellClient: @unchecked Sendable {
         case ShellEnvelope.ended:
             guard let id = message.session else { return }
             if current == id { current = nil }
-            goneSessions.insert(id)
+            if openUnanswered { goneSessions.insert(id) }
             emit(.ended(session: id, exitStatus: message.exitStatus ?? -1))
         case ShellEnvelope.detached:
             guard let id = message.session else { return }
             if current == id { current = nil }
-            goneSessions.insert(id)
+            if openUnanswered { goneSessions.insert(id) }
             emit(.detached(session: id))
         case ShellEnvelope.historyList:
             emit(.history(message.history ?? []))
@@ -749,6 +758,12 @@ public final class ShellClient: @unchecked Sendable {
         let ref = ref ?? lastOpenRef
         answeredThrough = max(answeredThrough, ref)
         return ref == 0 || ref > overtakenThrough
+    }
+
+    /// Some `open` has no answer delivered yet, overtaken or not.
+    private var openUnanswered: Bool {
+        opensLock.lock(); defer { opensLock.unlock() }
+        return lastOpenRef > answeredThrough
     }
 
     private func answered(_ ref: Int) {
