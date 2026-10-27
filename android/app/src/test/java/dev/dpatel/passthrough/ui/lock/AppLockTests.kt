@@ -205,6 +205,31 @@ class AppLockTests {
         assertFalse(l.claimArrivalPrompt())
     }
 
+    @Test fun leavingWithThePromptUpAsksOnReturn() {
+        val l = lock()
+        assertTrue(l.claimArrivalPrompt())
+        l.beginPrompt()
+        l.onBackground()                         // Home while the prompt is up
+        l.endPrompt(systemCancelled = true)      // the system closes it
+        l.onForeground()
+        assertTrue(l.claimArrivalPrompt())
+    }
+
+    @Test fun cancelInTheAppDoesNotAskAgain() {
+        val l = lock()
+        assertTrue(l.claimArrivalPrompt())
+        l.beginPrompt()
+        l.endPrompt(systemCancelled = true)      // closed while in front
+        assertFalse(l.claimArrivalPrompt())
+    }
+
+    @Test fun releasedArrivalPromptAsksAgain() {
+        val l = lock()
+        assertTrue(l.claimArrivalPrompt())
+        l.releaseArrivalPrompt()                 // never reached the screen
+        assertTrue(l.claimArrivalPrompt())
+    }
+
     @Test fun unlockClearsPromptInFlight() {
         val l = lock()
         l.beginPrompt()

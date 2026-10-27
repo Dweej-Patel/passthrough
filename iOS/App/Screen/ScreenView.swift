@@ -211,8 +211,8 @@ struct ScreenView: View {
 private extension View {
     /// A full 44 pt tap target in the landscape side bar, where the controls sit close
     /// together; the portrait top bar keeps its tighter row.
-    @ViewBuilder func sideTarget(_ on: Bool) -> some View {
-        if on { frame(width: 44, height: 44).contentShape(Rectangle()) } else { self }
+    func sideTarget(_ on: Bool) -> some View {
+        frame(width: on ? 44 : nil, height: on ? 44 : nil).contentShape(Rectangle())
     }
 }
 

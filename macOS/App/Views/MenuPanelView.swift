@@ -585,7 +585,7 @@ struct PhoneHereSection: View {
 
 /// A panel row that opens something. On the bare panel it would read as a label, so it gets
 /// a card like the switches above it, and lights up mint under the pointer and when pressed.
-/// A row that needs setup keeps its amber fill instead.
+/// A row that needs setup keeps its amber fill, a shade deeper under the pointer.
 private struct PanelRowButtonStyle: ButtonStyle {
     var attention: Bool
 
@@ -608,7 +608,7 @@ private struct PanelRowButtonStyle: ButtonStyle {
         }
 
         private var fill: Color {
-            if attention { return configuration.isPressed ? PTColor.attention.opacity(0.12) : .clear }
+            if attention { return PTColor.attention.opacity(configuration.isPressed ? 0.14 : hovering ? 0.08 : 0) }
             if configuration.isPressed { return PTColor.surfaceOn.opacity(0.7) }
             return hovering ? PTColor.surfaceOn : PTColor.surface
         }

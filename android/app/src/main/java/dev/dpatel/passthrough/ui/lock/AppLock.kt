@@ -48,7 +48,15 @@ class AppLock(private val clock: () -> Long = SystemClock::elapsedRealtime) {
         return true
     }
 
-    fun endPrompt() { promptInFlight = false }
+    /**
+     * [systemCancelled]: the system closed the prompt (ERROR_CANCELED). When that happens
+     * while the app is in the background, the user left with the prompt up, so the next
+     * trip to the front asks again ([onBackground] couldn't tell while the prompt was up).
+     */
+    fun endPrompt(systemCancelled: Boolean = false) {
+        promptInFlight = false
+        if (systemCancelled && backgroundedAt != null) arrivalPromptDue = true
+    }
 
     /**
      * Takes this trip's one prompt that the lock screen makes by itself; false once it's
@@ -60,6 +68,9 @@ class AppLock(private val clock: () -> Long = SystemClock::elapsedRealtime) {
         arrivalPromptDue = false
         return true
     }
+
+    /** Gives back a claimed arrival prompt that never reached the screen. */
+    fun releaseArrivalPrompt() { arrivalPromptDue = true }
 
     fun onUnlocked() {
         promptInFlight = false

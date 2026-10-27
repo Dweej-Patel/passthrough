@@ -171,7 +171,7 @@ private fun LockScreen(lock: AppLock, activity: FragmentActivity) {
                 }
 
                 override fun onAuthenticationError(errorCode: Int, errString: CharSequence) {
-                    lock.endPrompt()
+                    lock.endPrompt(systemCancelled = errorCode == BiometricPrompt.ERROR_CANCELED)
                     when (errorCode) {
                         BiometricPrompt.ERROR_USER_CANCELED,
                         BiometricPrompt.ERROR_NEGATIVE_BUTTON,
@@ -187,7 +187,8 @@ private fun LockScreen(lock: AppLock, activity: FragmentActivity) {
         )
     }
 
-    fun unlock() {
+    /** [onArrival]: the one prompt per trip to the front, given back if it never shows. */
+    fun unlock(onArrival: Boolean = false) {
         if (!hasSecureLock(activity)) {
             // No secure lock screen: there is nothing to check, so don't strand the user.
             Log.i(TAG, "No device lock screen set; unlocking without authentication")
@@ -203,7 +204,14 @@ private fun LockScreen(lock: AppLock, activity: FragmentActivity) {
                 withContext(Dispatchers.IO) { runCatching { Runtime.shellVault.unlockCipher(Runtime.registry) }.getOrNull() }
             } catch (e: CancellationException) {
                 lock.endPrompt()   // the lock screen went away first: free the prompt slot
+                if (onArrival) lock.releaseArrivalPrompt()
                 throw e
+            }
+            // Stopped meanwhile: authenticate() would do nothing and never call back, holding the slot.
+            if (activity.supportFragmentManager.isStateSaved) {
+                lock.endPrompt()
+                if (onArrival) lock.releaseArrivalPrompt()
+                return@launch
             }
             try {
                 if (cipher != null) prompt.authenticate(promptInfo(), BiometricPrompt.CryptoObject(cipher))
@@ -223,11 +231,11 @@ private fun LockScreen(lock: AppLock, activity: FragmentActivity) {
     LaunchedEffect(activity, lock) {
         activity.repeatOnLifecycle(Lifecycle.State.RESUMED) {
             method = unlockMethod(activity)
-            if (!hasSecureLock(activity) || lock.claimArrivalPrompt()) unlock()
+            if (!hasSecureLock(activity)) unlock() else if (lock.claimArrivalPrompt()) unlock(onArrival = true)
         }
     }
 
-    LockScreenContent(reason, method, error, onUnlock = ::unlock)
+    LockScreenContent(reason, method, error, onUnlock = { unlock() })
 }
 
 @Composable

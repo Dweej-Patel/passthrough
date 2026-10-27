@@ -77,7 +77,13 @@ final class AppLock: ObservableObject {
     func unlock() async {
         guard !isUnlocked, !isEvaluating else { return }
         isEvaluating = true
-        defer { isEvaluating = false }
+        await evaluate()
+        isEvaluating = false
+        // The app came back while this was running (the trip away cancelled it): ask now.
+        if !isUnlocked, UIApplication.shared.applicationState == .active { unlockOnArrival() }
+    }
+
+    private func evaluate() async {
         failure = nil
 
         let ctx = LAContext()
@@ -113,8 +119,11 @@ final class AppLock: ObservableObject {
         #endif
         guard !askedOnArrival else { return }
         // Spent even when the app arrives still unlocked, so a relock later on waits for a tap.
+        if isUnlocked { askedOnArrival = true; return }
+        // An evaluation from before the trip away is still winding down: `unlock()` asks
+        // once it has.
+        guard !isEvaluating else { return }
         askedOnArrival = true
-        guard !isUnlocked, !isEvaluating else { return }
         Task { await unlock() }
     }
 
