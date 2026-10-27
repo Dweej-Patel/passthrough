@@ -146,9 +146,10 @@ private fun PrivacyWindow(activity: FragmentActivity) {
 }
 
 /**
- * The branded lock screen. It never starts the authenticator by itself: the
- * prompt appears only when the user taps Unlock. A device with no secure lock
- * screen has nothing to check, so it passes straight through.
+ * The branded lock screen. It asks once by itself each time the app comes to the
+ * front locked ([AppLock.claimArrivalPrompt]); after that the prompt appears when
+ * the user taps Unlock. A device with no secure lock screen has nothing to check,
+ * so it passes straight through.
  */
 @Composable
 private fun LockScreen(lock: AppLock, activity: FragmentActivity) {
@@ -216,11 +217,13 @@ private fun LockScreen(lock: AppLock, activity: FragmentActivity) {
     }
 
     // Each time the screen comes up: re-read what the device offers (the user may have just
-    // enrolled a fingerprint), and pass through when there is no lock screen at all. Never prompts.
+    // enrolled a fingerprint), pass through when there is no lock screen at all, and otherwise
+    // ask once per trip to the front. RESUMED also returns when the prompt closes, which the
+    // claim keeps from asking again.
     LaunchedEffect(activity, lock) {
         activity.repeatOnLifecycle(Lifecycle.State.RESUMED) {
             method = unlockMethod(activity)
-            if (!hasSecureLock(activity)) unlock()
+            if (!hasSecureLock(activity) || lock.claimArrivalPrompt()) unlock()
         }
     }
 

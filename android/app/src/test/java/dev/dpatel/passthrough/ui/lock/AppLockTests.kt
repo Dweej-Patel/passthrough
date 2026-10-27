@@ -106,7 +106,7 @@ class AppLockTests {
         assertEquals(LockReason.AWAY, l.reason.value)
     }
 
-    /** The lock never claims the prompt slot by itself: the lock screen shows until the user taps Unlock. */
+    /** Locking itself never claims the prompt slot: the lock screen starts the prompt. */
     @Test fun lockingNeverStartsAPrompt() {
         val l = lock()
         assertFalse(l.promptInFlight)
@@ -153,6 +153,56 @@ class AppLockTests {
         now += 61_000
         l.onForeground()
         assertFalse(l.unlocked.value)
+    }
+
+    @Test fun coldStartAsksOnce() {
+        val l = lock()
+        assertTrue(l.claimArrivalPrompt())
+        assertFalse(l.claimArrivalPrompt())   // the prompt closing resumes the activity again
+    }
+
+    @Test fun eachTripAwayAsksOnceMore() {
+        val l = lock()
+        l.claimArrivalPrompt()   // cancelled
+        l.onBackground()
+        l.onForeground()
+        assertTrue(l.claimArrivalPrompt())
+        assertFalse(l.claimArrivalPrompt())
+    }
+
+    @Test fun rotationDoesNotAskAgain() {
+        val l = lock()
+        l.claimArrivalPrompt()
+        l.onBackground(changingConfigurations = true)
+        l.onForeground()
+        assertFalse(l.claimArrivalPrompt())
+    }
+
+    @Test fun credentialScreenDoesNotAskAgain() {
+        val l = lock()
+        assertTrue(l.claimArrivalPrompt())
+        l.beginPrompt()
+        l.onBackground()   // credential screen stops the activity (API < 29)
+        l.onForeground()
+        l.endPrompt()      // user cancelled
+        assertFalse(l.claimArrivalPrompt())
+    }
+
+    @Test fun relockAfterExpiryAsks() {
+        val l = lock().also { it.claimArrivalPrompt(); it.onUnlocked() }
+        l.onBackground()
+        now += 61_000
+        l.onForeground()
+        assertTrue(l.claimArrivalPrompt())
+    }
+
+    @Test fun relockWhileInUseWaitsForATap() {
+        val l = lock().also { it.claimArrivalPrompt(); it.onUnlocked() }
+        l.onBackground()
+        now += 5_000
+        l.onForeground()   // back within the grace period, still unlocked
+        l.relock()
+        assertFalse(l.claimArrivalPrompt())
     }
 
     @Test fun unlockClearsPromptInFlight() {

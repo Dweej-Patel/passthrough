@@ -96,7 +96,7 @@ private struct OverlayView: View {
     }
 }
 
-/// The branded lock screen. Authentication starts only from its button.
+/// The branded lock screen. It asks once by itself as the app arrives; its button asks again.
 private struct LockScreen: View {
     @EnvironmentObject private var lock: AppLock
     @State private var method: AppLock.Method = .passcode
