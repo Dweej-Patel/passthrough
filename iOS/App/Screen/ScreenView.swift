@@ -75,34 +75,28 @@ struct ScreenView: View {
 
     /// Landscape: the same controls in a column beside the screen. With the keyboard up
     /// there's only room for about three of them, so they pair up in two columns (the
-    /// screen is letterboxed then, so the width is free) and scroll as a last resort.
+    /// screen is letterboxed then, so the width is free). The shape follows `keyboard`,
+    /// never a measurement: one that depends on the space the keyboard leaves (as
+    /// ViewThatFits did) can flip back and forth as the keyboard comes up, and hung the app.
     private var sideBar: some View {
-        ViewThatFits(in: .vertical) {
-            VStack(spacing: 6) {
-                doneButton
-                Spacer(minLength: 0)
-                if model.phase == .live {
+        VStack(spacing: 6) {
+            doneButton
+            Spacer(minLength: 0)
+            if model.phase == .live {
+                if keyboard {
+                    HStack(spacing: 4) { clipboardMenu; desktopsMenu }
+                    HStack(spacing: 4) { modeButton; keyboardButton }
+                } else {
                     clipboardMenu
                     desktopsMenu
                     modeButton
                     keyboardButton
                 }
             }
-            ScrollView {
-                VStack(alignment: .leading, spacing: 6) {
-                    doneButton
-                    if model.phase == .live {
-                        HStack(spacing: 4) { clipboardMenu; desktopsMenu }
-                        HStack(spacing: 4) { modeButton; keyboardButton }
-                    }
-                }
-            }
-            .scrollBounceBehavior(.basedOnSize)
-            .scrollIndicators(.hidden)
         }
         .font(.title3)
         .tint(PTTheme.accentEnd)
-        .padding(.vertical, 14)
+        .padding(.vertical, keyboard ? 8 : 14)
         .padding(.horizontal, 6)
     }
 

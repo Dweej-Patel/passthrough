@@ -511,10 +511,15 @@ struct ScreenCanvas: UIViewRepresentable {
     func updateUIView(_ view: ScreenCanvasView, context: Context) {
         view.show(model.image, size: model.screenSize)
         if view.mode != mode { view.mode = mode }
-        if keyboard, !view.isFirstResponder {
-            _ = view.becomeFirstResponder()
-        } else if !keyboard, view.isFirstResponder {
-            _ = view.resignFirstResponder()
+        guard keyboard != view.isFirstResponder else { return }
+        // After this update, not inside it: changing the first responder makes SwiftUI read
+        // its graph again (focus), and doing that mid-update hung the app in landscape.
+        DispatchQueue.main.async { [keyboard] in
+            if keyboard, !view.isFirstResponder {
+                _ = view.becomeFirstResponder()
+            } else if !keyboard, view.isFirstResponder {
+                _ = view.resignFirstResponder()
+            }
         }
     }
 
