@@ -146,9 +146,10 @@ private fun PrivacyWindow(activity: FragmentActivity) {
 }
 
 /**
- * The branded lock screen. It never starts the authenticator by itself: the
- * prompt appears only when the user taps Unlock. A device with no secure lock
- * screen has nothing to check, so it passes straight through.
+ * The branded lock screen. It asks once by itself each time the app comes to the
+ * front locked ([AppLock.claimArrivalPrompt]); after that the prompt appears when
+ * the user taps Unlock. A device with no secure lock screen has nothing to check,
+ * so it passes straight through.
  */
 @Composable
 private fun LockScreen(lock: AppLock, activity: FragmentActivity) {
@@ -170,7 +171,7 @@ private fun LockScreen(lock: AppLock, activity: FragmentActivity) {
                 }
 
                 override fun onAuthenticationError(errorCode: Int, errString: CharSequence) {
-                    lock.endPrompt()
+                    lock.endPrompt(systemCancelled = errorCode == BiometricPrompt.ERROR_CANCELED)
                     when (errorCode) {
                         BiometricPrompt.ERROR_USER_CANCELED,
                         BiometricPrompt.ERROR_NEGATIVE_BUTTON,
@@ -186,7 +187,8 @@ private fun LockScreen(lock: AppLock, activity: FragmentActivity) {
         )
     }
 
-    fun unlock() {
+    /** [onArrival]: the one prompt per trip to the front, given back if it never shows. */
+    fun unlock(onArrival: Boolean = false) {
         if (!hasSecureLock(activity)) {
             // No secure lock screen: there is nothing to check, so don't strand the user.
             Log.i(TAG, "No device lock screen set; unlocking without authentication")
@@ -202,7 +204,14 @@ private fun LockScreen(lock: AppLock, activity: FragmentActivity) {
                 withContext(Dispatchers.IO) { runCatching { Runtime.shellVault.unlockCipher(Runtime.registry) }.getOrNull() }
             } catch (e: CancellationException) {
                 lock.endPrompt()   // the lock screen went away first: free the prompt slot
+                if (onArrival) lock.releaseArrivalPrompt()
                 throw e
+            }
+            // Stopped meanwhile: authenticate() would do nothing and never call back, holding the slot.
+            if (activity.supportFragmentManager.isStateSaved) {
+                lock.endPrompt()
+                if (onArrival) lock.releaseArrivalPrompt()
+                return@launch
             }
             try {
                 if (cipher != null) prompt.authenticate(promptInfo(), BiometricPrompt.CryptoObject(cipher))
@@ -216,15 +225,17 @@ private fun LockScreen(lock: AppLock, activity: FragmentActivity) {
     }
 
     // Each time the screen comes up: re-read what the device offers (the user may have just
-    // enrolled a fingerprint), and pass through when there is no lock screen at all. Never prompts.
+    // enrolled a fingerprint), pass through when there is no lock screen at all, and otherwise
+    // ask once per trip to the front. RESUMED also returns when the prompt closes, which the
+    // claim keeps from asking again.
     LaunchedEffect(activity, lock) {
         activity.repeatOnLifecycle(Lifecycle.State.RESUMED) {
             method = unlockMethod(activity)
-            if (!hasSecureLock(activity)) unlock()
+            if (!hasSecureLock(activity)) unlock() else if (lock.claimArrivalPrompt()) unlock(onArrival = true)
         }
     }
 
-    LockScreenContent(reason, method, error, onUnlock = ::unlock)
+    LockScreenContent(reason, method, error, onUnlock = { unlock() })
 }
 
 @Composable

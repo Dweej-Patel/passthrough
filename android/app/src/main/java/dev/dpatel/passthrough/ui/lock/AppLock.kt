@@ -20,8 +20,9 @@ enum class LockReason {
  * Gate state for the whole app UI. Locks the UI only; the foreground service keeps serving.
  * Starts locked, relocks once the app has been in the background for [RELOCK_AFTER_MS].
  *
- * Never asks for authentication by itself: the lock screen shows first and the
- * authenticator starts only when the user taps Unlock.
+ * Like Safari's locked private tabs on the iPhone: each trip to the front that finds the app
+ * locked asks once by itself ([claimArrivalPrompt]). After a cancel or a miss, Unlock asks
+ * again; nothing asks by itself again until the app has been in the background.
  */
 class AppLock(private val clock: () -> Long = SystemClock::elapsedRealtime) {
     private val _unlocked = MutableStateFlow(false)
@@ -32,6 +33,9 @@ class AppLock(private val clock: () -> Long = SystemClock::elapsedRealtime) {
     val reason: StateFlow<LockReason> = _reason.asStateFlow()
 
     private var backgroundedAt: Long? = null
+
+    /** This trip to the front may still ask once by itself; a cold start is one. */
+    private var arrivalPromptDue = true
 
     /** True while an authenticator is showing. Lives here so it survives activity recreation. */
     var promptInFlight = false
@@ -44,7 +48,29 @@ class AppLock(private val clock: () -> Long = SystemClock::elapsedRealtime) {
         return true
     }
 
-    fun endPrompt() { promptInFlight = false }
+    /**
+     * [systemCancelled]: the system closed the prompt (ERROR_CANCELED). When that happens
+     * while the app is in the background, the user left with the prompt up, so the next
+     * trip to the front asks again ([onBackground] couldn't tell while the prompt was up).
+     */
+    fun endPrompt(systemCancelled: Boolean = false) {
+        promptInFlight = false
+        if (systemCancelled && backgroundedAt != null) arrivalPromptDue = true
+    }
+
+    /**
+     * Takes this trip's one prompt that the lock screen makes by itself; false once it's
+     * taken, until the app has really been in the background. Rotation and a relock
+     * while in use ([relock]) don't bring it back.
+     */
+    fun claimArrivalPrompt(): Boolean {
+        if (!arrivalPromptDue) return false
+        arrivalPromptDue = false
+        return true
+    }
+
+    /** Gives back a claimed arrival prompt that never reached the screen. */
+    fun releaseArrivalPrompt() { arrivalPromptDue = true }
 
     fun onUnlocked() {
         promptInFlight = false
@@ -57,15 +83,22 @@ class AppLock(private val clock: () -> Long = SystemClock::elapsedRealtime) {
         // Rotation is not a trip to the background.
         if (changingConfigurations) return
         if (backgroundedAt == null) backgroundedAt = clock()
+        // The device credential screen stops the activity mid-prompt (API < 29): that's
+        // the prompt itself, not a trip away, so a cancel there must not bring a new one.
+        if (!promptInFlight) arrivalPromptDue = true
     }
 
     /** Decides expiry. Call as the activity starts, before content can be drawn. */
     fun onForeground() {
-        val since = backgroundedAt ?: return
+        val since = backgroundedAt
         backgroundedAt = null
-        val away = clock() - since
-        // A negative interval means the clock moved; treat that as expired.
-        if (away >= RELOCK_AFTER_MS || away < 0) lock(LockReason.AWAY)
+        if (since != null) {
+            val away = clock() - since
+            // A negative interval means the clock moved; treat that as expired.
+            if (away >= RELOCK_AFTER_MS || away < 0) lock(LockReason.AWAY)
+        }
+        // Back while still unlocked: this trip's prompt is spent, so a relock later on waits for a tap.
+        if (_unlocked.value) arrivalPromptDue = false
     }
 
     /**

@@ -5,9 +5,9 @@ import SwiftUI
 /// Gate for the whole app UI. Face ID / Touch ID with passcode fallback (passcode alone when no
 /// biometrics are enrolled). It locks the UI only; the packet tunnel keeps serving.
 ///
-/// Authentication never starts by itself: the lock screen shows first and `unlock()` runs when
-/// the user taps its button. The one exception is a device with no passcode at all, where there
-/// is nothing to check (`unlockIfNothingToCheck()`).
+/// Like Safari's locked private tabs: each time the app comes to the front locked, it asks once
+/// by itself (`unlockOnArrival()`). After a cancel or a miss the lock screen's button asks again;
+/// nothing asks by itself again until the app has been in the background.
 @MainActor
 final class AppLock: ObservableObject {
     /// How this device can unlock, for the lock screen's button and Settings.
@@ -49,6 +49,10 @@ final class AppLock: ObservableObject {
 
     private static let log = Logger(subsystem: "app.passthrough", category: "AppLock")
     private var backgroundedAt: Date?
+    /// The one prompt `unlockOnArrival()` makes per trip to the front has been made. Only a trip
+    /// to the background clears it, so the .inactive/.active around the Face ID sheet can't
+    /// prompt again, and a relock while in use (`invalidateSession()`) waits for a tap.
+    private var askedOnArrival = false
 
     /// Reads the device's enrolled biometry without prompting.
     var method: Method {
@@ -68,11 +72,18 @@ final class AppLock: ObservableObject {
         return .passcode
     }
 
-    /// Asks for Face ID / Touch ID / the passcode. Only ever called from a user's tap.
+    /// Asks for Face ID / Touch ID / the passcode: from the lock screen's button, or once by
+    /// itself as the app arrives (`unlockOnArrival()`).
     func unlock() async {
         guard !isUnlocked, !isEvaluating else { return }
         isEvaluating = true
-        defer { isEvaluating = false }
+        await evaluate()
+        isEvaluating = false
+        // The app came back while this was running (the trip away cancelled it): ask now.
+        if !isUnlocked, UIApplication.shared.applicationState == .active { unlockOnArrival() }
+    }
+
+    private func evaluate() async {
         failure = nil
 
         let ctx = LAContext()
@@ -98,14 +109,21 @@ final class AppLock: ObservableObject {
         }
     }
 
-    /// Unlocks without a prompt only when the device has no passcode (nothing to check).
-    func unlockIfNothingToCheck() {
+    /// Called whenever the app becomes active: asks once, by itself, if the app is locked.
+    /// With no passcode on the device there is nothing to check, and this just opens.
+    func unlockOnArrival() {
         #if DEBUG && targetEnvironment(simulator)
         // Screenshots of the demo screens: the demo touches no keys, and this
         // never exists on a phone or in a Release build.
         if !isUnlocked, ShellModel.demoState != nil { return open(with: LAContext()) }
         #endif
-        guard !isUnlocked, method == .none else { return }
+        guard !askedOnArrival else { return }
+        // Spent even when the app arrives still unlocked, so a relock later on waits for a tap.
+        if isUnlocked { askedOnArrival = true; return }
+        // An evaluation from before the trip away is still winding down: `unlock()` asks
+        // once it has.
+        guard !isEvaluating else { return }
+        askedOnArrival = true
         Task { await unlock() }
     }
 
@@ -161,6 +179,7 @@ final class AppLock: ObservableObject {
 
     private func markBackground() {
         if backgroundedAt == nil { backgroundedAt = Date() }
+        askedOnArrival = false
         // A message from before the trip away is stale by the time anyone sees the lock again.
         failure = nil
     }
@@ -173,9 +192,9 @@ final class AppLock: ObservableObject {
         if away >= Self.relockAfter || away < 0 { lock() }
     }
 
-    /// Ends the unlocked session so the lock screen asks again: the one prompt comes from the
-    /// lock, when the user taps it. The shell model calls this when the vault can't read a key
-    /// with `context`.
+    /// Ends the unlocked session so the lock screen asks again, from its button: the app is
+    /// already in front, so this doesn't prompt by itself. The shell model calls this when
+    /// the vault can't read a key with `context`.
     func invalidateSession() {
         guard isUnlocked else { return }
         notice = "Unlock again to use Remote shell."

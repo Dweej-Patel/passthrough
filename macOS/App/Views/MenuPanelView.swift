@@ -539,15 +539,16 @@ struct PhoneHereSection: View {
                     }
                 }
                 Button { SettingsWindow.show(openSettings, tab: .remoteShell) } label: {
-                    row(symbol: "apple.terminal", attention: shellNeedsSetup) {
+                    row(symbol: "apple.terminal", symbolColor: shellNeedsSetup ? .secondary : PTColor.tintText, attention: shellNeedsSetup) {
                         Text(shellStatus(open: running.count)).font(.system(size: 12.5, weight: .medium))
                             .foregroundStyle(shellNeedsSetup ? PTColor.attentionText : .primary)
                     } trailing: {
-                        Image(systemName: "chevron.right").font(.caption2.weight(.semibold)).foregroundStyle(.secondary)
+                        Image(systemName: "chevron.right").font(.caption.weight(.semibold))
+                            .foregroundStyle(shellNeedsSetup ? PTColor.attentionText : .secondary)
                     }
                     .contentShape(Rectangle())
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(PanelRowButtonStyle(attention: shellNeedsSetup))
                 .help("Open Remote Shell settings")
             }
             .task { fullDiskAccess = FullDiskAccess.isGranted }
@@ -566,10 +567,11 @@ struct PhoneHereSection: View {
         return "Remote shell ready for \(shell.phones.count) phone\(shell.phones.count == 1 ? "" : "s")"
     }
 
-    private func row<Content: View, Trailing: View>(symbol: String, attention: Bool, @ViewBuilder content: () -> Content,
+    private func row<Content: View, Trailing: View>(symbol: String, symbolColor: Color = .secondary, attention: Bool,
+                                                    @ViewBuilder content: () -> Content,
                                                     @ViewBuilder trailing: () -> Trailing) -> some View {
         HStack(spacing: 10) {
-            Image(systemName: symbol).font(.system(size: 12, weight: .semibold)).foregroundStyle(.secondary)
+            Image(systemName: symbol).font(.system(size: 12, weight: .semibold)).foregroundStyle(symbolColor)
                 .frame(width: 18)
             content()
             Spacer(minLength: 6)
@@ -581,6 +583,37 @@ struct PhoneHereSection: View {
     }
 }
 
+/// A panel row that opens something. On the bare panel it would read as a label, so it gets
+/// a card like the switches above it, and lights up mint under the pointer and when pressed.
+/// A row that needs setup keeps its amber fill, a shade deeper under the pointer.
+private struct PanelRowButtonStyle: ButtonStyle {
+    var attention: Bool
+
+    func makeBody(configuration: Configuration) -> some View {
+        RowBody(configuration: configuration, attention: attention)
+    }
+
+    private struct RowBody: View {
+        let configuration: ButtonStyleConfiguration
+        let attention: Bool
+        @State private var hovering = false
+
+        var body: some View {
+            let shape = RoundedRectangle(cornerRadius: 10, style: .continuous)
+            configuration.label
+                .background(fill, in: shape)
+                .overlay(shape.strokeBorder(attention ? Color.clear : PTColor.hairline, lineWidth: 1))
+                .onHover { hovering = $0 }
+                .animation(.easeOut(duration: 0.12), value: hovering)
+        }
+
+        private var fill: Color {
+            if attention { return PTColor.attention.opacity(configuration.isPressed ? 0.14 : hovering ? 0.08 : 0) }
+            if configuration.isPressed { return PTColor.surfaceOn.opacity(0.7) }
+            return hovering ? PTColor.surfaceOn : PTColor.surface
+        }
+    }
+}
 
 /// Live picture of the route traffic takes right now.
 struct FlowCard: View {

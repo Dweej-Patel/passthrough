@@ -73,25 +73,37 @@ struct ScreenView: View {
         .padding(.vertical, 10)
     }
 
-    /// Landscape: the same controls in a column beside the screen.
+    /// Landscape: the same controls in a column beside the screen. With the keyboard up
+    /// there's only room for about three of them, so they pair up in two columns (the
+    /// screen is letterboxed then, so the width is free). The shape follows `keyboard`,
+    /// never a measurement: one that depends on the space the keyboard leaves (as
+    /// ViewThatFits did) can flip back and forth as the keyboard comes up, and hung the app.
     private var sideBar: some View {
-        VStack(spacing: 22) {
-            Button { model.stop(); dismiss() } label: { Image(systemName: "xmark") }
-                .font(.body.weight(.semibold))
-                .accessibilityLabel("Done")
+        VStack(spacing: 6) {
+            doneButton
             Spacer(minLength: 0)
             if model.phase == .live {
-                clipboardMenu
-                desktopsMenu
-                modeButton
-                keyboardButton
+                if keyboard {
+                    HStack(spacing: 4) { clipboardMenu; desktopsMenu }
+                    HStack(spacing: 4) { modeButton; keyboardButton }
+                } else {
+                    clipboardMenu
+                    desktopsMenu
+                    modeButton
+                    keyboardButton
+                }
             }
         }
         .font(.title3)
         .tint(PTTheme.accentEnd)
-        .frame(width: 44)
-        .padding(.vertical, 14)
+        .padding(.vertical, keyboard ? 8 : 14)
         .padding(.horizontal, 6)
+    }
+
+    private var doneButton: some View {
+        Button { model.stop(); dismiss() } label: { Image(systemName: "xmark").sideTarget(landscape) }
+            .font(.body.weight(.semibold))
+            .accessibilityLabel("Done")
     }
 
     private var modeButton: some View {
@@ -99,6 +111,7 @@ struct ScreenView: View {
             modeSetting = (mode == .trackpad ? ScreenTouchMode.direct : .trackpad).rawValue
         } label: {
             Image(systemName: mode == .trackpad ? "rectangle.and.hand.point.up.left" : "hand.point.up.left")
+                .sideTarget(landscape)
         }
         .accessibilityLabel(mode == .trackpad ? "Trackpad mode. Switch to tapping where you click." : "Direct mode. Switch to trackpad.")
     }
@@ -106,6 +119,7 @@ struct ScreenView: View {
     private var keyboardButton: some View {
         Button { keyboard.toggle() } label: {
             Image(systemName: keyboard ? "keyboard.chevron.compact.down" : "keyboard")
+                .sideTarget(landscape)
         }
         .accessibilityLabel(keyboard ? "Hide keyboard" : "Show keyboard")
     }
@@ -117,7 +131,7 @@ struct ScreenView: View {
                 .disabled(model.copying)
             Button { model.pastePhoneClipboard() } label: { Label("Paste on \(model.macName)", systemImage: "doc.on.clipboard") }
         } label: {
-            Image(systemName: "doc.on.clipboard")
+            Image(systemName: "doc.on.clipboard").sideTarget(landscape)
         }
         .accessibilityLabel("Copy and paste")
     }
@@ -133,7 +147,7 @@ struct ScreenView: View {
             }
             Button { model.perform(.showDesktop) } label: { Label("Show desktop", systemImage: "menubar.dock.rectangle") }
         } label: {
-            Image(systemName: "square.stack.3d.up")
+            Image(systemName: "square.stack.3d.up").sideTarget(landscape)
         }
         .accessibilityLabel("Desktops and Mission Control")
     }
@@ -185,6 +199,14 @@ struct ScreenView: View {
             }
             .padding(32)
         }
+    }
+}
+
+private extension View {
+    /// A full 44 pt tap target in the landscape side bar, where the controls sit close
+    /// together; the portrait top bar keeps its tighter row.
+    func sideTarget(_ on: Bool) -> some View {
+        frame(width: on ? 44 : nil, height: on ? 44 : nil).contentShape(Rectangle())
     }
 }
 
