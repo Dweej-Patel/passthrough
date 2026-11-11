@@ -62,6 +62,8 @@ struct MacHomeView: View {
                         Button { showSwitcher = true } label: {
                             MacAvatar(macID: macID ?? "", name: macName, badge: shell.otherMacNeedsYou)
                         }
+                        .accessibilityLabel("Your Macs")
+                        .accessibilityValue(shell.otherMacNeedsYou ? "\(macName), another Mac needs you" : macName)
                     } else {
                         Button { showSettings = true } label: { Image(systemName: "gearshape") }
                             .accessibilityLabel("Settings")

@@ -34,7 +34,10 @@ final class MacActivityController {
     /// The Mac selected as of the last refresh, even while it is still connecting.
     private var selection: (id: String?, name: String)?
 
-    private var activity: Activity<MacActivityAttributes>? { Activity<MacActivityAttributes>.activities.first { $0.activityState != .ended && !endedIDs.contains($0.id) } }
+    /// The one on the Lock Screen: not ended, nor swiped away by the user (`.dismissed`).
+    private var activity: Activity<MacActivityAttributes>? {
+        Activity<MacActivityAttributes>.activities.first { [.active, .stale].contains($0.activityState) && !endedIDs.contains($0.id) }
+    }
     /// Activities an end was asked for that hasn't landed yet.
     private var endedIDs: Set<String> = []
     private var announcedMac: String?
@@ -122,7 +125,9 @@ final class MacActivityController {
         if let selected { lastSelected = selected }
         if let selection { self.selection = selection }
         if let activity {
-            guard let seen else { announced(); return }
+            // Nothing current from its Mac (just switched away, not heard from its watch yet):
+            // drop the last snapshot too, so the Keep-awake grace check can't end it on stale state.
+            guard let seen else { lastSeen = nil; announced(); return }
             lastSeen = seen
             if seen.state?.awake == true { awaitingAwakeUntil = nil }
             update(activity, seen)

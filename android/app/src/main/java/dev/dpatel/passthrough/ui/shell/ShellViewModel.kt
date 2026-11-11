@@ -931,6 +931,15 @@ class ShellViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     /**
+     * Keeps the connected Mac's finished sessions before they're cleared, so a finished tab can still
+     * be removed after switching back while that Mac is out of reach. Every path that leaves a Mac
+     * (another shell Mac, an internet-only one, no access) goes through here.
+     */
+    private fun keepEnded() {
+        clientMacID?.let { endedByMac[it] = _ended.value }
+    }
+
+    /**
      * The selected Mac is paired but has no usable shell credential: internet only ([reach] NO_ACCESS), or
      * a grant whose key can't be read (its recovery state). Nothing of the Mac left (sessions, tabs,
      * state) shows, and no tabs are restored or saved for this one: [clientMacID] is null, so the next
@@ -939,6 +948,7 @@ class ShellViewModel(app: Application) : AndroidViewModel(app) {
     private fun idleOnMacWithoutShell(reach: ShellReach) {
         stopRedialing()
         dropConnection()
+        keepEnded()
         resetSessions()
         clientMacID = null
         _lastError.value = null
@@ -951,8 +961,7 @@ class ShellViewModel(app: Application) : AndroidViewModel(app) {
      * becomes [macID] here, so nothing is remembered under the Mac being left.
      */
     private fun switchSessions(macID: String) {
-        // Kept so a finished tab can still be removed after switching back while that Mac is out of reach.
-        clientMacID?.let { endedByMac[it] = _ended.value }
+        keepEnded()
         resetSessions()
         _ended.value = endedByMac[macID] ?: ShellEndedSessions()
         clientMacID = macID
@@ -1054,6 +1063,7 @@ class ShellViewModel(app: Application) : AndroidViewModel(app) {
             discovery.stop()
             // A paired Mac (internet only, or no grant yet) stays selected; with none paired, nothing is.
             _selectedMacID.value = MacProfiles.selection(_selectedMacID.value, Runtime.settings.shellLastMac(), paired, emptyList())
+            keepEnded()
             clientMacID = null
             resetSessions()
         }

@@ -12,10 +12,14 @@ final class ShellRouter: ObservableObject {
     /// The Mac tab's "This iPhone" screen is pushed.
     @Published var showThisPhone = false
 
-    func dismissAll() {
+    /// True when something was showing (its dismissal is then still under way).
+    @discardableResult
+    func dismissAll() -> Bool {
+        let shown = terminal != nil || showHistory || showScreen
         terminal = nil
         showHistory = false
         showScreen = false
+        return shown
     }
 }
 
@@ -30,6 +34,9 @@ struct RootView: View {
     @State private var tab: RootTab = .mac
     @State private var showPairing = false
     @State private var showSettings = false
+    /// A link closed what was showing for the Mac being left: its terminal waits for
+    /// that to be gone, since presenting while another cover is still dismissing can fail.
+    @State private var linkAwaitsDismiss = false
 
     var body: some View {
         TabView(selection: $tab) {
@@ -45,13 +52,13 @@ struct RootView: View {
                 .tag(RootTab.activity)
         }
         .environmentObject(router)
-        .fullScreenCover(item: $router.terminal) { intent in
+        .fullScreenCover(item: $router.terminal, onDismiss: presentationDismissed) { intent in
             TerminalScreen(shell: model.shell, intent: intent)
         }
-        .sheet(isPresented: $router.showHistory) {
+        .sheet(isPresented: $router.showHistory, onDismiss: presentationDismissed) {
             ShellHistoryView(shell: model.shell)
         }
-        .fullScreenCover(isPresented: $router.showScreen) {
+        .fullScreenCover(isPresented: $router.showScreen, onDismiss: presentationDismissed) {
             ScreenView(shell: model.shell).environmentObject(lock)
         }
         .sheet(isPresented: $showPairing, onDismiss: { model.endPairing() }) {
@@ -124,6 +131,9 @@ extension RootView {
             router.showThisPhone = false
             links.done()
         case .session(let id, _):
+            // Just unlocked, the shell may not have rebuilt its Macs yet (the app's own unlock
+            // handler can run after this one): wait for the reach change that follows.
+            if shell.reach == .locked { return }
             // The Mac first: its tabs come back, and the terminal's tab is kept as that Mac's.
             // A Mac no longer paired: nothing to attach on any other; just the Mac tab.
             // Nor on a paired Mac without a usable shell credential (internet only, or its key is gone).
@@ -132,6 +142,8 @@ extension RootView {
                 router.showThisPhone = false
                 return links.done()
             }
+            // Presented once what was showing for the Mac left is gone (`presentationDismissed`).
+            guard !linkAwaitsDismiss else { return }
             router.terminal = .attach(id)
             links.done()
         case .keepAwake, .vpnOn:
@@ -151,6 +163,13 @@ extension RootView {
         }
     }
 
+    /// The terminal, history or screen finished closing: a link waiting on that runs now.
+    private func presentationDismissed() {
+        guard linkAwaitsDismiss else { return }
+        linkAwaitsDismiss = false
+        runPendingLink()
+    }
+
     /// A link from a Live Activity or widget names the Mac it shows: switch to it.
     /// Without one (an older link), a session link belongs to the running
     /// activity's Mac (tagged or adopted), else the Mac selected now. False when
@@ -164,7 +183,7 @@ extension RootView {
         case .mac(let macID):
             // A terminal, screen or history still open is the Mac being left's: close it
             // first, or what's typed into it (a Screen Sharing login) goes to the new one.
-            if macID != model.shell.selectedMacID { router.dismissAll() }
+            if macID != model.shell.selectedMacID, router.dismissAll() { linkAwaitsDismiss = true }
             model.shell.select(macID)
             return true
         case .rejected: return false

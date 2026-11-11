@@ -3,7 +3,7 @@ import PassthroughCore
 import PassthroughUI
 
 /// A Mac's profile picture: its initial on a color picked from its ID, with an
-/// amber dot when it needs you.
+/// amber dot when it needs you. Hidden from VoiceOver; whatever holds it gives the label.
 struct MacAvatar: View {
     let macID: String
     let name: String
@@ -29,9 +29,8 @@ struct MacAvatar: View {
                         .offset(x: size * 0.1, y: -size * 0.1)
                 }
             }
-            .accessibilityElement(children: .ignore)
-            .accessibilityLabel("Your Macs")
-            .accessibilityValue(badge ? "\(name), another Mac needs you" : name)
+            // A picture of the name beside it: the button holding it says what it is.
+            .accessibilityHidden(true)
     }
 }
 

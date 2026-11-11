@@ -835,8 +835,7 @@ final class ShellModel: ObservableObject {
     /// Another Mac's turn: clears what the last one said and brings back the
     /// new one's tabs, which `.ready` re-attaches as after any reconnect.
     private func switchSessions(to macID: String) {
-        // Kept so a finished tab can still be removed after switching back while that Mac is out of reach.
-        if let left = clientMacID { endedByMac[left] = ended }
+        keepEnded()
         resetSessions()
         ended = endedByMac[macID] ?? ShellEndedSessions()
         let tabs = tabMemory.tabs(for: macID)
@@ -856,11 +855,19 @@ final class ShellModel: ObservableObject {
         redialTask = nil
         redialsMade = nil
         dropConnection()
+        keepEnded()
         resetSessions()
         lastError = nil
         // Before dropping the Mac's ID: a drop from `.ready` is "last heard" for the Mac left.
         self.reach = reach
         clientMacID = nil
+    }
+
+    /// Keeps the connected Mac's finished sessions before they're cleared, so a finished tab
+    /// can still be removed after switching back while that Mac is out of reach. Every path
+    /// that leaves a Mac (another shell Mac, an internet-only one, no access) goes through here.
+    private func keepEnded() {
+        if let left = clientMacID { endedByMac[left] = ended }
     }
 
     /// Keeps the tabs showing as the connected Mac's.
@@ -946,6 +953,7 @@ final class ShellModel: ObservableObject {
             // A paired Mac (internet only, or no grant yet) stays selected; with none paired, nothing is.
             selectedMacID = MacProfiles.selection(current: selectedMacID, lastUsed: UserDefaults.standard.string(forKey: Self.lastMacKey),
                                                   paired: paired, withShell: [])
+            keepEnded()
             clientMacID = nil
             resetSessions()
         }
