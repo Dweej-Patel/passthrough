@@ -11,6 +11,9 @@ struct MacHomeView: View {
     @Binding var tab: RootTab
     @Binding var showPairing: Bool
     @Binding var showSettings: Bool
+    @State private var showSwitcher = false
+    /// Add a Mac or Settings, chosen in the switcher; presented once it has gone.
+    @State private var afterSwitcher: SwitcherNext?
     @State private var confirmSleep = false
     @State private var confirmVPNOff = false
     /// The switch last changed here, so a refusal without a switch named lands under it.
@@ -21,7 +24,7 @@ struct MacHomeView: View {
     private var macID: String? { shell.selectedMacID ?? model.pairedClients.first?.id }
     private var macName: String { shell.selectedMacName }
     private var onlineThroughPhone: Bool { macID.map(model.connectedMacIDs.contains) ?? false }
-    private var paired: Bool { !model.pairedClients.isEmpty || !shell.macs.isEmpty }
+    private var paired: Bool { !model.pairedClients.isEmpty }
 
     var body: some View {
         NavigationStack {
@@ -52,18 +55,17 @@ struct MacHomeView: View {
             }
             .background(PTColor.background)
             .navigationTitle(macName)
-            .navigationBarTitleDisplayMode(shell.macs.count > 1 ? .inline : .large)
-            .toolbarTitleMenu {
-                if shell.macs.count > 1 {
-                    Picker("Mac", selection: $shell.selectedMacID) {
-                        ForEach(shell.macs, id: \.macID) { Text($0.macName).tag(Optional($0.macID)) }
-                    }
-                }
-            }
+            .navigationBarTitleDisplayMode(.large)
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) {
-                    Button { showSettings = true } label: { Image(systemName: "gearshape") }
-                        .accessibilityLabel("Settings")
+                    if paired {
+                        Button { showSwitcher = true } label: {
+                            MacAvatar(macID: macID ?? "", name: macName, badge: shell.otherMacNeedsYou)
+                        }
+                    } else {
+                        Button { showSettings = true } label: { Image(systemName: "gearshape") }
+                            .accessibilityLabel("Settings")
+                    }
                 }
             }
             .navigationDestination(isPresented: $router.showThisPhone) {
@@ -75,11 +77,17 @@ struct MacHomeView: View {
         } message: {
             Text(runningShells == 1 ? "1 running shell pauses until it wakes." : "\(runningShells) running shells pause until it wakes.")
         }
+        .sheet(isPresented: $showSwitcher, onDismiss: runAfterSwitcher) {
+            MacSwitcherSheet(shell: shell, then: $afterSwitcher)
+        }
         .sheet(isPresented: $confirmVPNOff) {
             VPNOffSheet(macName: macName, killSwitch: state?.killSwitch == true) { shell.control(.vpn(false)) }
         }
         #if DEBUG
         .onAppear {
+            if ProcessInfo.processInfo.environment["PASSTHROUGH_SHOW_SWITCHER"] == "1" {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1) { showSwitcher = true }
+            }
             if ProcessInfo.processInfo.environment["PASSTHROUGH_SHOW_VPN_OFF"] == "1" {
                 DispatchQueue.main.asyncAfter(deadline: .now() + 1) { confirmVPNOff = true }
             }
@@ -87,11 +95,23 @@ struct MacHomeView: View {
         #endif
     }
 
+    private func runAfterSwitcher() {
+        defer { afterSwitcher = nil }
+        switch afterSwitcher {
+        case .addMac: showPairing = true
+        case .settings: showSettings = true
+        case let .answer(macID, session):
+            // Only if that Mac is still the one selected (nothing switched meanwhile).
+            if shell.selectedMacID == macID { router.terminal = .attach(session) }
+        case nil: break
+        }
+    }
+
     // MARK: Needs you
 
     /// Shells that went quiet on a question; the answer is typed in the terminal, as always.
     @ViewBuilder private var needsYou: some View {
-        let waiting = shell.sessions.filter(\.isAsking)
+        let waiting = shell.visibleSessions.filter(\.isAsking)
         ForEach(waiting, id: \.id) { session in
             Button { router.terminal = .attach(session.id) } label: {
                 HStack(spacing: 12) {
@@ -123,7 +143,7 @@ struct MacHomeView: View {
 
     /// Keep awake and the VPN show as the Mac last said; they only change while it's reachable.
     private var state: MacState? { shell.macState }
-    private var runningShells: Int { shell.sessions.filter(\.running).count }
+    private var runningShells: Int { shell.visibleSessions.filter(\.running).count }
 
     /// Internet first (this phone's own, always there), then what's on the
     /// Mac. A reason shared by several switches shows once, right under them.
@@ -213,7 +233,7 @@ struct MacHomeView: View {
             if on {
                 shell.control(.awake(true))
                 MacActivityController.shared.keepAwakeAsked(.init(macID: shell.selectedMacID, macName: macName, reachable: true,
-                                                                  lastHeard: nil, state: state, sessions: shell.sessions))
+                                                                  lastHeard: nil, state: state, sessions: shell.visibleSessions))
             } else if runningShells > 0 {
                 confirmSleep = true
             } else {
@@ -405,14 +425,14 @@ struct MacHomeView: View {
                 HStack {
                     Text("Shells").font(.headline)
                     Spacer()
-                    if !shell.sessions.isEmpty {
+                    if !shell.visibleSessions.isEmpty {
                         Button("See all") { tab = .shells }
                             .font(.subheadline.weight(.semibold))
                             .foregroundStyle(PTColor.tintText)
                             .frame(minHeight: 44)
                     }
                 }
-                if shell.sessions.isEmpty {
+                if shell.visibleSessions.isEmpty {
                     Text("Nothing running. Start a shell to run commands on \(macName).")
                         .font(.subheadline).foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
@@ -422,7 +442,7 @@ struct MacHomeView: View {
                 } else {
                     TimelineView(.periodic(from: .now, by: 30)) { context in
                         VStack(spacing: 0) {
-                            ForEach(Self.recent(shell.sessions), id: \.id) { session in
+                            ForEach(Self.recent(shell.visibleSessions), id: \.id) { session in
                                 sessionRow(session, now: context.date)
                             }
                         }

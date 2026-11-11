@@ -11,7 +11,7 @@ struct MacWidget: Widget {
         StaticConfiguration(kind: MacSnapshot.widgetKind, provider: Provider()) { entry in
             MacWidgetView(snapshot: entry.snapshot, stale: entry.stale)
                 .containerBackground(for: .widget) { PTColor.surface }
-                .widgetURL(AppLink.mac.url)
+                .widgetURL(AppLink.mac(entry.snapshot?.macID).url)
         }
         .configurationDisplayName("Mac")
         .description("Your Mac's awake time and shells, as Passthrough last saw them.")

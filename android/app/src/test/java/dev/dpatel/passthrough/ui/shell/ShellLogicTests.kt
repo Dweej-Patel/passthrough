@@ -56,6 +56,20 @@ class ShellLogicTests {
         assertEquals(ShellReach.NO_ACCESS, ShellReach.withoutCredential(granting = true, anyLocked = false, keyLost = false))
     }
 
+    @Test fun keyFactsReachPerMac() {
+        val facts = ShellKeyFacts(granting = setOf("locked", "lost", "missing"), locked = setOf("locked"), lost = setOf("lost"))
+        // Switching to a Mac whose key is locked or lost keeps the recovery state.
+        assertEquals(ShellReach.KEY_UNAVAILABLE, facts.reachWithoutCredential("locked"))
+        assertEquals(ShellReach.KEY_UNAVAILABLE, facts.reachWithoutCredential("lost"))
+        // A grant with no key and nothing known against it, or no grant at all: internet only.
+        assertEquals(ShellReach.NO_ACCESS, facts.reachWithoutCredential("missing"))
+        assertEquals(ShellReach.NO_ACCESS, facts.reachWithoutCredential("internetOnly"))
+        // Nothing selected: any locked or lost key is worth recovering.
+        assertEquals(ShellReach.KEY_UNAVAILABLE, facts.reachWithoutCredential(null))
+        assertEquals(ShellReach.NO_ACCESS, ShellKeyFacts(granting = setOf("a")).reachWithoutCredential(null))
+        assertEquals(ShellReach.NO_ACCESS, ShellKeyFacts().reachWithoutCredential(null))
+    }
+
     @Test fun sessionLimitIsExplained() {
         assertEquals("Your Mac already has 8 sessions open. End one to start another.", ShellError.TOO_MANY_SESSIONS.message())
         assertNull(ShellError.NO_SUCH_SESSION.message())

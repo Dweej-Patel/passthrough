@@ -39,11 +39,14 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.drop
 import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.transformWhile
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -82,6 +85,16 @@ class ShellViewModel(app: Application) : AndroidViewModel(app) {
     val selectedMacID: StateFlow<String?> = _selectedMacID.asStateFlow()
     private val _sessions = MutableStateFlow<List<ShellSessionInfo>>(emptyList())
     val sessions: StateFlow<List<ShellSessionInfo>> = _sessions.asStateFlow()
+    /** Finished sessions removed from this phone, per Mac (the Mac keeps listing them for a while). */
+    private var hiddenSessions = ShellHiddenSessions.stored(Runtime.settings.shellHiddenSessions())
+    /**
+     * What each Mac switched away from had said ended, in memory only: a remembered finished
+     * tab can still be removed after switching back while that Mac is out of reach.
+     */
+    private val endedByMac = mutableMapOf<String, ShellEndedSessions>()
+    private val _visibleSessions = MutableStateFlow<List<ShellSessionInfo>>(emptyList())
+    /** The selected Mac's sessions minus the finished ones removed here; what lists and badges show. */
+    val visibleSessions: StateFlow<List<ShellSessionInfo>> = _visibleSessions.asStateFlow()
     private val _history = MutableStateFlow<List<ShellHistoryEntry>>(emptyList())
     val history: StateFlow<List<ShellHistoryEntry>> = _history.asStateFlow()
     /** A history request is on its way to the Mac. */
@@ -91,6 +104,12 @@ class ShellViewModel(app: Application) : AndroidViewModel(app) {
     val openTabs: StateFlow<List<String>> = _openTabs.asStateFlow()
     private val _activeSession = MutableStateFlow<String?>(null)
     val activeSession: StateFlow<String?> = _activeSession.asStateFlow()
+    /**
+     * Each Mac's open tabs and active tab, so switching back (or relaunching)
+     * brings them back; kept in step with [openTabs]/[activeSession].
+     */
+    private val _tabMemory = MutableStateFlow(MacTabMemory.stored(Runtime.settings.shellTabMemory()))
+    val tabMemory: StateFlow<MacTabMemory> = _tabMemory.asStateFlow()
     /** Sessions that have ended: their tabs show a read-only log of their output. */
     private val _ended = MutableStateFlow(ShellEndedSessions())
     val ended: StateFlow<ShellEndedSessions> = _ended.asStateFlow()
@@ -130,14 +149,45 @@ class ShellViewModel(app: Application) : AndroidViewModel(app) {
     /** "Connect using": this device's choice. */
     val connectMode: StateFlow<ShellConnectMode> = Runtime.settings.shellConnectMode
 
+    /** The other paired Macs' sessions and state, while the app is in the foreground and unlocked. */
+    private val watcher = MacWatcher(
+        viewModelScope,
+        hiddenSessions = { hiddenSessions },
+        discovered = { ShellCredentials.discovered(discovery.services.value, it.macName, _macs.value.size)?.endpoint },
+        recency = { MacProfiles.recency(Runtime.settings.shellLastHeard(), Runtime.settings.shellLastSelectedAt()) },
+        storedLastHeard = { Runtime.settings.shellLastHeard()[it] },
+        noteHeard = ::noteHeard,
+    )
+    /** What each watched Mac (never the selected one) last said, by Mac ID. */
+    val watchedMacs: StateFlow<Map<String, MacWatcher.Seen>> = watcher.seen
+    /** A session on a Mac other than the selected one is waiting on a question. */
+    val otherMacNeedsYou: StateFlow<Boolean> = combine(_macs, _selectedMacID, watcher.seen) { macs, selected, seen ->
+        macs.any { it.macID != selected && otherStatus(it.macID, macs, seen) is MacStatus.Asking }
+    }.stateIn(viewModelScope, SharingStarted.Eagerly, false)
+
     private val listeners = LinkedHashSet<ShellStreamListener>()
 
     private var lock: AppLock? = null
     /** Keys read from the vault since the last unlock, by Mac. */
     private var keys: Map<String, ByteArray> = emptyMap()
+    /** What the last refresh learned about keys it couldn't use; read when [connect] selects a Mac without a credential. */
+    private var keyFacts = ShellKeyFacts()
     private var connection: ShellConnection? = null
     private var connectJob: Job? = null
     private var clientMacID: String? = null
+    /**
+     * Set while tabs are cleared or restored for a Mac change: those aren't
+     * changes the user made to the Mac whose tabs are showing.
+     */
+    private var holdingTabMemory = false
+
+    /** The tabs showing; every change is remembered as the connected Mac's. */
+    private var shownTabs: List<String>
+        get() = _openTabs.value
+        set(value) { _openTabs.value = value; rememberTabs() }
+    private var shownActive: String?
+        get() = _activeSession.value
+        set(value) { _activeSession.value = value; rememberTabs() }
     /** Bumped per connection, so a replaced connection's late events are dropped. */
     private var generation = 0
     /**
@@ -176,6 +226,9 @@ class ShellViewModel(app: Application) : AndroidViewModel(app) {
     private val refreshes = Channel<Unit>(Channel.CONFLATED)
     /** Debug builds only: the [ShellDemo] state shown instead of a real Mac (null normally). */
     private var demo: String? = null
+    private val _demoPaired = MutableStateFlow<List<PairedClient>>(emptyList())
+    /** Debug demo only: the demo Macs standing in for paired ones in the switcher (empty in normal use). */
+    val demoPaired: StateFlow<List<PairedClient>> = _demoPaired.asStateFlow()
 
     private class PendingTranscript(val id: String, val result: CompletableDeferred<List<ShellReplayChunk>?>) {
         val replay = ShellReplay.Collector()
@@ -199,7 +252,7 @@ class ShellViewModel(app: Application) : AndroidViewModel(app) {
                 if (found != dialedDiscovered) connect()
             }
         }
-        // "Connect using" changed: dial again with the new choice.
+        // "Connect using" changed: dial again with the new choice (connect() redials the watches first).
         viewModelScope.launch {
             connectMode.drop(1).collect { if (_macs.value.isNotEmpty() && foreground) connect() }
         }
@@ -209,6 +262,8 @@ class ShellViewModel(app: Application) : AndroidViewModel(app) {
     fun startDemo(state: String) {
         if (!BuildConfig.DEBUG) return
         demo = state
+        _demoPaired.value = if (ShellDemo.reach(state) == ShellReach.NO_ACCESS) emptyList()
+        else ShellDemo.macs.map { PairedClient(it.macID, it.macName, "", 0) }
         refresh()
     }
 
@@ -239,6 +294,7 @@ class ShellViewModel(app: Application) : AndroidViewModel(app) {
         foreground = false
         stopRedialing()
         dropConnection()
+        watcher.stop()
         discovery.stop()
         // Not usable until the foreground refresh dials again (typing meanwhile would go nowhere).
         if (_reach.value == ShellReach.READY) _reach.value = ShellReach.CONNECTING
@@ -258,10 +314,11 @@ class ShellViewModel(app: Application) : AndroidViewModel(app) {
         val clients: List<PairedClient>,
         val phoneID: String,
         val keys: Map<String, ByteArray>,
-        val anyLocked: Boolean,
-        val keyLost: Boolean,
+        val facts: ShellKeyFacts,
         val deviceSecure: Boolean,
-    )
+    ) {
+        val anyLocked: Boolean get() = facts.anyLocked
+    }
 
     private suspend fun runRefresh() {
         val lock = lock ?: return
@@ -282,14 +339,14 @@ class ShellViewModel(app: Application) : AndroidViewModel(app) {
         val clients = registry.clients
         val granting = clients.filter { it.shell != null }
         if (!vault.supported || !vault.deviceSecure || granting.isEmpty()) {
-            return Loaded(clients, "", emptyMap(), anyLocked = false, keyLost = false, deviceSecure = vault.deviceSecure)
+            return Loaded(clients, "", emptyMap(), ShellKeyFacts(granting.map { it.id }.toSet()), deviceSecure = vault.deviceSecure)
         }
         vault.migrateLegacyLost(registry)
-        var anyLocked = false
+        val locked = HashSet<String>()
         val pending = granting.filter { registry.sealedPendingShellKey(it.id) != null }.map { it.id }.toSet()
         if (pending.isNotEmpty()) {
             vault.adoptPending(registry)
-            if (vault.status.value == ShellKeyStatus.LOCKED) anyLocked = true
+            if (vault.status.value == ShellKeyStatus.LOCKED) locked += pending
         }
         vault.prune(clients.map { it.id }.toSet())
         val keys = HashMap<String, ByteArray>()
@@ -301,18 +358,21 @@ class ShellViewModel(app: Application) : AndroidViewModel(app) {
             }
             when (val read = vault.read(client.id)) {
                 is ShellKeyVault.Read.Key -> keys[client.id] = read.bytes
-                ShellKeyVault.Read.Locked -> anyLocked = true
+                ShellKeyVault.Read.Locked -> locked += client.id
                 ShellKeyVault.Read.Missing, ShellKeyVault.Read.Unavailable -> Unit
             }
         }
         // Per Mac: a Mac that granted again since the vault lost its key is not lost.
-        val keyLost = granting.any { it.id !in keys && vault.isLost(it.id) }
-        return Loaded(clients, registry.phoneID, keys, anyLocked, keyLost, deviceSecure = true)
+        val lost = granting.filter { it.id !in keys && vault.isLost(it.id) }.map { it.id }.toSet()
+        val facts = ShellKeyFacts(granting.map { it.id }.toSet(), locked, lost)
+        return Loaded(clients, registry.phoneID, keys, facts, deviceSecure = true)
     }
 
     private fun applyLoaded(loaded: Loaded, lock: AppLock) {
+        // A Mac the phone forgot (one or all) takes its tabs and last-used mark with it.
+        forgetUnpaired(loaded.clients.map { it.id }.toSet())
         val granting = loaded.clients.filter { it.shell != null }
-        ShellReach.beforeKeys(vault.supported, unlocked = true, loaded.deviceSecure, granting.isNotEmpty())?.let { return clear(it) }
+        ShellReach.beforeKeys(vault.supported, unlocked = true, loaded.deviceSecure, granting.isNotEmpty())?.let { return clear(it, paired = loaded.clients.map { c -> c.id }) }
         if (loaded.anyLocked) {
             if (!relockRequested) {
                 // The vault needs an unlock prompt (a grant arrived while the app was open and the vault
@@ -328,12 +388,25 @@ class ShellViewModel(app: Application) : AndroidViewModel(app) {
             relockRequested = false
         }
         keys = loaded.keys
+        keyFacts = loaded.facts
         val built = ShellCredentials.build(granting, loaded.phoneID, key = { keys[it] }, manualAddress = Runtime.settings::shellManualAddress,
             relayToken = Runtime.registry::relayToken)
         val previous = _macs.value.firstOrNull { it.macID == clientMacID }
         _macs.value = built
-        if (built.none { it.macID == _selectedMacID.value }) _selectedMacID.value = built.firstOrNull()?.macID
-        val current = current() ?: return clear(ShellReach.withoutCredential(granting.isNotEmpty(), loaded.anyLocked, loaded.keyLost))
+        // A paired Mac stays selected even without a shell credential (internet only).
+        _selectedMacID.value = MacProfiles.selection(
+            _selectedMacID.value, Runtime.settings.shellLastMac(), loaded.clients.map { it.id }, built.map { it.macID },
+        )
+        val current = current() ?: run {
+            val mac = _selectedMacID.value
+            if (mac == null) return clear(loaded.facts.reachWithoutCredential(null))
+            updateWatcher()
+            // A grant whose key can't be read keeps its recovery state; a Mac with no grant is internet only.
+            return idleOnMacWithoutShell(loaded.facts.reachWithoutCredential(mac))
+        }
+        // Before any dial below: a watch on the (newly) selected Mac ends first. Also covers
+        // the paths that keep the live connection (a new pairing changes what is watched).
+        updateWatcher()
         if (!foreground) return
         discovery.start()
         // Keep a live connection to the same Mac with the same key: a `macInfo` only
@@ -346,10 +419,19 @@ class ShellViewModel(app: Application) : AndroidViewModel(app) {
         connect()
     }
 
-    /** The user picked another Mac. */
+    /**
+     * Makes [macID] the selected Mac: the only way the UI switches. The tabs
+     * showing are kept for the Mac being left (nothing is sent to it), and the
+     * new Mac's own tabs come back once [connect] dials it.
+     */
     fun select(macID: String) {
         if (_selectedMacID.value == macID) return
+        clientMacID?.let { _tabMemory.value = _tabMemory.value.save(MacTabs(_openTabs.value, _activeSession.value), it) }
+        saveTabMemory()
+        Runtime.settings.setShellLastMac(macID)
+        Runtime.settings.setShellLastSelectedAt(Runtime.settings.shellLastSelectedAt() + (macID to System.currentTimeMillis()))
         _selectedMacID.value = macID
+        // connect() ends the new Mac's watch before it dials.
         connect()
     }
 
@@ -364,12 +446,49 @@ class ShellViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    // Other Macs
+
+    /** What a Mac's row in the switcher says: the selected Mac from the live connection, the others from their watch. */
+    fun status(macID: String): MacStatus {
+        if (macID != _selectedMacID.value) return otherStatus(macID, _macs.value, watcher.seen.value)
+        return MacProfiles.status(_visibleSessions.value, reachable = _reach.value == ShellReach.READY,
+            lastHeardMillis = Runtime.settings.shellLastHeard()[macID], hasShell = _macs.value.any { it.macID == macID })
+    }
+
+    private fun otherStatus(macID: String, macs: List<ShellCredential>, seen: Map<String, MacWatcher.Seen>): MacStatus {
+        val watched = seen[macID]
+        return MacProfiles.status(watched?.sessions, reachable = watched?.reachable ?: false,
+            lastHeardMillis = watched?.lastHeardMillis ?: Runtime.settings.shellLastHeard()[macID],
+            hasShell = macs.any { it.macID == macID })
+    }
+
+    /**
+     * Starts or ends watches to match the paired Macs and the selection; ends them all while in
+     * the background or locked (watches are foreground only). Runs on the main thread before every
+     * live dial ([connect], [applyLoaded]), so the selected Mac's watch is retired first.
+     */
+    private fun updateWatcher() {
+        if (demo != null) return applyDemoWatch()
+        if (!foreground || lock?.unlocked?.value != true) return watcher.stop()
+        // Android has no Live Activity: nothing is pinned.
+        watcher.update(_macs.value, _selectedMacID.value, pinned = emptySet(), connectMode.value)
+    }
+
+    private fun noteHeard(macID: String, millis: Long) {
+        Runtime.settings.setShellLastHeard(Runtime.settings.shellLastHeard() + (macID to millis))
+    }
+
     // Connection
 
     private fun current(): ShellCredential? = _macs.value.firstOrNull { it.macID == _selectedMacID.value }
 
-    /** Dials the selected Mac (replacing any connection); once ready, re-attaches (the Mac sends its sessions unasked). */
+    /**
+     * Dials the selected Mac (replacing any connection); once ready, re-attaches (the Mac sends its
+     * sessions unasked). First of all, the watches are brought in line with the selection, so the
+     * selected Mac's watch (if any) is ended before the live connection is started.
+     */
     fun connect() {
+        updateWatcher()
         if (demo != null) return refresh()
         dropConnection()
         redialJob?.cancel()
@@ -377,10 +496,16 @@ class ShellViewModel(app: Application) : AndroidViewModel(app) {
         val credential = current()
         if (credential == null) {
             stopRedialing()
+            // Locked or without a passcode, a switch keeps that state: unlocking refreshes.
+            // (`clear` reset the key facts, which would otherwise say "no access".)
+            val reach = _reach.value
+            if (reach == ShellReach.LOCKED || reach == ShellReach.NEEDS_PASSCODE) return
+            // The same per-Mac key facts the last refresh used, so a locked or lost key keeps its recovery state.
+            _selectedMacID.value?.let { mac -> return idleOnMacWithoutShell(keyFacts.reachWithoutCredential(mac)) }
             if (_macs.value.isEmpty()) _reach.value = ShellReach.NO_ACCESS
             return
         }
-        if (clientMacID != credential.macID) resetSessions()
+        if (clientMacID != credential.macID) switchSessions(credential.macID)
         val gen = ++generation
         clientMacID = credential.macID
         _lastError.value = null
@@ -434,8 +559,11 @@ class ShellViewModel(app: Application) : AndroidViewModel(app) {
         size = cols to rows
         _lastError.value = null
         if (demo != null) {
-            val id = "demo-new-${_openTabs.value.size}"
-            handle(ShellEvent.Sessions(ShellDemo.sessions(listOf(id))))
+            val mac = _selectedMacID.value ?: return
+            val prefix = ShellDemo.newPrefix(mac)
+            val opened = _openTabs.value.filter { it.startsWith(prefix) }
+            val id = generateSequence(1) { it + 1 }.map { "$prefix$it" }.first { it !in opened }
+            handle(ShellEvent.Sessions(ShellDemo.sessions(mac, opened + id)))
             handle(ShellEvent.Opened(id))
             handle(ShellEvent.Output(id, ShellDemo.output(id)))
             return
@@ -467,8 +595,8 @@ class ShellViewModel(app: Application) : AndroidViewModel(app) {
         size = cols to rows
         openWhenReady = false
         reattachIfRefused = false
-        if (id !in _openTabs.value) _openTabs.value = _openTabs.value + id
-        _activeSession.value = id
+        if (id !in _openTabs.value) shownTabs = _openTabs.value + id
+        shownActive = id
         _detachedSession.value = null
         if (demo != null) return demoAttach(id)
         // Not connected yet: Ready attaches the active session, so asking now would replay twice.
@@ -489,12 +617,33 @@ class ShellViewModel(app: Application) : AndroidViewModel(app) {
         connection?.resize(cols, rows)
     }
 
-    /** Ends a running session on the Mac, or just closes the tab of an ended one (the Mac would refuse to close it again). */
+    /**
+     * Ends a running session on the Mac. A finished one is removed instead ([remove]): its tab
+     * closes and it's hidden on this phone, since the Mac would refuse to close it again.
+     */
     fun close(id: String) {
-        if (!_ended.value.isEnded(id)) connection?.close(id)
+        if (hiddenSessions.canRemove(id, _ended.value, _sessions.value)) return remove(id)
+        connection?.close(id)
         _ended.value = _ended.value.forget(id)
-        _openTabs.value = _openTabs.value - id
-        if (_activeSession.value == id) _activeSession.value = null
+        shownTabs = _openTabs.value - id
+        if (_activeSession.value == id) shownActive = null
+    }
+
+    /**
+     * Removes a finished session from this phone: hides it for this Mac and
+     * drops its tab. Never sends `close` (the Mac ignores it for a session that
+     * has ended), so it works while the Mac is out of reach.
+     */
+    fun remove(id: String) {
+        if (!hiddenSessions.canRemove(id, _ended.value, _sessions.value)) return
+        (clientMacID ?: _selectedMacID.value)?.let {
+            hiddenSessions = hiddenSessions.hide(id, it)
+            saveHiddenSessions()
+            publishVisible()
+        }
+        _ended.value = _ended.value.forget(id)
+        shownTabs = _openTabs.value - id
+        if (_activeSession.value == id) shownActive = null
     }
 
     /**
@@ -580,6 +729,7 @@ class ShellViewModel(app: Application) : AndroidViewModel(app) {
         when (event) {
             is ShellEvent.Ready -> {
                 stopRedialing()
+                if (demo == null) clientMacID?.let { noteHeard(it, System.currentTimeMillis()) }
                 _reach.value = ShellReach.READY
                 _path.value = event.path
                 connection?.let { conn -> controls.readied(SystemClock.elapsedRealtime()).forEach { send(conn, it) } }
@@ -613,18 +763,23 @@ class ShellViewModel(app: Application) : AndroidViewModel(app) {
             is ShellEvent.Sessions -> {
                 _sessions.value = event.sessions
                 val ids = event.sessions.map { it.id }.toSet()
+                (clientMacID ?: _selectedMacID.value)?.let {
+                    val applied = hiddenSessions.apply(ids.toList(), it)
+                    if (applied != hiddenSessions) { hiddenSessions = applied; saveHiddenSessions() }
+                }
+                publishVisible()
                 // The ended session on screen keeps its tab (and log) until the user closes it.
                 val kept = _activeSession.value?.takeIf { _ended.value.isEnded(it) }
                 _ended.value = _ended.value.apply(event.sessions, keeping = setOfNotNull(kept))
-                _openTabs.value = _openTabs.value.filter { it in ids || it == kept }
-                if (_activeSession.value?.let { it !in ids && it != kept } == true) _activeSession.value = null
+                shownTabs = _openTabs.value.filter { it in ids || it == kept }
+                if (_activeSession.value?.let { it !in ids && it != kept } == true) shownActive = null
                 if (_detachedSession.value?.let { it !in ids } == true) _detachedSession.value = null
             }
             is ShellEvent.Opened -> {
-                if (event.session !in _openTabs.value) _openTabs.value = _openTabs.value + event.session
+                if (event.session !in _openTabs.value) shownTabs = _openTabs.value + event.session
                 reattachIfRefused = false
                 listeners.toList().forEach { it.streamStarting(event.session, false) }
-                _activeSession.value = event.session
+                shownActive = event.session
                 _detachedSession.value = null
                 _lastError.value = null
                 connection?.list()
@@ -632,7 +787,7 @@ class ShellViewModel(app: Application) : AndroidViewModel(app) {
             is ShellEvent.OpenedDetached -> {
                 // The user went to another tab before the Mac answered: the new one waits beside it,
                 // and the tab on screen stays.
-                if (event.session !in _openTabs.value) _openTabs.value = _openTabs.value + event.session
+                if (event.session !in _openTabs.value) shownTabs = _openTabs.value + event.session
             }
             is ShellEvent.Output -> listeners.toList().forEach { it.output(event.session, event.data) }
             is ShellEvent.Attached -> listeners.toList().forEach { it.replayFinished(event.session) }
@@ -643,7 +798,7 @@ class ShellViewModel(app: Application) : AndroidViewModel(app) {
             is ShellEvent.Detached -> {
                 // Another connection took it over; don't take it back on reconnect.
                 if (_activeSession.value == event.session) {
-                    _activeSession.value = null
+                    shownActive = null
                     _detachedSession.value = event.session
                 }
             }
@@ -681,6 +836,7 @@ class ShellViewModel(app: Application) : AndroidViewModel(app) {
             }
             is ShellEvent.Disconnected -> {
                 val dropped = _reach.value == ShellReach.READY
+                if (dropped) clientMacID?.let { noteHeard(it, System.currentTimeMillis()) }
                 connection = null
                 reattachIfRefused = false
                 _path.value = null
@@ -753,6 +909,8 @@ class ShellViewModel(app: Application) : AndroidViewModel(app) {
 
     /** Ends the connection without touching tabs, so a later [connect] re-attaches. */
     private fun dropConnection() {
+        // Remember when the Mac being left last answered, for "last heard".
+        if (_reach.value == ShellReach.READY && demo == null) clientMacID?.let { noteHeard(it, System.currentTimeMillis()) }
         generation++
         connectJob?.let { job -> if (connection == null) job.cancel() }
         connectJob = null
@@ -772,7 +930,98 @@ class ShellViewModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch(Dispatchers.IO) { conn.close() }
     }
 
+    /**
+     * The selected Mac is paired but has no usable shell credential: internet only ([reach] NO_ACCESS), or
+     * a grant whose key can't be read (its recovery state). Nothing of the Mac left (sessions, tabs,
+     * state) shows, and no tabs are restored or saved for this one: [clientMacID] is null, so the next
+     * dial with a credential restores its remembered tabs.
+     */
+    private fun idleOnMacWithoutShell(reach: ShellReach) {
+        stopRedialing()
+        dropConnection()
+        resetSessions()
+        clientMacID = null
+        _lastError.value = null
+        _reach.value = reach
+    }
+
+    /**
+     * Another Mac's turn: clears what the last one said and brings back the new
+     * one's tabs, which Ready re-attaches as after any reconnect. [clientMacID]
+     * becomes [macID] here, so nothing is remembered under the Mac being left.
+     */
+    private fun switchSessions(macID: String) {
+        // Kept so a finished tab can still be removed after switching back while that Mac is out of reach.
+        clientMacID?.let { endedByMac[it] = _ended.value }
+        resetSessions()
+        _ended.value = endedByMac[macID] ?: ShellEndedSessions()
+        clientMacID = macID
+        val tabs = _tabMemory.value.tabs(macID)
+        holdingTabMemory = true
+        try {
+            shownTabs = tabs.openTabs
+            shownActive = tabs.active
+        } finally {
+            holdingTabMemory = false
+        }
+    }
+
+    /** Keeps the tabs showing as the connected Mac's. */
+    private fun rememberTabs() {
+        if (holdingTabMemory) return
+        val mac = clientMacID ?: return
+        val tabs = MacTabs(_openTabs.value, _activeSession.value)
+        if (_tabMemory.value.tabs(mac) == tabs) return
+        _tabMemory.value = _tabMemory.value.save(tabs, mac)
+        saveTabMemory()
+    }
+
+    private fun saveTabMemory() {
+        val memory = _tabMemory.value
+        Runtime.settings.setShellTabMemory(if (memory.byMac.isEmpty()) null else memory.toJson())
+    }
+
+    private fun saveHiddenSessions() {
+        Runtime.settings.setShellHiddenSessions(if (hiddenSessions.byMac.isEmpty()) null else hiddenSessions.toJson())
+    }
+
+    private fun publishVisible() {
+        val mac = clientMacID ?: _selectedMacID.value
+        _visibleSessions.value = if (mac == null) _sessions.value else hiddenSessions.visible(_sessions.value, mac)
+    }
+
+    /** Drops tab memory and the last-used Mac for Macs no longer paired. */
+    private fun forgetUnpaired(paired: Set<String>) {
+        endedByMac.keys.retainAll(paired)
+        val kept = _tabMemory.value.keepOnly(paired)
+        if (kept != _tabMemory.value) {
+            _tabMemory.value = kept
+            saveTabMemory()
+        }
+        val keptHidden = hiddenSessions.keepOnly(paired)
+        if (keptHidden != hiddenSessions) {
+            hiddenSessions = keptHidden
+            saveHiddenSessions()
+            publishVisible()
+        }
+        if (Runtime.settings.shellLastMac()?.let { it !in paired } == true) Runtime.settings.setShellLastMac(null)
+        val heard = Runtime.settings.shellLastHeard()
+        if (heard.keys.any { it !in paired }) Runtime.settings.setShellLastHeard(heard.filterKeys { it in paired })
+        val selectedAt = Runtime.settings.shellLastSelectedAt()
+        if (selectedAt.keys.any { it !in paired }) Runtime.settings.setShellLastSelectedAt(selectedAt.filterKeys { it in paired })
+    }
+
+    /** Clears everything the connected Mac said, tabs included (its tabs stay in [tabMemory]). */
     private fun resetSessions() {
+        holdingTabMemory = true
+        try {
+            resetSessionState()
+        } finally {
+            holdingTabMemory = false
+        }
+    }
+
+    private fun resetSessionState() {
         openWhenReady = false
         _macState.value = null
         controls.reset()
@@ -781,9 +1030,10 @@ class ShellViewModel(app: Application) : AndroidViewModel(app) {
         _timelineUnsupported.value = false
         timelineLoading = false
         _sessions.value = emptyList()
+        _visibleSessions.value = emptyList()
         _history.value = emptyList()
-        _openTabs.value = emptyList()
-        _activeSession.value = null
+        shownTabs = emptyList()
+        shownActive = null
         _detachedSession.value = null
         _ended.value = ShellEndedSessions()
     }
@@ -793,32 +1043,39 @@ class ShellViewModel(app: Application) : AndroidViewModel(app) {
      * merely locked (or without a passcode) the selection and tabs stay, so the
      * next unlock reconnects and re-attaches.
      */
-    private fun clear(reach: ShellReach) {
+    private fun clear(reach: ShellReach, paired: List<String> = emptyList()) {
         stopRedialing()
         dropConnection()
+        watcher.stop()
         keys = emptyMap()
+        keyFacts = ShellKeyFacts()
         _macs.value = emptyList()
         if (reach == ShellReach.NO_ACCESS || reach == ShellReach.UNSUPPORTED) {
             discovery.stop()
-            _selectedMacID.value = null
+            // A paired Mac (internet only, or no grant yet) stays selected; with none paired, nothing is.
+            _selectedMacID.value = MacProfiles.selection(_selectedMacID.value, Runtime.settings.shellLastMac(), paired, emptyList())
             clientMacID = null
             resetSessions()
         }
         _reach.value = reach
     }
 
+    /** Through the same Mac change as [connect] (tabs kept per Mac), without dialing. */
     private fun seedDemo(state: String) {
         val reach = ShellDemo.reach(state)
+        _macs.value = if (reach == ShellReach.NO_ACCESS) emptyList() else ShellDemo.macs
+        if (_macs.value.none { it.macID == _selectedMacID.value }) {
+            _selectedMacID.value = MacProfiles.reopen(Runtime.settings.shellLastMac(), _macs.value.map { it.macID })
+        }
+        applyDemoWatch()
         if (reach != ShellReach.READY) {
-            _macs.value = if (reach == ShellReach.NO_ACCESS) emptyList() else ShellDemo.macs
-            _selectedMacID.value = _macs.value.firstOrNull()?.macID
             _reach.value = reach
             return
         }
-        _macs.value = ShellDemo.macs
-        if (_selectedMacID.value == null) _selectedMacID.value = ShellDemo.macs.first().macID
+        val mac = _selectedMacID.value ?: return
+        if (clientMacID != mac) switchSessions(mac)
         handle(ShellEvent.Ready(ShellDemo.path))
-        handle(ShellEvent.Sessions(ShellDemo.sessions(_openTabs.value.filter { it.startsWith("demo-new") })))
+        handle(ShellEvent.Sessions(ShellDemo.sessions(mac, _openTabs.value.filter { it.startsWith(ShellDemo.newPrefix(mac)) })))
         handle(ShellEvent.History(ShellDemo.history()))
         if (_macState.value == null) handle(ShellEvent.MacStateChanged(ShellDemo.macState))
     }
@@ -830,8 +1087,22 @@ class ShellViewModel(app: Application) : AndroidViewModel(app) {
         ShellDemo.ended(id)?.let(::handle)
     }
 
+    /** The other demo Macs as a watch would see them (the second one's `codex` session is asking), without dialling. */
+    private fun applyDemoWatch() {
+        val state = demo ?: return
+        if (!BuildConfig.DEBUG || ShellDemo.reach(state) != ShellReach.READY) return watcher.demoShow(emptyMap())
+        val now = System.currentTimeMillis()
+        val ids = MacProfiles.watched(_macs.value.map { it.macID }, _selectedMacID.value, emptyMap(), emptySet(), MacWatcher.LIMIT)
+        watcher.demoShow(ids.associateWith { id ->
+            val opened = _tabMemory.value.tabs(id).openTabs.filter { it.startsWith(ShellDemo.newPrefix(id)) }
+            MacWatcher.Seen(hiddenSessions.visible(ShellDemo.sessions(id, opened), id), ShellDemo.watchedMacState,
+                reachable = true, lastHeardMillis = now)
+        })
+    }
+
     override fun onCleared() {
         dropConnection()
+        watcher.stop()
         discovery.stop()
     }
 

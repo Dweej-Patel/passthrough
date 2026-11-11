@@ -39,8 +39,10 @@ final class ShellModel: ObservableObject {
     }
 
     @Published var macs: [ShellCredential] = []
-    @Published var selectedMacID: String? {
-        didSet { if selectedMacID != oldValue, !applyingRefresh { connect() } }
+    /// Changed by the UI only through `select(_:)`.
+    @Published private(set) var selectedMacID: String? {
+        // The watch on the newly selected Mac ends before the live connection dials it.
+        didSet { if selectedMacID != oldValue, !applyingRefresh { updateWatcher(); connect() } }
     }
     @Published private(set) var reach: Reach = .noAccess {
         didSet {
@@ -48,17 +50,25 @@ final class ShellModel: ObservableObject {
             if reach != .connecting && reach != .ready { openWhenReady = false }
             // Remember when each Mac last answered, for "last heard" while it can't be reached.
             guard reach == .ready || oldValue == .ready, let mac = clientMacID else { return }
-            var heard = Self.lastHeardStore
-            heard[mac] = Date().timeIntervalSince1970
-            UserDefaults.standard.set(heard, forKey: Self.lastHeardKey)
+            Self.noteHeard(mac)
         }
     }
     @Published private(set) var sessions: [ShellSessionInfo] = []
     @Published private(set) var history: [ShellHistoryEntry] = []
     /// The Mac has answered a history request since this Mac was selected.
     @Published private(set) var historyLoaded = false
-    @Published var openTabs: [String] = []
-    @Published var activeSession: String?
+    @Published var openTabs: [String] = [] { didSet { rememberTabs() } }
+    @Published var activeSession: String? { didSet { rememberTabs() } }
+    /// Each Mac's open tabs and active tab, so switching back (or relaunching)
+    /// brings them back; kept in step with `openTabs`/`activeSession`.
+    private(set) var tabMemory: MacTabMemory
+    /// Finished sessions removed from this phone, per Mac (the Mac keeps listing them for a while).
+    @Published private(set) var hiddenSessions: ShellHiddenSessions
+    /// The selected Mac's sessions minus the finished ones removed here.
+    var visibleSessions: [ShellSessionInfo] {
+        guard let mac = clientMacID ?? selectedMacID else { return sessions }
+        return hiddenSessions.visible(sessions, on: mac)
+    }
     /// Sessions that have ended: their tabs show a read-only log of their output.
     @Published private(set) var ended = ShellEndedSessions()
     /// The last thing the Mac refused (too many sessions, no such session…).
@@ -90,8 +100,20 @@ final class ShellModel: ObservableObject {
         didSet {
             guard connectMode != oldValue else { return }
             UserDefaults.standard.set(connectMode.rawValue, forKey: Self.connectModeKey)
+            updateWatcher()
             if !macs.isEmpty { connect() }
         }
+    }
+    /// The other paired Macs' sessions and state, while the app is in the foreground.
+    let watcher = MacWatcher()
+    /// Macs watched whatever the cap (the Live Activity's Mac).
+    private var watchPinned: Set<String> = []
+    /// Watches the Live Activity's Mac whatever the cap (nil: none).
+    func pinWatch(_ macID: String?) {
+        let pinned = macID.map { Set([$0]) } ?? []
+        guard pinned != watchPinned else { return }
+        watchPinned = pinned
+        updateWatcher()
     }
     /// Output for `(session, bytes)`, for the terminal views.
     let output = PassthroughSubject<(String, Data), Never>()
@@ -104,6 +126,11 @@ final class ShellModel: ObservableObject {
 
     private static let manualAddressPrefix = "shell.manualAddress."
     private static let connectModeKey = "shell.connectMode"
+    private static let tabMemoryKey = "shell.tabMemory"
+    private static let lastMacKey = "shell.lastMac"
+    private static let hiddenSessionsKey = "shell.hiddenSessions"
+    /// When each Mac was last selected (seconds since 1970), for which Macs to watch.
+    private static let lastSelectedKey = "shell.lastSelectedAt"
 
     private var client: ShellClient?
     private var clientMacID: String?
@@ -116,6 +143,9 @@ final class ShellModel: ObservableObject {
     /// Bumped per `ShellClient`, so a replaced client's late events are dropped.
     private var generation = 0
     private var applyingRefresh = false
+    /// Set while tabs are cleared or restored for a Mac change: those aren't
+    /// changes the user made to the Mac whose tabs are showing.
+    private var holdingTabMemory = false
     /// A relock was requested because a key read needed authentication; until a
     /// refresh reads every key, another failure shows `.keyUnavailable` instead of looping.
     private var relockRequested = false
@@ -132,6 +162,12 @@ final class ShellModel: ObservableObject {
     static let redialDelays: [TimeInterval] = [0, 1, 2, 4, 8, 15]
     /// The addresses each Mac granted, so a manual address can be applied without re-reading keys.
     private var granted: [String: [String]] = [:]
+    /// Which Macs granted the shell and whose key needed authentication, as of the last
+    /// refresh; read when `connect` selects a Mac without a usable credential.
+    private var keyFacts = ShellKeyFacts()
+    /// Every paired Mac (with or without the shell), as of the last refresh: the
+    /// selection stays on any of them, and the header names it.
+    private var paired: [PairedClient] = []
     private var size = (cols: 80, rows: 24)
     /// A new session asked for while connecting (or waiting to redial):
     /// opened on `.ready`. Dropped once the Mac can't be reached, or for
@@ -147,13 +183,37 @@ final class ShellModel: ObservableObject {
     private var pendingTranscript: (id: String, token: UUID, replay: ShellReplay.Collector,
                                     continuation: CheckedContinuation<[ShellReplayChunk]?, Never>)?
     private var observers: [NSObjectProtocol] = []
+    private var watcherChanges: AnyCancellable?
+    /// What each Mac switched away from had said ended, in memory only: a remembered finished
+    /// tab can still be removed after switching back while that Mac is out of reach.
+    private var endedByMac: [String: ShellEndedSessions] = [:]
 
     init() {
         connectMode = UserDefaults.standard.string(forKey: Self.connectModeKey).flatMap(ShellConnectMode.init(rawValue:)) ?? .automatic
+        tabMemory = UserDefaults.standard.data(forKey: Self.tabMemoryKey)
+            .flatMap { try? JSONDecoder().decode(MacTabMemory.self, from: $0) } ?? MacTabMemory()
+        hiddenSessions = UserDefaults.standard.data(forKey: Self.hiddenSessionsKey)
+            .flatMap { try? JSONDecoder().decode(ShellHiddenSessions.self, from: $0) } ?? ShellHiddenSessions()
         // Sockets don't survive suspension; leave cleanly, and `refresh` on return reconnects.
         observers.append(NotificationCenter.default.addObserver(forName: UIApplication.didEnterBackgroundNotification, object: nil, queue: .main) { [weak self] _ in
-            MainActor.assumeIsolated { self?.dropConnection() }
+            MainActor.assumeIsolated {
+                self?.dropConnection()
+                self?.watcher.stop()
+            }
         })
+        // The foreground refresh runs while the app still counts as in the background,
+        // when `updateWatcher` stops watches: start them once it is active.
+        observers.append(NotificationCenter.default.addObserver(forName: UIApplication.didBecomeActiveNotification, object: nil, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated { self?.updateWatcher() }
+        })
+        watcher.hiddenSessions = { [weak self] in self?.hiddenSessions ?? ShellHiddenSessions() }
+        watcher.discovered = { [weak self] credential in
+            guard let self else { return nil }
+            return ShellCredentials.discovered(among: self.browseResults, macName: credential.macName, shellMacCount: self.macs.count)
+        }
+        watcher.recency = { MacProfiles.recency(lastHeard: Self.lastHeardStore, lastSelected: Self.lastSelectedStore) }
+        // Views watch this model: pass on what the watched Macs say.
+        watcherChanges = watcher.objectWillChange.sink { [weak self] _ in self?.objectWillChange.send() }
     }
 
     // MARK: Credentials
@@ -168,22 +228,29 @@ final class ShellModel: ObservableObject {
         #if DEBUG
         if let demo = Self.demoState { return lock.isUnlocked ? applyDemo(demo) : clear(.locked) }
         #endif
-        guard lock.isUnlocked else { return clear(granting.isEmpty ? .noAccess : .locked) }
-        guard ShellKeyVault.passcodeSet else { return clear(granting.isEmpty ? .noAccess : .needsPasscode) }
+        paired = clients
+        let pairedIDs = clients.map(\.id)
+        guard lock.isUnlocked else { return clear(granting.isEmpty ? .noAccess : .locked, paired: pairedIDs) }
+        guard ShellKeyVault.passcodeSet else { return clear(granting.isEmpty ? .noAccess : .needsPasscode, paired: pairedIDs) }
 
         // Read at call time: the lock replaces its context on every relock.
         let context = lock.context
         ShellKeyVault.adoptPending(from: registry, context: context)
         ShellKeyVault.prune(keeping: Set(clients.map(\.id)), context: context)
-        var anyLocked = false
+        var memory = tabMemory
+        memory.keepOnly(Set(clients.map(\.id)))
+        if memory != tabMemory { tabMemory = memory; saveTabMemory() }
+        forgetUnpaired(keeping: Set(pairedIDs))
+        var locked: Set<String> = []
         let built = ShellCredentials.build(clients: granting, phoneID: registry.phoneID, key: { id in
             switch ShellKeyVault.read(macID: id, context: context) {
             case let .key(data): return data
-            case .locked: anyLocked = true; return nil
+            case .locked: locked.insert(id); return nil
             case .missing: return nil
             }
         }, manualAddress: manualAddress(for:), relayToken: { registry.relayToken(clientID: $0) })
-        if anyLocked {
+        let facts = ShellKeyFacts(granting: Set(granting.map(\.id)), locked: locked)
+        if !locked.isEmpty {
             if !relockRequested {
                 // The lock's context no longer satisfies the item: end the session so the
                 // lock prompts once. Deferred: this runs inside the lock's own change handler.
@@ -196,18 +263,26 @@ final class ShellModel: ObservableObject {
             relockRequested = false
         }
         granted = Dictionary(granting.compactMap { c in c.shell.map { (c.id, $0.addresses) } }, uniquingKeysWith: { a, _ in a })
+        keyFacts = facts
 
         let previous = macs.first { $0.macID == clientMacID }
         applyingRefresh = true
         macs = built
-        if selectedMacID.map({ id in !built.contains { $0.macID == id } }) ?? true { selectedMacID = built.first?.macID }
+        // A paired Mac stays selected even without a shell credential (internet only).
+        selectedMacID = MacProfiles.selection(current: selectedMacID, lastUsed: UserDefaults.standard.string(forKey: Self.lastMacKey),
+                                              paired: pairedIDs, withShell: built.map(\.macID))
         applyingRefresh = false
 
         guard let current = built.first(where: { $0.macID == selectedMacID }) else {
             // A Mac granted access but its key isn't here: plugging in renews it.
-            return clear(anyLocked || !granting.isEmpty ? .keyUnavailable : .noAccess)
+            guard let mac = selectedMacID else { return clear(facts.keyUnavailable(for: nil) ? .keyUnavailable : .noAccess) }
+            // Before leaving the live connection: the other Macs' watches follow the selection.
+            startBrowsing()
+            updateWatcher()
+            return idleOnMacWithoutShell(facts.keyUnavailable(for: mac) ? .keyUnavailable : .noAccess)
         }
         startBrowsing()
+        updateWatcher()
         // Keep a live connection to the same Mac with the same key: a `macInfo`
         // only changed how to dial it next time. Otherwise dial again.
         if client != nil, clientMacID == current.macID, let previous {
@@ -227,8 +302,10 @@ final class ShellModel: ObservableObject {
     /// The selected Mac's shell grant, if it has one.
     var selectedMac: ShellCredential? { macs.first { $0.macID == selectedMacID } }
 
-    /// The Mac on screen: the selected shell Mac, else the first paired one.
-    var selectedMacName: String { selectedMac?.macName ?? registry?.clients.first?.name ?? "Your Mac" }
+    /// The Mac on screen: the selected Mac (with or without the shell), else the first paired one.
+    var selectedMacName: String {
+        selectedMac?.macName ?? (paired.first { $0.id == selectedMacID } ?? paired.first)?.name ?? "Your Mac"
+    }
 
     /// The selected Mac's shell can be reached off its own network (iroh).
     var selectedReachesFromAnywhere: Bool { selectedMac?.irohID != nil }
@@ -247,8 +324,49 @@ final class ShellModel: ObservableObject {
     }
 
     private static let lastHeardKey = "PTShellLastHeard"
-    private static var lastHeardStore: [String: Double] {
+    /// When each Mac last answered (seconds since 1970), on the live connection or a watch.
+    static var lastHeardStore: [String: Double] {
         UserDefaults.standard.dictionary(forKey: lastHeardKey) as? [String: Double] ?? [:]
+    }
+
+    static func noteHeard(_ macID: String, at date: Date = Date()) {
+        var heard = lastHeardStore
+        heard[macID] = date.timeIntervalSince1970
+        UserDefaults.standard.set(heard, forKey: lastHeardKey)
+    }
+
+    private static var lastSelectedStore: [String: Double] {
+        UserDefaults.standard.dictionary(forKey: lastSelectedKey) as? [String: Double] ?? [:]
+    }
+
+    /// What a Mac's row in the switcher says: the selected Mac from the live
+    /// connection, the others from their watch (or when last heard).
+    func status(for macID: String) -> MacStatus {
+        let hasShell = macs.contains { $0.macID == macID }
+        if macID == selectedMacID {
+            return MacProfiles.status(sessions: visibleSessions, reachable: reach == .ready, lastHeard: lastHeard, hasShell: hasShell)
+        }
+        let seen = watcher.seen[macID]
+        let heard = seen?.lastHeard ?? Self.lastHeardStore[macID].map(Date.init(timeIntervalSince1970:))
+        return MacProfiles.status(sessions: seen?.sessions, reachable: seen?.reachable ?? false, lastHeard: heard, hasShell: hasShell)
+    }
+
+    /// A session on a Mac other than the selected one is waiting on a question.
+    var otherMacNeedsYou: Bool {
+        macs.contains { mac in
+            guard mac.macID != selectedMacID, case .asking = status(for: mac.macID) else { return false }
+            return true
+        }
+    }
+
+    /// Starts or ends watches to match the paired Macs and the selection.
+    /// Not while in the background: watches are foreground only.
+    private func updateWatcher() {
+        #if DEBUG
+        if Self.demoState != nil { return applyDemoWatch() }
+        #endif
+        guard UIApplication.shared.applicationState != .background, lock?.isUnlocked == true else { return watcher.stop() }
+        watcher.update(credentials: macs, selected: selectedMacID, pinned: watchPinned, connectMode: connectMode)
     }
 
     /// Connecting again by itself after a working connection dropped.
@@ -270,7 +388,21 @@ final class ShellModel: ObservableObject {
         macs[i].addresses = ShellCredentials.addresses(granted: granted[macID] ?? [], manual: trimmed)
     }
 
-    /// The phone forgot this Mac: drop its key, address and any connection to it.
+    /// Makes `macID` the selected Mac: the only way the UI switches. The tabs
+    /// showing are kept for the Mac being left (nothing is sent to it), and
+    /// the new Mac's own tabs come back once `connect` dials it.
+    func select(_ macID: String) {
+        guard macID != selectedMacID else { return }
+        if let current = clientMacID { tabMemory.save(MacTabs(openTabs: openTabs, active: activeSession), for: current) }
+        saveTabMemory()
+        UserDefaults.standard.set(macID, forKey: Self.lastMacKey)
+        var selectedAt = Self.lastSelectedStore
+        selectedAt[macID] = Date().timeIntervalSince1970
+        UserDefaults.standard.set(selectedAt, forKey: Self.lastSelectedKey)
+        selectedMacID = macID
+    }
+
+    /// The phone forgot this Mac: drop its key, address, tabs and any connection to it.
     func forget(macID: String) {
         ShellKeyVault.delete(macID: macID, context: lock?.isUnlocked == true ? lock?.context : nil)
         UserDefaults.standard.removeObject(forKey: Self.manualAddressPrefix + macID)
@@ -278,12 +410,33 @@ final class ShellModel: ObservableObject {
         if clientMacID == macID { dropConnection(); resetSessions() }
         applyingRefresh = true
         macs.removeAll { $0.macID == macID }
-        if selectedMacID == macID { selectedMacID = macs.first?.macID }
+        let stillPaired = paired.map(\.id).filter { $0 != macID }
+        if selectedMacID == macID {
+            // The last used Mac, else one with the shell, else any paired one (internet only).
+            let lastUsed = UserDefaults.standard.string(forKey: Self.lastMacKey)
+            selectedMacID = MacProfiles.selection(current: nil, lastUsed: lastUsed == macID ? nil : lastUsed,
+                                                  paired: stillPaired, withShell: macs.map(\.macID))
+        }
         applyingRefresh = false
-        if macs.isEmpty { clear(.noAccess) } else if client == nil { connect() }
+        if macs.isEmpty { clear(.noAccess, paired: stillPaired) } else {
+            // Before dialling: the new selection's watch (if any) ends first.
+            updateWatcher()
+            if client == nil { connect() }
+        }
         var heard = Self.lastHeardStore
         heard[macID] = nil
         UserDefaults.standard.set(heard, forKey: Self.lastHeardKey)
+        var selectedAt = Self.lastSelectedStore
+        selectedAt[macID] = nil
+        UserDefaults.standard.set(selectedAt, forKey: Self.lastSelectedKey)
+        tabMemory.forget(macID)
+        saveTabMemory()
+        hiddenSessions.forget(macID)
+        saveHiddenSessions()
+        endedByMac[macID] = nil
+        if UserDefaults.standard.string(forKey: Self.lastMacKey) == macID {
+            UserDefaults.standard.removeObject(forKey: Self.lastMacKey)
+        }
     }
 
     func forgetAll() {
@@ -294,6 +447,12 @@ final class ShellModel: ObservableObject {
         granted = [:]
         clear(.noAccess)
         UserDefaults.standard.removeObject(forKey: Self.lastHeardKey)
+        UserDefaults.standard.removeObject(forKey: Self.lastSelectedKey)
+        tabMemory = MacTabMemory()
+        UserDefaults.standard.removeObject(forKey: Self.tabMemoryKey)
+        UserDefaults.standard.removeObject(forKey: Self.lastMacKey)
+        hiddenSessions = ShellHiddenSessions()
+        UserDefaults.standard.removeObject(forKey: Self.hiddenSessionsKey)
     }
 
     // MARK: Connection
@@ -309,10 +468,15 @@ final class ShellModel: ObservableObject {
         redialTask = nil
         guard let credential = macs.first(where: { $0.macID == selectedMacID }) else {
             redialsMade = nil
-            reach = macs.isEmpty ? .noAccess : reach
+            // A paired Mac without a usable credential: nothing of the Mac left shows, and the
+            // same per-Mac key facts the last refresh used say why. Not while locked: unlocking refreshes.
+            if let mac = selectedMacID, reach != .locked, reach != .needsPasscode {
+                return idleOnMacWithoutShell(keyFacts.keyUnavailable(for: mac) ? .keyUnavailable : .noAccess)
+            }
+            if macs.isEmpty, reach != .locked, reach != .needsPasscode { reach = .noAccess }
             return
         }
-        if clientMacID != credential.macID { resetSessions() }
+        if clientMacID != credential.macID { switchSessions(to: credential.macID) }
         generation += 1
         let gen = generation
         clientTriesIroh = connectMode == .automatic && credential.irohID.map(IrohInfo.isValidID) == true
@@ -385,13 +549,33 @@ final class ShellModel: ObservableObject {
         client?.resize(cols: cols, rows: rows)
     }
 
-    /// Ends a running session, or just closes the tab of an ended one (the
-    /// Mac would refuse to close it again).
+    /// Ends a running session. A finished one is removed instead (`remove`):
+    /// its tab closes and it's hidden on this phone, since the Mac would refuse to close it again.
     func close(_ id: String) {
-        if !ended.isEnded(id) { client?.close(id) }
+        if hiddenSessions.canRemove(id, ended: ended, sessions: sessions) { return remove(id) }
+        client?.close(id)
         ended.forget(id)
         openTabs.removeAll { $0 == id }
         if activeSession == id { activeSession = nil }
+    }
+
+    /// Removes a finished session from this phone: hides it for this Mac and
+    /// drops its tab. Never sends `close` (the Mac ignores it for a session
+    /// that has ended), so it works while the Mac is out of reach.
+    func remove(_ id: String) {
+        guard hiddenSessions.canRemove(id, ended: ended, sessions: sessions) else { return }
+        if let mac = clientMacID ?? selectedMacID {
+            hiddenSessions.hide(id, on: mac)
+            saveHiddenSessions()
+        }
+        ended.forget(id)
+        openTabs.removeAll { $0 == id }
+        if activeSession == id { activeSession = nil }
+    }
+
+    private func saveHiddenSessions() {
+        guard let data = try? JSONEncoder().encode(hiddenSessions) else { return }
+        UserDefaults.standard.set(data, forKey: Self.hiddenSessionsKey)
     }
 
     func loadHistory() { client?.requestHistory() }
@@ -522,6 +706,11 @@ final class ShellModel: ObservableObject {
         case let .sessions(list):
             sessions = list
             let ids = Set(list.map(\.id))
+            if let mac = clientMacID ?? selectedMacID {
+                var hidden = hiddenSessions
+                hidden.apply(listed: Array(ids), on: mac)
+                if hidden != hiddenSessions { hiddenSessions = hidden; saveHiddenSessions() }
+            }
             // The ended session on screen keeps its tab (and log) until the user closes it.
             let kept = activeSession.flatMap { ended.isEnded($0) ? $0 : nil }
             ended.apply(list, keeping: Set([kept].compactMap { $0 }))
@@ -643,7 +832,70 @@ final class ShellModel: ObservableObject {
         finishTranscript(nil)
     }
 
+    /// Another Mac's turn: clears what the last one said and brings back the
+    /// new one's tabs, which `.ready` re-attaches as after any reconnect.
+    private func switchSessions(to macID: String) {
+        // Kept so a finished tab can still be removed after switching back while that Mac is out of reach.
+        if let left = clientMacID { endedByMac[left] = ended }
+        resetSessions()
+        ended = endedByMac[macID] ?? ShellEndedSessions()
+        let tabs = tabMemory.tabs(for: macID)
+        holdingTabMemory = true
+        openTabs = tabs.openTabs
+        activeSession = tabs.active
+        holdingTabMemory = false
+    }
+
+    /// The selected Mac is paired but has no usable shell credential: internet only
+    /// (`.noAccess`), or a grant whose key can't be read (`.keyUnavailable`). Nothing
+    /// of the Mac left (sessions, tabs, state) shows, and no tabs are restored or
+    /// saved for this one: `clientMacID` is nil, so the first connect with a
+    /// credential brings back its remembered tabs. The Mac left's tabs were saved by `select`.
+    private func idleOnMacWithoutShell(_ reach: Reach) {
+        redialTask?.cancel()
+        redialTask = nil
+        redialsMade = nil
+        dropConnection()
+        resetSessions()
+        lastError = nil
+        // Before dropping the Mac's ID: a drop from `.ready` is "last heard" for the Mac left.
+        self.reach = reach
+        clientMacID = nil
+    }
+
+    /// Keeps the tabs showing as the connected Mac's.
+    private func rememberTabs() {
+        guard !holdingTabMemory, let mac = clientMacID else { return }
+        let tabs = MacTabs(openTabs: openTabs, active: activeSession)
+        guard tabMemory.tabs(for: mac) != tabs else { return }
+        tabMemory.save(tabs, for: mac)
+        saveTabMemory()
+    }
+
+    /// Drops what's kept per Mac for Macs no longer paired (the Android app does the same).
+    private func forgetUnpaired(keeping paired: Set<String>) {
+        var hidden = hiddenSessions
+        hidden.keepOnly(paired)
+        if hidden != hiddenSessions { hiddenSessions = hidden; saveHiddenSessions() }
+        endedByMac = endedByMac.filter { paired.contains($0.key) }
+        let defaults = UserDefaults.standard
+        if let last = defaults.string(forKey: Self.lastMacKey), !paired.contains(last) { defaults.removeObject(forKey: Self.lastMacKey) }
+        let heard = Self.lastHeardStore
+        if heard.keys.contains(where: { !paired.contains($0) }) { defaults.set(heard.filter { paired.contains($0.key) }, forKey: Self.lastHeardKey) }
+        let selectedAt = Self.lastSelectedStore
+        if selectedAt.keys.contains(where: { !paired.contains($0) }) { defaults.set(selectedAt.filter { paired.contains($0.key) }, forKey: Self.lastSelectedKey) }
+    }
+
+    private func saveTabMemory() {
+        guard let data = try? JSONEncoder().encode(tabMemory) else { return }
+        UserDefaults.standard.set(data, forKey: Self.tabMemoryKey)
+    }
+
+    /// Clears everything the connected Mac said, tabs included (its tabs stay
+    /// in `tabMemory`).
     private func resetSessions() {
+        holdingTabMemory = true
+        defer { holdingTabMemory = false }
         openWhenReady = false
         macState = nil
         timeline = nil
@@ -678,17 +930,22 @@ final class ShellModel: ObservableObject {
     /// No usable Mac right now: forget keys held in memory, stop dialing and
     /// browsing. While merely locked (or without a passcode) the selection and
     /// tabs stay, so the next unlock reconnects and re-attaches.
-    private func clear(_ reach: Reach) {
+    /// `paired`: the paired Macs, one of which stays selected on `.noAccess` (internet only, or no grant yet).
+    private func clear(_ reach: Reach, paired: [String] = []) {
         redialTask?.cancel()
         redialTask = nil
         redialsMade = nil
         dropConnection()
+        watcher.stop()
+        keyFacts = ShellKeyFacts()
         // Browsing exposes nothing secret: keep it across relocks so results are ready on unlock.
         if reach == .noAccess { stopBrowsing() }
         applyingRefresh = true
         macs = []
         if reach == .noAccess {
-            selectedMacID = nil
+            // A paired Mac (internet only, or no grant yet) stays selected; with none paired, nothing is.
+            selectedMacID = MacProfiles.selection(current: selectedMacID, lastUsed: UserDefaults.standard.string(forKey: Self.lastMacKey),
+                                                  paired: paired, withShell: [])
             clientMacID = nil
             resetSessions()
         }
@@ -762,6 +1019,13 @@ extension ShellError {
 extension ShellModel {
     static var demoState: String? { UserDefaults.standard.string(forKey: "PTDemoShell") }
 
+    /// The demo's paired Macs: two with the shell, and one paired for internet only.
+    static let demoPaired = [
+        PairedClient(id: "demo-mac", name: "MacBook Pro", tokenHash: "", pairedAt: .now),
+        PairedClient(id: "demo-mac-2", name: "Home Studio", tokenHash: "", pairedAt: .now),
+        PairedClient(id: "demo-mac-3", name: "Office iMac", tokenHash: "", pairedAt: .now),
+    ]
+
     fileprivate static let demoOutput: Data = {
         let esc = "\u{1b}["
         let prompt = "\(esc)1;36mme\(esc)0m@\(esc)1;35mmacbook\(esc)0m \(esc)34m~/dev/passthrough\(esc)0m % "
@@ -782,15 +1046,52 @@ extension ShellModel {
     /// The demo session waiting on a question.
     fileprivate static let demoAskingID = "8F3A1C2E-5B7D-4E60-8F21-3C4D5E6F7A8B"
 
+    /// The second demo Mac's session waiting on a question.
+    fileprivate static let demoStudioAskingID = "2C7E9B14-0A3D-4F5E-9B61-7D8E9FA0B1C2"
+
+    /// Each demo Mac's sessions, kept across switches so opened ones stay.
+    private static var demoSessions: [String: [ShellSessionInfo]] = [:]
+
+    private static func demoBaseSessions(_ macID: String, now: Double) -> [ShellSessionInfo] {
+        if macID == "demo-mac-2" {
+            return [
+                ShellSessionInfo(id: "studio-1", title: "zsh — ~/music", startedAt: now - 3000, lastOutputAt: now - 300, running: true),
+                ShellSessionInfo(id: demoStudioAskingID, title: "codex", startedAt: now - 1200, lastOutputAt: now - 90, running: true,
+                                 waiting: "Allow running `swift test`?"),
+            ]
+        }
+        return [
+            ShellSessionInfo(id: demoAskingID, title: "claude", startedAt: now - 1900, lastOutputAt: now - 40, running: true,
+                             waiting: "Do you want to make this edit to HomeView.swift?"),
+            ShellSessionInfo(id: "demo-1", title: "zsh — ~/dev/passthrough", startedAt: now - 760, lastOutputAt: now - 20, running: true),
+            ShellSessionInfo(id: "demo-2", title: "npm run build", startedAt: now - 5400, lastOutputAt: now - 3600, running: false, exitStatus: 0),
+        ]
+    }
+
     fileprivate func applyDemo(_ state: String) {
         let now = Date().timeIntervalSince1970
         guard state != "noAccess" else { return clear(.noAccess) }
         applyingRefresh = true
-        macs = [ShellCredential(macID: "demo-mac", macName: "My MacBook Pro", certSHA256: "", shellKey: Data(),
-                                phoneID: "demo", port: 0, addresses: [])]
-        selectedMacID = "demo-mac"
+        macs = [
+            ShellCredential(macID: "demo-mac", macName: "MacBook Pro", certSHA256: "", shellKey: Data(),
+                            phoneID: "demo", port: 0, addresses: []),
+            ShellCredential(macID: "demo-mac-2", macName: "Home Studio", certSHA256: "", shellKey: Data(),
+                            phoneID: "demo", port: 0, addresses: []),
+        ]
+        paired = Self.demoPaired
+        selectedMacID = MacProfiles.selection(current: selectedMacID, lastUsed: UserDefaults.standard.string(forKey: Self.lastMacKey),
+                                              paired: paired.map(\.id), withShell: macs.map(\.macID))
         applyingRefresh = false
-        clientMacID = "demo-mac"
+        guard let mac = selectedMacID else { return }
+        // The internet-only demo Mac: the same idle state as a real one.
+        guard macs.contains(where: { $0.macID == mac }) else {
+            applyDemoWatch()
+            return idleOnMacWithoutShell(.noAccess)
+        }
+        if clientMacID != mac {
+            switchSessions(to: mac)
+            clientMacID = mac
+        }
         switch state {
         case "connecting": reach = .connecting
         case "unreachable": reach = .unreachable
@@ -807,12 +1108,7 @@ extension ShellModel {
             macState = MacState(awake: false, awakeStopped: MacState.stoppedBattery, battery: 0.2, charging: false, batteryFloor: 0.2, control: true)
         }
         if state == "ready", sessions.isEmpty {
-            sessions = [
-                ShellSessionInfo(id: Self.demoAskingID, title: "claude", startedAt: now - 1900, lastOutputAt: now - 40, running: true,
-                                 waiting: "Do you want to make this edit to HomeView.swift?"),
-                ShellSessionInfo(id: "demo-1", title: "zsh — ~/dev/passthrough", startedAt: now - 760, lastOutputAt: now - 20, running: true),
-                ShellSessionInfo(id: "demo-2", title: "npm run build", startedAt: now - 5400, lastOutputAt: now - 3600, running: false, exitStatus: 0),
-            ]
+            sessions = Self.demoSessions[mac] ?? Self.demoBaseSessions(mac, now: now)
             ended.apply(sessions)
         }
         if state == "ready" || state == "empty" {
@@ -824,6 +1120,22 @@ extension ShellModel {
             ]
             historyLoaded = true
         }
+        applyDemoWatch()
+    }
+
+    /// The other demo Macs as a watch would see them (the second one's
+    /// `codex` session is asking), without dialling anything.
+    fileprivate func applyDemoWatch() {
+        guard Self.demoState == "ready" else { return watcher.demoShow([:]) }
+        let now = Date().timeIntervalSince1970
+        let ids = MacProfiles.watched(candidates: macs.map(\.macID), selected: selectedMacID,
+                                      recency: [:], pinned: watchPinned, limit: MacWatcher.limit)
+        watcher.demoShow(Dictionary(uniqueKeysWithValues: ids.map { id in
+            (id, MacWatcher.Seen(sessions: Self.demoSessions[id] ?? Self.demoBaseSessions(id, now: now),
+                                 state: id == "demo-mac" ? MacState(awake: true, battery: 0.64, charging: false, minutesLeft: 190, batteryFloor: 0.2, control: true)
+                                                 : MacState(awake: true, battery: 0.9, charging: true, control: true),
+                                 reachable: true, lastHeard: Date(timeIntervalSince1970: now)))
+        }))
     }
 
     fileprivate func demoTimeline(since: Date) {
@@ -858,9 +1170,10 @@ extension ShellModel {
     }
 
     fileprivate func demoOpen() {
-        let id = "demo-\(sessions.count + 1)"
+        let id = "\(selectedMacID ?? "demo")-new-\(sessions.count + 1)"
         sessions.append(ShellSessionInfo(id: id, title: "zsh — ~", startedAt: Date().timeIntervalSince1970,
                                          lastOutputAt: Date().timeIntervalSince1970, running: true))
+        if let mac = selectedMacID { Self.demoSessions[mac] = sessions }
         if !openTabs.contains(id) { openTabs.append(id) }
         streamStarting.send((id, false))
         activeSession = id

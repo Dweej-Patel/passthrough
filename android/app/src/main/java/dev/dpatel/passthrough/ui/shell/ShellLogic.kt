@@ -52,6 +52,25 @@ enum class ShellReach(val message: String?) {
     }
 }
 
+/**
+ * What the last key read learned about each granting Mac whose key it could not
+ * use: [locked] needed authentication (even after the relock), [lost] the vault
+ * marked as invalidated. Kept between refreshes so a switch to a Mac without a
+ * credential shows the same state a refresh would.
+ */
+data class ShellKeyFacts(
+    val granting: Set<String> = emptySet(),
+    val locked: Set<String> = emptySet(),
+    val lost: Set<String> = emptySet(),
+) {
+    val anyLocked: Boolean get() = locked.isNotEmpty()
+
+    /** The reach for [mac] (null: nothing selected) when it has no usable credential. */
+    fun reachWithoutCredential(mac: String?): ShellReach =
+        if (mac == null) ShellReach.withoutCredential(granting.isNotEmpty(), anyLocked, lost.isNotEmpty())
+        else ShellReach.withoutCredential(mac in granting, mac in locked, mac in lost)
+}
+
 /** Copy for a refusal worth telling the user about; null for ones the UI handles quietly. */
 fun ShellError.message(): String? = when (this) {
     ShellError.TOO_MANY_SESSIONS -> "Your Mac already has ${RemoteShell.MAX_SESSIONS} sessions open. End one to start another."

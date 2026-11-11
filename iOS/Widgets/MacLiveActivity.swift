@@ -14,7 +14,7 @@ struct MacLiveActivity: Widget {
         ActivityConfiguration(for: MacActivityAttributes.self) { context in
             LockScreenActivity(context: context)
                 .activitySystemActionForegroundColor(PTColor.tintText)
-                .widgetURL(link(context.state).url)
+                .widgetURL(link(context).url)
         } dynamicIsland: { context in
             let state = context.state
             let stale = context.isStale || !state.reachable
@@ -55,13 +55,15 @@ struct MacLiveActivity: Widget {
                     Image(systemName: "cup.and.saucer.fill").foregroundStyle(PTColor.tint)
                 }
             }
-            .widgetURL(link(state).url)
+            .widgetURL(link(context).url)
             .keylineTint(PTColor.tint)
         }
     }
 
-    private func link(_ state: MacActivityAttributes.ContentState) -> AppLink {
-        state.waitingSession.map(AppLink.session) ?? .mac
+    /// Names the activity's Mac, so a tap switches to it first (nil from an activity an older build started).
+    private func link(_ context: ActivityViewContext<MacActivityAttributes>) -> AppLink {
+        let macID = context.attributes.macID
+        return context.state.waitingSession.map { AppLink.session($0, mac: macID) } ?? .mac(macID)
     }
 }
 

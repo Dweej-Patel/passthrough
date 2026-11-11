@@ -52,6 +52,12 @@ object PT {
     val danger = Color(0xFFFF6B6B)
     val success = Color(0xFF5CE68F)
 
+    /** Mac avatar colors (white initials), same six in the same order as iOS's PTTheme.avatarPalette. */
+    val avatarPalette = listOf(
+        Color(0xFF0E8F86), Color(0xFF6B3FD1), Color(0xFFD1573F),
+        Color(0xFF2F6FDB), Color(0xFFB8409A), Color(0xFF5B8C2A),
+    )
+
     // The redesign's tint and "needs you", as on iOS and the Mac (PTColor in PassthroughUI).
     /** Text on a mint fill. */
     val onTint = Color(0xFF06281C)

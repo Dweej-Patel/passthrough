@@ -28,11 +28,7 @@ struct RemoteShellCard: View {
     private var statusLine: some View {
         HStack(spacing: 8) {
             PTStatusDot(color: ShellStatusLabel.color(shell.reach), live: shell.reach == .ready)
-            if shell.macs.count > 1 {
-                macPicker
-            } else {
-                Text(selectedMacName).font(.subheadline.weight(.semibold)).lineLimit(1)
-            }
+            Text(selectedMacName).font(.subheadline.weight(.semibold)).lineLimit(1)
             Text(statusDetail).font(.caption).foregroundStyle(.secondary).lineLimit(1)
             Spacer(minLength: 0)
         }
@@ -44,27 +40,6 @@ struct RemoteShellCard: View {
         case .ready: shell.path?.label.map { "Connected \($0)" } ?? "Connected"
         default: ShellStatusLabel.title(shell.reach)
         }
-    }
-
-    private var macPicker: some View {
-        Menu {
-            Picker("Mac", selection: $shell.selectedMacID) {
-                ForEach(shell.macs, id: \.macID) { mac in
-                    Text(mac.macName).tag(Optional(mac.macID))
-                }
-            }
-        } label: {
-            HStack(spacing: 4) {
-                Text(selectedMacName).lineLimit(1)
-                Image(systemName: "chevron.up.chevron.down").font(.caption2.weight(.bold))
-            }
-            .font(.subheadline.weight(.semibold))
-            .foregroundStyle(.primary)
-            .frame(minHeight: 44)
-            .contentShape(Rectangle())
-        }
-        .accessibilityLabel("Mac, \(selectedMacName)")
-        .accessibilityHint("Choose which Mac to open a shell on")
     }
 
     @ViewBuilder private var content: some View {
@@ -94,7 +69,7 @@ struct RemoteShellCard: View {
         case .locked, .needsPasscode, .keyUnavailable:
             notice(shell.reachMessage ?? "", icon: "exclamationmark.triangle.fill", tint: PTColor.attention)
         case .ready:
-            if shell.sessions.isEmpty {
+            if shell.visibleSessions.isEmpty {
                 VStack(alignment: .leading, spacing: 12) {
                     Text("No sessions open. Start one to run commands on \(selectedMacName).")
                         .font(.subheadline).foregroundStyle(.secondary)
@@ -107,7 +82,7 @@ struct RemoteShellCard: View {
             } else {
                 TimelineView(.periodic(from: .now, by: 30)) { context in
                     VStack(alignment: .leading, spacing: 4) {
-                        ForEach(shell.sessions, id: \.id) { session in
+                        ForEach(shell.visibleSessions, id: \.id) { session in
                             row(session, now: context.date)
                         }
                     }
@@ -175,7 +150,11 @@ struct RemoteShellCard: View {
             .accessibilityHint("Opens the terminal")
             Menu {
                 Button { router.terminal = .attach(session.id) } label: { Label("Open", systemImage: "terminal") }
-                Button(role: .destructive) { shell.close(session.id) } label: { Label("End session", systemImage: "xmark") }
+                if session.running {
+                    Button(role: .destructive) { shell.close(session.id) } label: { Label("End session", systemImage: "xmark") }
+                } else {
+                    Button(role: .destructive) { shell.remove(session.id) } label: { Label("Remove", systemImage: "trash") }
+                }
             } label: {
                 Image(systemName: "ellipsis.circle")
                     .font(.body)

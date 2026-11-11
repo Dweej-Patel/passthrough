@@ -14,6 +14,13 @@ public enum PTTheme {
     public static let danger = Color(red: 1.0, green: 0.42, blue: 0.42)
     public static let success = Color(red: 0.36, green: 0.90, blue: 0.56)
 
+    /// Mac avatar colors, picked per Mac by `MacProfiles.colorIndex`. Android
+    /// uses the same RGB values in the same order. White initials read on all.
+    public static let avatarHex: [UInt32] = [0x0E8F86, 0x6B3FD1, 0xD1573F, 0x2F6FDB, 0xB8409A, 0x5B8C2A]
+    public static let avatarPalette: [Color] = avatarHex.map {
+        Color(red: Double($0 >> 16 & 0xFF) / 255, green: Double($0 >> 8 & 0xFF) / 255, blue: Double($0 & 0xFF) / 255)
+    }
+
     public static var accent: LinearGradient {
         LinearGradient(colors: [accentStart, accentEnd], startPoint: .topLeading, endPoint: .bottomTrailing)
     }
