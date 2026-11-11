@@ -60,8 +60,10 @@ private struct MenuBarLabel: View {
     private var icon: some View {
         Image(nsImage: MenuBarIcon.image(MenuBarIcon.State(
             online: session.phase.isConnected,
+            phone: session.device != nil,
             awake: keepAwake.isOn,
             vpn: vpnLayer.status.isConnected,
+            screen: !shell.screenViewers.isEmpty,
             needsYou: shell.sessions.contains(where: \.isAsking),
             problem: vpnLayer.isWanted && vpnLayer.status.isFailing)))
     }

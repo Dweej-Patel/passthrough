@@ -61,7 +61,8 @@ enum PanelSnapshots {
     @MainActor
     private static func renderMenuBarIcons(to directory: String) {
         let states: [MenuBarIcon.State] = [
-            .init(), .init(online: true), .init(online: true, awake: true), .init(online: true, vpn: true),
+            .init(), .init(phone: true), .init(online: true), .init(online: true, awake: true), .init(online: true, vpn: true),
+            .init(online: true, screen: true), .init(phone: true, awake: true, screen: true),
             .init(online: true, awake: true, vpn: true), .init(awake: true),
             .init(online: true, needsYou: true), .init(awake: true, needsYou: true), .init(problem: true), .init(online: true, vpn: true, problem: true),
         ]

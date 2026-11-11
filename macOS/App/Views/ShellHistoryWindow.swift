@@ -262,6 +262,9 @@ final class ReplayTerminalContainer: NSView {
         terminal.frame = CGRect(x: 0, y: 0, width: size.width + 0.5, height: size.height + 0.5)
     }
 
+    /// As on the phone: stray bytes become replacement marks, one column each.
+    private var utf8 = UTF8Repair()
+
     private func feed(from index: Int, offset: Int) {
         var index = index, offset = offset, budget = Self.chunkSize
         while !cancelled, index < replay.count, budget > 0 {
@@ -277,7 +280,7 @@ final class ReplayTerminalContainer: NSView {
                 index += 1
             case let .output(data):
                 let end = min(offset + budget, data.count)
-                terminal.feed(byteArray: ArraySlice([UInt8](data[(data.startIndex + offset)..<(data.startIndex + end)])))
+                terminal.feed(byteArray: ArraySlice(utf8.repair(data.subdata(in: (data.startIndex + offset)..<(data.startIndex + end)))))
                 budget -= end - offset
                 if end == data.count { index += 1; offset = 0 } else { offset = end }
             }

@@ -101,7 +101,7 @@ It is **off by default**, sits directly under the passthrough switch, and works 
 
 **Heat auto-off** (Settings ▸ General ▸ Heat, on by default): macOS reports how hard it is working to stay cool. When that reaches *serious*, the point where it starts slowing the Mac down, keep-awake switches itself off so a closed laptop can sleep and cool, and turning it on is refused until the Mac has cooled. It uses the public thermal state rather than raw sensor temperatures.
 
-The menu-bar icon is one phone glyph with a few marks: radio waves while online through the phone, an underline while keep-awake holds the Mac, a shield while the VPN layer is connected, an amber dot when a remote shell is waiting on a question, and amber with "!" when the VPN failed and is blocking traffic.
+The menu-bar icon is one phone glyph with a few marks, and colour says what is going on: the phone turns blue when a phone is connected and green with radio waves while the Mac is online through it; a green cup while keep-awake holds the Mac, a green lock while the VPN layer is connected, and a red display while a phone is viewing this Mac's screen; an amber dot when a remote shell is waiting on a question, and an amber phone with "!" when the VPN failed and is blocking traffic. With nothing going on it is plain, in the menu bar's own colour.
 
 Caution: the heat and battery limits are a safety net, not a licence. A closed, running Mac in a bag can still get very hot; use lid-closed on power or in open air.
 
