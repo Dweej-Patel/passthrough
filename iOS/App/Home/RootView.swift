@@ -74,6 +74,7 @@ struct RootView: View {
             // Tear presentations down deterministically when the app locks.
             if !unlocked {
                 router.dismissAll()
+                linkAwaitsDismiss = false   // the unlock runs a waiting link again anyway
                 showPairing = false
                 showSettings = false
                 model.endPairing()
@@ -183,7 +184,12 @@ extension RootView {
         case .mac(let macID):
             // A terminal, screen or history still open is the Mac being left's: close it
             // first, or what's typed into it (a Screen Sharing login) goes to the new one.
-            if macID != model.shell.selectedMacID, router.dismissAll() { linkAwaitsDismiss = true }
+            if macID != model.shell.selectedMacID, router.dismissAll() {
+                linkAwaitsDismiss = true
+                // In case nothing was really on screen (a terminal still queued behind a sheet):
+                // then no `onDismiss` comes, and the link would wait until it expires.
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1) { presentationDismissed() }
+            }
             model.shell.select(macID)
             return true
         case .rejected: return false

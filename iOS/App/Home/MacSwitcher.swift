@@ -3,7 +3,8 @@ import PassthroughCore
 import PassthroughUI
 
 /// A Mac's profile picture: its initial on a color picked from its ID, with an
-/// amber dot when it needs you. Hidden from VoiceOver; whatever holds it gives the label.
+/// amber dot when it needs you. Whatever holds it gives the label (the toolbar
+/// button), or hides it beside the name it shows (a switcher row).
 struct MacAvatar: View {
     let macID: String
     let name: String
@@ -29,8 +30,6 @@ struct MacAvatar: View {
                         .offset(x: size * 0.1, y: -size * 0.1)
                 }
             }
-            // A picture of the name beside it: the button holding it says what it is.
-            .accessibilityHidden(true)
     }
 }
 
@@ -100,6 +99,7 @@ struct MacSwitcherSheet: View {
         return Button { choose(row.id, asking: asking) } label: {
             HStack(spacing: 12) {
                 MacAvatar(macID: row.id, name: row.name, size: 38)
+                    .accessibilityHidden(true)   // the name beside it says the same
                 VStack(alignment: .leading, spacing: 2) {
                     Text(row.name).font(.body.weight(.semibold)).lineLimit(1)
                     Text(MacProfiles.statusText(status, now: .now))
