@@ -67,6 +67,18 @@ final class ShellProtocolTests: XCTestCase {
         XCTAssertEqual(info.addresses, ["192.168.1.20", "100.101.102.103"])
     }
 
+    /// `locked` is on the wire only when the Mac says it, and `lock` carries nothing but its name.
+    func testLockOnTheWire() throws {
+        var message = ShellEnvelope(t: ShellEnvelope.macState)
+        message.state = MacState(awake: true, locked: true)
+        let decoded = try ShellEnvelope.decode(try message.encodedLine().dropLast())
+        XCTAssertEqual(decoded.state?.locked, true)
+        let older = try ShellEnvelope.decode(Data(#"{"t":"macState","state":{"awake":true}}"#.utf8))
+        XCTAssertNil(older.state?.locked)
+        let lock = String(decoding: try ShellEnvelope(t: ShellEnvelope.lock).encodedLine(), as: UTF8.self)
+        XCTAssertEqual(lock.trimmingCharacters(in: .newlines), #"{"t":"lock"}"#)
+    }
+
     /// The Mac's state and a phone's requests to change it; absent fields stay absent.
     func testMacStateAndControlFields() throws {
         let messages = try XCTUnwrap(shell()["messages"] as? [[String: Any]])

@@ -97,6 +97,9 @@ public struct ShellEnvelope: Codable, Equatable, Sendable {
     /// A phone turning Keep awake or the VPN on or off (`on`).
     public static let setAwake = "setAwake"
     public static let setVPN = "setVPN"
+    /// A phone asking the Mac to lock its screen (no fields). The Mac stays
+    /// awake and everything keeps running; `macState` follows with `locked`.
+    public static let lock = "lock"
     /// A phone asking what happened on the Mac since a time (`since`); answered `eventList`.
     public static let events = "events"
     public static let eventList = "eventList"
@@ -231,14 +234,17 @@ public struct MacState: Codable, Equatable, Sendable {
     public var control: Bool?
     /// The Mac is online through a phone, or on its way there. Absent from older Macs.
     public var internet: Bool?
+    /// The Mac's screen is locked. Absent from older Macs, and when the Mac can't tell.
+    public var locked: Bool?
 
     public init(awake: Bool? = nil, awakeStopped: String? = nil, battery: Double? = nil, charging: Bool? = nil,
                 minutesLeft: Int? = nil, batteryFloor: Double? = nil, hot: Bool? = nil, vpn: String? = nil,
-                vpnName: String? = nil, killSwitch: Bool? = nil, control: Bool? = nil, internet: Bool? = nil) {
+                vpnName: String? = nil, killSwitch: Bool? = nil, control: Bool? = nil, internet: Bool? = nil,
+                locked: Bool? = nil) {
         self.awake = awake; self.awakeStopped = awakeStopped; self.battery = battery; self.charging = charging
         self.minutesLeft = minutesLeft; self.batteryFloor = batteryFloor; self.hot = hot; self.vpn = vpn
         self.vpnName = vpnName; self.killSwitch = killSwitch; self.control = control
-        self.internet = internet
+        self.internet = internet; self.locked = locked
     }
 
     public static let vpnOff = "off"
@@ -302,6 +308,8 @@ public struct BatterySample: Codable, Equatable, Sendable {
 public enum MacControl: Equatable, Sendable {
     case awake(Bool)
     case vpn(Bool)
+    /// Lock the Mac's screen. There is no unlocking from a phone.
+    case lock
 }
 
 /// Which peers may reach the shell, and which of the Mac's addresses a phone

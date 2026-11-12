@@ -64,6 +64,7 @@ final class MacEventRecorder {
         case .awake(false): log.record(MacEvent.kindAwake, "\(label) let the Mac sleep")
         case .vpn(true): log.record(MacEvent.kindVPN, "\(label) turned the VPN on")
         case .vpn(false): log.record(MacEvent.kindVPN, "\(label) turned the VPN off", warning: true)
+        case .lock: log.record(MacEvent.kindSleep, "\(label) locked the screen")
         }
     }
 

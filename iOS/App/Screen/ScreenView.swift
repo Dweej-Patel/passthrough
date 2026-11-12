@@ -146,6 +146,10 @@ struct ScreenView: View {
                 Button { model.perform(.appWindows) } label: { Label("App windows", systemImage: "macwindow.on.rectangle") }
             }
             Button { model.perform(.showDesktop) } label: { Label("Show desktop", systemImage: "menubar.dock.rectangle") }
+            // Only the lock: the Mac stays awake, and this view stays open on its lock screen.
+            if shell.macState?.locked == false, shell.macState?.control == true {
+                Button { shell.control(.lock) } label: { Label("Lock \(model.macName)", systemImage: "lock") }
+            }
         } label: {
             Image(systemName: "square.stack.3d.up").sideTarget(landscape)
         }

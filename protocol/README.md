@@ -338,6 +338,7 @@ disconnected; it can attach again and gets the scrollback.
 | `screenReady` | Mac | none | Reply to `screen`; every later byte, both ways, is Screen Sharing's. |
 | `macState` | Mac | `state` | How the Mac is doing (below): sent after `macInfo` and before `sessions`, then whenever it changes, on every connection that isn't carrying the screen. A Mac that has nothing to say sends none. |
 | `setAwake` / `setVPN` | phone | `on` | Turn Keep awake or the Mac's VPN on or off. An accepted request gets no reply of its own: the phone that asked gets a `macState` about a second later whether anything changed or not (a battery or heat limit can refuse Keep awake), and every phone gets one when something does. |
+| `lock` | phone | none | Lock the Mac's screen, as the Apple menu's Lock Screen does: the Mac stays awake and everything keeps running. Allowed and answered as `setAwake` is (`macState` about a second later, with `locked`). There is no unlocking: that takes the Mac's password. An older Mac answers `bad_request`. |
 | `events` | phone | `since` | What happened on the Mac since then (Unix seconds), for the phone's timeline. A Mac that keeps no log answers `bad_request`. |
 | `eventList` | Mac | `since`, `events`, `battery` | The answer, oldest first: at most the newest 500 `MacEvent`s since `since` and no older than 7 days (`t`, `kind`, `title`, `detail`?, `session`?, `warning`?), and `BatterySample`s (`t`, `level` 0 to 1, `charging`?), one per 5 minutes at most plus one at each plug or unplug, starting with the one just before `since`. Fewer events if the line would exceed 262144 bytes (the oldest dropped). `title` and `detail` are written by the Mac, ready to show; `kind` (`awake`, `vpn`, `link`, `power`, `sleep`, `shell`, `asked`, `answered`) picks an icon, and phones show unknown kinds plainly. |
 | `ping` / `pong` | either | none | Liveness; each side answers `ping` with `pong`. A phone pings after 5 s without hearing from the Mac and gives the connection up after 15 s of silence and then dials again. The iPhone also gives it up 2 s after a ping it sent because the system said the connection's path failed (the cable it used unplugged, Wi-Fi lost) and nothing came back; Android closes the sockets of a network it lost by itself. |
@@ -372,7 +373,8 @@ what it doesn't know or doesn't have, and a phone ignores fields it doesn't know
 | `hot` | macOS reports the Mac running hot. |
 | `vpn` | `off`, `connecting`, `on` or `failed`; absent when the Mac has no VPN set up. |
 | `vpnName`, `killSwitch` | The VPN profile in use, and whether its kill switch is on. |
-| `control` | This phone may send `setAwake` and `setVPN`. |
+| `control` | This phone may send `setAwake`, `setVPN` and `lock`. |
+| `locked` | The Mac's screen is locked. Absent from a Mac that doesn't say. |
 | `internet` | The Mac is online through a phone, or on its way there. A phone falls back to whether it is sharing itself when a Mac leaves it out. |
 
 Whether a phone may change Keep awake and the VPN is a per-phone setting on

@@ -1372,6 +1372,31 @@ final class ShellListenerTests: XCTestCase {
         XCTAssertTrue(probe.failures.isEmpty)
     }
 
+    /// Locking goes through the same gate as Keep awake and the VPN, and is answered with the Mac's state.
+    func testALockRequestReachesTheHandlerAndIsAnswered() {
+        let listener = startListener()
+        let asked = Locked<[MacControl]>([])
+        listener.macState = { _ in MacState(control: true, locked: !asked.get().isEmpty) }
+        listener.onMacControl = { _, _, change in
+            asked.set(asked.get() + [change])
+            return nil
+        }
+        let (client, probe) = readyClient(listener)
+        wait(for: [probe.expect(self, "state") { Self.state($0).count == 1 }], timeout: 5)
+        client.lockMac()
+        wait(for: [probe.expect(self, "answered") { Self.state($0).last?.locked == true }], timeout: 5)
+        XCTAssertEqual(asked.get(), [.lock])
+        XCTAssertTrue(probe.failures.isEmpty)
+    }
+
+    func testALockRequestFromAPhoneNotAllowedIsRefused() {
+        let listener = startListener()
+        listener.onMacControl = { _, _, _ in .notAllowed }
+        let (client, probe) = readyClient(listener)
+        client.lockMac()
+        wait(for: [probe.expect(self, "refused") { _ in probe.failures == [.notAllowed] }], timeout: 5)
+    }
+
     /// The Mac holding its state (a limit refusing Keep awake) still answers
     /// the phone that asked, so its spinner always stops.
     func testAnAcceptedRequestIsAnsweredEvenWhenNothingChanges() {
