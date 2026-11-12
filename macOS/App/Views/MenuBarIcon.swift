@@ -1,4 +1,5 @@
 import AppKit
+import PassthroughUI
 
 /// The menu-bar icon: the phone alone when nothing is on, radio waves while
 /// online through it, and a badge beside it for each thing that is on (a lock
@@ -7,7 +8,8 @@ import AppKit
 ///
 /// Colour says what is going on at a glance, the way the system's microphone
 /// mark does: green for what is on (online, the VPN, Keep awake), blue for a
-/// phone that is connected but not carrying the Mac's traffic, red while the
+/// phone that is plugged in (or linked wirelessly) but not carrying the Mac's
+/// traffic, including one that still needs pairing, red while the
 /// screen is being viewed, and amber for what needs you: a dot on the phone's
 /// corner when a shell is waiting on a question, an amber phone with a "!"
 /// when something is wrong (the VPN failed and is blocking traffic). With
@@ -15,7 +17,7 @@ import AppKit
 enum MenuBarIcon {
     struct State: Equatable {
         var online = false
-        /// A phone is plugged in (or in reach) but the Mac isn't online through it.
+        /// A phone is plugged in (or linked over Wi-Fi) but the Mac isn't online through it; it may still need pairing.
         var phone = false
         var awake = false
         var vpn = false
@@ -26,12 +28,13 @@ enum MenuBarIcon {
     }
 
     private static let gap: CGFloat = 3
-    private static let amber = NSColor(srgbRed: 1, green: 0.72, blue: 0.30, alpha: 1)
+    // The app's own palette (PTColor), so a change there reaches the menu bar too.
+    private static let amber = PTNSColor.attention
     private static let deepAmber = NSColor(srgbRed: 0.64, green: 0.37, blue: 0, alpha: 1)
     // Each colour as (on a dark bar, on a light bar): the bright one is faint on a light bar.
-    private static let green = (NSColor(srgbRed: 0.37, green: 0.90, blue: 0.71, alpha: 1), NSColor(srgbRed: 0.04, green: 0.48, blue: 0.33, alpha: 1))
+    private static let green = PTNSColor.tintText
     private static let blue = (NSColor(srgbRed: 0.39, green: 0.71, blue: 1, alpha: 1), NSColor(srgbRed: 0.04, green: 0.42, blue: 0.86, alpha: 1))
-    private static let red = (NSColor(srgbRed: 1, green: 0.42, blue: 0.38, alpha: 1), NSColor(srgbRed: 0.83, green: 0.18, blue: 0.18, alpha: 1))
+    private static let red = PTNSColor.problem
     /// Drawing on a dark menu bar. The bright amber is faint on a light one: deep amber there.
     private static var onDarkBar: Bool { NSAppearance.currentDrawing().bestMatch(from: [.darkAqua, .aqua]) == .darkAqua }
 
@@ -105,7 +108,7 @@ enum MenuBarIcon {
     }
 
     private static func description(_ s: State) -> String {
-        var parts = ["Passthrough", s.online ? "online through the phone" : s.phone ? "phone connected" : "not using the phone"]
+        var parts = ["Passthrough", s.online ? "online through the phone" : s.phone ? "phone found, not in use" : "not using the phone"]
         if s.screen { parts.append("a phone is viewing this screen") }
         if s.awake { parts.append("keeping the Mac awake") }
         if s.vpn { parts.append("VPN on") }

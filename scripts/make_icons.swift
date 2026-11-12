@@ -1,5 +1,5 @@
 #!/usr/bin/env swift
-// Renders the Passthrough app icon at every size: a white arrow passing
+// Renders the Passthrough app icon at every size: an arrow passing
 // through a phone (behind it on the left, in front on the right) on a
 // background of the app's own colours (PTColor in Palette.swift): mint on ink,
 // or with PT_ICON=mint, ink on mint. Vector drawing, so it stays crisp when small.
