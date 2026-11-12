@@ -25,6 +25,9 @@ internal object ShellDemo {
     const val EXTRA = "pt.demo.shell"
     /** The session waiting on a question, which the timeline's asked and answered point at. */
     private const val ASKING = "8F3A1C2E-5B7D-4E60-8F21-3C4D5E6F7A8B"
+    /** The second demo Mac's session waiting on a question. */
+    private const val STUDIO_ASKING = "2C7E9B14-0A3D-4F5E-9B61-7D8E9FA0B1C2"
+    private const val STUDIO = "demo-mac-2"
 
     fun reach(value: String): ShellReach = when (value) {
         "connecting" -> ShellReach.CONNECTING
@@ -36,25 +39,39 @@ internal object ShellDemo {
     }
 
     val macs = listOf(
-        ShellCredential("demo-mac-1", "My MacBook Pro", "", ByteArray(0), "demo-phone", 0, emptyList()),
-        ShellCredential("demo-mac-2", "Studio", "", ByteArray(0), "demo-phone", 0, emptyList()),
+        ShellCredential("demo-mac-1", "MacBook Pro", "", ByteArray(0), "demo-phone", 0, emptyList()),
+        ShellCredential(STUDIO, "Home Studio", "", ByteArray(0), "demo-phone", 0, emptyList()),
     )
 
     private fun now() = System.currentTimeMillis() / 1000.0
 
-    fun sessions(extra: List<String> = emptyList()): List<ShellSessionInfo> {
+    /** Sessions opened in the demo on [macID] start with this. */
+    fun newPrefix(macID: String) = "$macID-new-"
+
+    /** Each demo Mac's own sessions, plus the ones opened in the demo ([extra]). */
+    fun sessions(macID: String, extra: List<String> = emptyList()): List<ShellSessionInfo> {
         val t = now()
-        return listOf(
+        val base = if (macID == STUDIO) {
+            listOf(
+                ShellSessionInfo("studio-1", "zsh — ~/music", startedAt = t - 3000, lastOutputAt = t - 300, running = true),
+                ShellSessionInfo(STUDIO_ASKING, "codex", startedAt = t - 1200, lastOutputAt = t - 90, running = true,
+                    waiting = "Allow running `swift test`?"),
+            )
+        } else listOf(
             ShellSessionInfo(ASKING, "claude", startedAt = t - 1900, lastOutputAt = t - 40, running = true,
                 waiting = "Do you want to make this edit to HomeView.swift?"),
             ShellSessionInfo("demo-1", "zsh — ~/dev/passthrough", startedAt = t - 4 * 60, lastOutputAt = t - 5, running = true),
             ShellSessionInfo("demo-2", "htop", startedAt = t - 3 * 3600, lastOutputAt = t - 60, running = true),
             ShellSessionInfo("demo-3", "npm run build", startedAt = t - 2 * 3600, lastOutputAt = t - 3600, running = false, exitStatus = 0),
-        ) + extra.map { ShellSessionInfo(it, "zsh", startedAt = t, lastOutputAt = t, running = true) }
+        )
+        return base + extra.map { ShellSessionInfo(it, "zsh", startedAt = t, lastOutputAt = t, running = true) }
     }
 
     val macState = MacState(awake = true, battery = 0.64, charging = false, minutesLeft = 190, batteryFloor = 0.2, hot = false,
         vpn = MacStates.VPN_ON, vpnName = "NordVPN Germany", killSwitch = true, control = true)
+
+    /** What the other demo Macs report through the watcher. */
+    val watchedMacState = MacState(awake = true, battery = 0.9, charging = true, control = true)
 
     fun timeline(since: Double): MacTimeline {
         val start = now() - (2 * 3600 + 14 * 60)

@@ -18,12 +18,12 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.Key
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.MoreHoriz
 import androidx.compose.material.icons.filled.Terminal
-import androidx.compose.material.icons.filled.UnfoldMore
 import androidx.compose.material.icons.filled.WifiOff
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
@@ -83,7 +83,7 @@ fun RemoteShellCard(vm: ShellViewModel, onOpen: (String?) -> Unit, onHistory: ()
     val redialing by vm.redialing.collectAsStateWithLifecycle()
     val macs by vm.macs.collectAsStateWithLifecycle()
     val selected by vm.selectedMacID.collectAsStateWithLifecycle()
-    val sessions by vm.sessions.collectAsStateWithLifecycle()
+    val sessions by vm.visibleSessions.collectAsStateWithLifecycle()
     val lastError by vm.lastError.collectAsStateWithLifecycle()
     val path by vm.path.collectAsStateWithLifecycle()
     val fromAnywhere by vm.triedFromAnywhere.collectAsStateWithLifecycle()
@@ -109,7 +109,7 @@ fun RemoteShellCard(vm: ShellViewModel, onOpen: (String?) -> Unit, onHistory: ()
             }
             // Which Mac, and how it's reached: its own line, so long names and large text fit.
             if (macName != null && (reach == ShellReach.READY || reach == ShellReach.CONNECTING || reach == ShellReach.UNREACHABLE)) {
-                MacLine(vm, macName, if (reach == ShellReach.READY) path?.label else null, pickable = macs.size > 1)
+                MacLine(macName, if (reach == ShellReach.READY) path?.label else null)
             }
             when (reach) {
                 ShellReach.CONNECTING -> Row(
@@ -156,28 +156,12 @@ fun RemoteShellCard(vm: ShellViewModel, onOpen: (String?) -> Unit, onHistory: ()
 }
 
 @Composable
-private fun MacLine(vm: ShellViewModel, macName: String, pathLabel: String?, pickable: Boolean) {
+private fun MacLine(macName: String, pathLabel: String?) {
     val c = LocalPT.current
-    val macs by vm.macs.collectAsStateWithLifecycle()
-    var open by remember { mutableStateOf(false) }
-    Box {
-        Row(
-            Modifier
-                .clip(RoundedCornerShape(10.dp))
-                .then(if (pickable) Modifier.clickable(role = Role.DropdownList) { open = true }.heightIn(min = 40.dp) else Modifier)
-                .semantics { if (pickable) contentDescription = "Mac: $macName. Choose another Mac" },
-            verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp),
-        ) {
-            Text(macName, style = PT.display(15.sp, FontWeight.SemiBold), color = c.primary, maxLines = 1, overflow = TextOverflow.Ellipsis,
-                modifier = Modifier.weight(1f, fill = false))
-            if (pickable) Icon(Icons.Filled.UnfoldMore, null, tint = c.secondary, modifier = Modifier.size(16.dp))
-            pathLabel?.let { Text("· $it", style = PT.display(13.sp, FontWeight.Normal), color = c.secondary, maxLines = 1) }
-        }
-        DropdownMenu(expanded = open, onDismissRequest = { open = false }) {
-            macs.forEach { mac ->
-                DropdownMenuItem(text = { Text(mac.macName) }, onClick = { open = false; vm.select(mac.macID) })
-            }
-        }
+    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+        Text(macName, style = PT.display(15.sp, FontWeight.SemiBold), color = c.primary, maxLines = 1, overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.weight(1f, fill = false))
+        pathLabel?.let { Text("· $it", style = PT.display(13.sp, FontWeight.Normal), color = c.secondary, maxLines = 1) }
     }
 }
 
@@ -209,19 +193,27 @@ private fun SessionRow(vm: ShellViewModel, session: ShellSessionInfo, nowMillis:
                 Text(ShellFormat.status(session, nowMillis / 1000.0), style = PT.display(12.sp, FontWeight.Normal), color = c.secondary)
             }
         }
-        // An ended session has nothing to end; the Mac keeps it listed for a while.
-        if (session.running) Box {
+        // A running session can be ended; a finished one the Mac keeps listing for a while can be removed here.
+        Box {
             IconButton(onClick = { menu = true }) {
                 Icon(Icons.Filled.MoreHoriz, "Options for ${session.title}", tint = c.secondary)
             }
             DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
-                DropdownMenuItem(
-                    text = { Text("End session", color = PT.danger) },
-                    leadingIcon = { Icon(Icons.Filled.Close, null, tint = PT.danger) },
-                    onClick = { menu = false; vm.close(session.id) },
-                )
+                if (session.running) {
+                    DropdownMenuItem(
+                        text = { Text("End session", color = PT.danger) },
+                        leadingIcon = { Icon(Icons.Filled.Close, null, tint = PT.danger) },
+                        onClick = { menu = false; vm.close(session.id) },
+                    )
+                } else {
+                    DropdownMenuItem(
+                        text = { Text("Remove", color = PT.danger) },
+                        leadingIcon = { Icon(Icons.Filled.Delete, null, tint = PT.danger) },
+                        onClick = { menu = false; vm.remove(session.id) },
+                    )
+                }
             }
-        } else Spacer(Modifier.size(48.dp))
+        }
     }
 }
 

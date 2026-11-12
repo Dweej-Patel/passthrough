@@ -228,7 +228,7 @@ struct TerminalScreen: View {
         let isEnded = shell.ended.isEnded(id)
         let running = !isEnded && (info?.running ?? false)
         return Button {
-            if id != shell.activeSession { controller.attach(id) }
+            if id != shell.activeSession, shell.reach == .ready { controller.attach(id) }
         } label: {
             HStack(spacing: 6) {
                 Circle()
@@ -246,12 +246,13 @@ struct TerminalScreen: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .disabled(shell.reach != .ready)
+        // An ended tab stays enabled offline so its menu can remove it; selecting still needs the Mac.
+        .disabled(shell.reach != .ready && !isEnded)
         .accessibilityValue(isEnded ? "Ended" : (selected ? "Selected" : ""))
         .accessibilityHint("Touch and hold for more")
         .contextMenu {
             if isEnded {
-                Button { closeTab(id) } label: { Label("Close tab", systemImage: "xmark") }
+                Button { closeTab(id) } label: { Label("Remove", systemImage: "trash") }
             } else {
                 Button(role: .destructive) { shell.close(id) } label: { Label("End session", systemImage: "xmark") }
             }

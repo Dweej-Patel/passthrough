@@ -118,16 +118,19 @@ fun MacScreen(
     val reach by shell.reach.collectAsStateWithLifecycle()
     val macs by shell.macs.collectAsStateWithLifecycle()
     val selected by shell.selectedMacID.collectAsStateWithLifecycle()
-    val sessions by shell.sessions.collectAsStateWithLifecycle()
+    val sessions by shell.visibleSessions.collectAsStateWithLifecycle()
     val path by shell.path.collectAsStateWithLifecycle()
     val state by shell.macState.collectAsStateWithLifecycle()
     val pending by shell.pendingControl.collectAsStateWithLifecycle()
     val controlError by shell.controlError.collectAsStateWithLifecycle()
     val redialing by shell.redialing.collectAsStateWithLifecycle()
+    val demoPaired by shell.demoPaired.collectAsStateWithLifecycle()
+    val otherNeedsYou by shell.otherMacNeedsYou.collectAsStateWithLifecycle()
 
     val isPaired = paired.isNotEmpty() || macs.isNotEmpty()
     val macID = selected ?: paired.firstOrNull()?.id
-    val macName = macs.firstOrNull { it.macID == selected }?.macName ?: paired.firstOrNull()?.name ?: "Your Mac"
+    val macName = macs.firstOrNull { it.macID == selected }?.macName
+        ?: (paired.firstOrNull { it.id == selected } ?: paired.firstOrNull())?.name ?: "Your Mac"
     val online = macID != null && stats.macs.any { it.id == macID }
     val running = sessions.filter { it.running }
 
@@ -135,6 +138,9 @@ fun MacScreen(
     var confirmSleep by rememberSaveable { mutableStateOf(false) }
     var askVpnOff by rememberSaveable { mutableStateOf(false) }
     var lastTapped by rememberSaveable { mutableStateOf<MacSwitch?>(null) }
+    var showSwitcher by rememberSaveable { mutableStateOf(false) }
+    // The switcher lists paired Macs only; the debug demo supplies its own (empty otherwise).
+    val switcherMacs = paired.ifEmpty { demoPaired }
 
     /** Pairing needs this phone sharing: start it on the way. */
     val pair = { if (!service.isActive) onPower(); onPair() }
@@ -168,7 +174,8 @@ fun MacScreen(
                 if (isPaired) macName else "Passthrough", style = PT.display(30.sp), color = c.primary,
                 modifier = Modifier.weight(1f).semantics { heading() }, maxLines = 1, overflow = TextOverflow.Ellipsis,
             )
-            PTCircleIconButton(Icons.Filled.Settings, "Settings", onSettings)
+            if (switcherMacs.isEmpty()) PTCircleIconButton(Icons.Filled.Settings, "Settings", onSettings)
+            else MacAvatarButton(macID ?: switcherMacs.first().id, macName, badge = otherNeedsYou) { showSwitcher = true }
         }
 
         // A shell waiting on a question comes before everything else.
@@ -202,6 +209,12 @@ fun MacScreen(
         ThisPhoneRow(vm, onThisPhone)
     }
 
+    if (showSwitcher) {
+        MacSwitcherSheet(
+            shell, switcherMacs, onDismiss = { showSwitcher = false },
+            onAddMac = pair, onSettings = onSettings, onOpenTerminal = onOpenTerminal,
+        )
+    }
     if (confirmSleep) {
         AlertDialog(
             onDismissRequest = { confirmSleep = false },

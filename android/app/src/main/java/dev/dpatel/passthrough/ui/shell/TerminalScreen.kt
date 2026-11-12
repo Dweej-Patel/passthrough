@@ -41,6 +41,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.ContentPaste
 import androidx.compose.material.icons.filled.East
@@ -361,8 +362,9 @@ private fun Tab(
                 .background(if (selected) PT.accentEnd.copy(alpha = 0.18f) else c.fill, CircleShape)
                 .then(if (selected) Modifier.border(1.dp, PT.accentEnd.copy(alpha = 0.45f), CircleShape) else Modifier)
                 .combinedClickable(
-                    enabled = enabled,
-                    onClick = { if (id != vm.activeSession.value) controller.attach(id) },
+                    // An ended tab stays enabled offline so its menu can remove it; selecting still needs the Mac.
+                    enabled = enabled || isEnded,
+                    onClick = { if (enabled && id != vm.activeSession.value) controller.attach(id) },
                     onLongClick = { menu = true },
                 )
                 .padding(horizontal = 12.dp, vertical = 8.dp)
@@ -377,8 +379,8 @@ private fun Tab(
         DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
             if (isEnded) {
                 DropdownMenuItem(
-                    text = { Text("Close tab") },
-                    leadingIcon = { Icon(Icons.Filled.Close, null) },
+                    text = { Text("Remove") },
+                    leadingIcon = { Icon(Icons.Filled.Delete, null) },
                     onClick = { menu = false; onCloseTab(id) },
                 )
             } else {

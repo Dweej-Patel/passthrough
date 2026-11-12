@@ -12,10 +12,14 @@ final class ShellRouter: ObservableObject {
     /// The Mac tab's "This iPhone" screen is pushed.
     @Published var showThisPhone = false
 
-    func dismissAll() {
+    /// True when something was showing (its dismissal is then still under way).
+    @discardableResult
+    func dismissAll() -> Bool {
+        let shown = terminal != nil || showHistory || showScreen
         terminal = nil
         showHistory = false
         showScreen = false
+        return shown
     }
 }
 
@@ -30,6 +34,9 @@ struct RootView: View {
     @State private var tab: RootTab = .mac
     @State private var showPairing = false
     @State private var showSettings = false
+    /// A link closed what was showing for the Mac being left: its terminal waits for
+    /// that to be gone, since presenting while another cover is still dismissing can fail.
+    @State private var linkAwaitsDismiss = false
 
     var body: some View {
         TabView(selection: $tab) {
@@ -45,13 +52,13 @@ struct RootView: View {
                 .tag(RootTab.activity)
         }
         .environmentObject(router)
-        .fullScreenCover(item: $router.terminal) { intent in
+        .fullScreenCover(item: $router.terminal, onDismiss: presentationDismissed) { intent in
             TerminalScreen(shell: model.shell, intent: intent)
         }
-        .sheet(isPresented: $router.showHistory) {
+        .sheet(isPresented: $router.showHistory, onDismiss: presentationDismissed) {
             ShellHistoryView(shell: model.shell)
         }
-        .fullScreenCover(isPresented: $router.showScreen) {
+        .fullScreenCover(isPresented: $router.showScreen, onDismiss: presentationDismissed) {
             ScreenView(shell: model.shell).environmentObject(lock)
         }
         .sheet(isPresented: $showPairing, onDismiss: { model.endPairing() }) {
@@ -67,6 +74,7 @@ struct RootView: View {
             // Tear presentations down deterministically when the app locks.
             if !unlocked {
                 router.dismissAll()
+                linkAwaitsDismiss = false   // the unlock runs a waiting link again anyway
                 showPairing = false
                 showSettings = false
                 model.endPairing()
@@ -79,7 +87,11 @@ struct RootView: View {
         .onChange(of: model.shell.reach) { _, _ in runPendingLink(); refreshSurfaces() }
         .onChange(of: model.shell.macState) { _, _ in runPendingLink(); refreshSurfaces() }
         .onChange(of: model.shell.sessions) { _, _ in refreshSurfaces() }
+        .onChange(of: model.shell.watcher.seen) { _, _ in refreshSurfaces() }
+        .onChange(of: model.shell.selectedMacID) { _, _ in refreshSurfaces() }
         .onAppear {
+            // Keep watching the Mac a running Live Activity belongs to (also after a relaunch).
+            MacActivityController.shared.onActivityMacChange = { [shell = model.shell] in shell.pinWatch($0) }
             // A link that came in before the first unlock built this.
             runPendingLink()
             #if DEBUG
@@ -102,12 +114,12 @@ struct RootView: View {
 
 extension RootView {
     /// Shells waiting on a question: the Mac tab's badge.
-    private var asking: Int { model.shell.sessions.filter(\.isAsking).count }
+    private var asking: Int { model.shell.visibleSessions.filter(\.isAsking).count }
 
     private func seen(reachable: Bool) -> MacActivityController.Seen {
         let shell = model.shell
         return .init(macID: shell.selectedMacID, macName: shell.selectedMacName, reachable: reachable,
-                     lastHeard: shell.lastHeard, state: shell.macState, sessions: shell.sessions)
+                     lastHeard: shell.lastHeard, state: shell.macState, sessions: shell.visibleSessions)
     }
 
     private func runPendingLink() {
@@ -115,10 +127,24 @@ extension RootView {
         let shell = model.shell
         switch link {
         case .mac:
+            selectLinked(link)
             tab = .mac
             router.showThisPhone = false
             links.done()
-        case .session(let id):
+        case .session(let id, _):
+            // Just unlocked, the shell may not have rebuilt its Macs yet (the app's own unlock
+            // handler can run after this one): wait for the reach change that follows.
+            if shell.reach == .locked { return }
+            // The Mac first: its tabs come back, and the terminal's tab is kept as that Mac's.
+            // A Mac no longer paired: nothing to attach on any other; just the Mac tab.
+            // Nor on a paired Mac without a usable shell credential (internet only, or its key is gone).
+            guard selectLinked(link), shell.selectedMac != nil else {
+                tab = .mac
+                router.showThisPhone = false
+                return links.done()
+            }
+            // Presented once what was showing for the Mac left is gone (`presentationDismissed`).
+            guard !linkAwaitsDismiss else { return }
             router.terminal = .attach(id)
             links.done()
         case .keepAwake, .vpnOn:
@@ -138,17 +164,71 @@ extension RootView {
         }
     }
 
+    /// The terminal, history or screen finished closing: a link waiting on that runs now.
+    private func presentationDismissed() {
+        guard linkAwaitsDismiss else { return }
+        linkAwaitsDismiss = false
+        runPendingLink()
+    }
+
+    /// A link from a Live Activity or widget names the Mac it shows: switch to it.
+    /// Without one (an older link), a session link belongs to the running
+    /// activity's Mac (tagged or adopted), else the Mac selected now. False when
+    /// it names a Mac that isn't paired: nothing should be opened.
+    @discardableResult
+    private func selectLinked(_ link: AppLink) -> Bool {
+        let target = link.target(activityMac: MacActivityController.shared.activityMacID,
+                                 paired: model.pairedClients.map(\.id))
+        switch target {
+        case .current: return true
+        case .mac(let macID):
+            // A terminal, screen or history still open is the Mac being left's: close it
+            // first, or what's typed into it (a Screen Sharing login) goes to the new one.
+            if macID != model.shell.selectedMacID, router.dismissAll() {
+                linkAwaitsDismiss = true
+                // In case nothing was really on screen (a terminal still queued behind a sheet):
+                // then no `onDismiss` comes, and the link would wait until it expires.
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1) { presentationDismissed() }
+            }
+            model.shell.select(macID)
+            return true
+        case .rejected: return false
+        }
+    }
+
     /// The Live Activity and the widget show what the app last saw. Locked or
     /// connecting, they keep it (and go stale on their own); unreachable, they
     /// say when they last heard.
     private func refreshSurfaces() {
         let shell = model.shell
         guard !shell.macs.isEmpty || !model.pairedClients.isEmpty else { return MacActivityController.shared.clear() }
+        let controller = MacActivityController.shared
+        controller.adoptUntagged(selectedMacID: shell.selectedMacID, paired: model.pairedClients.map { client in
+            (id: client.id, name: shell.macs.first(where: { $0.macID == client.id })?.macName ?? client.shell?.macName ?? client.name)
+        })
+        let selected: MacActivityController.Seen?
         switch shell.reach {
-        case .ready: MacActivityController.shared.refresh(seen(reachable: true))
-        case .unreachable, .noAccess: MacActivityController.shared.refresh(seen(reachable: false))
-        case .connecting, .locked, .needsPasscode, .keyUnavailable: break
+        case .ready: selected = seen(reachable: true)
+        case .unreachable, .noAccess: selected = seen(reachable: false)
+        case .connecting, .locked, .needsPasscode, .keyUnavailable: selected = nil
         }
+        // The activity follows the Mac Keep awake was turned on for, not the selection.
+        var activity: MacActivityController.Seen?
+        if let id = controller.activityMacID {
+            if id == shell.selectedMacID {
+                activity = selected
+            } else if let client = model.pairedClients.first(where: { $0.id == id }) {
+                // Still paired: locked, without its credential or not watched yet, it keeps what it last showed.
+                if let heard = shell.watcher.seen[id], heard.state != nil {
+                    let name = shell.macs.first(where: { $0.macID == id })?.macName ?? client.name
+                    activity = .init(macID: id, macName: name, reachable: heard.reachable, lastHeard: heard.lastHeard,
+                                     state: heard.state, sessions: heard.sessions ?? [])
+                }
+            } else {
+                controller.clear()   // that Mac was forgotten
+            }
+        }
+        controller.refresh(selected: selected, selection: (shell.selectedMacID, shell.selectedMacName), activity: activity)
     }
 }
 

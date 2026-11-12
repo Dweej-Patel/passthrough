@@ -154,6 +154,16 @@ The phone learns the Mac's details (endpoint id, relay, addresses) over the cabl
 
 **History.** Every session is recorded, output only (so passwords typed at a no-echo prompt are not captured), as an [asciicast v2](https://docs.asciinema.org/manual/asciicast/v2/) file in `~/Library/Application Support/<identifier>/ShellHistory/`, in a `0700` folder with `0600` files. It never leaves the Mac except when a paired phone fetches it. View it in the Mac's History window (Remote shell section) or from the phone's Remote shell card. Whatever a script prints, secrets included, is in the transcript; it is protected by file permissions and FileVault, not encrypted by Passthrough. A session's recording stops at 64 MiB (marked `[transcript truncated]`), and viewing or fetching one shows at most its last 8 MiB. The folder is excluded from backups. *Keep shell history* in the Mac's Remote shell settings (7 days, 30 days by default, 90 days, or forever) deletes finished sessions older than that at launch, when you change it and whenever a session ends; past 2 GB in all the oldest finished sessions go first. Delete one session or clear everything from the Mac; sessions still running are never deleted.
 
+### Several Macs
+
+The phone can be paired with more than one Mac. Pairing still happens over the cable.
+
+* **Your Macs.** Tap the round avatar with the Mac's initial, where the Settings gear used to be. It opens *Your Macs*, which lists every paired Mac with its status: connected, shells open, a shell waiting on a question, last heard, or paired with no Remote shell. A checkmark marks the current one. *Add a Mac* opens the usual pairing code, and *Settings* is there too.
+* **Switching.** It works like switching profiles: the whole app moves to the Mac you pick. Each Mac remembers its open shell tabs and which one was in front, and the app opens on the Mac you used last. Shells keep running on the Mac you left, and nothing there is closed or changed.
+* **Other Macs.** While the app is open, the phone keeps an eye on up to four of your other Macs, and on the Mac a Keep awake Live Activity is running for on iPhone. An amber dot on the avatar means another Mac has a shell waiting on a question. Tap that Mac's row to switch to it and open that shell. This only works while the app is open; there are no alerts in the background.
+* **Keep awake.** On iPhone, the Keep awake Live Activity stays with the Mac it was started for when you switch.
+* **Removing a session.** A finished session can be removed with *Remove*. This only hides it on this phone.
+
 ### Self-hosting a relay
 
 The default relays are shared and meant for development and testing. For anything you depend on, run your own `iroh-relay` server. Use a 1.x release, to match the iroh 1.x this app is built on (iroh-ffi 1.1.0 and `computer.iroh:iroh-android` 1.1.0), built from the [`iroh-relay` crate](https://github.com/n0-computer/iroh/tree/main/iroh-relay) with its `server` feature. It needs a public hostname. A minimal `config.toml`, started with `iroh-relay -c config.toml`:

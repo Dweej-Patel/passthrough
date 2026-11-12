@@ -66,4 +66,7 @@ struct MacActivityAttributes: ActivityAttributes {
 
     var macName: String
     var startedAt: Date
+    /// The Mac Keep awake was turned on for; the activity stays with it however the app's selection changes.
+    /// Nil only for an activity an older version started.
+    var macID: String?
 }
