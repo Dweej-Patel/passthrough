@@ -16,6 +16,8 @@ public final class ScreenVideoClient: @unchecked Sendable {
         case frame(CMSampleBuffer, number: UInt32)
         /// The answer to `copySelection()`.
         case copied(ScreenVideoWire.CopyResult)
+        /// The answer to `curtain(_:)`: whether the Mac's displays are hidden now.
+        case curtained(Bool)
         /// The connection is over: nil when `close()` ended it.
         case closed(Error?)
     }
@@ -107,6 +109,10 @@ public final class ScreenVideoClient: @unchecked Sendable {
         }
     }
 
+    /// Hides what the Mac's own displays show (this stream still shows it), or
+    /// shows it again; the Mac answers with `curtained`. A Mac that predates it doesn't answer.
+    public func curtain(_ hidden: Bool) { send(.curtain(hidden)) }
+
     /// Frame `number` is on screen.
     public func shown(_ number: UInt32) { send(.ack(number: number)) }
 
@@ -167,6 +173,8 @@ public final class ScreenVideoClient: @unchecked Sendable {
             guard copiesAsked > 0 else { return }
             copiesAsked -= 1
             emit(.copied(result))
+        case let .curtained(hidden):
+            emit(.curtained(hidden))
         default:
             break
         }

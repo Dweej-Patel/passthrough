@@ -19,7 +19,7 @@ enum ScreenTouchMode: String, CaseIterable {
 /// swipes move between desktops (left and right) or open Mission Control
 /// (up) and the app's windows (down), as on a Mac's trackpad. It is also the
 /// keyboard's text input while the keyboard is up.
-final class ScreenCanvasView: UIView, UIScrollViewDelegate, UIKeyInput {
+final class ScreenCanvasView: UIView, UIScrollViewDelegate, UIKeyInput, UIGestureRecognizerDelegate {
     var onPointer: ((CGPoint, RFBClient.Buttons) -> Void)?
     var onClick: ((CGPoint, RFBClient.Buttons) -> Void)?
     /// Two fingers moved by a delta (screen pixels) with the pointer at a point; then the
@@ -90,6 +90,7 @@ final class ScreenCanvasView: UIView, UIScrollViewDelegate, UIKeyInput {
         let wheel = UIPanGestureRecognizer(target: self, action: #selector(wheeled(_:)))
         wheel.minimumNumberOfTouches = 2
         wheel.maximumNumberOfTouches = 2
+        wheel.delegate = self
         let hold = UILongPressGestureRecognizer(target: self, action: #selector(held(_:)))
         hold.minimumPressDuration = 0.35
         move.require(toFail: hold)
@@ -101,6 +102,7 @@ final class ScreenCanvasView: UIView, UIScrollViewDelegate, UIKeyInput {
             addGestureRecognizer(swipe)
         }
         self.move = move
+        self.wheel = wheel
         applyMode()
     }
 
@@ -111,6 +113,9 @@ final class ScreenCanvasView: UIView, UIScrollViewDelegate, UIKeyInput {
     }
 
     private weak var move: UIPanGestureRecognizer?
+    private weak var wheel: UIPanGestureRecognizer?
+    /// Where the fingers now down first touched, to tell a pinch from a two-finger scroll.
+    private var touchStarts: [(touch: UITouch, start: CGPoint)] = []
     private var foregroundObserver: NSObjectProtocol?
 
     private func applyMode() {
@@ -125,9 +130,14 @@ final class ScreenCanvasView: UIView, UIScrollViewDelegate, UIKeyInput {
 
     func show(_ image: CGImage?, size: CGSize) {
         if size != screenSize {
+            let place = zoomedPlace()
+            // The pointer keeps its place on a screen whose size in pixels changed (Screen Sharing to the stream).
+            if screenSize.width > 0, size.width > 0 {
+                cursorPoint = CGPoint(x: cursorPoint.x / screenSize.width * size.width, y: cursorPoint.y / screenSize.height * size.height)
+            }
             screenSize = size
             if cursorPoint == .zero { cursorPoint = CGPoint(x: size.width / 2, y: size.height / 2) }
-            layoutContent()
+            layoutContent(keeping: place)
             applyMode()
         }
         content.layer.contents = image
@@ -147,13 +157,26 @@ final class ScreenCanvasView: UIView, UIScrollViewDelegate, UIKeyInput {
     override func layoutSubviews() {
         super.layoutSubviews()
         if scroll.frame != bounds {
+            let place = zoomedPlace()
             scroll.frame = bounds
-            layoutContent()
+            layoutContent(keeping: place)
         }
     }
 
+    /// While zoomed in: how wide the whole screen is drawn (points) and which part
+    /// of it is at the view's centre (0…1 across it), to come back to after the
+    /// view changes shape. Nil at zoom 1.
+    private func zoomedPlace() -> (width: CGFloat, centre: CGPoint)? {
+        guard scroll.zoomScale > 1.01, screenSize.width > 0, content.bounds.width > 0, content.bounds.height > 0 else { return nil }
+        let centre = content.convert(CGPoint(x: scroll.bounds.midX, y: scroll.bounds.midY), from: scroll)
+        return (content.frame.width,
+                CGPoint(x: centre.x / content.bounds.width, y: centre.y / content.bounds.height))
+    }
+
     /// Fits the screen to the view at zoom 1; zooming goes up to one Mac pixel per phone pixel (at least 3×).
-    private func layoutContent() {
+    /// `place` (`zoomedPlace()`, from before the change): the zoom and the part in view are kept, so the
+    /// keyboard coming up or the phone turning doesn't zoom back out.
+    private func layoutContent(keeping place: (width: CGFloat, centre: CGPoint)? = nil) {
         guard screenSize.width > 0, bounds.width > 0 else { return }
         scroll.zoomScale = 1
         let fit = min(bounds.width / screenSize.width, bounds.height / screenSize.height)
@@ -165,7 +188,20 @@ final class ScreenCanvasView: UIView, UIScrollViewDelegate, UIKeyInput {
         CATransaction.commit()
         let onePixel = 1 / (fit * max(window?.screen.scale ?? 3, 1))
         scroll.maximumZoomScale = max(3, onePixel)
+        if let place {
+            scroll.zoomScale = min(max(place.width / content.frame.width, 1), scroll.maximumZoomScale)
+        }
         centerContent()
+        if let place, scroll.zoomScale > 1 {
+            let inset = scroll.contentInset
+            let low = CGPoint(x: -inset.left, y: -inset.top)
+            let high = CGPoint(x: max(low.x, scroll.contentSize.width - scroll.bounds.width + inset.right),
+                               y: max(low.y, scroll.contentSize.height - scroll.bounds.height + inset.bottom))
+            scroll.contentOffset = CGPoint(x: (place.centre.x * scroll.contentSize.width - scroll.bounds.width / 2).clamped(low.x, high.x),
+                                           y: (place.centre.y * scroll.contentSize.height - scroll.bounds.height / 2).clamped(low.y, high.y))
+            // Trackpad: the pointer matters more than the centre (the keyboard just took half the view).
+            if mode == .trackpad { follow() }
+        }
         updateCursor()
     }
 
@@ -178,6 +214,28 @@ final class ScreenCanvasView: UIView, UIScrollViewDelegate, UIKeyInput {
     func viewForZooming(in scrollView: UIScrollView) -> UIView? { content }
     func scrollViewDidZoom(_ scrollView: UIScrollView) { centerContent(); updateCursor() }
     func scrollViewDidScroll(_ scrollView: UIScrollView) { updateCursor() }
+    func scrollViewDidEndZooming(_ scrollView: UIScrollView, with view: UIView?, atScale scale: CGFloat) { bringPointerIntoView() }
+
+    /// The part of the Mac's screen in view, in screen pixels.
+    private var visibleScreen: CGRect {
+        guard content.bounds.width > 0, content.bounds.height > 0 else { return .zero }
+        let visible = content.convert(scroll.bounds, from: scroll).intersection(content.bounds)
+        guard !visible.isNull else { return .zero }
+        let x = screenSize.width / content.bounds.width, y = screenSize.height / content.bounds.height
+        return CGRect(x: visible.minX * x, y: visible.minY * y, width: visible.width * x, height: visible.height * y)
+    }
+
+    /// Trackpad: a pinch can leave the pointer outside what's in view, where a tap would
+    /// click unseen and the next drag would pull the view away to it. The pointer comes
+    /// to the middle of what the pinch chose instead.
+    private func bringPointerIntoView() {
+        guard mode == .trackpad, screenSize.width > 0 else { return }
+        let visible = visibleScreen
+        guard visible.width > 1, visible.height > 1, !visible.contains(cursorPoint) else { return }
+        cursorPoint = CGPoint(x: visible.midX.rounded(), y: visible.midY.rounded())
+        onPointer?(cursorPoint, [])
+        updateCursor()
+    }
 
     /// Screen pixels for a point in this view.
     private func screenPoint(_ location: CGPoint) -> CGPoint {
@@ -220,6 +278,7 @@ final class ScreenCanvasView: UIView, UIScrollViewDelegate, UIKeyInput {
 
     /// Trackpad: the finger's travel moves the pointer, a little faster than 1:1.
     @objc private func moved(_ recognizer: UIPanGestureRecognizer) {
+        if recognizer.state == .began { bringPointerIntoView() }
         guard recognizer.state == .changed else { return }
         let translation = recognizer.translation(in: self)
         recognizer.setTranslation(.zero, in: self)
@@ -261,6 +320,31 @@ final class ScreenCanvasView: UIView, UIScrollViewDelegate, UIKeyInput {
         default:
             break
         }
+    }
+
+    // MARK: Pinch or scroll
+
+    /// Remembers where each finger came down, for `gestureRecognizerShouldBegin`.
+    func gestureRecognizer(_ recognizer: UIGestureRecognizer, shouldReceive touch: UITouch) -> Bool {
+        if recognizer === wheel {
+            touchStarts.removeAll { $0.touch === touch || $0.touch.phase == .ended || $0.touch.phase == .cancelled }
+            touchStarts.append((touch, touch.location(in: self)))
+        }
+        return true
+    }
+
+    /// Two fingers scroll the Mac or pinch to zoom, and whichever is recognized first
+    /// ends the other. A pinch with one finger still moves the middle of the two, which
+    /// used to start the scroll and lose the zoom: when the fingers have come apart or
+    /// together by more than their middle has travelled, it is a pinch, and the scroll stands down.
+    override func gestureRecognizerShouldBegin(_ recognizer: UIGestureRecognizer) -> Bool {
+        guard recognizer === wheel else { return super.gestureRecognizerShouldBegin(recognizer) }
+        let down = touchStarts.filter { $0.touch.phase != .ended && $0.touch.phase != .cancelled }
+        guard down.count == 2 else { return true }
+        let a = down[0].touch.location(in: self), b = down[1].touch.location(in: self)
+        let spread = abs(hypot(a.x - b.x, a.y - b.y) - hypot(down[0].start.x - down[1].start.x, down[0].start.y - down[1].start.y))
+        let travel = hypot((a.x + b.x - down[0].start.x - down[1].start.x) / 2, (a.y + b.y - down[0].start.y - down[1].start.y) / 2)
+        return spread <= travel
     }
 
     /// Two fingers: the Mac's scroll, content following the fingers.

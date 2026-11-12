@@ -62,6 +62,8 @@ public final class ScreenVideoStreamer: ScreenVideoSource, @unchecked Sendable {
     private var copying = false
     private var stopped = false
     private var captureStarted = false
+    /// A `curtain` that came before capture was up.
+    private var wantsCurtain: Bool?
     private var encoder: VideoEncoder?
     private var encoderSettings: (width: Int, height: Int, bitRate: Int)?
     /// Encodes in a row that came back empty; the encoder is made again once, then the stream ends.
@@ -154,8 +156,25 @@ public final class ScreenVideoStreamer: ScreenVideoSource, @unchecked Sendable {
         case let .text(text): type(.text(text))
         case let .clipboard(text): input?.clipboard(text)
         case .copy: copySelection()
-        case .format, .frame, .copied:
+        case let .curtain(hidden): setCurtain(hidden)
+        case .format, .frame, .copied, .curtained:
             break
+        }
+    }
+
+    /// Hides the Mac's displays from whoever is at the Mac (or shows them again), and
+    /// tells the phone what they are now. Before capture is up there is nothing
+    /// to leave the curtain out of: it waits for `captureReady`.
+    private func setCurtain(_ hidden: Bool) {
+        guard input != nil else { wantsCurtain = hidden; return }
+        wantsCurtain = nil
+        capture.setCurtain(hidden) { [weak self] nowHidden in
+            guard let self else { return }
+            self.queue.async {
+                guard !self.stopped else { return }
+                if hidden != nowHidden { ptLog(.warning, "screen: couldn't hide the display for a phone") }
+                self.write(ScreenVideoWire.encode(.curtained(nowHidden)), frame: false)
+            }
         }
     }
 
@@ -284,6 +303,7 @@ public final class ScreenVideoStreamer: ScreenVideoSource, @unchecked Sendable {
         }
         input = makeInput(display)
         ptLog(.info, "screen: streaming \(width)×\(height)")
+        if let hidden = wantsCurtain { setCurtain(hidden) }
         pump()
     }
 

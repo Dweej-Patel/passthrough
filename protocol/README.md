@@ -441,6 +441,9 @@ Mac → phone:
   a phone's paste, or the text is empty); 2: text over 64 KiB; 3: not text. A status the phone
   doesn't know reads as 1. The phone takes `copied` only as the answer to a
   `copy` it sent, never unasked.
+- `4` curtained: the answer to `curtain`. Hidden u8: 1 when the Mac's
+  displays are hidden now, 0 when they show (also when it couldn't hide
+  them).
 
 Phone → Mac:
 - `16` hello: max width u16, max height u16, the phone's largest useful
@@ -469,6 +472,13 @@ Phone → Mac:
   `org.nspasteboard.TransientType` (a phone's paste among them) is not the
   ⌘C's and answers 1. Every `copy` gets exactly one answer: one sent while
   another is unanswered gets 1 at once.
+- `25` curtain: hidden u8 (1 hide, 0 show). Hidden, the Mac puts a black
+  window over each of its displays and leaves those windows out of the
+  stream, so whoever is at the Mac sees black while the phone sees the
+  screen. Answered with `curtained`. The curtain comes down when the stream
+  ends, however it ends. It hides the picture only: the Mac's own keyboard
+  and trackpad still work. A Mac that predates it skips the message and
+  doesn't answer.
 
 The Mac marks text a phone puts on its clipboard (`22`) with
 `org.nspasteboard.ConcealedType` and `TransientType`, so clipboard managers

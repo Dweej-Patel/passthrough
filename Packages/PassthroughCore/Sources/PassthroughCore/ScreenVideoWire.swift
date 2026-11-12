@@ -27,6 +27,8 @@ public enum ScreenVideoWire {
         case frame(number: UInt32, keyframe: Bool, data: Data)
         /// The answer to `copy`.
         case copied(CopyResult)
+        /// The answer to `curtain`: whether the Mac's displays are hidden now.
+        case curtained(Bool)
 
         // Phone → Mac
         /// The phone's largest useful size in pixels; the Mac fits the stream inside it.
@@ -47,6 +49,9 @@ public enum ScreenVideoWire {
         case keyframeRequest
         /// Press ⌘C on the Mac and answer with what it copied (`copied`).
         case copy
+        /// Hide what the Mac's own displays show (black, to anyone at the Mac) while
+        /// this stream goes on showing it, or show it again; answered with `curtained`.
+        case curtain(Bool)
     }
 
     /// What a `copy` found. Only what that ⌘C put on the Mac's clipboard is
@@ -72,8 +77,8 @@ public enum ScreenVideoWire {
     }
 
     enum Kind: UInt8 {
-        case format = 1, frame = 2, copied = 3
-        case hello = 16, ack = 17, pointer = 18, scroll = 19, key = 20, text = 21, clipboard = 22, keyframeRequest = 23, copy = 24
+        case format = 1, frame = 2, copied = 3, curtained = 4
+        case hello = 16, ack = 17, pointer = 18, scroll = 19, key = 20, text = 21, clipboard = 22, keyframeRequest = 23, copy = 24, curtain = 25
     }
 
     public enum Failure: Error, Equatable { case tooLarge, malformed }
@@ -123,6 +128,12 @@ public enum ScreenVideoWire {
             kind = .keyframeRequest
         case .copy:
             kind = .copy
+        case let .curtained(hidden):
+            kind = .curtained
+            payload.append(hidden ? 1 : 0)
+        case let .curtain(hidden):
+            kind = .curtain
+            payload.append(hidden ? 1 : 0)
         }
         var out = Data([kind.rawValue])
         out.append(u32: UInt32(payload.count))
@@ -242,6 +253,12 @@ public enum ScreenVideoWire {
             return .keyframeRequest
         case .copy:
             return .copy
+        case .curtained:
+            try need(1)
+            return .curtained(p[b] == 1)
+        case .curtain:
+            try need(1)
+            return .curtain(p[b] == 1)
         }
     }
 }
