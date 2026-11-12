@@ -17,13 +17,15 @@ public enum PTColor {
     public static let hairline = Color.primary.opacity(0.08)
 
     public static let tint = dynamic(light: 0x3DD9A0, dark: 0x5EE6B5)
-    public static let tintText = dynamic(light: 0x0B7A55, dark: 0x5EE6B5)
+    public static let tintText = dynamic(PTHex.tintText)
     public static let onTint = Color(hex: 0x06281C)
 
-    public static let attention = Color(hex: 0xFFB84D)
+    public static let attention = Color(hex: PTHex.attention)
     public static let attentionText = dynamic(light: 0x8A5300, dark: 0xFFCE85)
     public static let onAttention = Color(hex: 0x2A1A00)
-    public static let problem = dynamic(light: 0xC8352A, dark: 0xFF7A6B)
+    public static let problem = dynamic(PTHex.problem)
+
+    static func dynamic(_ pair: (light: UInt32, dark: UInt32)) -> Color { dynamic(light: pair.light, dark: pair.dark) }
 
     static func dynamic(light: UInt32, dark: UInt32) -> Color {
         #if canImport(UIKit)
@@ -39,6 +41,27 @@ extension Color {
         self.init(red: Double((hex >> 16) & 0xFF) / 255, green: Double((hex >> 8) & 0xFF) / 255, blue: Double(hex & 0xFF) / 255)
     }
 }
+
+/// Values shared with what draws outside SwiftUI (the Mac's menu-bar icon), so both follow one palette.
+enum PTHex {
+    static let tintText: (light: UInt32, dark: UInt32) = (0x0B7A55, 0x5EE6B5)
+    static let attention: UInt32 = 0xFFB84D
+    static let problem: (light: UInt32, dark: UInt32) = (0xC8352A, 0xFF7A6B)
+}
+
+#if canImport(AppKit) && !canImport(UIKit)
+/// The palette as AppKit colours, each as (on a dark appearance, on a light one), for
+/// drawing that picks the side itself, such as the menu-bar icon.
+public enum PTNSColor {
+    public static let tintText = pair(PTHex.tintText)
+    public static let attention = NSColor(hex: PTHex.attention)
+    public static let problem = pair(PTHex.problem)
+
+    private static func pair(_ hex: (light: UInt32, dark: UInt32)) -> (NSColor, NSColor) {
+        (NSColor(hex: hex.dark), NSColor(hex: hex.light))
+    }
+}
+#endif
 
 #if canImport(UIKit)
 private extension UIColor {

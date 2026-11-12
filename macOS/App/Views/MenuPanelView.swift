@@ -367,6 +367,10 @@ struct SwitchRow<Fix: View, Below: View>: View {
                     .toggleStyle(MintSwitchStyle(fill: attention ? PTColor.attention : PTColor.tint))
                     .accessibilityLabel(title)
             }
+            // The whole row is the switch, not just the small capsule. The
+            // capsule's own tap wins over this one, so it never fires twice.
+            .contentShape(Rectangle())
+            .onTapGesture { tap(!isOn) }
             if let reason {
                 VStack(alignment: .leading, spacing: 7) {
                     Text(reason)

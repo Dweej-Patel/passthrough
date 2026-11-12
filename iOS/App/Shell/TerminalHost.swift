@@ -44,6 +44,8 @@ final class TerminalDriver: NSObject, ObservableObject, TerminalViewDelegate {
     /// (device attributes, cursor position, colors…) and clipboard writes are dropped.
     var replaying = false
     private var feeding = false
+    /// Stray bytes become replacement marks, so the terminal counts the columns the shell does.
+    private var utf8 = UTF8Repair()
     private var laidOut = false
     private var whenLaidOut: [(Int, Int) -> Void] = []
 
@@ -114,13 +116,14 @@ final class TerminalDriver: NSObject, ObservableObject, TerminalViewDelegate {
     func feed(_ data: Data) {
         // Replies to queries are sent synchronously from inside `feed`; keystrokes never are.
         feeding = true
-        view.feed(byteArray: ArraySlice([UInt8](data)))
+        view.feed(byteArray: ArraySlice(utf8.repair(data)))
         feeding = false
     }
 
     /// Clears the screen and scrollback, so a replay doesn't stack on old output.
     func reset() {
         // RIS, then show the cursor (RIS keeps a hidden one hidden).
+        utf8.reset()
         view.feed(text: "\u{1b}c\u{1b}[?25h")
         view.clearScrollback()
         view.clearSearch()

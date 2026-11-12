@@ -1,7 +1,8 @@
 #!/usr/bin/env swift
-// Renders the Passthrough app icon at every size: a white arrow passing
-// through a ring (behind it on the left, in front on the right) on the
-// teal→violet brand gradient. Vector drawing, so it stays crisp when small.
+// Renders the Passthrough app icon at every size: an arrow passing
+// through a phone (behind it on the left, in front on the right) on a
+// background of the app's own colours (PTColor in Palette.swift): mint on ink,
+// or with PT_ICON=mint, ink on mint. Vector drawing, so it stays crisp when small.
 //
 //   swift scripts/make_icons.swift              iOS and macOS app icons
 //   swift scripts/make_icons.swift --android    Android adaptive-icon layers
@@ -9,9 +10,13 @@
 import AppKit
 import CoreGraphics
 
-let teal = CGColor(red: 0.09, green: 0.78, blue: 0.72, alpha: 1)
-let violet = CGColor(red: 0.47, green: 0.33, blue: 0.98, alpha: 1)
-let deep = CGColor(red: 0.20, green: 0.16, blue: 0.55, alpha: 1)
+func rgb(_ hex: UInt32, _ alpha: CGFloat = 1) -> CGColor {
+    CGColor(red: CGFloat((hex >> 16) & 0xFF) / 255, green: CGFloat((hex >> 8) & 0xFF) / 255, blue: CGFloat(hex & 0xFF) / 255, alpha: alpha)
+}
+/// The app's mint (PTColor.tint) and the dark green drawn on it (PTColor.onTint).
+let mint = rgb(0x3DD9A0), mintLight = rgb(0x5EE6B5), ink = rgb(0x06281C)
+let onMint = ProcessInfo.processInfo.environment["PT_ICON"] == "mint"
+let glyphColor = onMint ? ink : mintLight
 
 enum Layer { case full, background, glyph }
 
@@ -39,14 +44,13 @@ func render(size: Int, rounded: Bool, layer: Layer = .full, glyphScale: CGFloat 
 
 func drawBackground(_ ctx: CGContext, _ canvas: CGRect) {
     let space = CGColorSpace(name: CGColorSpace.sRGB)!
-    // Teal top-left to violet, deepening toward the bottom-right corner.
-    let base = CGGradient(colorsSpace: space, colors: [teal, violet, deep] as CFArray, locations: [0, 0.62, 1])!
-    ctx.drawLinearGradient(base, start: CGPoint(x: 80, y: 0), end: CGPoint(x: 944, y: 1024), options: [.drawsBeforeStartLocation, .drawsAfterEndLocation])
-    // A soft light from the top left, and a little depth at the bottom.
-    let light = CGGradient(colorsSpace: space, colors: [CGColor(gray: 1, alpha: 0.30), CGColor(gray: 1, alpha: 0)] as CFArray, locations: [0, 1])!
-    ctx.drawRadialGradient(light, startCenter: CGPoint(x: 230, y: 150), startRadius: 0, endCenter: CGPoint(x: 230, y: 150), endRadius: 700, options: [])
-    let shade = CGGradient(colorsSpace: space, colors: [CGColor(gray: 0, alpha: 0), CGColor(gray: 0, alpha: 0.18)] as CFArray, locations: [0, 1])!
-    ctx.drawLinearGradient(shade, start: CGPoint(x: 512, y: 560), end: CGPoint(x: 512, y: 1024), options: [])
+    // One colour family, top to bottom: no second hue.
+    let colors = onMint ? [mintLight, mint, rgb(0x2BBE89)] : [rgb(0x0E3B2B), ink, rgb(0x03140E)]
+    let base = CGGradient(colorsSpace: space, colors: colors as CFArray, locations: [0, 0.55, 1])!
+    ctx.drawLinearGradient(base, start: CGPoint(x: 512, y: 0), end: CGPoint(x: 512, y: 1024), options: [.drawsBeforeStartLocation, .drawsAfterEndLocation])
+    // A soft light from the top left.
+    let light = CGGradient(colorsSpace: space, colors: [onMint ? CGColor(gray: 1, alpha: 0.22) : rgb(0x5EE6B5, 0.16), CGColor(gray: 1, alpha: 0)] as CFArray, locations: [0, 1])!
+    ctx.drawRadialGradient(light, startCenter: CGPoint(x: 260, y: 140), startRadius: 0, endCenter: CGPoint(x: 260, y: 140), endRadius: 760, options: [])
 }
 
 /// A phone with traffic passing through it: the arrow goes in behind the
@@ -82,7 +86,7 @@ func drawGlyph(_ ctx: CGContext, scale: CGFloat, shadow: Bool) {
 
     let w = width * scale, g = gap * scale
     ctx.saveGState()
-    if shadow { ctx.setShadow(offset: CGSize(width: 0, height: 14 * scale), blur: 40 * scale, color: CGColor(red: 0.08, green: 0.05, blue: 0.30, alpha: 0.45)) }
+    if shadow { ctx.setShadow(offset: CGSize(width: 0, height: 14 * scale), blur: 40 * scale, color: onMint ? rgb(0x06281C, 0.22) : CGColor(gray: 0, alpha: 0.45)) }
     ctx.beginTransparencyLayer(auxiliaryInfo: nil)
     ctx.setLineJoin(.round)
     func stroke(_ path: CGPath, _ lineWidth: CGFloat, cap: CGLineCap = .round, clear: Bool = false) {
@@ -90,13 +94,13 @@ func drawGlyph(_ ctx: CGContext, scale: CGFloat, shadow: Bool) {
         ctx.setLineCap(cap)
         ctx.addPath(path)
         ctx.setLineWidth(lineWidth)
-        ctx.setStrokeColor(.white)
+        ctx.setStrokeColor(glyphColor)
         ctx.strokePath()
     }
     stroke(body, w)
     ctx.setBlendMode(.normal)
     ctx.addPath(island)
-    ctx.setFillColor(.white)
+    ctx.setFillColor(glyphColor)
     ctx.fillPath()
 
     let lane: CGFloat = 560
