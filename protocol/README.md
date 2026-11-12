@@ -475,7 +475,8 @@ Phone → Mac:
 - `25` curtain: hidden u8 (1 hide, 0 show). Hidden, the Mac puts a black
   window over each of its displays and leaves those windows out of the
   stream, so whoever is at the Mac sees black while the phone sees the
-  screen. Answered with `curtained`. The curtain comes down when the stream
+  screen. The iPhone asks for it as each view starts, unless the user
+  turned it off. Answered with `curtained`. The curtain comes down when the stream
   ends, however it ends. It hides the picture only: the Mac's own keyboard
   and trackpad still work. A Mac that predates it skips the message and
   doesn't answer.

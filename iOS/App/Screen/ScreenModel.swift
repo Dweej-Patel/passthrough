@@ -78,6 +78,8 @@ final class ScreenModel: ObservableObject {
     private var askedHidden: Bool?
     /// The user's choice, kept for the next view: hide the Mac's display while viewing.
     private static let hidesMacKey = "screenHidesMacDisplay"
+    /// Hidden unless the user turned it off: a view starts private.
+    private static var hidesMac: Bool { UserDefaults.standard.object(forKey: hidesMacKey) as? Bool ?? true }
     /// What Paste last put on the Mac over Screen Sharing, which may send it back.
     private var lastPaste: String?
     /// Bumped by every start and stop, so a stale connection's events are dropped.
@@ -253,7 +255,7 @@ final class ScreenModel: ObservableObject {
             let first = !videoStarted
             videoStarted = true
             phase = .live
-            if first, UserDefaults.standard.bool(forKey: Self.hidesMacKey) { askMacHidden(true) }
+            if first, Self.hidesMac { askMacHidden(true, saysIfUnanswered: false) }
         case let .frame(sample, number):
             // Not shown (no canvas yet, or its display failed): what follows needs a new keyframe.
             if onVideoFrame?(sample) != true { video?.requestKeyframe() }
@@ -576,7 +578,9 @@ final class ScreenModel: ObservableObject {
         askMacHidden(hidden)
     }
 
-    private func askMacHidden(_ hidden: Bool) {
+    /// `saysIfUnanswered`: false for the ask every view starts with, so a Mac that
+    /// predates hiding isn't remarked on each time; choosing it in the menu says so.
+    private func askMacHidden(_ hidden: Bool, saysIfUnanswered: Bool = true) {
         guard let video else { return }
         video.curtain(hidden)
         askedHidden = hidden
@@ -585,6 +589,7 @@ final class ScreenModel: ObservableObject {
             try? await Task.sleep(for: .seconds(4))
             guard !Task.isCancelled, let self, self.askedHidden == hidden else { return }
             self.askedHidden = nil
+            guard saysIfUnanswered else { return }
             self.show("\(self.macName) didn't answer. Update Passthrough on it to hide its display.")
         }
     }
