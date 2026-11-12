@@ -2,8 +2,8 @@ import Foundation
 import Combine
 import PassthroughCore
 
-/// What phones see of the Mac (Internet, Keep awake, battery, heat, the VPN)
-/// and what they may change. Turning things on is quiet; a phone turning the
+/// What phones see of the Mac (Internet, Keep awake, battery, heat, the VPN,
+/// whether its screen is locked) and what they may change. Turning things on is quiet; a phone turning the
 /// VPN off drops a notice from the notch that stays until someone at the Mac
 /// sees it, or the VPN comes back on. The Mac's own limits (battery, heat)
 /// still apply to whatever a phone asks.
@@ -12,6 +12,7 @@ final class MacStateBridge {
     private let session: SessionCoordinator
     private let notice = NotchNotice()
     private let recorder: MacEventRecorder
+    private let screenLock = ScreenLock.shared
     private var cancellables: Set<AnyCancellable> = []
     /// When each refusal reason was last told, so a phone retrying at a limit doesn't stack them.
     private var refusedAt: [String: Date] = [:]
@@ -28,6 +29,7 @@ final class MacStateBridge {
         Publishers.MergeMany(
             session.keepAwake.objectWillChange.map { _ in () }.eraseToAnyPublisher(),
             session.vpnLayer.objectWillChange.map { _ in () }.eraseToAnyPublisher(),
+            screenLock.$isLocked.removeDuplicates().map { _ in () }.eraseToAnyPublisher(),
             session.$phase.map { $0.isConnected || $0.isBusy }.removeDuplicates().map { _ in () }.eraseToAnyPublisher())
             .debounce(for: .milliseconds(200), scheduler: RunLoop.main)
             .sink { [weak self] in self?.publish() }
@@ -47,7 +49,8 @@ final class MacStateBridge {
         let keepAwake = session.keepAwake, vpn = session.vpnLayer
         let battery = keepAwake.battery
         var state = MacState(awake: keepAwake.isOn, awakeStopped: keepAwake.stoppedBy,
-                             hot: KeepAwakeController.isHot(keepAwake.thermal), internet: session.internetShared)
+                             hot: KeepAwakeController.isHot(keepAwake.thermal), internet: session.internetShared,
+                             locked: ScreenLock.shared.isLocked)
         if battery.hasBattery, battery.percent >= 0 {
             state.battery = Double(battery.percent) / 100
             state.charging = battery.isOnAC
@@ -85,6 +88,15 @@ final class MacStateBridge {
                 recorder.phoneChanged(change, by: label)
                 notice.show(.quiet(title: "\(label) turned Keep awake \(on ? "on" : "off")", detail: nil, symbol: "cup.and.saucer"))
             }
+        case .lock:
+            // Already locked (a phone resending): nothing to do, and nothing to say.
+            guard !screenLock.isLocked else { return publish() }
+            guard screenLock.lock() else {
+                ptLog(.error, "\(label) asked to lock the screen, but macOS's lock call isn't there")
+                return publish()
+            }
+            ptLog(.info, "\(label) locked the screen")
+            recorder.phoneChanged(change, by: label)
         case .vpn(let on):
             ptLog(.info, "\(label) turned the VPN \(on ? "on" : "off")")
             guard on != vpn.isWanted else { return publish() }

@@ -29,6 +29,8 @@ import androidx.compose.material.icons.filled.ChevronRight
 import androidx.compose.material.icons.filled.Coffee
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Laptop
+import androidx.compose.material.icons.filled.Lock
+import androidx.compose.material.icons.filled.LockOpen
 import androidx.compose.material.icons.filled.PhoneAndroid
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Settings
@@ -41,6 +43,7 @@ import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Switch
 import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
@@ -153,6 +156,7 @@ fun MacScreen(
     )
     val awake = MacSwitches.awake(state, block != null, macName, pending, controlError, lastTapped)
     val vpn = MacSwitches.vpn(state, block != null, macName, pending, controlError, lastTapped)
+    val screenLock = MacSwitches.lock(state, block != null, macName, pending, controlError, lastTapped)
 
     fun fix(f: SwitchFix, retry: () -> Unit) = when (f) {
         SwitchFix.PAIR -> pair()
@@ -200,6 +204,13 @@ fun MacScreen(
                 lastTapped = MacSwitch.VPN
                 if (on) shell.control(MacControl.Vpn(true)) else askVpnOff = true
             }) { fix(it, shell::connect) }
+            screenLock?.let { model ->
+                HorizontalDivider(Modifier.padding(start = 62.dp), color = c.cardBorder)
+                LockRow(macName, model, onLock = {
+                    lastTapped = MacSwitch.LOCK
+                    shell.control(MacControl.Lock)
+                }) { f -> fix(f) { shell.control(MacControl.Lock) } }
+            }
             // Said once for both of the Mac's switches.
             block?.let { Note(it, Modifier.padding(start = 12.dp, end = 12.dp, bottom = 10.dp)) { f -> fix(f, shell::connect) } }
         }
@@ -287,6 +298,46 @@ private fun SwitchRow(
                     disabledCheckedTrackColor = c.tint.copy(alpha = 0.4f), disabledCheckedThumbColor = Color.White.copy(alpha = 0.8f),
                 ),
             )
+        }
+        model.note?.let { Note(it, Modifier.padding(start = 62.dp, end = 12.dp, bottom = 10.dp), onFix) }
+    }
+}
+
+/**
+ * Whether the Mac's screen is locked, with a button that locks it: only the
+ * lock, so the Mac stays awake and its shells keep running. There is no
+ * unlocking from here; that takes the Mac's password.
+ */
+@Composable
+private fun LockRow(macName: String, model: SwitchModel, onLock: () -> Unit, onFix: (SwitchFix) -> Unit) {
+    val c = LocalPT.current
+    val locked = model.on
+    val fill by animateColorAsState(if (locked) c.tint else c.fill, tween(250), label = "fill")
+    Column {
+        Row(
+            Modifier.fillMaxWidth().heightIn(min = 64.dp).padding(horizontal = 12.dp, vertical = 10.dp),
+            verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(14.dp),
+        ) {
+            Box(Modifier.size(36.dp).background(fill, CircleShape), contentAlignment = Alignment.Center) {
+                Icon(
+                    if (locked) Icons.Filled.Lock else Icons.Filled.LockOpen, null, modifier = Modifier.size(18.dp),
+                    tint = if (locked) PT.onTint else c.primary,
+                )
+            }
+            Column(Modifier.weight(1f).semantics(mergeDescendants = true) {}, verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                Text("Screen lock", style = PT.display(16.sp, FontWeight.SemiBold), color = c.primary)
+                Text(
+                    model.status, style = PT.display(13.sp, FontWeight.Normal),
+                    color = if (locked) c.tintText else c.secondary,
+                )
+            }
+            if (model.pending) CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp, color = c.secondary)
+            if (!locked) {
+                OutlinedButton(
+                    onClick = onLock, enabled = model.enabled,
+                    modifier = Modifier.heightIn(min = 48.dp).semantics { contentDescription = "Lock $macName's screen" },
+                ) { Text("Lock", style = PT.display(14.sp, FontWeight.SemiBold), color = if (model.enabled) c.tintText else c.secondary) }
+            }
         }
         model.note?.let { Note(it, Modifier.padding(start = 62.dp, end = 12.dp, bottom = 10.dp), onFix) }
     }

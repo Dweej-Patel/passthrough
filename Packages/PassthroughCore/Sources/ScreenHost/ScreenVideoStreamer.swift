@@ -34,6 +34,10 @@ public final class ScreenVideoStreamer: ScreenVideoSource, @unchecked Sendable {
         /// before answering `nothing`. Kept short: any change in that time is
         /// taken as the ⌘C's.
         var copyTimeout: TimeInterval = 1
+        /// How long a phone may say nothing, with frames it hasn't acknowledged,
+        /// before its curtain comes down: put away or gone without a word, no one
+        /// is watching, and the Mac shouldn't stay black for whoever is at it.
+        var curtainSilence: TimeInterval = 20
     }
     /// How long the screen must be still before the last frame is sharpened.
     static let refineDelay: TimeInterval = 0.25
@@ -62,6 +66,13 @@ public final class ScreenVideoStreamer: ScreenVideoSource, @unchecked Sendable {
     private var copying = false
     private var stopped = false
     private var captureStarted = false
+    /// A `curtain` that came before capture was up.
+    private var wantsCurtain: Bool?
+    /// The Mac's displays are hidden for this phone (the Mac's last answer).
+    private var curtainUp = false
+    private var watchingSilence = false
+    /// When the phone last sent anything (system uptime).
+    private var heardAt = ProcessInfo.processInfo.systemUptime
     private var encoder: VideoEncoder?
     private var encoderSettings: (width: Int, height: Int, bitRate: Int)?
     /// Encodes in a row that came back empty; the encoder is made again once, then the stream ends.
@@ -123,6 +134,7 @@ public final class ScreenVideoStreamer: ScreenVideoSource, @unchecked Sendable {
 
     private func received(_ data: Data) {
         guard !data.isEmpty else { return }
+        heardAt = ProcessInfo.processInfo.systemUptime
         let messages: [ScreenVideoWire.Message]
         do {
             messages = try reader.append(data)
@@ -154,8 +166,47 @@ public final class ScreenVideoStreamer: ScreenVideoSource, @unchecked Sendable {
         case let .text(text): type(.text(text))
         case let .clipboard(text): input?.clipboard(text)
         case .copy: copySelection()
-        case .format, .frame, .copied:
+        case let .curtain(hidden): setCurtain(hidden)
+        case .format, .frame, .copied, .curtained:
             break
+        }
+    }
+
+    /// Hides the Mac's displays from whoever is at the Mac (or shows them again), and
+    /// tells the phone what they are now. Before capture is up there is nothing
+    /// to leave the curtain out of: it waits for `captureReady`.
+    private func setCurtain(_ hidden: Bool) {
+        guard input != nil else { wantsCurtain = hidden; return }
+        wantsCurtain = nil
+        capture.setCurtain(hidden) { [weak self] nowHidden in
+            guard let self else { return }
+            self.queue.async {
+                guard !self.stopped else { return }
+                if hidden != nowHidden { ptLog(.warning, "screen: couldn't hide the display for a phone") }
+                self.curtainUp = nowHidden
+                if nowHidden { self.watchSilence() }
+                self.write(ScreenVideoWire.encode(.curtained(nowHidden)), frame: false)
+            }
+        }
+    }
+
+    /// While the curtain is up for this phone: down again once the phone has
+    /// gone quiet with frames out (`limits.curtainSilence`). A still screen sends
+    /// none, so it waits for the screen to change.
+    private func watchSilence() {
+        guard !watchingSilence else { return }
+        watchingSilence = true
+        queue.asyncAfter(deadline: .now() + min(5, limits.curtainSilence / 2)) { [weak self] in
+            guard let self else { return }
+            self.watchingSilence = false
+            guard !self.stopped, self.curtainUp else { return }
+            if self.sent != self.acked, ProcessInfo.processInfo.systemUptime - self.heardAt > self.limits.curtainSilence {
+                ptLog(.info, "screen: the phone viewing the screen went quiet; its display shows again")
+                self.curtainUp = false
+                self.setCurtain(false)
+            } else {
+                self.watchSilence()
+            }
         }
     }
 
@@ -284,6 +335,7 @@ public final class ScreenVideoStreamer: ScreenVideoSource, @unchecked Sendable {
         }
         input = makeInput(display)
         ptLog(.info, "screen: streaming \(width)×\(height)")
+        if let hidden = wantsCurtain { setCurtain(hidden) }
         pump()
     }
 

@@ -55,7 +55,8 @@ struct ScreenView: View {
                     if let slow = model.slowReason {
                         Text(slow).font(.caption2).foregroundStyle(PTTheme.warning).lineLimit(2).multilineTextAlignment(.center)
                     } else {
-                        Text(mode == .trackpad ? "Drag to move · tap to click · hold to drag" : "Tap to click · hold to drag")
+                        Text(model.macHidden ? "Hidden on \(model.macName)'s own display"
+                             : mode == .trackpad ? "Drag to move · tap to click · hold to drag" : "Tap to click · hold to drag")
                             .font(.caption2).foregroundStyle(.secondary).lineLimit(1)
                     }
                 }
@@ -146,6 +147,16 @@ struct ScreenView: View {
                 Button { model.perform(.appWindows) } label: { Label("App windows", systemImage: "macwindow.on.rectangle") }
             }
             Button { model.perform(.showDesktop) } label: { Label("Show desktop", systemImage: "menubar.dock.rectangle") }
+            // Only the lock: the Mac stays awake, and this view stays open on its lock screen.
+            if shell.macState?.locked == false, shell.macState?.control == true {
+                Button { shell.control(.lock) } label: { Label("Lock \(model.macName)", systemImage: "lock") }
+            }
+            // Black on the Mac's own displays while this view goes on showing the screen.
+            if model.canHideMac {
+                Toggle(isOn: Binding(get: { model.macHidden }, set: { model.setMacHidden($0) })) {
+                    Label("Hide \(model.macName)'s display", systemImage: "eye.slash")
+                }
+            }
         } label: {
             Image(systemName: "square.stack.3d.up").sideTarget(landscape)
         }

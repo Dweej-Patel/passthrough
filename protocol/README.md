@@ -338,6 +338,7 @@ disconnected; it can attach again and gets the scrollback.
 | `screenReady` | Mac | none | Reply to `screen`; every later byte, both ways, is Screen Sharing's. |
 | `macState` | Mac | `state` | How the Mac is doing (below): sent after `macInfo` and before `sessions`, then whenever it changes, on every connection that isn't carrying the screen. A Mac that has nothing to say sends none. |
 | `setAwake` / `setVPN` | phone | `on` | Turn Keep awake or the Mac's VPN on or off. An accepted request gets no reply of its own: the phone that asked gets a `macState` about a second later whether anything changed or not (a battery or heat limit can refuse Keep awake), and every phone gets one when something does. |
+| `lock` | phone | none | Lock the Mac's screen, as the Apple menu's Lock Screen does: the Mac stays awake and everything keeps running. Allowed and answered as `setAwake` is (`macState` about a second later, with `locked`). There is no unlocking: that takes the Mac's password. An older Mac answers `bad_request`. |
 | `events` | phone | `since` | What happened on the Mac since then (Unix seconds), for the phone's timeline. A Mac that keeps no log answers `bad_request`. |
 | `eventList` | Mac | `since`, `events`, `battery` | The answer, oldest first: at most the newest 500 `MacEvent`s since `since` and no older than 7 days (`t`, `kind`, `title`, `detail`?, `session`?, `warning`?), and `BatterySample`s (`t`, `level` 0 to 1, `charging`?), one per 5 minutes at most plus one at each plug or unplug, starting with the one just before `since`. Fewer events if the line would exceed 262144 bytes (the oldest dropped). `title` and `detail` are written by the Mac, ready to show; `kind` (`awake`, `vpn`, `link`, `power`, `sleep`, `shell`, `asked`, `answered`) picks an icon, and phones show unknown kinds plainly. |
 | `ping` / `pong` | either | none | Liveness; each side answers `ping` with `pong`. A phone pings after 5 s without hearing from the Mac and gives the connection up after 15 s of silence and then dials again. The iPhone also gives it up 2 s after a ping it sent because the system said the connection's path failed (the cable it used unplugged, Wi-Fi lost) and nothing came back; Android closes the sockets of a network it lost by itself. |
@@ -372,7 +373,8 @@ what it doesn't know or doesn't have, and a phone ignores fields it doesn't know
 | `hot` | macOS reports the Mac running hot. |
 | `vpn` | `off`, `connecting`, `on` or `failed`; absent when the Mac has no VPN set up. |
 | `vpnName`, `killSwitch` | The VPN profile in use, and whether its kill switch is on. |
-| `control` | This phone may send `setAwake` and `setVPN`. |
+| `control` | This phone may send `setAwake`, `setVPN` and `lock`. |
+| `locked` | The Mac's screen is locked. Absent from a Mac that doesn't say. |
 | `internet` | The Mac is online through a phone, or on its way there. A phone falls back to whether it is sharing itself when a Mac leaves it out. |
 
 Whether a phone may change Keep awake and the VPN is a per-phone setting on
@@ -439,6 +441,11 @@ Mac → phone:
   a phone's paste, or the text is empty); 2: text over 64 KiB; 3: not text. A status the phone
   doesn't know reads as 1. The phone takes `copied` only as the answer to a
   `copy` it sent, never unasked.
+- `4` curtained: the answer to `curtain`. Hidden u8: 1 when the Mac's
+  displays are hidden now, 0 when they show (also when it couldn't hide
+  them). Also sent unasked, 0, when the curtain comes down by itself: it
+  couldn't be put up again after the displays changed, or the phone went
+  quiet (below).
 
 Phone → Mac:
 - `16` hello: max width u16, max height u16, the phone's largest useful
@@ -467,6 +474,18 @@ Phone → Mac:
   `org.nspasteboard.TransientType` (a phone's paste among them) is not the
   ⌘C's and answers 1. Every `copy` gets exactly one answer: one sent while
   another is unanswered gets 1 at once.
+- `25` curtain: hidden u8 (1 hide, 0 show). Hidden, the Mac puts a black
+  window over each of its displays and leaves those windows out of the
+  stream, so whoever is at the Mac sees black while the phone sees the
+  screen. The iPhone asks for it as each view starts, unless the user
+  turned it off, and asks to show it again while the app is in the
+  background. Answered with `curtained`. There is one curtain for the Mac:
+  every stream leaves it out, also one that didn't ask for it (another
+  phone's view), and it stays up while any stream wants it. It comes down
+  for a stream when that stream ends, however it ends, or when its phone
+  has sent nothing for 20 s with frames unacked (put away, or gone without
+  a word). It hides the picture only: the Mac's own keyboard and trackpad
+  still work. A Mac that predates it skips the message and doesn't answer.
 
 The Mac marks text a phone puts on its clipboard (`22`) with
 `org.nspasteboard.ConcealedType` and `TransientType`, so clipboard managers

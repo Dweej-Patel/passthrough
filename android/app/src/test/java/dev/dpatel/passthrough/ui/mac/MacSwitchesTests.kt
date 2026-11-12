@@ -85,6 +85,31 @@ class MacSwitchesTests {
         assertNull(MacSwitches.awake(allowed, blocked = false, macName = "Studio", error = MacControlError.NOT_SENT, lastTapped = MacSwitch.VPN).note)
     }
 
+    @Test fun lockRow() {
+        // A Mac that doesn't say has no lock to offer.
+        assertNull(MacSwitches.lock(allowed, blocked = false, macName = "Studio"))
+        assertNull(MacSwitches.lock(null, blocked = false, macName = "Studio"))
+
+        val unlocked = MacSwitches.lock(allowed.copy(locked = false), blocked = false, macName = "Studio")!!
+        assertFalse(unlocked.on)
+        assertTrue(unlocked.enabled)
+        assertEquals("Unlocked", unlocked.status)
+
+        val locking = MacSwitches.lock(allowed.copy(locked = false), blocked = false, macName = "Studio", pending = listOf(MacControl.Lock))!!
+        assertTrue(locking.pending)
+        assertFalse(locking.enabled)
+        assertEquals("Locking…", locking.status)
+
+        val locked = MacSwitches.lock(allowed.copy(locked = true), blocked = false, macName = "Studio", pending = listOf(MacControl.Lock))!!
+        assertTrue(locked.on)
+        assertFalse(locked.enabled)
+        assertFalse(locked.pending)
+
+        assertFalse(MacSwitches.lock(allowed.copy(locked = false, control = false), blocked = true, macName = "Studio")!!.enabled)
+        val unsent = MacSwitches.lock(allowed.copy(locked = false), blocked = false, macName = "Studio", error = MacControlError.NOT_SENT, lastTapped = MacSwitch.LOCK)!!
+        assertEquals(SwitchFix.RETRY, unsent.note?.fix)
+    }
+
     @Test fun vpnFailedWarns() {
         val failed = MacSwitches.vpn(allowed.copy(vpn = MacStates.VPN_FAILED, killSwitch = true), blocked = false, macName = "Studio")
         assertTrue(failed.on)

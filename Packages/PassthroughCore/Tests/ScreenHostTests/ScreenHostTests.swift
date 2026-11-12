@@ -28,6 +28,10 @@ final class ScreenVideoWireTests: XCTestCase {
             .copied(.nothing),
             .copied(.tooLong),
             .copied(.notText),
+            .curtain(true),
+            .curtain(false),
+            .curtained(true),
+            .curtained(false),
         ]
         let bytes = messages.reduce(Data()) { $0 + ScreenVideoWire.encode($1) }
         var reader = ScreenVideoWire.Reader()
@@ -351,6 +355,52 @@ final class ScreenVideoStreamerTests: XCTestCase {
         events.compactMap { if case let .copied(result) = $0 { result } else { nil } }
     }
 
+    /// A phone hides the Mac's displays and shows them again; the Mac says what they are each time,
+    /// also when it couldn't hide them.
+    func testTheCurtainIsAskedForAndAnswered() {
+        let capture = FakeCapture(width: 320, height: 200)
+        let streamer = ScreenVideoStreamer(capture: capture, input: { _ in RecordingInput() })
+        let (mac, phone) = MemoryPipe.pair()
+        // Asked before capture is up: it waits for it.
+        streamer.start(stream: mac, initialBytes: ScreenVideoWire.encode(.hello(maxWidth: 320, maxHeight: 320))
+                       + ScreenVideoWire.encode(.curtain(true))) {}
+        addTeardownBlock { streamer.stop() }
+        let events = Locked<[ScreenVideoClient.Event]>([])
+        let client = ScreenVideoClient(stream: phone, maxSide: 320, queue: DispatchQueue(label: "test")) { event in
+            events.set(events.get() + [event])
+        }
+        client.start()
+        func answers() -> [Bool] { events.get().compactMap { if case let .curtained(hidden) = $0 { return hidden } else { return nil } } }
+        waitUntil("hidden") { answers() == [true] }
+        client.curtain(false)
+        waitUntil("shown") { answers() == [true, false] }
+        capture.canHide.set(false)
+        client.curtain(true)
+        waitUntil("couldn't hide") { answers() == [true, false, false] }
+        XCTAssertEqual(capture.curtains.get(), [true, false, true])
+    }
+
+    /// A phone that goes quiet (put away) with frames it hasn't acknowledged gets its curtain
+    /// taken down, and is told so; the stream itself goes on.
+    func testAQuietPhonesCurtainComesDown() throws {
+        guard (try? VideoEncoder(width: 320, height: 200, bitRate: 1_000_000)) != nil else {
+            throw XCTSkip("no hardware H.264 encoder")
+        }
+        let capture = FakeCapture(width: 320, height: 200)
+        var limits = ScreenVideoStreamer.Limits()
+        limits.curtainSilence = 0.4
+        let streamer = ScreenVideoStreamer(capture: capture, input: { _ in RecordingInput() }, limits: limits)
+        let (mac, phone) = MemoryPipe.pair()
+        streamer.start(stream: mac, initialBytes: ScreenVideoWire.encode(.hello(maxWidth: 320, maxHeight: 320))
+                       + ScreenVideoWire.encode(.curtain(true))) {}
+        addTeardownBlock { streamer.stop() }
+        waitUntil("hidden") { capture.curtains.get() == [true] }
+        capture.push(shade: 80)   // a frame the phone never acknowledges
+        waitUntil("shown again") { capture.curtains.get() == [true, false] }
+        XCTAssertFalse(capture.stopped.get())
+        _ = phone
+    }
+
     /// The phone hanging up ends the stream (and so, upstream, the connection).
     func testThePhoneLeavingEndsIt() {
         let capture = FakeCapture(width: 320, height: 200)
@@ -425,6 +475,14 @@ private final class FakeCapture: FrameCapturing, @unchecked Sendable {
     }
 
     func stop() { stopped.set(true); deliver.set(nil) }
+
+    /// What the phone asked of the curtain, and whether this capture can do it.
+    let curtains = Locked<[Bool]>([])
+    let canHide = Locked(true)
+    func setCurtain(_ hidden: Bool, done: @escaping @Sendable (Bool) -> Void) {
+        curtains.set(curtains.get() + [hidden])
+        done(hidden && canHide.get())
+    }
 
     func push(shade: UInt8) {
         var buffer: CVPixelBuffer?

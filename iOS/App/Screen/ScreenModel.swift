@@ -48,6 +48,10 @@ final class ScreenModel: ObservableObject {
     @Published private(set) var notice: String?
     /// A Copy is waiting for the Mac's answer; another waits for it.
     @Published private(set) var copying = false
+    /// The Mac says its own displays are hidden (black to whoever is at it) while this view shows the screen.
+    @Published private(set) var macHidden = false
+    /// Only the Mac's own stream can leave the black out of what it sends; Screen Sharing would show it.
+    var canHideMac: Bool { video != nil }
 
     private var shell: ShellModel?
     private var context: LAContext?
@@ -68,6 +72,20 @@ final class ScreenModel: ObservableObject {
     /// Ends a Copy the Mac doesn't answer (the stream: a Mac that predates
     /// copying; Screen Sharing: one whose clipboard didn't change).
     private var copyTimeout: Task<Void, Never>?
+    /// Says so when the Mac doesn't answer a request to hide its display (one that predates it).
+    private var hideTimeout: Task<Void, Never>?
+    /// What the Mac was last asked (`askMacHidden`) and hasn't answered yet.
+    private var askedHidden: Bool?
+    /// The user's choice, kept for the next view: hide the Mac's display while viewing.
+    private static let hidesMacKey = "screenHidesMacDisplay"
+    /// Hidden unless the user turned it off: a view starts private.
+    private static var hidesMac: Bool { UserDefaults.standard.object(forKey: hidesMacKey) as? Bool ?? true }
+    /// Hidden only while someone is looking: this app going to the background (put
+    /// away, the phone locked) shows the Mac's display again, and coming back hides it again.
+    private var appObservers: [NSObjectProtocol] = []
+    private var hiddenBeforeAway = false
+    /// The answer to the background's ask isn't remarked on.
+    private var quietCurtain = false
     /// What Paste last put on the Mac over Screen Sharing, which may send it back.
     private var lastPaste: String?
     /// Bumped by every start and stop, so a stale connection's events are dropped.
@@ -99,7 +117,41 @@ final class ScreenModel: ObservableObject {
         macID = mac.macID
         macName = mac.macName
         slowReason = nil
+        observeApp()
         open(video: true)
+    }
+
+    private func observeApp() {
+        guard appObservers.isEmpty else { return }
+        let nc = NotificationCenter.default
+        appObservers = [
+            nc.addObserver(forName: UIApplication.didEnterBackgroundNotification, object: nil, queue: .main) { [weak self] _ in
+                MainActor.assumeIsolated { self?.appWentAway() }
+            },
+            nc.addObserver(forName: UIApplication.willEnterForegroundNotification, object: nil, queue: .main) { [weak self] _ in
+                MainActor.assumeIsolated { self?.appCameBack() }
+            },
+        ]
+    }
+
+    /// The view outlives a short trip away, but no one is watching the Mac meanwhile.
+    private func appWentAway() {
+        guard video != nil, macHidden || askedHidden == true else { return }
+        hiddenBeforeAway = true
+        quietCurtain = true
+        // Long enough for the ask to get out before iOS suspends the app.
+        let task = UIApplication.shared.beginBackgroundTask()
+        askMacHidden(false, saysIfUnanswered: false)
+        Task {
+            try? await Task.sleep(for: .seconds(2))
+            UIApplication.shared.endBackgroundTask(task)
+        }
+    }
+
+    private func appCameBack() {
+        guard hiddenBeforeAway else { return }
+        hiddenBeforeAway = false
+        if video != nil, Self.hidesMac { askMacHidden(true, saysIfUnanswered: false) }
     }
 
     /// Screen Sharing, with the Mac account's login.
@@ -186,6 +238,11 @@ final class ScreenModel: ObservableObject {
         video = nil
         copyTimeout?.cancel()
         copying = false
+        hideTimeout?.cancel()
+        askedHidden = nil
+        macHidden = false
+        hiddenBeforeAway = false
+        quietCurtain = false
         pendingLogin = nil
         client?.disconnect()
         client = nil
@@ -237,8 +294,10 @@ final class ScreenModel: ObservableObject {
         switch event {
         case let .size(width, height):
             screenSize = CGSize(width: width, height: height)
+            let first = !videoStarted
             videoStarted = true
             phase = .live
+            if first, Self.hidesMac { askMacHidden(true, saysIfUnanswered: false) }
         case let .frame(sample, number):
             // Not shown (no canvas yet, or its display failed): what follows needs a new keyframe.
             if onVideoFrame?(sample) != true { video?.requestKeyframe() }
@@ -253,6 +312,18 @@ final class ScreenModel: ObservableObject {
             case .tooLong: copyFailed("That's too long to copy to this iPhone.")
             case .notText: copyFailed("Only text can be copied to this iPhone.")
             }
+        case let .curtained(hidden):
+            hideTimeout?.cancel()
+            let asked = askedHidden
+            askedHidden = nil
+            if quietCurtain {
+                quietCurtain = false
+            } else if asked == true, !hidden {
+                show("\(macName) couldn't hide its display.")
+            } else if hidden != macHidden {
+                show(hidden ? "\(macName)'s own display is hidden" : "\(macName)'s display is showing again")
+            }
+            macHidden = hidden
         case .closed:
             let worked = videoStarted
             stop()
@@ -379,7 +450,7 @@ final class ScreenModel: ObservableObject {
             handle(event, generation: gen)
         case .closed:
             upgradeFailed()
-        case .frame, .copied:
+        case .frame, .copied, .curtained:
             break   // none before the size
         }
     }
@@ -541,6 +612,29 @@ final class ScreenModel: ObservableObject {
             guard !Task.isCancelled, let self, self.copying else { return }
             self.copyFailed(self.video != nil ? "\(self.macName) didn't answer. Update Passthrough on it to copy from it."
                                              : "Nothing was copied. Select something on \(self.macName) first.")
+        }
+    }
+
+    /// Hides the Mac's own displays while this view shows the screen (black to
+    /// whoever is at the Mac), or shows them again; remembered for the next view.
+    func setMacHidden(_ hidden: Bool) {
+        UserDefaults.standard.set(hidden, forKey: Self.hidesMacKey)
+        askMacHidden(hidden)
+    }
+
+    /// `saysIfUnanswered`: false for the ask every view starts with, so a Mac that
+    /// predates hiding isn't remarked on each time; choosing it in the menu says so.
+    private func askMacHidden(_ hidden: Bool, saysIfUnanswered: Bool = true) {
+        guard let video else { return }
+        video.curtain(hidden)
+        askedHidden = hidden
+        hideTimeout?.cancel()
+        hideTimeout = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(4))
+            guard !Task.isCancelled, let self, self.askedHidden == hidden else { return }
+            self.askedHidden = nil
+            guard saysIfUnanswered else { return }
+            self.show("\(self.macName) didn't answer. Update Passthrough on it to hide its display.")
         }
     }
 

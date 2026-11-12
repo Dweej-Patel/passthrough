@@ -7,6 +7,7 @@ import PassthroughUI
 struct MacHomeView: View {
     @EnvironmentObject private var model: AppModel
     @EnvironmentObject private var router: ShellRouter
+    @Environment(\.dynamicTypeSize) private var typeSize
     @ObservedObject var shell: ShellModel
     @Binding var tab: RootTab
     @Binding var showPairing: Bool
@@ -158,6 +159,10 @@ struct MacHomeView: View {
                     awakeRow
                     Divider().padding(.leading, 58)
                     vpnRow
+                    if state?.locked != nil {
+                        Divider().padding(.leading, 58)
+                        lockRow
+                    }
                     if let reason = controlBlock { SwitchNote(problem: reason).padding(.horizontal, 10).padding(.bottom, 10) }
                     Divider().padding(.leading, 58)
                     screenRow
@@ -172,6 +177,7 @@ struct MacHomeView: View {
         .sensoryFeedback(.selection, trigger: model.state.isActive)
         .sensoryFeedback(.selection, trigger: state?.awake)
         .sensoryFeedback(.selection, trigger: state?.vpn)
+        .sensoryFeedback(.selection, trigger: state?.locked)
         .animation(.easeOut(duration: 0.25), value: shell.controlMisses)
     }
 
@@ -364,6 +370,66 @@ struct MacHomeView: View {
         .accessibilityHint("Opens the Mac's screen")
     }
 
+    // MARK: Screen lock
+
+    /// Whether the Mac's screen is locked, with a button that locks it. Only
+    /// the lock: the Mac stays awake and its shells keep running. Unlocking
+    /// takes the Mac's password, at the Mac or through the screen view.
+    private var lockRow: some View {
+        let locked = state?.locked == true
+        let pending = shell.pendingControls[.lock] != nil
+        return VStack(alignment: .leading, spacing: 0) {
+            HStack(spacing: 12) {
+                if !typeSize.isAccessibilitySize {
+                    SwitchIcon(symbol: locked ? "lock.fill" : "lock.open.fill", on: locked, warning: false)
+                }
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Screen lock").font(.body.weight(.semibold))
+                    HStack(alignment: .firstTextBaseline, spacing: 6) {
+                        if pending { ProgressView().controlSize(.mini) }
+                        Text(pending ? "Locking\u{2026}" : locked ? "Locked \u{2014} everything keeps running" : "Unlocked")
+                            .font(.subheadline).foregroundStyle(.secondary)
+                            .contentTransition(.opacity)
+                    }
+                    .fixedSize(horizontal: false, vertical: true)
+                }
+                Spacer(minLength: 8)
+                if !locked {
+                    Button("Lock") {
+                        lastTouched = .lock
+                        shell.control(.lock)
+                    }
+                    .font(.subheadline.weight(.semibold))
+                    .buttonStyle(.bordered)
+                    .buttonBorderShape(.capsule)
+                    .tint(PTColor.tint)
+                    .disabled(sharedBlock || pending)
+                    .accessibilityLabel("Lock \(macName)'s screen")
+                    .accessibilityHint("The Mac stays awake and its shells keep running")
+                }
+            }
+            .padding(10)
+            .frame(minHeight: 60)
+            if !sharedBlock, let problem = lockProblem {
+                SwitchNote(problem: problem)
+                    .padding(.leading, typeSize.isAccessibilitySize ? 10 : 58)
+                    .padding(.trailing, 10)
+                    .padding(.bottom, 10)
+            }
+        }
+        .animation(.easeOut(duration: 0.25), value: locked)
+    }
+
+    private var lockProblem: SwitchProblem? {
+        if let miss = shell.controlMisses[.lock] {
+            let retry: (String, () -> Void) = ("Try again", { shell.control(.lock) })
+            return .init(miss.answered ? "\(macName) didn't lock its screen." : "\(macName) didn't answer, so its screen may not be locked.",
+                         warning: true, fix: retry)
+        }
+        if lastTouched == .lock, let message = shell.controlMessage { return .init(message, warning: true) }
+        return nil
+    }
+
     // MARK: Shared reasons
 
     /// Keep awake and the VPN can't change for a reason shown once under them; their own reasons wait.
@@ -390,7 +456,7 @@ struct MacHomeView: View {
             return .init("Update Passthrough on \(macName) to change Keep awake and the VPN from here.")
         }
         guard state.control == true else {
-            return .init("This iPhone isn't allowed to change Keep awake and the VPN. To allow it, on the Mac open Passthrough's Settings, go to Remote Shell and turn on Awake & VPN for this iPhone.")
+            return .init("This iPhone isn't allowed to change Keep awake and the VPN, or lock the screen. To allow it, on the Mac open Passthrough's Settings, go to Remote Shell and turn on Awake & VPN for this iPhone.")
         }
         return nil
     }

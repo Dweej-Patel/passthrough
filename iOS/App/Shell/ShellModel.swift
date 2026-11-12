@@ -607,6 +607,7 @@ final class ShellModel: ObservableObject {
         switch change {
         case .awake(let on): client.setAwake(on)
         case .vpn(let on): client.setVPN(on)
+        case .lock: client.lockMac()
         }
         // An answer that never comes (a dropped reply, an older Mac) doesn't spin forever.
         Task { [weak self] in
@@ -645,6 +646,7 @@ final class ShellModel: ObservableObject {
         switch key {
         case .awake: (state.awake == true) == on
         case .vpn: on ? state.vpnUp : state.vpn == MacState.vpnOff
+        case .lock: (state.locked == true) == on
         }
     }
 
@@ -1174,6 +1176,7 @@ extension ShellModel {
         switch change {
         case .awake(let on): macState?.awake = on
         case .vpn(let on): macState?.vpn = on ? MacState.vpnOn : MacState.vpnOff
+        case .lock: macState?.locked = true
         }
     }
 
@@ -1196,8 +1199,8 @@ extension ShellModel {
 }
 #endif
 
-/// Keep awake or the VPN: a switch on the Mac this phone can change.
-enum MacSwitch: Hashable { case awake, vpn }
+/// Keep awake, the VPN or the screen lock: something on the Mac this phone can change.
+enum MacSwitch: Hashable { case awake, vpn, lock }
 
 /// A change to one switch, sent and not yet answered.
 struct PendingControl: Equatable {
@@ -1218,6 +1221,7 @@ extension MacControl {
         switch self {
         case .awake(let on): (.awake, on)
         case .vpn(let on): (.vpn, on)
+        case .lock: (.lock, true)
         }
     }
 }

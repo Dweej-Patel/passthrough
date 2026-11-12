@@ -39,6 +39,17 @@ class MacControlsTests {
         assertTrue(c.pending.isEmpty())
     }
 
+    /** The lock waits for the Mac to say its screen is locked, which can take it a moment. */
+    @Test fun lockWaitsForLocked() {
+        val c = MacControls()
+        c.request(MacControl.Lock, ready = true, now = 0)
+        c.request(awakeOn, ready = true, now = 0)
+        c.stateArrived(MacState(awake = true, locked = false))
+        assertEquals(listOf<MacControl>(MacControl.Lock), c.pending)
+        c.stateArrived(MacState(awake = true, locked = true))
+        assertTrue(c.pending.isEmpty())
+    }
+
     @Test fun disconnectingDropsWhatWasSent() {
         val c = MacControls()
         c.request(awakeOn, ready = true, now = 0)

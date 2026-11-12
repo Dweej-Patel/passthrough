@@ -647,7 +647,7 @@ class ShellViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     /**
-     * Asks the Mac to turn Keep awake or its VPN on or off; [macState] follows.
+     * Asks the Mac to turn Keep awake or its VPN on or off, or to lock its screen; [macState] follows.
      * The caller asked for the biometric before VPN off. Made while the Mac
      * can't be reached (a PIN prompt stopped the activity, say), it's held and
      * sent once connected again, or given up after [MacControls.HOLD_MS].
@@ -658,6 +658,7 @@ class ShellViewModel(app: Application) : AndroidViewModel(app) {
                 when (change) {
                     is MacControl.Awake -> it.copy(awake = change.on)
                     is MacControl.Vpn -> it.copy(vpn = if (change.on) MacStates.VPN_ON else MacStates.VPN_OFF)
+                    MacControl.Lock -> it.copy(locked = true)
                 }
             }
             return
@@ -671,6 +672,7 @@ class ShellViewModel(app: Application) : AndroidViewModel(app) {
     private fun send(conn: ShellConnection, change: MacControl) = when (change) {
         is MacControl.Awake -> conn.setAwake(change.on)
         is MacControl.Vpn -> conn.setVPN(change.on)
+        MacControl.Lock -> conn.lockMac()
     }
 
     /** Shows [controls]; while anything is pending, checks once a second for what to stop waiting on. */

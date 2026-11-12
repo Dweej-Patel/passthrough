@@ -288,7 +288,7 @@ private struct PhonesSection: View {
                             .help("Also let \(phone.label) see and control this screen.")
                         permission("Awake & VPN", isOn: Binding(get: { phone.controlAllowed },
                                                                 set: { shell.setControlAllowed($0, for: phone.phoneID) }))
-                            .help("Let \(phone.label) turn Keep awake and the VPN on or off. Turning the VPN off asks for Face ID on the phone and shows a notice here. Battery and heat limits, VPN accounts and the kill switch setting stay on this Mac.")
+                            .help("Let \(phone.label) turn Keep awake and the VPN on or off, and lock this screen. Turning the VPN off asks for Face ID on the phone and shows a notice here. Battery and heat limits, VPN accounts and the kill switch setting stay on this Mac.")
                     }
                     .padding(.leading, 34)
                 }

@@ -1,11 +1,16 @@
 package dev.dpatel.passthrough.core
 
-/** A change a phone asks the Mac for (`setAwake`, `setVPN`). */
+/** A change a phone asks the Mac for (`setAwake`, `setVPN`, `lock`). */
 sealed interface MacControl {
     val on: Boolean
 
     data class Awake(override val on: Boolean) : MacControl
     data class Vpn(override val on: Boolean) : MacControl
+
+    /** Lock the Mac's screen. There is no unlocking from a phone. */
+    data object Lock : MacControl {
+        override val on: Boolean get() = true
+    }
 }
 
 /** The VPN is on, on its way, or failed with its block in place: anything but off. */

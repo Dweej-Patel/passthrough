@@ -385,6 +385,10 @@ public final class ShellClient: @unchecked Sendable {
         command(m)
     }
 
+    /// Asks the Mac to lock its screen. `.macState` follows with `locked`, or
+    /// `.failed` says why not (`.badRequest` from an older Mac).
+    public func lockMac() { command(ShellEnvelope(t: ShellEnvelope.lock)) }
+
     /// As `setAwake`, for the Mac's VPN.
     public func setVPN(_ on: Bool) {
         var m = ShellEnvelope(t: ShellEnvelope.setVPN)
