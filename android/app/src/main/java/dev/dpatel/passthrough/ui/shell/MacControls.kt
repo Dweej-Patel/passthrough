@@ -5,7 +5,7 @@ import dev.dpatel.passthrough.core.MacState
 import dev.dpatel.passthrough.core.ShellError
 import dev.dpatel.passthrough.core.vpnUp
 
-/** Why a Keep awake or VPN change didn't happen. */
+/** Why a Keep awake, VPN or screen lock change didn't happen. */
 enum class MacControlError {
     /** The Mac doesn't let this phone change them (`not_allowed`). */
     NOT_ALLOWED,
@@ -83,6 +83,8 @@ class MacControls {
         // Refused at the battery limit or when hot: the Mac says why instead.
         is MacControl.Awake -> (state.awake == true) == change.on || (change.on && state.awakeStopped != null)
         is MacControl.Vpn -> state.vpn == null || state.vpnUp == change.on
+        // Locking takes the Mac a moment: it says so once the screen is locked.
+        MacControl.Lock -> state.locked == true
     }
 
     companion object {

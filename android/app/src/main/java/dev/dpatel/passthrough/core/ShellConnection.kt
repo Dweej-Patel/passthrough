@@ -314,6 +314,9 @@ class ShellConnection(
     /** As [setAwake], for the Mac's VPN. */
     fun setVPN(on: Boolean) = enqueue(ShellEnvelope(ShellEnvelope.SET_VPN, on = on))
 
+    /** Asks the Mac to lock its screen; `locked` comes back in [ShellEvent.MacStateChanged]. */
+    fun lockMac() = enqueue(ShellEnvelope(ShellEnvelope.LOCK))
+
     /** What happened on the Mac since [sinceSeconds] (Unix): [ShellEvent.Events], or `BAD_REQUEST` from an older Mac. */
     fun requestEvents(sinceSeconds: Double) = enqueue(ShellEnvelope(ShellEnvelope.EVENTS, since = kotlin.math.floor(sinceSeconds)))
 

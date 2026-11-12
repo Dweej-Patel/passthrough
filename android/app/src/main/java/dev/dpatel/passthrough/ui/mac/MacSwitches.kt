@@ -10,8 +10,8 @@ import dev.dpatel.passthrough.service.ServiceState
 import dev.dpatel.passthrough.ui.shell.MacControlError
 import dev.dpatel.passthrough.ui.shell.ShellReach
 
-/** One of the Mac's own switches this phone can change. */
-enum class MacSwitch { AWAKE, VPN }
+/** One of the Mac's own switches this phone can change, or its screen lock. */
+enum class MacSwitch { AWAKE, VPN, LOCK }
 
 /** A fix this phone can make for what a note describes. */
 enum class SwitchFix(val label: String) {
@@ -99,7 +99,7 @@ object MacSwitches {
             link.reach != ShellReach.READY -> SwitchNote(link.reach.message ?: "Keep awake and the VPN can't change from this phone.")
             state == null -> SwitchNote("Waiting for $mac…", warning = false)
             state.control != true || error == MacControlError.NOT_ALLOWED -> SwitchNote(
-                "$mac lets you change Keep awake and the VPN only on the Mac. To change them here, turn on Awake & VPN " +
+                "$mac lets you change Keep awake and the VPN, and lock its screen, only on the Mac. To do it here, turn on Awake & VPN " +
                     "for this phone in Passthrough's Remote Shell settings on the Mac.",
                 warning = false,
             )
@@ -165,6 +165,30 @@ object MacSwitches {
             on = change?.on ?: state.vpnUp, enabled = true,
             status = change?.let { if (it.on) "Turning on…" else "Turning off…" } ?: vpnStatus(state),
             note = note, pending = change != null,
+        )
+    }
+
+    /**
+     * The screen lock: [SwitchModel.on] when locked, [SwitchModel.enabled] when its
+     * Lock button can lock it. Only the lock: the Mac stays awake and its shells keep
+     * running; unlocking takes the Mac's password. Null for a Mac that doesn't say
+     * (one that predates it), which has no lock to offer.
+     */
+    fun lock(
+        state: MacState?, blocked: Boolean, macName: String,
+        pending: List<MacControl> = emptyList(), error: MacControlError? = null, lastTapped: MacSwitch? = null,
+    ): SwitchModel? {
+        val locked = state?.locked ?: return null
+        val asked = MacControl.Lock in pending
+        val note = when {
+            !blocked && error == MacControlError.NOT_SENT && lastTapped == MacSwitch.LOCK ->
+                SwitchNote("Couldn't reach $macName, so its screen didn't lock.", fix = SwitchFix.RETRY)
+            else -> null
+        }
+        return SwitchModel(
+            on = locked, enabled = !blocked && !locked && !asked,
+            status = if (asked && !locked) "Locking…" else if (locked) "Locked — everything keeps running" else "Unlocked",
+            note = note, pending = asked && !locked,
         )
     }
 

@@ -62,6 +62,13 @@ class ShellProtocolTests {
         assertTrue(lines.any { it.t == ShellEnvelope.ERROR && it.reason == ShellError.NOT_ALLOWED.wire })
     }
 
+    /** `lock` carries no fields; `locked` comes back in `macState`, and an older Mac leaves it out. */
+    @Test fun lockAndLocked() {
+        assertEquals("{\"t\":\"lock\"}\n", ShellEnvelope(ShellEnvelope.LOCK).encodeLine().toString(Charsets.UTF_8))
+        assertEquals(true, ShellEnvelope.decode("{\"t\":\"macState\",\"state\":{\"control\":true,\"locked\":true}}").state?.locked)
+        assertEquals(null, ShellEnvelope.decode("{\"t\":\"macState\",\"state\":{\"control\":true}}").state?.locked)
+    }
+
     /** A replay's sizes: the entry's starting size, and a size on the transcript line it applies from. */
     @Test fun replaySizeFields() {
         val lines = shell["messages"]!!.jsonArray.map { ShellEnvelope.decode(it.jsonObject["line"]!!.jsonPrimitive.content) }

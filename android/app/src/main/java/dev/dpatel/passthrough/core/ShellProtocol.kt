@@ -96,6 +96,8 @@ data class ShellEnvelope(
         /** A phone turning Keep awake or the VPN on or off (`on`). */
         const val SET_AWAKE = "setAwake"
         const val SET_VPN = "setVPN"
+        /** A phone asking the Mac to lock its screen (no fields); `macState` follows with `locked`. */
+        const val LOCK = "lock"
         /** A phone asking what happened on the Mac since a time (`since`); answered `eventList`. */
         const val EVENTS = "events"
         const val EVENT_LIST = "eventList"
@@ -230,10 +232,12 @@ data class MacState(
     /** The VPN profile in use, as the Mac names it. */
     val vpnName: String? = null,
     val killSwitch: Boolean? = null,
-    /** This phone may change Keep awake and the VPN (`setAwake`, `setVPN`). */
+    /** This phone may change Keep awake and the VPN, and lock the screen (`setAwake`, `setVPN`, `lock`). */
     val control: Boolean? = null,
     /** The Mac is online through a phone, or on its way there. Absent from older Macs. */
     val internet: Boolean? = null,
+    /** The Mac's screen is locked. Absent from older Macs. */
+    val locked: Boolean? = null,
 )
 
 /** The `vpn` and `awakeStopped` values in [MacState]. */
