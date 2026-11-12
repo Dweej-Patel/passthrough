@@ -80,6 +80,12 @@ final class ScreenModel: ObservableObject {
     private static let hidesMacKey = "screenHidesMacDisplay"
     /// Hidden unless the user turned it off: a view starts private.
     private static var hidesMac: Bool { UserDefaults.standard.object(forKey: hidesMacKey) as? Bool ?? true }
+    /// Hidden only while someone is looking: this app going to the background (put
+    /// away, the phone locked) shows the Mac's display again, and coming back hides it again.
+    private var appObservers: [NSObjectProtocol] = []
+    private var hiddenBeforeAway = false
+    /// The answer to the background's ask isn't remarked on.
+    private var quietCurtain = false
     /// What Paste last put on the Mac over Screen Sharing, which may send it back.
     private var lastPaste: String?
     /// Bumped by every start and stop, so a stale connection's events are dropped.
@@ -111,7 +117,41 @@ final class ScreenModel: ObservableObject {
         macID = mac.macID
         macName = mac.macName
         slowReason = nil
+        observeApp()
         open(video: true)
+    }
+
+    private func observeApp() {
+        guard appObservers.isEmpty else { return }
+        let nc = NotificationCenter.default
+        appObservers = [
+            nc.addObserver(forName: UIApplication.didEnterBackgroundNotification, object: nil, queue: .main) { [weak self] _ in
+                MainActor.assumeIsolated { self?.appWentAway() }
+            },
+            nc.addObserver(forName: UIApplication.willEnterForegroundNotification, object: nil, queue: .main) { [weak self] _ in
+                MainActor.assumeIsolated { self?.appCameBack() }
+            },
+        ]
+    }
+
+    /// The view outlives a short trip away, but no one is watching the Mac meanwhile.
+    private func appWentAway() {
+        guard video != nil, macHidden || askedHidden == true else { return }
+        hiddenBeforeAway = true
+        quietCurtain = true
+        // Long enough for the ask to get out before iOS suspends the app.
+        let task = UIApplication.shared.beginBackgroundTask()
+        askMacHidden(false, saysIfUnanswered: false)
+        Task {
+            try? await Task.sleep(for: .seconds(2))
+            UIApplication.shared.endBackgroundTask(task)
+        }
+    }
+
+    private func appCameBack() {
+        guard hiddenBeforeAway else { return }
+        hiddenBeforeAway = false
+        if video != nil, Self.hidesMac { askMacHidden(true, saysIfUnanswered: false) }
     }
 
     /// Screen Sharing, with the Mac account's login.
@@ -201,6 +241,8 @@ final class ScreenModel: ObservableObject {
         hideTimeout?.cancel()
         askedHidden = nil
         macHidden = false
+        hiddenBeforeAway = false
+        quietCurtain = false
         pendingLogin = nil
         client?.disconnect()
         client = nil
@@ -274,7 +316,9 @@ final class ScreenModel: ObservableObject {
             hideTimeout?.cancel()
             let asked = askedHidden
             askedHidden = nil
-            if asked == true, !hidden {
+            if quietCurtain {
+                quietCurtain = false
+            } else if asked == true, !hidden {
                 show("\(macName) couldn't hide its display.")
             } else if hidden != macHidden {
                 show(hidden ? "\(macName)'s own display is hidden" : "\(macName)'s display is showing again")

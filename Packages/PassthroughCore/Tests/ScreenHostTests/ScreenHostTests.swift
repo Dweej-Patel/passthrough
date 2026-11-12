@@ -355,7 +355,6 @@ final class ScreenVideoStreamerTests: XCTestCase {
         events.compactMap { if case let .copied(result) = $0 { result } else { nil } }
     }
 
-    /// The phone hanging up ends the stream (and so, upstream, the connection).
     /// A phone hides the Mac's displays and shows them again; the Mac says what they are each time,
     /// also when it couldn't hide them.
     func testTheCurtainIsAskedForAndAnswered() {
@@ -381,6 +380,28 @@ final class ScreenVideoStreamerTests: XCTestCase {
         XCTAssertEqual(capture.curtains.get(), [true, false, true])
     }
 
+    /// A phone that goes quiet (put away) with frames it hasn't acknowledged gets its curtain
+    /// taken down, and is told so; the stream itself goes on.
+    func testAQuietPhonesCurtainComesDown() throws {
+        guard (try? VideoEncoder(width: 320, height: 200, bitRate: 1_000_000)) != nil else {
+            throw XCTSkip("no hardware H.264 encoder")
+        }
+        let capture = FakeCapture(width: 320, height: 200)
+        var limits = ScreenVideoStreamer.Limits()
+        limits.curtainSilence = 0.4
+        let streamer = ScreenVideoStreamer(capture: capture, input: { _ in RecordingInput() }, limits: limits)
+        let (mac, phone) = MemoryPipe.pair()
+        streamer.start(stream: mac, initialBytes: ScreenVideoWire.encode(.hello(maxWidth: 320, maxHeight: 320))
+                       + ScreenVideoWire.encode(.curtain(true))) {}
+        addTeardownBlock { streamer.stop() }
+        waitUntil("hidden") { capture.curtains.get() == [true] }
+        capture.push(shade: 80)   // a frame the phone never acknowledges
+        waitUntil("shown again") { capture.curtains.get() == [true, false] }
+        XCTAssertFalse(capture.stopped.get())
+        _ = phone
+    }
+
+    /// The phone hanging up ends the stream (and so, upstream, the connection).
     func testThePhoneLeavingEndsIt() {
         let capture = FakeCapture(width: 320, height: 200)
         let streamer = ScreenVideoStreamer(capture: capture, input: { _ in RecordingInput() })

@@ -40,9 +40,14 @@ final class ScreenCapturer: NSObject, FrameCapturing, SCStreamOutput, SCStreamDe
     private var onStopped: ((Error?) -> Void)?
     private var stopped = false
     private var display: SCDisplay?
-    /// The curtain's changes, one after another: `stop()`'s comes last.
+    /// This stream with the Mac's one curtain (`ScreenCurtain.shared`), which every stream leaves out.
+    private let curtainID = UUID()
+    /// The curtain's windows, as last told: what the stream leaves out.
+    private var excluded: [SCWindow] = []
+    /// Told what the curtain is when it falls without being asked (`setCurtain`'s `done`).
+    private var curtainReport: (@Sendable (Bool) -> Void)?
+    /// This stream's asks of the curtain, one after another: leaving it comes last.
     private var curtainWork: Task<Void, Never>?
-    private let curtain = ScreenCurtain()
     private let wake = DisplayWake()
 
     func start(maxSide: Int, queue: DispatchQueue, frame: @escaping (CVPixelBuffer) -> Void,
@@ -52,6 +57,7 @@ final class ScreenCapturer: NSObject, FrameCapturing, SCStreamOutput, SCStreamDe
             return try await capture(maxSide: maxSide, queue: queue, frame: frame, stopped: stopped)
         } catch {
             wake.end()
+            leaveCurtain()
             throw error
         }
     }
@@ -89,17 +95,26 @@ final class ScreenCapturer: NSObject, FrameCapturing, SCStreamOutput, SCStreamDe
         configuration.capturesAudio = false
 
         lock.withLock { onFrame = frame; onStopped = stopped }
-        let stream = SCStream(filter: SCContentFilter(display: display, excludingWindows: []), configuration: configuration, delegate: self)
+        // Another view's curtain may be up: left out from the first frame.
+        let viewer = ScreenCurtain.Viewer(exclude: { [weak self] windows in await self?.exclude(windows) ?? true },
+                                          fell: { [weak self] in self?.lock.withLock { self?.curtainReport }?(false) })
+        let leftOut = await ScreenCurtain.shared.join(curtainID, viewer)
+        lock.withLock { excluded = leftOut }
+        let stream = SCStream(filter: SCContentFilter(display: display, excludingWindows: leftOut), configuration: configuration, delegate: self)
         try stream.addStreamOutput(self, type: .screen, sampleHandlerQueue: queue)
         try await stream.startCapture()
-        let alreadyStopped = lock.withLock { () -> Bool in
+        let (alreadyStopped, latest) = lock.withLock { () -> (Bool, [SCWindow]) in
             if !self.stopped { self.stream = stream; self.display = display }
-            return self.stopped
+            return (self.stopped, self.excluded)
         }
         // `stop()` came while starting: it had nothing to stop yet.
         if alreadyStopped {
             stream.stopCapture { _ in }
             wake.end()
+            leaveCurtain()
+        } else if latest.map(\.windowID) != leftOut.map(\.windowID) {
+            // The curtain changed while this started.
+            try? await stream.updateContentFilter(SCContentFilter(display: display, excludingWindows: latest))
         }
         return (width, height, CGDisplayBounds(display.displayID))
     }
@@ -114,49 +129,50 @@ final class ScreenCapturer: NSObject, FrameCapturing, SCStreamOutput, SCStreamDe
         }
         stream?.stopCapture { _ in }
         wake.end()
-        // After any change still under way, so nothing can raise it once the stream is over.
-        changeCurtain(false, done: { _ in })
+        leaveCurtain()
     }
 
     // MARK: Curtain
 
     func setCurtain(_ hidden: Bool, done: @escaping @Sendable (Bool) -> Void) {
-        changeCurtain(hidden, done: done)
-    }
-
-    private func changeCurtain(_ hidden: Bool, done: @escaping @Sendable (Bool) -> Void) {
+        let id = curtainID
         lock.withLock {
+            curtainReport = done
             let before = curtainWork
-            curtainWork = Task { [self] in
+            curtainWork = Task {
                 await before?.value
-                done(await applyCurtain(hidden))
+                done(await ScreenCurtain.shared.want(id, hidden))
             }
         }
     }
 
-    /// Up: the windows first, see-through, then the stream told to leave them
-    /// out, and only then black, so the phone never sees them. Whether it is up.
-    private func applyCurtain(_ hidden: Bool) async -> Bool {
-        let (stream, display) = lock.withLock { (self.stream, self.display) }
-        guard hidden, let stream, let display else {
-            await curtain.lower()
-            if let stream, let display { try? await stream.updateContentFilter(SCContentFilter(display: display, excludingWindows: [])) }
-            return false
+    /// After any ask still under way, so nothing can raise it for this stream once it is over.
+    private func leaveCurtain() {
+        let id = curtainID
+        lock.withLock {
+            curtainReport = nil
+            let before = curtainWork
+            curtainWork = Task {
+                await before?.value
+                await ScreenCurtain.shared.leave(id)
+            }
         }
-        let numbers = await curtain.prepare { [weak self] in self?.changeCurtain(true, done: { _ in }) }
+    }
+
+    /// The curtain's windows, left out of this stream from now on.
+    private func exclude(_ windows: [SCWindow]) async -> Bool {
+        let (stream, display) = lock.withLock { () -> (SCStream?, SCDisplay?) in
+            excluded = windows
+            return (self.stream, self.display)
+        }
+        // Not started yet (it starts with them), or over.
+        guard let stream, let display else { return true }
         do {
-            let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: false)
-            let windows = content.windows.filter { numbers.contains($0.windowID) }
-            guard !numbers.isEmpty, windows.count == numbers.count else { throw CocoaError(.featureUnsupported) }
             try await stream.updateContentFilter(SCContentFilter(display: display, excludingWindows: windows))
+            return true
         } catch {
-            ptLog(.warning, "screen: couldn't leave the curtain out of the stream: \(error)")
-            await curtain.lower()
-            return false
+            return lock.withLock { self.stream == nil }   // over meanwhile: nothing left to show
         }
-        // Stopped meanwhile: `stop()`'s own change comes after this one and takes it down.
-        await curtain.raise()
-        return true
     }
 
     func stream(_ stream: SCStream, didOutputSampleBuffer sample: CMSampleBuffer, of type: SCStreamOutputType) {
@@ -174,7 +190,7 @@ final class ScreenCapturer: NSObject, FrameCapturing, SCStreamOutput, SCStreamDe
             return onStopped
         }
         wake.end()
-        changeCurtain(false, done: { _ in })
+        leaveCurtain()
         stopped?(error)
     }
 }

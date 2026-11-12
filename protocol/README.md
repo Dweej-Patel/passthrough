@@ -443,7 +443,9 @@ Mac → phone:
   `copy` it sent, never unasked.
 - `4` curtained: the answer to `curtain`. Hidden u8: 1 when the Mac's
   displays are hidden now, 0 when they show (also when it couldn't hide
-  them).
+  them). Also sent unasked, 0, when the curtain comes down by itself: it
+  couldn't be put up again after the displays changed, or the phone went
+  quiet (below).
 
 Phone → Mac:
 - `16` hello: max width u16, max height u16, the phone's largest useful
@@ -476,10 +478,14 @@ Phone → Mac:
   window over each of its displays and leaves those windows out of the
   stream, so whoever is at the Mac sees black while the phone sees the
   screen. The iPhone asks for it as each view starts, unless the user
-  turned it off. Answered with `curtained`. The curtain comes down when the stream
-  ends, however it ends. It hides the picture only: the Mac's own keyboard
-  and trackpad still work. A Mac that predates it skips the message and
-  doesn't answer.
+  turned it off, and asks to show it again while the app is in the
+  background. Answered with `curtained`. There is one curtain for the Mac:
+  every stream leaves it out, also one that didn't ask for it (another
+  phone's view), and it stays up while any stream wants it. It comes down
+  for a stream when that stream ends, however it ends, or when its phone
+  has sent nothing for 20 s with frames unacked (put away, or gone without
+  a word). It hides the picture only: the Mac's own keyboard and trackpad
+  still work. A Mac that predates it skips the message and doesn't answer.
 
 The Mac marks text a phone puts on its clipboard (`22`) with
 `org.nspasteboard.ConcealedType` and `TransientType`, so clipboard managers
