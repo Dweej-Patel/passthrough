@@ -8,8 +8,8 @@ import PassthroughUI
 ///
 /// Colour says what is going on at a glance, the way the system's microphone
 /// mark does: green for what is on (online, the VPN, Keep awake), blue for a
-/// phone that is plugged in (or linked wirelessly) but not carrying the Mac's
-/// traffic, including one that still needs pairing, red while the
+/// phone that is plugged in (or linked over Wi-Fi) but not carrying the Mac's
+/// traffic (still connecting, or needing pairing), red while the
 /// screen is being viewed, and amber for what needs you: a dot on the phone's
 /// corner when a shell is waiting on a question, an amber phone with a "!"
 /// when something is wrong (the VPN failed and is blocking traffic). With
@@ -108,7 +108,7 @@ enum MenuBarIcon {
     }
 
     private static func description(_ s: State) -> String {
-        var parts = ["Passthrough", s.online ? "online through the phone" : s.phone ? "phone found, not in use" : "not using the phone"]
+        var parts = ["Passthrough", s.online ? "online through the phone" : s.phone ? "phone found, Mac not online through it" : "not using the phone"]
         if s.screen { parts.append("a phone is viewing this screen") }
         if s.awake { parts.append("keeping the Mac awake") }
         if s.vpn { parts.append("VPN on") }
