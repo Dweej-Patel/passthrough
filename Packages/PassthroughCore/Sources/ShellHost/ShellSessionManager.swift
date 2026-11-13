@@ -170,6 +170,7 @@ public final class ShellSessionManager: @unchecked Sendable {
     private var lastGeneration: UInt64 = 0
     private var changeHandler: (@Sendable () -> Void)?
     private var viewersHandler: (@Sendable () -> Void)?
+    private var fallbackTheme: ShellTheme?
 
     public init(transcripts: TranscriptStore,
                 command: @escaping () -> (String, [String]) = { LoginShell.command() },
@@ -186,14 +187,29 @@ public final class ShellSessionManager: @unchecked Sendable {
     }
 
     public var sessions: [ShellSessionInfo] {
-        queue.sync { order.compactMap { table[$0]?.info } }
+        queue.sync { order.compactMap { table[$0] }.map { themed($0.info) } }
+    }
+
+    /// The colours of the last terminal window on the Mac that told them: a
+    /// session with none of its own (one a phone started) is listed with
+    /// these, so every session looks on the phone as terminals do on the Mac.
+    public var defaultTheme: ShellTheme? {
+        get { queue.sync { fallbackTheme } }
+        set { queue.sync { fallbackTheme = newValue?.sanitized } }
+    }
+
+    private func themed(_ info: ShellSessionInfo) -> ShellSessionInfo {
+        guard info.theme == nil, let fallbackTheme else { return info }
+        var info = info
+        info.theme = fallbackTheme
+        return info
     }
 
     /// The sessions with who is looking at each, for the Mac's own list.
     public var details: [ShellSessionDetail] {
         queue.sync {
             order.compactMap { table[$0] }.map {
-                ShellSessionDetail(info: $0.info, origin: $0.origin, phoneAttached: $0.attachment != nil, macViewers: $0.viewers.count)
+                ShellSessionDetail(info: themed($0.info), origin: $0.origin, phoneAttached: $0.attachment != nil, macViewers: $0.viewers.count)
             }
         }
     }
@@ -248,6 +264,7 @@ public final class ShellSessionManager: @unchecked Sendable {
             reserved = false
             table[id] = session
             order.append(id)
+            if let theme = session.theme { fallbackTheme = theme }
             process.start()
             ptLog(.info, "shell: opened session")
             notifyChange()
@@ -273,7 +290,11 @@ public final class ShellSessionManager: @unchecked Sendable {
                 let old = session.generation
                 callouts.async { previous.shellDetached(session: id, generation: old) }
             }
-            if session.running {
+            // A Mac window joining a session someone else is using leaves its
+            // size alone until someone types in the window: resizing redraws
+            // the prompt, which can wipe the lines the window is about to be shown.
+            let joins = shared && session.active != nil && session.active != ObjectIdentifier(client)
+            if session.running, !joins {
                 session.active = ObjectIdentifier(client)
                 resize(session, to: size)
             }

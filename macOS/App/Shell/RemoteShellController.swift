@@ -123,6 +123,9 @@ final class RemoteShellController: ObservableObject {
     nonisolated private static let secretKeyAccount = "iroh.secretKey"
     nonisolated private static let relayTokenAccount = "iroh.relayToken"
     nonisolated private static let historyRetentionKey = "remoteShellHistoryRetentionDays"
+    nonisolated private static let terminalThemeKey = "remoteShellTerminalTheme"
+    /// The theme last written to the defaults.
+    private var savedTerminalTheme: ShellTheme?
 
     private let store = ShellAccessStore(secrets: KeychainSecretStore())
     /// What `macInfo` and grants say, kept current here and read on the
@@ -186,6 +189,9 @@ final class RemoteShellController: ObservableObject {
                     self?.iroh?.listener?.pushSessions()
                 }
             }
+            // The Mac terminal's colours, kept across launches, for sessions phones start.
+            manager.defaultTheme = (UserDefaults.standard.data(forKey: Self.terminalThemeKey))
+                .flatMap { try? JSONDecoder().decode(ShellTheme.self, from: $0) }
             manager.onViewersChange = { [weak self] in
                 Task { @MainActor in self?.refreshTerminals() }
             }
@@ -579,6 +585,10 @@ final class RemoteShellController: ObservableObject {
     }
 
     private func refreshTerminals() {
+        if let theme = manager?.defaultTheme, theme != savedTerminalTheme, let data = try? JSONEncoder().encode(theme) {
+            savedTerminalTheme = theme
+            UserDefaults.standard.set(data, forKey: Self.terminalThemeKey)
+        }
         let updated = (manager?.details ?? []).filter(\.info.running)
         if updated != terminals { terminals = updated }
     }

@@ -214,5 +214,44 @@ final class SharedSessionTests: XCTestCase {
         manager.input(id, Data("echo still-$((6+1))\n".utf8), from: phone)
         wait("output keeps coming") { phone.text.contains("still-7") }
     }
+
+    func testAMacWindowJoiningASessionInUseLeavesItsSizeUntilItTypes() throws {
+        let id = try manager.open(phoneLabel: "Pixel", cols: 50, rows: 30)
+        let phone = Client(), mac = Client()
+        try manager.attach(id, client: phone, cols: 50, rows: 30)
+        manager.input(id, Data("echo kept-$((1+2))\n".utf8), from: phone)
+        wait("printed") { phone.text.contains("kept-3") }
+        try manager.attach(id, client: mac, cols: 120, rows: 40, shared: true)
+        wait("replayed") { mac.text.contains("kept-3") }
+        manager.input(id, Data("echo a; stty size\n".utf8), from: phone)
+        wait("still the phone's size") { phone.text.contains("30 50") }
+        XCTAssertFalse(phone.text.contains("40 120"))
+        manager.input(id, Data("echo b; stty size\n".utf8), from: mac)
+        wait("the window's size once it types") { mac.text.contains("40 120") }
+    }
+
+    func testAMacWindowJoiningASessionNobodyUsesTakesItsSize() throws {
+        let id = try manager.open(phoneLabel: "Pixel", cols: 50, rows: 30)
+        let mac = Client(), probe = Client()
+        try manager.attach(id, client: mac, cols: 120, rows: 40, shared: true)
+        manager.input(id, Data("stty size\n".utf8))
+        try manager.attach(id, client: probe, cols: 120, rows: 40, shared: true)
+        wait("the window's size") { mac.text.contains("40 120") }
+    }
+
+    func testPhoneSessionsTakeTheMacTerminalsColoursOnceOneToldThem() throws {
+        let phoneSession = try manager.open(phoneLabel: "Pixel", cols: 80, rows: 24)
+        XCTAssertNil(manager.sessions.first { $0.id == phoneSession }?.theme)
+        let theme = ShellTheme(foreground: "#e6e6e6", background: "#212734")
+        let macSession = try manager.open(phoneLabel: "This Mac", cols: 80, rows: 24, origin: .mac, theme: theme)
+        XCTAssertEqual(manager.sessions.first { $0.id == macSession }?.theme, theme)
+        XCTAssertEqual(manager.sessions.first { $0.id == phoneSession }?.theme, theme, "a phone's session is listed with the Mac terminal's colours")
+        XCTAssertEqual(manager.defaultTheme, theme)
+        // And a Mac terminal that told none keeps the last known ones too.
+        let quiet = try manager.open(phoneLabel: "This Mac", cols: 80, rows: 24, origin: .mac)
+        XCTAssertEqual(manager.sessions.first { $0.id == quiet }?.theme, theme)
+        manager.defaultTheme = ShellTheme(background: "not a colour")
+        XCTAssertNil(manager.defaultTheme)
+    }
 }
 #endif
