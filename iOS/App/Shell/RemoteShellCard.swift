@@ -168,10 +168,11 @@ struct RemoteShellCard: View {
     }
 
     /// "running · 4m" (since it started) or "exited 0 · 1h" (since its last output).
+    /// A session started in a terminal window on the Mac says so first ("on the Mac · running · 4m").
     static func status(_ session: ShellSessionInfo, now: Date) -> String {
         if session.running, let question = session.waiting { return "needs you · " + question }
         if session.running {
-            return "running · " + age(now.timeIntervalSince1970 - session.startedAt)
+            return (session.isOnMac ? "on the Mac · " : "") + "running · " + age(now.timeIntervalSince1970 - session.startedAt)
         }
         let exited = session.exitStatus.map { "exited \($0)" } ?? "exited"
         return exited + " · " + age(now.timeIntervalSince1970 - session.lastOutputAt)

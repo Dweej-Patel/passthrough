@@ -57,6 +57,7 @@ public final class PTYProcess: @unchecked Sendable {
     private let writeQueue = DispatchQueue(label: "passthrough.shell.pty.write")
     private let state = MasterState()
     private var exited = false          // queue-confined
+    private var readingPaused = false   // queue-confined
     private var readSource: DispatchSourceRead?
     private var exitSource: DispatchSourceProcess?
 
@@ -83,6 +84,7 @@ public final class PTYProcess: @unchecked Sendable {
         // Dropping the object ends the session: hang up, and reap the child
         // without a source that needs us. Once started, the read source's cancel
         // handler (which holds only the fd's state, not self) closes the master.
+        if readingPaused { readSource?.resume() }   // a suspended source never runs its cancel handler
         readSource?.cancel()
         exitSource?.cancel()
         if readSource == nil { state.close(master) }
@@ -114,6 +116,7 @@ public final class PTYProcess: @unchecked Sendable {
             let state = state, fd = master
             reader.setCancelHandler { state.close(fd) }
             reader.resume()
+            if readingPaused { reader.suspend() }
             readSource = reader
 
             let watcher = DispatchSource.makeProcessSource(identifier: pid, eventMask: .exit, queue: queue)
@@ -139,6 +142,21 @@ public final class PTYProcess: @unchecked Sendable {
                 var p = pollfd(fd: master, events: Int16(POLLOUT), revents: 0)
                 poll(&p, 1, 100)
             }
+        }
+    }
+
+    /// Stops (or resumes) reading what the process writes: its output then
+    /// waits in the terminal, and the process itself once that is full, as
+    /// with a terminal that draws slowly. Exit is still noticed, and what was
+    /// written by then is delivered.
+    public func setReadingPaused(_ paused: Bool) {
+        queue.async { [self] in
+            guard paused != readingPaused else { return }
+            readingPaused = paused
+            // A suspended source must be resumed before it is cancelled, so
+            // only a live one is ever suspended (`cancelReading` undoes it).
+            guard let readSource else { return }
+            if paused { readSource.suspend() } else { readSource.resume() }
         }
     }
 
@@ -169,9 +187,19 @@ public final class PTYProcess: @unchecked Sendable {
             let n = read(master, &buffer, buffer.count)
             if n > 0 { onOutput?(Data(buffer[0..<n])); continue }
             if n < 0, errno == EINTR { continue }
-            if n == 0 || (n < 0 && errno != EAGAIN) { readSource?.cancel(); readSource = nil }   // the slave side is gone
+            if n == 0 || (n < 0 && errno != EAGAIN) { cancelReading() }   // the slave side is gone
             return
         }
+    }
+
+    /// Cancels the read source, which closes the master. A source suspended by
+    /// `setReadingPaused` is resumed first: a suspended one never runs its
+    /// cancel handler.
+    private func cancelReading() {
+        guard let source = readSource else { return }
+        readSource = nil
+        if readingPaused { source.resume() }
+        source.cancel()
     }
 
     /// `blocking` once the exit event has fired: the status is then certain to come.
@@ -183,8 +211,7 @@ public final class PTYProcess: @unchecked Sendable {
         drain()   // whatever it wrote last
         exitSource?.cancel()
         exitSource = nil
-        readSource?.cancel()
-        readSource = nil
+        cancelReading()
         let code: Int32 = (status & 0x7f) == 0 ? (status >> 8) & 0xff : 128 + (status & 0x7f)
         ptLog(.info, "shell: pid \(pid) exited (\(code))")
         onExit?(code)

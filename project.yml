@@ -195,6 +195,13 @@ targets:
         codeSign: true
         copy:
           destination: executables
+      # What a terminal window runs to show one of the app's sessions.
+      - target: PassthroughTerm
+        embed: true
+        link: false
+        codeSign: true
+        copy:
+          destination: executables
     postCompileScripts:
       - name: Install launchd plist
         inputFiles: [$(SRCROOT)/macOS/App/LaunchDaemon.plist]
@@ -264,6 +271,28 @@ targets:
         EXCLUDED_ARCHS: x86_64
       configs:
         # No get-task-allow in Release: the helper refuses debuggable clients.
+        Release:
+          CODE_SIGN_INJECT_BASE_ENTITLEMENTS: NO
+
+  # Runs inside a terminal window on the Mac and shows a session of the app's
+  # in it, so paired phones see the same terminal (LocalTerminalClient). The
+  # source is the package's, which builds and tests it too.
+  PassthroughTerm:
+    type: tool
+    platform: macOS
+    sources:
+      - path: Packages/PassthroughCore/Sources/passthrough-term
+    dependencies:
+      - package: PassthroughCore
+        product: PassthroughCore
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: $(PASSTHROUGH_ID).term
+        PRODUCT_NAME: passthrough-term
+        ENABLE_HARDENED_RUNTIME: YES
+        ARCHS: arm64
+        EXCLUDED_ARCHS: x86_64
+      configs:
         Release:
           CODE_SIGN_INJECT_BASE_ENTITLEMENTS: NO
 

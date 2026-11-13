@@ -64,7 +64,7 @@ private struct MenuBarLabel: View {
             awake: keepAwake.isOn,
             vpn: vpnLayer.status.isConnected,
             screen: !shell.screenViewers.isEmpty,
-            needsYou: shell.sessions.contains(where: \.isAsking),
+            needsYou: !shell.phonesAsking.isEmpty,
             problem: vpnLayer.isWanted && vpnLayer.status.isFailing)))
     }
 }

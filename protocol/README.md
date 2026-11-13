@@ -309,6 +309,45 @@ connection stays open.
 A phone that stops reading while 8 MiB of output waits to be sent is
 disconnected; it can attach again and gets the scrollback.
 
+### Terminals on the Mac
+
+A terminal window on the Mac can look at a session too, beside the phone
+attached to it: it is added as a viewer, takes nothing over and is never sent
+`detached`, so phones see no difference except in what the session prints and
+how big it is. A session's terminal has the size of whoever attached or typed
+last: a phone's `resize` is remembered, and applied once that phone is the one
+the session follows (it attached last, or types). What a terminal sends by
+itself in `input` (its answers to a program's questions: cursor position,
+device attributes, status, mode, window and colour reports, DCS and APC
+replies; and focus in and out) is not typing: it never moves the session, and
+it is dropped from any terminal but the one the session follows. When that
+one goes, the session follows whoever is left, at that one's size. A session started in
+a window on the Mac is listed with `origin` `mac`; the Mac keeps up to 32 of
+those, apart from the 8 sessions phones may open. Closing its window ends it.
+
+The window talks to the app over a Unix socket on the Mac, never the network
+(`LocalTerminalWire`): frames of one byte of kind, a big-endian UInt32 length
+and a payload. The window sends `hello` (1, JSON: `mode` `hook`, `new`,
+`attach` or `list`, `session`?, `cols`, `rows`, `directory`?, `environment`?,
+`token`?, `typeahead`?, `inside`?),
+then `input` (2, raw bytes), `resize` (3, two big-endian UInt16: columns,
+rows) and, for a session it started, `theme` (4, JSON: its colours). The app answers `started` (16, JSON `session`), `refused` (20, JSON
+`reason`) or `sessions` (21, the JSON list), then sends `output` (17, raw
+bytes), `replayed` (18, after the scrollback of a session that was already
+running) and `ended` (19, JSON `exitStatus`). Only connections from the app's
+own user are accepted, and of those: `hook`, `new` and `list` only while *Show
+new terminals on my phones* is on (else `refused` `not_sharing`); `attach`
+only with the `token` the app wrote, for that exact `session`, into the
+command file of a window it opened (good once, for a minute; else `refused`
+`not_allowed`; a token used a second time is also refused, and the app then
+takes that session off its windows and tells the owner). The owner can stop a
+window showing a phone's session at any time (`refused` `stopped`, after
+`started`; the session carries on), and never to the session named in `inside`, the one the
+window is already in (`refused` `own_session`). `typeahead` (with `hook`): a
+whole line was waiting on the terminal before its shell asked, as a terminal
+types the command into a window it opens to run one; the window "Open here"
+opened is told `not_sharing` that way, so its own shell runs that command.
+
 ### Messages
 
 | `t` | From | Fields | Meaning |
@@ -319,7 +358,7 @@ disconnected; it can attach again and gets the scrollback.
 | `hello` | phone | none | iroh only: the first line the phone writes, so the Mac sees the stream. Ignored elsewhere. |
 | `macInfo` | Mac | `irohID`, `irohRelay`?, `relayToken`?, `addresses` | Sent right after `ready` on every path, except while the Mac's iroh endpoint is on but not ready to hand out (still starting, or on the default relays with no home relay yet): then it is not sent at all, so phones keep what they have (the grant likewise leaves the iroh fields out). The phone updates the stored grant's iroh details and addresses (`addresses` at most 16; validation as in `shellGrant`; absent `relayToken` clears the stored one). Valid `addresses` always apply. The iroh fields apply as a group only when valid; no `irohID` clears the stored iroh details and token, and a token without an `irohID` is never stored. It never changes the shell key or certificate pin. |
 | `list` | phone | none | Ask for the live sessions. |
-| `sessions` | Mac | `sessions` | Reply to `list`, and sent unasked whenever the list changes (a session opens, ends, or starts or stops waiting): `ShellSessionInfo` objects `id`, `title`, `startedAt`, `lastOutputAt` (Unix seconds), `running`, `exitStatus`?, `waiting`?. `waiting` is the question a running session went quiet on, read off its last lines of output (a line ending in `?`, a `[y/N]` choice, a password prompt) after 1.5 s without output. Input clears it, and only output after the last input is read again, so an answered question isn't found again above the next prompt. A heuristic: phones show it as a nudge, never act on it. |
+| `sessions` | Mac | `sessions` | Reply to `list`, and sent unasked whenever the list changes (a session opens, ends, or starts or stops waiting): `ShellSessionInfo` objects `id`, `title`, `startedAt`, `lastOutputAt` (Unix seconds), `running`, `exitStatus`?, `waiting`?, `origin`?. `origin` is `mac` for a session started in a terminal window on the Mac (below) and absent otherwise; a phone that does not know it lists the session like any other. `theme` is that window's colours when its terminal told them: `foreground`?, `background`? and `palette`? (the 16 ANSI colours), each `#rrggbb`; a phone may draw the session with them, and must ignore any that is not six hex digits. `waiting` is the question a running session went quiet on, read off its last lines of output (a line ending in `?`, a `[y/N]` choice, a password prompt) after 1.5 s without output. Input clears it, and only output after the last input is read again, so an answered question isn't found again above the next prompt. A heuristic: phones show it as a nudge, never act on it. |
 | `open` | phone | `cols`, `rows`, `ref`? | Start a new session. `ref`, a number the phone picks, comes back in the answer. |
 | `opened` | Mac | `session`, `cols`, `rows`, `ref`? | The session exists and this connection is attached to it (until a later `open` or `attach`). |
 | `attach` | phone | `session`, `cols`, `rows` | Attach to a live session; the Mac replays its scrollback as `output` first. |
@@ -329,7 +368,7 @@ disconnected; it can attach again and gets the scrollback.
 | `output` | Mac | `session`, `data` | PTY output, at most 16384 bytes before base64 per line. |
 | `close` | phone | `session` | End the session (the shell is hung up). |
 | `ended` | Mac | `session`, `exitStatus`? | The shell exited. |
-| `detached` | Mac | `session`, `reason`? | Another connection took the session over. |
+| `detached` | Mac | `session`, `reason`? | Another phone's connection took the session over (a terminal window on the Mac never does). |
 | `history` | phone | none | Ask for past sessions. |
 | `historyList` | Mac | `history` | `ShellHistoryEntry` objects `id`, `title`, `phoneLabel`, `startedAt`, `endedAt`?, `exitStatus`?, `bytes`, `cols`?, `rows`? (the terminal's size when the session started; absent from older Macs); newest first. At most the newest 500, and fewer (the oldest dropped) if the line would otherwise exceed 262144 bytes. |
 | `transcript` | phone | `session` | Ask for a past session's recorded output: at most its last 8 MiB. |

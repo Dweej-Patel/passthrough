@@ -23,6 +23,7 @@ struct RemoteShellSettings: View {
                 setup
                 PhonesSection()
                 OpenSessionsSection()
+                MacTerminalsSection()
                 ReachAnywhereSettings()
             } else {
                 HowItWorks()
@@ -336,24 +337,31 @@ private struct OpenSessionsSection: View {
     @State private var ending: ShellSessionInfo?
 
     var body: some View {
-        let open = shell.sessions.filter(\.running)
+        let open = shell.terminals
         Section {
             if open.isEmpty {
                 Text("No shells are open.").foregroundStyle(.secondary)
             }
-            ForEach(open, id: \.id) { info in
+            ForEach(open) { terminal in
                 HStack(spacing: 12) {
-                    Image(systemName: "apple.terminal")
+                    Image(systemName: terminal.origin == .mac ? "macwindow" : "apple.terminal")
                         .font(.system(size: 16))
                         .foregroundStyle(PTTheme.accent)
                         .frame(width: 22)
                     VStack(alignment: .leading, spacing: 2) {
-                        Text(info.title).lineLimit(1).truncationMode(.middle)
-                        Text("Started \(Date(timeIntervalSince1970: info.startedAt).formatted(.relative(presentation: .named)))")
+                        Text(terminal.info.title).lineLimit(1).truncationMode(.middle)
+                        Text(SessionWording.detail(terminal))
                             .font(.caption).foregroundStyle(.secondary)
                     }
                     Spacer()
-                    Button("End…") { ending = info }
+                    if terminal.macViewers == 0 {
+                        Button("Open in Terminal") { shell.openInTerminal(terminal.id) }
+                            .help("Show this session in a terminal window here. A phone attached to it keeps it too.")
+                    } else if terminal.origin == .phone {
+                        Button("Stop Showing Here") { shell.stopShowingHere(terminal.id) }
+                            .help("Stop showing this session in terminal windows here. It keeps running for the phone.")
+                    }
+                    Button("End…") { ending = terminal.info }
                 }
                 .padding(.vertical, 1)
             }
@@ -367,6 +375,69 @@ private struct OpenSessionsSection: View {
         } message: { _ in
             Text("The shell and anything running in it are closed, as when you close a Terminal window. Its recording is kept.")
         }
+    }
+}
+
+/// How a session's row says where it is and who is looking at it.
+enum SessionWording {
+    /// "In a terminal here · a phone is attached", "From a phone · started 5 minutes ago".
+    static func detail(_ terminal: ShellSessionDetail, now: Date = Date()) -> String {
+        var parts: [String] = []
+        switch (terminal.origin, terminal.macViewers > 0) {
+        case (.mac, true): parts.append("In a terminal here")
+        case (.mac, false): parts.append("Started in a terminal here")
+        case (.phone, true): parts.append("From a phone · open in a terminal here")
+        case (.phone, false): parts.append("From a phone")
+        }
+        if terminal.phoneAttached { parts.append("a phone is attached") }
+        parts.append("started " + Date(timeIntervalSince1970: terminal.info.startedAt).formatted(.relative(presentation: .named)))
+        return parts.joined(separator: " · ")
+    }
+}
+
+/// "Show new terminals on my phones": every new terminal window on this Mac
+/// as a session, through a few lines in the shell's startup file.
+private struct MacTerminalsSection: View {
+    @EnvironmentObject private var shell: RemoteShellController
+
+    var body: some View {
+        Section {
+            Toggle(isOn: Binding(get: { shell.sharesNewTerminals }, set: { shell.setSharesNewTerminals($0) })) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Show new terminals on my phones")
+                    Text("Each new terminal window (Terminal, iTerm, an editor's terminal) is a session your phones can open, with you still typing in it here.")
+                        .font(.caption).foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            .disabled(shell.terminalsUnsupported != nil)
+            if let problem = shell.terminalsError ?? shell.terminalsUnsupported {
+                Label(problem, systemImage: "exclamationmark.triangle.fill")
+                    .font(.caption).foregroundStyle(PTColor.attentionText)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        } header: {
+            Text("Terminals on this Mac")
+        } footer: {
+            Text(footer)
+                .font(.caption).foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    private var footer: String {
+        if shell.sharesNewTerminals {
+            return "Passthrough added a few lines to \(shell.startupFileName); turning this off removes them. Terminals already open are not changed. "
+                + "These terminals are recorded like any session, a phone with shell access can type into them, and quitting Passthrough closes their shells (the window then starts a new one). "
+                + "They run inside Passthrough with its permissions, such as Full Disk Access, and while this is on any program on this Mac can start one."
+        }
+        if shell.hookWithoutChoice {
+            return "Off, though Passthrough's lines are in \(shell.startupFileName) (an earlier version, or something else, put them there): "
+                + "new terminals stay plain. Turn this on to show them on your phones, or on and off again to remove the lines."
+        }
+        return "Off: phones see only the sessions they start. Turning it on adds a few lines to \(shell.startupFileName). "
+            + "Those terminals are then recorded like any session, a phone with shell access can type into them, and quitting Passthrough closes their shells. "
+            + "They run inside Passthrough with its permissions, such as Full Disk Access, and while it is on any program on this Mac can start one."
     }
 }
 

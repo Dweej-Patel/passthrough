@@ -9,6 +9,12 @@ public enum RemoteShell {
     public static let proofLabel = "passthrough-shell-v1"
     /// Most sessions a Mac keeps open at once.
     public static let maxSessions = 8
+    /// Most sessions started in terminals on the Mac itself, counted apart
+    /// from `maxSessions`: the Mac's own windows never use up the phones'.
+    public static let maxMacSessions = 32
+    /// Set to the session's id in every session's environment, so a shell
+    /// started inside one knows it is already shared.
+    public static let sessionVariable = "PASSTHROUGH_SESSION"
     /// Most views of its screen a Mac shows at once, to one phone and in all.
     public static let maxScreenViewsPerPhone = 2
     public static let maxScreenViews = 4
@@ -156,12 +162,23 @@ public struct ShellSessionInfo: Codable, Equatable, Sendable {
     /// The question a running session went quiet on, as the Mac reads its
     /// screen ("Do you want to make this edit?"); absent when it isn't waiting.
     public var waiting: String?
+    /// `mac` for a session started in a terminal window on the Mac, which
+    /// shows it too; absent for one a phone opened (and from older Macs).
+    public var origin: String?
+    /// The colours of the terminal window on the Mac that shows the session,
+    /// when it said; a phone draws the session with them.
+    public var theme: ShellTheme?
+
+    public static let originMac = "mac"
 
     public init(id: String, title: String, startedAt: Double, lastOutputAt: Double, running: Bool, exitStatus: Int32? = nil,
-                waiting: String? = nil) {
+                waiting: String? = nil, origin: String? = nil, theme: ShellTheme? = nil) {
         self.id = id; self.title = title; self.startedAt = startedAt; self.lastOutputAt = lastOutputAt
-        self.running = running; self.exitStatus = exitStatus; self.waiting = waiting
+        self.running = running; self.exitStatus = exitStatus; self.waiting = waiting; self.origin = origin; self.theme = theme
     }
+
+    /// Started in a terminal window on the Mac.
+    public var isOnMac: Bool { origin == Self.originMac }
 }
 
 /// A past session in the Mac's history. Times are Unix seconds.

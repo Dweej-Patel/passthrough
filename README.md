@@ -26,7 +26,7 @@ For iPhone and Android. No accounts, no Passthrough server.</p>
 |---|---|
 | **Internet through your phone** | Plug in and the Mac goes online through the phone's own connection: no hotspot, nothing to configure. An optional wireless link carries the same traffic when you unplug. [More](docs/GUIDE.md#how-it-works) |
 | **A Mac that stays awake** | Lid closed is fine. It still sleeps at your battery limit or when it runs hot, and the phone shows how long it has left. [More](docs/GUIDE.md#keep-mac-awake) |
-| **Its shell, from anywhere** | A real terminal on your Mac from the phone: on the same Wi-Fi, over Tailscale, or from anywhere through a built-in end-to-end encrypted connection. Sessions survive disconnects and are recorded. On iPhone you can also see and control the screen. [More](docs/GUIDE.md#remote-shell) |
+| **Its shell, from anywhere** | A real terminal on your Mac from the phone: on the same Wi-Fi, over Tailscale, or from anywhere through a built-in end-to-end encrypted connection. Sessions survive disconnects and are recorded, and a session can be open in a terminal window on the Mac and on the phone at once. On iPhone you can also see and control the screen. [More](docs/GUIDE.md#remote-shell) |
 | **A VPN on top** | WireGuard or OpenVPN (NordVPN built in) with a kill switch, over the phone's connection or any other network. [More](docs/GUIDE.md#vpn-layer) |
 
 ## Your Mac from the phone

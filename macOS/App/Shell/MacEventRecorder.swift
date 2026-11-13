@@ -145,6 +145,8 @@ final class MacEventRecorder {
     private func sessionsChanged(_ list: [ShellSessionInfo]) {
         for now in list {
             let before = sessions[now.id]
+            // A terminal window on the Mac itself, ending or asking, is not news for a phone's timeline, unless a phone is in it.
+            guard session.shell.isPhones(now) else { continue }
             if before?.running == true, !now.running {
                 let minutes = max(0, Int((now.lastOutputAt - now.startedAt) / 60))
                 let exit = now.exitStatus.map { "exit \($0)" } ?? "ended"

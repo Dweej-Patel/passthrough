@@ -596,7 +596,8 @@ final class SessionCoordinator: ObservableObject {
 
     /// What to say before letting the Mac sleep while phones' shells run; nil when none do.
     var sleepWarning: String? {
-        let running = shell.sessions.filter(\.running).count
+        // Terminal windows on the Mac sleep with it in front of whoever is there, unless a phone is in one too.
+        let running = shell.phoneShells.count
         guard running > 0 else { return nil }
         let shells = running == 1 ? "A shell from your phone is" : "\(running) shells from your phone are"
         return "\(shells) running. Asleep, the Mac pauses \(running == 1 ? "it" : "them") until it wakes."
