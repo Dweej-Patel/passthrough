@@ -50,6 +50,8 @@ final class LocalTerminalTests: XCTestCase {
         private var data = Data()
         private var result: LocalTerminalClient.Outcome?
         private let stop = Locked(false)
+        /// What the window answers when asked for its colours; nil: nothing, as a bare pseudo-terminal.
+        let coloursAnswer = Locked<Data?>(nil)
         /// A client thread is using the far side and closes it when it is done.
         private let clientRunning = Locked(false)
 
@@ -70,6 +72,10 @@ final class LocalTerminalTests: XCTestCase {
                     let n = read(near, &buffer, buffer.count)
                     guard n > 0, let self else { break }
                     self.lock.lock(); self.data.append(contentsOf: buffer[0..<n]); self.lock.unlock()
+                    // A terminal that tells its colours when asked, as Terminal.app does.
+                    if let answer = self.coloursAnswer.get(), Data(buffer[0..<n]).range(of: TerminalColors.question) != nil {
+                        _ = answer.withUnsafeBytes { write(near, $0.baseAddress, answer.count) }
+                    }
                 }
                 // As a window closing: the near side goes, and the client finds
                 // its terminal hung up. The far side is the client's to the end
@@ -100,12 +106,12 @@ final class LocalTerminalTests: XCTestCase {
         /// Runs the client as the tool would in this window.
         func run(_ socket: String, _ mode: LocalTerminalWire.Mode, session: String? = nil,
                  environment: [String: String] = ["PATH": "/usr/bin:/bin", "TERM": "xterm-256color", "PS1": "$ "],
-                 directory: String = "/tmp") {
+                 directory: String = "/tmp", coloursTimeout: TimeInterval = 0) {
             let far = far
             clientRunning.set(true)
             Thread { [weak self] in
                 let outcome = LocalTerminalClient.run(.init(socketPath: socket, mode: mode, session: session, input: far, output: far,
-                                                            environment: environment, directory: directory))
+                                                            environment: environment, directory: directory, coloursTimeout: coloursTimeout))
                 Darwin.close(far)
                 guard let self else { return }
                 self.lock.lock(); self.result = outcome; self.lock.unlock()
@@ -154,6 +160,39 @@ final class LocalTerminalTests: XCTestCase {
         mac.type("exit 7\r")
         wait("the window's client hears the shell's exit status") { mac.outcome == .ended(7) }
         wait("and so does the phone") { phone.exitStatus == 7 }
+    }
+
+    static let coloursAnswer = Data("\u{1B}]10;rgb:e6ce/e6ce/e6ce\u{07}\u{1B}]11;rgb:213d/2743/33e7\u{07}\u{1B}[?1;2c".utf8)
+
+    func testTheWindowsColoursGoWithItsSessionToPhones() throws {
+        let mac = window()
+        mac.coloursAnswer.set(Self.coloursAnswer)
+        mac.run(socketPath, .hook, coloursTimeout: 2)
+        wait("started") { self.running.count == 1 }
+        XCTAssertEqual(running.first?.theme, ShellTheme(foreground: "#e6e6e6", background: "#212734"))
+        // The answer was read by the tool: none of it reaches the shell as typing.
+        mac.type("echo clean-$((7+7))\r")
+        wait("the shell works") { mac.text.contains("clean-14") }
+        XCTAssertFalse(mac.text.contains("rgb:"), mac.text)
+    }
+
+    func testAWindowThatDoesNotSayItsColoursStillStartsAfterAShortWait() {
+        let mac = window()
+        mac.run(socketPath, .hook, coloursTimeout: 0.2)
+        wait("started") { self.running.count == 1 }
+        XCTAssertNil(running.first?.theme)
+        mac.type("echo fine-$((8+8))\r")
+        wait("the shell works") { mac.text.contains("fine-16") }
+    }
+
+    func testAWindowOnlyShowingASessionDoesNotChangeItsColours() throws {
+        let id = try manager.open(phoneLabel: "Pixel", cols: 80, rows: 24)
+        let mac = window()
+        mac.coloursAnswer.set(Self.coloursAnswer)
+        mac.run(socketPath, .attach, session: id, coloursTimeout: 2)
+        wait("attached") { self.manager.details.first?.macViewers == 1 }
+        XCTAssertNil(running.first?.theme)
+        XCTAssertFalse(mac.text.contains("\u{1B}]11;?"), "and is not asked")
     }
 
     func testTheSessionStartsInTheWindowsFolderWithItsEnvironment() throws {

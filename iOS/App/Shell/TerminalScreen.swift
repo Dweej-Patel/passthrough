@@ -31,6 +31,8 @@ final class ShellTerminalController: ObservableObject {
     @Published var pendingPaste: PendingPaste?
     private var noticeTask: Task<Void, Never>?
     private var subscriptions: Set<AnyCancellable> = []
+    /// The colours the terminal draws with now (the shown session's; nil: the app's own).
+    private var theme: ShellTheme?
 
     init(shell: ShellModel) {
         self.shell = shell
@@ -48,6 +50,18 @@ final class ShellTerminalController: ObservableObject {
                 guard let self, session == self.shown else { return }
                 self.driver.feed(data)
             }
+            .store(in: &subscriptions)
+        // The list can come after the session is shown (a session just opened).
+        shell.$sessions
+            .sink { [weak self] sessions in
+                guard let self, let shown = self.shown, let info = sessions.first(where: { $0.id == shown }),
+                      info.theme != self.theme else { return }
+                self.theme = info.theme
+                self.driver.apply(info.theme)
+            }
+            .store(in: &subscriptions)
+        driver.objectWillChange
+            .sink { [weak self] in self?.objectWillChange.send() }
             .store(in: &subscriptions)
         driver.onInput = { [weak self] data in
             guard let self, let active = shell.activeSession, active == self.shown else { return }
@@ -103,6 +117,9 @@ final class ShellTerminalController: ObservableObject {
     private func show(_ id: String, replay: Bool) {
         shown = id
         driver.replaying = false
+        // Before anything is drawn: a Mac terminal's session in that terminal's colours.
+        theme = shell.sessions.first { $0.id == id }?.theme
+        driver.apply(theme)
         driver.reset()
         driver.replaying = replay
         // An ended session's replay is its log: show it read-only.
@@ -135,7 +152,7 @@ struct TerminalScreen: View {
 
     var body: some View {
         ZStack {
-            Color(TerminalStyle.background).ignoresSafeArea()
+            Color(controller.driver.background).ignoresSafeArea()
             VStack(spacing: 0) {
                 tabStrip
                 ZStack(alignment: .top) {

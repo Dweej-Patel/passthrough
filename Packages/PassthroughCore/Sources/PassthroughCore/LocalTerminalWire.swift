@@ -49,11 +49,13 @@ public enum LocalTerminalWire {
         /// starts as the terminal's own would have.
         public var directory: String?
         public var environment: [String: String]?
+        /// The window's colours, when its terminal told them.
+        public var theme: ShellTheme?
 
         public init(mode: Mode, session: String? = nil, cols: Int, rows: Int, directory: String? = nil,
-                    environment: [String: String]? = nil) {
+                    environment: [String: String]? = nil, theme: ShellTheme? = nil) {
             self.mode = mode; self.session = session; self.cols = cols; self.rows = rows
-            self.directory = directory; self.environment = environment
+            self.directory = directory; self.environment = environment; self.theme = theme
         }
     }
 

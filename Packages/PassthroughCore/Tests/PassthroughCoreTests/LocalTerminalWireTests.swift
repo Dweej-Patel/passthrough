@@ -64,4 +64,58 @@ final class LocalTerminalWireTests: XCTestCase {
         let old = #"{"id":"C","title":"zsh","startedAt":1,"lastOutputAt":2,"running":true}"#
         XCTAssertNil(try JSONDecoder().decode(ShellSessionInfo.self, from: Data(old.utf8)).origin)
     }
+
+    // MARK: A terminal's colours
+
+    /// What Terminal.app answers, as it answers it (BEL-ended, four digits a channel).
+    static let terminalAnswer: Data = {
+        var text = "\u{1B}]10;rgb:e6ce/e6ce/e6ce\u{07}\u{1B}]11;rgb:213d/2743/33e7\u{07}"
+        let palette = ["354e/4245/4bcf", "b480/55f1/47f9", "6c95/aad2/7107", "c4c4/acac/6262", "6d6d/9696/b4b4", "bdbd/7b7b/cdcd",
+                       "7c16/cb85/ce42", "de68/e648/ec13", "46bd/5cd3/6d12", "e049/6c9a/5a49", "7965/be4a/7e0d", "e5e5/c8c8/7272",
+                       "6767/b5b5/eded", "d3d3/8989/e5e5", "848c/de23/e13a", "e64a/ef7a/f63d"]
+        for (index, colour) in palette.enumerated() { text += "\u{1B}]4;\(index);rgb:\(colour)\u{07}" }
+        return Data((text + "\u{1B}[?1;2c").utf8)
+    }()
+
+    func testATerminalsAnswerBecomesItsColours() throws {
+        XCTAssertTrue(TerminalColors.isComplete(Self.terminalAnswer))
+        let theme = try XCTUnwrap(TerminalColors.parse(Self.terminalAnswer))
+        XCTAssertEqual(theme.foreground, "#e6e6e6")
+        XCTAssertEqual(theme.background, "#212734")
+        XCTAssertEqual(theme.palette?.count, 16)
+        XCTAssertEqual(theme.palette?[4], "#6d96b4")
+        XCTAssertEqual(theme.palette?[15], "#e5eff5")
+    }
+
+    func testAnAnswerEndedTheOtherWayOrWithFewerDigitsIsReadToo() {
+        let answer = Data("\u{1B}]11;rgb:1/2/f\u{1B}\\\u{1B}]10;rgb:ff/80/00\u{1B}\\\u{1B}[?62c".utf8)
+        let theme = TerminalColors.parse(answer)
+        XCTAssertEqual(theme?.background, "#1122ff")
+        XCTAssertEqual(theme?.foreground, "#ff8000")
+        XCTAssertNil(theme?.palette, "a palette is all 16 or nothing")
+    }
+
+    func testATerminalThatOnlySaysWhatItIsHasNoColours() {
+        let answer = Data("\u{1B}[?1;2c".utf8)
+        XCTAssertTrue(TerminalColors.isComplete(answer))
+        XCTAssertNil(TerminalColors.parse(answer))
+        XCTAssertFalse(TerminalColors.isComplete(Data("\u{1B}]11;rgb:0/0/0\u{07}".utf8)))
+        XCTAssertNil(TerminalColors.parse(Data("\u{1B}]11;notacolour\u{07}\u{1B}]4;99;rgb:0/0/0\u{07}\u{1B}[?1c".utf8)))
+    }
+
+    func testOnlyWellFormedColoursAreKept() {
+        let theme = ShellTheme(foreground: "#FFAA00", background: "red; rm -rf", palette: Array(repeating: "#000000", count: 15))
+        XCTAssertEqual(theme.sanitized, ShellTheme(foreground: "#ffaa00"))
+        XCTAssertNil(ShellTheme(background: "#12345").sanitized)
+        XCTAssertNil(ShellTheme.rgb("#12345g"))
+        XCTAssertEqual(ShellTheme.rgb("#102030")?.green, 0x20)
+    }
+
+    func testASessionWithoutAThemeIsSentAsBefore() throws {
+        let plain = ShellSessionInfo(id: "A", title: "zsh", startedAt: 1, lastOutputAt: 2, running: true)
+        XCTAssertFalse(String(decoding: try JSONEncoder().encode(plain), as: UTF8.self).contains("theme"))
+        let themed = ShellSessionInfo(id: "B", title: "zsh", startedAt: 1, lastOutputAt: 2, running: true, origin: ShellSessionInfo.originMac,
+                                      theme: ShellTheme(foreground: "#ffffff", background: "#000000"))
+        XCTAssertEqual(try JSONDecoder().decode(ShellSessionInfo.self, from: JSONEncoder().encode(themed)), themed)
+    }
 }

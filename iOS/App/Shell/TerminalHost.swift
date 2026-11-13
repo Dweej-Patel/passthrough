@@ -11,6 +11,11 @@ enum TerminalStyle {
     static let background = UIColor(red: 0.05, green: 0.06, blue: 0.09, alpha: 1)
     static let foreground = UIColor(white: 0.9, alpha: 1)
     static let font = UIFont.monospacedSystemFont(ofSize: 13, weight: .regular)
+
+    static func color(_ hex: String?) -> UIColor? {
+        guard let hex, let rgb = ShellTheme.rgb(hex) else { return nil }
+        return UIColor(red: CGFloat(rgb.red) / 255, green: CGFloat(rgb.green) / 255, blue: CGFloat(rgb.blue) / 255, alpha: 1)
+    }
 }
 
 /// Text from the Mac (its shell's copies, what Screen copies on it) on
@@ -80,6 +85,24 @@ final class TerminalDriver: NSObject, ObservableObject, TerminalViewDelegate {
             self.whenLaidOut = []
             pending.forEach { $0(cols, rows) }
         }
+    }
+
+    /// The background the terminal draws on now, for what surrounds it.
+    @Published private(set) var background = TerminalStyle.background
+
+    /// Draws with a Mac terminal window's colours (a session started in one),
+    /// or the app's own for nil and for whatever the theme leaves out.
+    func apply(_ theme: ShellTheme?) {
+        let background = TerminalStyle.color(theme?.background) ?? TerminalStyle.background
+        view.backgroundColor = background
+        view.layer.backgroundColor = background.cgColor
+        view.nativeBackgroundColor = background
+        view.nativeForegroundColor = TerminalStyle.color(theme?.foreground) ?? TerminalStyle.foreground
+        let palette = theme?.palette?.compactMap { hex -> SwiftTerm.Color? in
+            ShellTheme.rgb(hex).map { SwiftTerm.Color(red8: UInt16($0.red), green8: UInt16($0.green), blue8: UInt16($0.blue)) }
+        }
+        view.installColors(palette?.count == 16 ? palette! : SwiftTerm.Color.terminalAppColors)
+        if background != self.background { self.background = background }
     }
 
     /// Whether the terminal takes input; switchable, e.g. once its session ends.

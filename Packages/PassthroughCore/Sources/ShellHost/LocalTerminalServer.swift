@@ -254,7 +254,7 @@ final class LocalTerminalConnection: ShellAttachment, @unchecked Sendable {
                         ? URL(fileURLWithPath: path, isDirectory: true) : nil
                 }
                 let id = try manager.open(phoneLabel: label, cols: hello.cols, rows: hello.rows, origin: .mac,
-                                          environment: hello.environment, directory: directory)
+                                          environment: hello.environment, directory: directory, theme: hello.theme)
                 owner = true
                 show(id, hello)
             } catch let error as ShellError {

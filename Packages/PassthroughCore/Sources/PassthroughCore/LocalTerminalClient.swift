@@ -19,15 +19,19 @@ public enum LocalTerminalClient {
         public var directory: String
         /// How long the app has to answer before the terminal carries on without it.
         public var answerTimeout: TimeInterval
+        /// How long the terminal has to say what its colours are, for a new
+        /// session; 0 does not ask.
+        public var coloursTimeout: TimeInterval
 
         public init(socketPath: String, mode: LocalTerminalWire.Mode, session: String? = nil,
                     input: Int32 = STDIN_FILENO, output: Int32 = STDOUT_FILENO,
                     environment: [String: String] = ProcessInfo.processInfo.environment,
                     directory: String = FileManager.default.currentDirectoryPath,
-                    answerTimeout: TimeInterval = 2) {
+                    answerTimeout: TimeInterval = 2, coloursTimeout: TimeInterval = 0) {
             self.socketPath = socketPath; self.mode = mode; self.session = session
             self.input = input; self.output = output
             self.environment = environment; self.directory = directory; self.answerTimeout = answerTimeout
+            self.coloursTimeout = coloursTimeout
         }
     }
 
@@ -61,11 +65,25 @@ public enum LocalTerminalClient {
         guard let socket = connect(options.socketPath) else { return .unavailable(notRunning) }
         defer { close(socket) }
 
+        // Raw from here: every key goes to the session's own terminal, which
+        // does the echo and the signals; and the terminal's answer about its
+        // colours is not a line, and must not be echoed.
+        var saved = termios()
+        let isTerminal = options.mode != .list && tcgetattr(options.input, &saved) == 0
+        if isTerminal {
+            var raw = saved
+            cfmakeraw(&raw)
+            tcsetattr(options.input, TCSANOW, &raw)
+        }
+        defer { if isTerminal { tcsetattr(options.input, TCSANOW, &saved) } }
+
+        let starts = options.mode == .hook || options.mode == .new
+        // Only now that the app is there: a terminal with no Passthrough is asked nothing.
+        let theme = starts && isTerminal ? TerminalColors.ask(input: options.input, output: options.output, timeout: options.coloursTimeout) : nil
         var size = windowSize(options.output)
         let hello = LocalTerminalWire.Hello(
             mode: options.mode, session: options.session, cols: size.cols, rows: size.rows,
-            directory: options.mode == .attach || options.mode == .list ? nil : options.directory,
-            environment: options.mode == .attach || options.mode == .list ? nil : options.environment)
+            directory: starts ? options.directory : nil, environment: starts ? options.environment : nil, theme: theme)
         // The hello and its answer share one deadline: an app that accepts
         // and then neither reads nor answers must not hold the terminal.
         let deadline = Date().addingTimeInterval(options.answerTimeout)
@@ -95,16 +113,6 @@ public enum LocalTerminalClient {
                 }
             }
         }
-
-        // Raw: every key goes to the session's own terminal, which does the echo and the signals.
-        var saved = termios()
-        let isTerminal = tcgetattr(options.input, &saved) == 0
-        if isTerminal {
-            var raw = saved
-            cfmakeraw(&raw)
-            tcsetattr(options.input, TCSANOW, &raw)
-        }
-        defer { if isTerminal { tcsetattr(options.input, TCSANOW, &saved) } }
 
         let resized = ResizeWatch()
         defer { resized.stop() }

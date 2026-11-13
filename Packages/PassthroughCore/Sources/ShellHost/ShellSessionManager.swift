@@ -73,6 +73,8 @@ public final class ShellSessionManager: @unchecked Sendable {
         /// authorized phone may still attach to it meanwhile.
         let openedBy: String?
         let origin: ShellSessionOrigin
+        /// The colours of the Mac terminal window it was started in.
+        let theme: ShellTheme?
         let process: PTYProcess
         let writer: TranscriptWriter
         var scrollback = ScrollbackBuffer(capacity: RemoteShell.scrollbackBytes)
@@ -115,9 +117,9 @@ public final class ShellSessionManager: @unchecked Sendable {
         /// Viewers that can't take more output yet: reading the shell waits for them.
         var pausedBy: Set<ObjectIdentifier> = []
 
-        init(id: String, startedAt: Date, openedBy: String?, origin: ShellSessionOrigin, process: PTYProcess,
+        init(id: String, startedAt: Date, openedBy: String?, origin: ShellSessionOrigin, theme: ShellTheme?, process: PTYProcess,
              writer: TranscriptWriter, size: Size) {
-            self.id = id; self.startedAt = startedAt; self.openedBy = openedBy; self.origin = origin
+            self.id = id; self.startedAt = startedAt; self.openedBy = openedBy; self.origin = origin; self.theme = theme
             self.process = process; self.writer = writer; self.size = size
             lastOutputAt = startedAt
         }
@@ -125,7 +127,8 @@ public final class ShellSessionManager: @unchecked Sendable {
         var info: ShellSessionInfo {
             ShellSessionInfo(id: id, title: title, startedAt: startedAt.timeIntervalSince1970,
                              lastOutputAt: lastOutputAt.timeIntervalSince1970, running: running, exitStatus: exitStatus,
-                             waiting: running ? waiting : nil, origin: origin == .mac ? ShellSessionInfo.originMac : nil)
+                             waiting: running ? waiting : nil, origin: origin == .mac ? ShellSessionInfo.originMac : nil,
+                             theme: theme)
         }
 
         /// Everyone output goes to.
@@ -206,7 +209,7 @@ public final class ShellSessionManager: @unchecked Sendable {
     /// (`RemoteShell.maxMacSessions`) and never use up the phones' sessions.
     public func open(phoneLabel: String, phoneID: String? = nil, cols: Int, rows: Int,
                      origin: ShellSessionOrigin = .phone, environment given: [String: String]? = nil,
-                     directory givenDirectory: URL? = nil) throws -> String {
+                     directory givenDirectory: URL? = nil, theme: ShellTheme? = nil) throws -> String {
         try queue.sync {
             for id in order where table[id]?.running == false { remove(id) }
             let running = table.values.filter { $0.running && $0.origin == origin }.count + (opening[origin] ?? 0)
@@ -232,7 +235,7 @@ public final class ShellSessionManager: @unchecked Sendable {
             process.terminate()   // never started; dropping it hangs up and reaps
             throw error
         }
-        let session = Session(id: id, startedAt: now, openedBy: phoneID, origin: origin, process: process, writer: writer, size: size)
+        let session = Session(id: id, startedAt: now, openedBy: phoneID, origin: origin, theme: theme?.sanitized, process: process, writer: writer, size: size)
         // Weak: the session owns the process, so a strong capture would be a cycle that leaks every session.
         process.onOutput = { [weak self, weak session] data in
             self?.queue.async { if let session { self?.received(data, session: session) } }

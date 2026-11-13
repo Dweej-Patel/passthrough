@@ -55,7 +55,7 @@ case "hook":
     // the shell that asked then carries on as it would have.
     guard isatty(STDIN_FILENO) == 1, isatty(STDOUT_FILENO) == 1,
           environment[RemoteShell.sessionVariable] == nil else { exit(0) }
-    let outcome = LocalTerminalClient.run(.init(socketPath: socketPath, mode: .hook, environment: environment))
+    let outcome = LocalTerminalClient.run(.init(socketPath: socketPath, mode: .hook, environment: environment, coloursTimeout: 0.3))
     switch outcome {
     case .ended(let status):
         // Descriptor 3 is how the hook hears that a session really ran and
@@ -74,7 +74,7 @@ case "hook":
     exit(0)
 
 case "new":
-    switch LocalTerminalClient.run(.init(socketPath: socketPath, mode: .new, environment: environment)) {
+    switch LocalTerminalClient.run(.init(socketPath: socketPath, mode: .new, environment: environment, coloursTimeout: 0.3)) {
     case .ended(let status): exit(status)
     case .unavailable(let reason): fail(explain(reason))
     case .lost: fail("Passthrough stopped, and the session with it.")

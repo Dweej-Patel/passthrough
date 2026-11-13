@@ -165,13 +165,16 @@ public struct ShellSessionInfo: Codable, Equatable, Sendable {
     /// `mac` for a session started in a terminal window on the Mac, which
     /// shows it too; absent for one a phone opened (and from older Macs).
     public var origin: String?
+    /// The colours of the terminal window on the Mac that shows the session,
+    /// when it said; a phone draws the session with them.
+    public var theme: ShellTheme?
 
     public static let originMac = "mac"
 
     public init(id: String, title: String, startedAt: Double, lastOutputAt: Double, running: Bool, exitStatus: Int32? = nil,
-                waiting: String? = nil, origin: String? = nil) {
+                waiting: String? = nil, origin: String? = nil, theme: ShellTheme? = nil) {
         self.id = id; self.title = title; self.startedAt = startedAt; self.lastOutputAt = lastOutputAt
-        self.running = running; self.exitStatus = exitStatus; self.waiting = waiting; self.origin = origin
+        self.running = running; self.exitStatus = exitStatus; self.waiting = waiting; self.origin = origin; self.theme = theme
     }
 
     /// Started in a terminal window on the Mac.
