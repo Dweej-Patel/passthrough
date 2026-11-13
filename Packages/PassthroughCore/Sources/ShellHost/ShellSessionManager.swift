@@ -227,7 +227,9 @@ public final class ShellSessionManager: @unchecked Sendable {
                      origin: ShellSessionOrigin = .phone, environment given: [String: String]? = nil,
                      directory givenDirectory: URL? = nil, theme: ShellTheme? = nil) throws -> String {
         try queue.sync {
-            for id in order where table[id]?.running == false { remove(id) }
+            // Ended ones of the same kind make room; a phone's stay listed for
+            // their time (`endedRetention`) however many terminals open on the Mac.
+            for id in order where table[id]?.running == false && table[id]?.origin == origin { remove(id) }
             let running = table.values.filter { $0.running && $0.origin == origin }.count + (opening[origin] ?? 0)
             guard running < (origin == .mac ? RemoteShell.maxMacSessions : RemoteShell.maxSessions) else { throw ShellError.tooManySessions }
             opening[origin, default: 0] += 1
@@ -336,7 +338,7 @@ public final class ShellSessionManager: @unchecked Sendable {
                     session.viewers.removeAll { $0.client === client }
                     changed = true
                 }
-                if session.active == ObjectIdentifier(client) { session.active = nil }
+                if session.active == ObjectIdentifier(client) { followNext(session) }
                 release(session, from: client)
             }
             if changed { notifyViewers() }
@@ -345,15 +347,29 @@ public final class ShellSessionManager: @unchecked Sendable {
 
     /// `client` is who typed it, when known: the terminal takes that client's
     /// size if it isn't already the one it follows.
+    ///
+    /// What a terminal sends by itself (`TerminalReports`: its answers to a
+    /// program's questions, focus in and out) is not typing: it never moves
+    /// the session to that terminal, and from a terminal the session doesn't
+    /// follow it is dropped, as the one it follows answers too.
     public func input(_ id: String, _ data: Data, from client: ShellAttachment? = nil) {
         queue.async { [self] in
             guard let session = table[id], session.running else { return }
-            if let client, session.active != ObjectIdentifier(client), let size = size(of: client, in: session) {
-                session.active = ObjectIdentifier(client)
-                if size != session.size { resize(session, to: size) }
+            let typed = TerminalReports.removing(from: data)
+            var data = data
+            if let client {
+                let followed = session.active == nil || session.active == ObjectIdentifier(client)
+                if !followed { data = typed }
+                if !typed.isEmpty, session.active != ObjectIdentifier(client), let size = size(of: client, in: session) {
+                    session.active = ObjectIdentifier(client)
+                    if size != session.size { resize(session, to: size) }
+                }
             }
+            guard !data.isEmpty else { return }
             session.process.write(data)
-            if !session.titleKnown { learnTitle(from: data, session: session) }
+            // A terminal's answers alone: nobody typed, so nothing was answered either.
+            guard !typed.isEmpty else { return }
+            if !session.titleKnown { learnTitle(from: typed, session: session) }
             // Someone answered: it isn't waiting any more, and only what
             // comes next can ask again.
             session.tail.removeAll(keepingCapacity: true)
@@ -447,6 +463,24 @@ public final class ShellSessionManager: @unchecked Sendable {
         session.size = size
         session.process.resize(cols: size.cols, rows: size.rows)
         session.writer.resize(cols: Int(size.cols), rows: Int(size.rows), at: Date())
+    }
+
+    /// The client the session followed is gone: it follows whoever is left
+    /// (the attachment, else the Mac window that came last) at that one's
+    /// size, so what that terminal shows isn't drawn for one that isn't there.
+    private func followNext(_ session: Session) {
+        session.active = nil
+        let next: (ShellAttachment, Size)?
+        if let attachment = session.attachment, let size = session.attachmentSize {
+            next = (attachment, size)
+        } else if let viewer = session.viewers.last {
+            next = (viewer.client, viewer.size)
+        } else {
+            next = nil
+        }
+        guard let (client, size) = next, session.running else { return }
+        session.active = ObjectIdentifier(client)
+        if size != session.size { resize(session, to: size) }
     }
 
     /// The size `client`'s terminal last had, if it is looking at `session`.

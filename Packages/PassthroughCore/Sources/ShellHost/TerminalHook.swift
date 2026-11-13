@@ -17,17 +17,76 @@ public enum TerminalHook {
     public static let end = "# <<< Passthrough shared terminals <<<"
 
     /// The startup file for a login shell, or nil for a shell the hook isn't written for.
-    /// bash reads the first of three that exists, so that one is used.
-    public static func startupFile(shell: String, home: URL, exists: (URL) -> Bool = { FileManager.default.fileExists(atPath: $0.path) }) -> URL? {
+    /// bash reads the first of three that exists, so that one is used. zsh
+    /// reads `.zshrc` from `zdotdir` (its `ZDOTDIR`, `zshDirectory`), else from home.
+    public static func startupFile(shell: String, home: URL, zdotdir: URL? = nil,
+                                   exists: (URL) -> Bool = { FileManager.default.fileExists(atPath: $0.path) }) -> URL? {
         switch URL(fileURLWithPath: shell).lastPathComponent {
         case "zsh":
-            return home.appendingPathComponent(".zshrc")
+            return (zdotdir ?? home).appendingPathComponent(".zshrc")
         case "bash":
             let candidates = [".bash_profile", ".bash_login", ".profile"].map { home.appendingPathComponent($0) }
             return candidates.first(where: exists) ?? candidates[0]
         default:
             return nil
         }
+    }
+
+    /// Where zsh reads `.zshrc` from: the `ZDOTDIR` that `~/.zshenv` sets, else
+    /// `home`. Read as text, never run: a shell started by the app would run
+    /// whatever is in that file with Passthrough's privacy permissions. Only
+    /// a plain assignment is understood (quoted or not, with `~`, `$HOME` and
+    /// `$XDG_CONFIG_HOME` in it); anything else, or a folder that isn't
+    /// there, is home. The last assignment wins, as it would in zsh.
+    public static func zshDirectory(home: URL) -> URL {
+        guard let text = try? String(contentsOf: home.appendingPathComponent(".zshenv"), encoding: .utf8) else { return home }
+        var config = home.appendingPathComponent(".config").path
+        var found: String?
+        // One statement at a time: `ZDOTDIR=~/.zsh; export ZDOTDIR` is two.
+        let statements = text.split(whereSeparator: \.isNewline).flatMap { line -> [Substring] in
+            let code = line.range(of: " #").map { line[..<$0.lowerBound] } ?? line[...]
+            return line.trimmingCharacters(in: .whitespaces).hasPrefix("#") ? [] : code.split(separator: ";")
+        }
+        for raw in statements {
+            var line = raw.trimmingCharacters(in: .whitespaces)
+            if line.hasPrefix("export ") { line = String(line.dropFirst(7)).trimmingCharacters(in: .whitespaces) }
+            for (name, isZdotdir) in [("ZDOTDIR=", true), ("XDG_CONFIG_HOME=", false)] where line.hasPrefix(name) {
+                let value = expand(String(line.dropFirst(name.count)), home: home.path, config: config)
+                if isZdotdir { found = value } else if let value { config = value }
+            }
+        }
+        var isDirectory: ObjCBool = false
+        guard let path = found, FileManager.default.fileExists(atPath: path, isDirectory: &isDirectory), isDirectory.boolValue else { return home }
+        return URL(fileURLWithPath: path, isDirectory: true)
+    }
+
+    /// A shell assignment's value as zsh would read it, when it is a plain
+    /// path; nil for anything it would have to run or look up to know.
+    static func expand(_ value: String, home: String, config: String) -> String? {
+        var text = value
+        // A trailing comment.
+        if let hash = text.range(of: " #") { text = String(text[..<hash.lowerBound]) }
+        text = text.trimmingCharacters(in: .whitespaces)
+        var quoted = false
+        if text.count >= 2, let first = text.first, first == "\"" || first == "'", text.last == first {
+            text = String(text.dropFirst().dropLast())
+            quoted = true
+            if first == "'" { return text.hasPrefix("/") && !text.contains("'") ? text : nil }
+        }
+        // zsh expands a leading ~ only outside quotes.
+        if !quoted, text == "~" || text.hasPrefix("~/") { text = home + text.dropFirst() }
+        // `${ZDOTDIR:-…}` and `${ZDOTDIR:=…}`: ZDOTDIR is not set yet while ~/.zshenv runs, so the default.
+        for form in ["${ZDOTDIR:-", "${ZDOTDIR:="] where text.hasPrefix(form) && text.hasSuffix("}") {
+            text = String(text.dropFirst(form.count).dropLast())
+            if text == "~" || text.hasPrefix("~/") { text = home + text.dropFirst() }
+        }
+        for (name, replacement) in [("${XDG_CONFIG_HOME:-$HOME/.config}", config), ("${XDG_CONFIG_HOME:-~/.config}", config),
+                                    ("${XDG_CONFIG_HOME}", config), ("$XDG_CONFIG_HOME", config), ("${HOME}", home), ("$HOME", home)] {
+            text = text.replacingOccurrences(of: name, with: replacement)
+        }
+        let unknown = CharacterSet(charactersIn: "$`\"'\\;|&(){}<>*?[] \t")
+        guard text.hasPrefix("/"), text.rangeOfCharacter(from: unknown) == nil else { return nil }
+        return text
     }
 
     /// `script` as the hook names it: under `$HOME` when it is, so the lines

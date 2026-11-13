@@ -31,11 +31,12 @@ public enum LocalTerminalWire {
         /// A new terminal's shell asking by itself (the startup hook): allowed
         /// only while the owner has turned sharing every terminal on.
         case hook
-        /// A new session, asked for by name.
+        /// A new session, asked for by name: as `hook`, only while sharing is on.
         case new
-        /// Show a session that is already running.
+        /// Show a session that is already running: only with the one-time
+        /// `token` the app wrote into the window it opened for it ("Open here").
         case attach
-        /// Only list the sessions.
+        /// Only list the sessions: only while sharing is on.
         case list
     }
 
@@ -50,11 +51,19 @@ public enum LocalTerminalWire {
         /// starts as the terminal's own would have.
         public var directory: String?
         public var environment: [String: String]?
+        /// `attach`: the one-time token that lets this window show the session.
+        public var token: String?
+        /// `hook`: a whole line was already typed into the terminal before its
+        /// shell asked, as when a terminal opens a window to run a command.
+        public var typeahead: Bool?
+        /// The session the asking terminal is itself in, if any (`PASSTHROUGH_SESSION`).
+        public var inside: String?
 
         public init(mode: Mode, session: String? = nil, cols: Int, rows: Int, directory: String? = nil,
-                    environment: [String: String]? = nil) {
+                    environment: [String: String]? = nil, token: String? = nil, typeahead: Bool? = nil, inside: String? = nil) {
             self.mode = mode; self.session = session; self.cols = cols; self.rows = rows
             self.directory = directory; self.environment = environment
+            self.token = token; self.typeahead = typeahead; self.inside = inside
         }
     }
 
@@ -74,6 +83,12 @@ public enum LocalTerminalWire {
 
         /// Sharing every terminal is off, or this one was asked to stay plain.
         public static let notSharing = "not_sharing"
+        /// An `attach` without a token the app gave out for that session, or one already used.
+        public static let notAllowed = ShellError.notAllowed.rawValue
+        /// An `attach` to the very session the terminal is in: its output would come back as its input.
+        public static let ownSession = "own_session"
+        /// The owner stopped this window showing the session (it carries on).
+        public static let stopped = "stopped"
         public static let tooManySessions = ShellError.tooManySessions.rawValue
         public static let noSuchSession = ShellError.noSuchSession.rawValue
         public static let badRequest = ShellError.badRequest.rawValue

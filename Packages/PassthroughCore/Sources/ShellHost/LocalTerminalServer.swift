@@ -9,22 +9,26 @@ import PassthroughCore
 /// attach to it at the same time (`LocalTerminalWire`).
 ///
 /// Only this user's processes get in: the socket is `0600` in the user's own
-/// folder, and every connection's user is checked. Such a process can already
-/// start any shell as the user, so the socket gives it nothing new.
+/// folder, and every connection's user is checked. That is not enough on its
+/// own: a session's shell runs inside Passthrough, with its privacy
+/// permissions (Full Disk Access and the rest), which such a process may not
+/// have. What each connection may then ask for is `admit`'s to say
+/// (`LocalTerminalAccess`, in the app).
 public final class LocalTerminalServer: @unchecked Sendable {
     public let path: String
     private let manager: ShellSessionManager
     private let label: String
-    private let admit: @Sendable (LocalTerminalWire.Mode) -> Bool
+    private let admit: @Sendable (LocalTerminalWire.Hello) -> Bool
     private let queue = DispatchQueue(label: "passthrough.terminals.accept")
     private var listening: Int32 = -1          // queue-confined
     private var source: DispatchSourceRead?    // queue-confined
     private var connections: [ObjectIdentifier: LocalTerminalConnection] = [:]   // queue-confined
 
-    /// `admit` says whether a request is taken right now; it is asked for
-    /// every `hello`, on a private queue. `label` names the Mac in the history.
+    /// `admit` says whether a request is taken right now (`LocalTerminalAccess`
+    /// in the app); it is asked for every `hello`, on a private queue. `label`
+    /// names the Mac in the history.
     public init(path: String, manager: ShellSessionManager, label: String = "This Mac",
-                admit: @escaping @Sendable (LocalTerminalWire.Mode) -> Bool = { _ in true }) {
+                admit: @escaping @Sendable (LocalTerminalWire.Hello) -> Bool) {
         self.path = path
         self.manager = manager
         self.label = label
@@ -92,6 +96,13 @@ public final class LocalTerminalServer: @unchecked Sendable {
         }
     }
 
+    /// Every window showing `session` that didn't start it stops showing it
+    /// (the owner's Stop): the session carries on.
+    public func stopShowing(_ session: String) {
+        let open: [LocalTerminalConnection] = queue.sync { Array(connections.values) }
+        open.forEach { $0.stopShowing(session) }
+    }
+
     /// Stops listening and closes every terminal's connection. A session a
     /// terminal started ends with its connection, as when its window closes.
     public func stop() {
@@ -143,7 +154,7 @@ final class LocalTerminalConnection: ShellAttachment, @unchecked Sendable {
     private let fd: Int32
     private let manager: ShellSessionManager
     private let label: String
-    private let admit: @Sendable (LocalTerminalWire.Mode) -> Bool
+    private let admit: @Sendable (LocalTerminalWire.Hello) -> Bool
     private let queue = DispatchQueue(label: "passthrough.terminals.connection")
     private let writes = DispatchQueue(label: "passthrough.terminals.write")
     private let descriptor = Descriptor()
@@ -159,11 +170,20 @@ final class LocalTerminalConnection: ShellAttachment, @unchecked Sendable {
     private var paused = false
     var onClose: (() -> Void)?
 
-    init(fd: Int32, manager: ShellSessionManager, label: String, admit: @escaping @Sendable (LocalTerminalWire.Mode) -> Bool) {
+    init(fd: Int32, manager: ShellSessionManager, label: String, admit: @escaping @Sendable (LocalTerminalWire.Hello) -> Bool) {
         self.fd = fd
         self.manager = manager
         self.label = label
         self.admit = admit
+    }
+
+    /// Stops showing `session` if this window only shows it.
+    func stopShowing(_ id: String) {
+        queue.async { [self] in
+            guard session == id, !owner else { return }
+            send(LocalTerminalWire.encode(.refused, json: LocalTerminalWire.Refused(reason: LocalTerminalWire.Refused.stopped)))
+            finish()
+        }
     }
 
     func start() {
@@ -239,7 +259,9 @@ final class LocalTerminalConnection: ShellAttachment, @unchecked Sendable {
     }
 
     private func greet(_ hello: LocalTerminalWire.Hello) {
-        guard admit(hello.mode) else { return refuse(LocalTerminalWire.Refused.notSharing) }
+        guard admit(hello) else {
+            return refuse(hello.mode == .attach ? LocalTerminalWire.Refused.notAllowed : LocalTerminalWire.Refused.notSharing)
+        }
         switch hello.mode {
         case .list:
             send(LocalTerminalWire.encode(.sessions, json: manager.sessions))
@@ -249,6 +271,8 @@ final class LocalTerminalConnection: ShellAttachment, @unchecked Sendable {
             // By its id, or the first few characters of it (what `list` shows).
             let matches = manager.sessions.filter { $0.running && ($0.id == id || (id.count >= 4 && $0.id.lowercased().hasPrefix(id.lowercased()))) }
             guard matches.count == 1 else { return refuse(LocalTerminalWire.Refused.noSuchSession) }
+            // Shown inside itself, its output would be written back into it for ever.
+            guard matches[0].id.lowercased() != hello.inside?.lowercased() else { return refuse(LocalTerminalWire.Refused.ownSession) }
             show(matches[0].id, hello)
         case .hook, .new:
             do {
@@ -270,11 +294,13 @@ final class LocalTerminalConnection: ShellAttachment, @unchecked Sendable {
         }
     }
 
+    /// `started` follows the attach, so a session gone by then is refused, not started and dropped.
+    /// The attach's replay is queued to this queue behind it, so `started` still comes first.
     private func show(_ id: String, _ hello: LocalTerminalWire.Hello) {
         session = id
-        send(LocalTerminalWire.encode(.started, json: LocalTerminalWire.Started(session: id)))
         do {
             try manager.attach(id, client: self, cols: hello.cols, rows: hello.rows, shared: true)
+            send(LocalTerminalWire.encode(.started, json: LocalTerminalWire.Started(session: id)))
         } catch {
             session = nil
             refuse(LocalTerminalWire.Refused.noSuchSession)

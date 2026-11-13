@@ -487,7 +487,7 @@ struct AskingRows: View {
     @EnvironmentObject private var shell: RemoteShellController
 
     var body: some View {
-        let asking = shell.sessions.filter(\.isAsking)
+        let asking = shell.phonesAsking
         if !asking.isEmpty {
             VStack(spacing: 4) {
                 ForEach(asking, id: \.id) { s in
@@ -556,9 +556,19 @@ struct PhoneHereSection: View {
                             Button("Open here") { shell.openInTerminal(terminal.id) }
                                 .controlSize(.small)
                                 .help("Show this session in a terminal window on this Mac. A phone attached to it keeps it too.")
-                        } else if terminal.phoneAttached {
-                            Image(systemName: "iphone").font(.caption.weight(.semibold)).foregroundStyle(PTColor.tintText)
-                                .help("A phone is looking at this terminal")
+                        } else {
+                            HStack(spacing: 6) {
+                                if terminal.phoneAttached {
+                                    Image(systemName: "iphone").font(.caption.weight(.semibold)).foregroundStyle(PTColor.tintText)
+                                        .help("A phone is looking at this terminal")
+                                }
+                                // A phone's session shown here: take it off this Mac's windows at any time.
+                                if terminal.origin == .phone {
+                                    Button("Stop") { shell.stopShowingHere(terminal.id) }
+                                        .controlSize(.small)
+                                        .help("Stop showing this session in terminal windows here. It keeps running for the phone.")
+                                }
+                            }
                         }
                     }
                 }
@@ -594,7 +604,7 @@ struct PhoneHereSection: View {
     }
 
     private var shellNeedsSetup: Bool {
-        shell.sessions.allSatisfy { !$0.running } && (shell.listenerError != nil || shell.phones.isEmpty || !fullDiskAccess)
+        !shell.sessions.contains { $0.running && shell.isPhones($0) } && (shell.listenerError != nil || shell.phones.isEmpty || !fullDiskAccess)
     }
 
     private func shellStatus(open: Int) -> String {

@@ -3,7 +3,8 @@ import XCTest
 
 final class LocalTerminalWireTests: XCTestCase {
     func testFramesRoundTripHoweverTheBytesArrive() throws {
-        let hello = LocalTerminalWire.Hello(mode: .hook, cols: 120, rows: 40, directory: "/tmp", environment: ["TERM": "xterm-256color"])
+        let hello = LocalTerminalWire.Hello(mode: .hook, cols: 120, rows: 40, directory: "/tmp", environment: ["TERM": "xterm-256color"],
+                                            token: "ab", typeahead: true, inside: "S")
         let stream = LocalTerminalWire.encode(.hello, json: hello)
             + LocalTerminalWire.encode(.input, Data("ls\r".utf8))
             + LocalTerminalWire.encode(.replayed)
@@ -114,6 +115,23 @@ final class LocalTerminalWireTests: XCTestCase {
         // A key landing in the middle of a reply spoils that reply only, and is never lost... 
         XCTAssertTrue(TerminalColors.split(read).typed.starts(with: Data("ls\r".utf8)))
         XCTAssertEqual(TerminalColors.split(Data("/a/b.command ; exit;\n".utf8)).typed, Data("/a/b.command ; exit;\n".utf8))
+    }
+
+    /// A reply still on its way at the end of what was read is held apart, not taken for typing.
+    func testAReplyCutOffAtTheEndIsUnfinished() {
+        let cut = TerminalColors.scan(Data("ls\r\u{1B}]4;12;rgb:5c5c/".utf8))
+        XCTAssertEqual(cut.typed, Data("ls\r".utf8))
+        XCTAssertEqual(cut.unfinished, Data("\u{1B}]4;12;rgb:5c5c/".utf8))
+        let rest = TerminalColors.scan(cut.unfinished + Data("5c5c/ffff\u{07}\u{1B}[?1;2cq".utf8))
+        XCTAssertTrue(TerminalColors.isComplete(rest.replies))
+        XCTAssertEqual(rest.typed, Data("q".utf8))
+        XCTAssertEqual(rest.unfinished, Data())
+        XCTAssertEqual(TerminalColors.scan(Data("\u{1B}[?1;".utf8)).unfinished, Data("\u{1B}[?1;".utf8))
+        XCTAssertEqual(TerminalColors.scan(Data("x\u{1B}".utf8)).unfinished, Data("\u{1B}".utf8), "maybe the start of one")
+        // An arrow key is typing, whole.
+        XCTAssertEqual(TerminalColors.scan(Data("\u{1B}[A".utf8)).typed, Data("\u{1B}[A".utf8))
+        // `split` hands everything back as before: nothing is lost.
+        XCTAssertEqual(TerminalColors.split(Data("ls\r\u{1B}]4;12;rgb:5c5c/".utf8)).typed, Data("ls\r\u{1B}]4;12;rgb:5c5c/".utf8))
     }
 
     func testOnlyWellFormedColoursAreKept() {

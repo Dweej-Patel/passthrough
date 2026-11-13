@@ -97,33 +97,50 @@ public enum TerminalColors {
     /// them, as when it opens a window to run a command) and must still reach
     /// the shell, in order.
     public static func split(_ read: Data) -> (replies: Data, typed: Data) {
+        let parts = scan(read)
+        return (parts.replies, parts.typed + parts.unfinished)
+    }
+
+    /// As `split`, with what may be the start of a reply still on its way
+    /// apart (`unfinished`: an `ESC ]` or `ESC [ ?` not ended yet, or an `ESC`
+    /// last): it is all at the end, and the next read may finish it.
+    public static func scan(_ read: Data) -> (replies: Data, typed: Data, unfinished: Data) {
         var replies = Data(), typed = Data()
         let bytes = [UInt8](read)
         var index = 0
         while index < bytes.count {
-            guard bytes[index] == 0x1B, index + 1 < bytes.count else { typed.append(bytes[index]); index += 1; continue }
+            guard bytes[index] == 0x1B else { typed.append(bytes[index]); index += 1; continue }
+            guard index + 1 < bytes.count else { return (replies, typed, Data(bytes[index...])) }
             var end: Int?
+            var open = false
             if bytes[index + 1] == UInt8(ascii: "]") {
                 var scan = index + 2
+                open = true
                 while scan < bytes.count {
                     if bytes[scan] == 0x07 { end = scan + 1; break }
                     if bytes[scan] == 0x1B, scan + 1 < bytes.count, bytes[scan + 1] == UInt8(ascii: "\\") { end = scan + 2; break }
                     scan += 1
                 }
-            } else if bytes[index + 1] == UInt8(ascii: "["), index + 2 < bytes.count, bytes[index + 2] == UInt8(ascii: "?") {
-                var scan = index + 3
-                while scan < bytes.count, bytes[scan] == UInt8(ascii: ";") || (UInt8(ascii: "0")...UInt8(ascii: "9")).contains(bytes[scan]) { scan += 1 }
-                if scan < bytes.count, bytes[scan] == UInt8(ascii: "c") { end = scan + 1 }
+            } else if bytes[index + 1] == UInt8(ascii: "[") {
+                if index + 2 >= bytes.count {
+                    open = true
+                } else if bytes[index + 2] == UInt8(ascii: "?") {
+                    var scan = index + 3
+                    while scan < bytes.count, bytes[scan] == UInt8(ascii: ";") || (UInt8(ascii: "0")...UInt8(ascii: "9")).contains(bytes[scan]) { scan += 1 }
+                    if scan == bytes.count { open = true } else if bytes[scan] == UInt8(ascii: "c") { end = scan + 1 }
+                }
             }
             if let end {
                 replies.append(contentsOf: bytes[index..<end])
                 index = end
+            } else if open {
+                return (replies, typed, Data(bytes[index...]))
             } else {
                 typed.append(bytes[index])
                 index += 1
             }
         }
-        return (replies, typed)
+        return (replies, typed, Data())
     }
 
     #if os(macOS)
@@ -131,10 +148,13 @@ public enum TerminalColors {
     /// must be in raw mode (the answer is not a line, and must not be echoed).
     /// Gives up after `timeout`: a terminal that says nothing has no colours
     /// to give. `typed` is whatever else arrived meanwhile: keys, to pass on.
-    public static func ask(input: Int32, output: Int32, timeout: TimeInterval) -> (theme: ShellTheme?, typed: Data) {
-        guard timeout > 0 else { return (nil, Data()) }
+    /// Not `complete`: the terminal hadn't finished answering, and the rest
+    /// may still come (`unfinished` is the start of a reply cut off at the end).
+    public static func ask(input: Int32, output: Int32, timeout: TimeInterval)
+        -> (theme: ShellTheme?, typed: Data, complete: Bool, unfinished: Data) {
+        guard timeout > 0 else { return (nil, Data(), true, Data()) }
         let sent = question.withUnsafeBytes { write(output, $0.baseAddress, question.count) }
-        guard sent == question.count else { return (nil, Data()) }
+        guard sent == question.count else { return (nil, Data(), true, Data()) }
         var answer = Data()
         var buffer = [UInt8](repeating: 0, count: 4096)
         let deadline = Date().addingTimeInterval(timeout)
@@ -149,8 +169,13 @@ public enum TerminalColors {
             guard n > 0 else { break }
             answer.append(contentsOf: buffer[0..<n])
         }
-        let parts = split(answer)
-        return (parse(parts.replies), parts.typed)
+        let parts = scan(answer)
+        if isComplete(parts.replies) {
+            return (parse(parts.replies), parts.typed + parts.unfinished, true, Data())
+        }
+        // A lone ESC last is the Escape key; anything longer, a reply cut off.
+        let cut = parts.unfinished.count >= 2
+        return (parse(parts.replies), parts.typed + (cut ? Data() : parts.unfinished), false, cut ? parts.unfinished : Data())
     }
     #endif
 }

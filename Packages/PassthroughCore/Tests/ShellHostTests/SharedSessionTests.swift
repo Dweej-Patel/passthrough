@@ -114,6 +114,99 @@ final class SharedSessionTests: XCTestCase {
         wait("the phone's new size") { phone.text.contains("20 60") }
     }
 
+    /// Both terminals answer a program's question (where is the cursor?):
+    /// only the one the session follows gets through, so the shell never
+    /// reads the other answer as typing.
+    func testOnlyTheFollowedTerminalsAnswersReachTheShell() throws {
+        let id = try manager.open(phoneLabel: "Pixel", cols: 80, rows: 24)
+        let phone = Client(), mac = Client()
+        try manager.attach(id, client: mac, cols: 80, rows: 24, shared: true)
+        try manager.attach(id, client: phone, cols: 80, rows: 24)
+        manager.input(id, Data("stty -echo; IFS= read -r x; printf '<%s>\\n' \"$x\" | cat -v\n".utf8), from: phone)
+        manager.input(id, Data("\u{1B}[24;1R\u{1B}]11;rgb:0000/0000/0000\u{07}".utf8), from: mac)
+        manager.input(id, Data("\u{1B}[5;5Rok\n".utf8), from: phone)
+        wait("the phone's answer and typing, not the Mac's answer") { phone.text.contains("<^[[5;5Rok>") }
+        XCTAssertFalse(phone.text.contains("24;1R"), phone.text)
+    }
+
+    /// Focus in and out, and answers, are not someone taking the keyboard:
+    /// the session keeps following the phone, at its size.
+    func testATerminalsReportsDoNotMoveTheSession() throws {
+        let id = try manager.open(phoneLabel: "Pixel", cols: 80, rows: 24)
+        let phone = Client(), mac = Client()
+        try manager.attach(id, client: mac, cols: 120, rows: 40, shared: true)
+        try manager.attach(id, client: phone, cols: 50, rows: 30)
+        manager.input(id, Data("\u{1B}[I".utf8), from: mac)
+        manager.input(id, Data("\u{1B}[O\u{1B}[?1;2c".utf8), from: mac)
+        // Still the phone's session: its own resize applies, and the Mac window's size never did.
+        manager.resize(id, cols: 60, rows: 20, from: phone)
+        manager.input(id, Data("stty size\n".utf8))
+        wait("the phone's new size") { phone.text.contains("20 60") }
+        XCTAssertFalse(phone.text.contains("40 120"), phone.text)
+        // Typing in the window does move it.
+        manager.input(id, Data("stty size\n".utf8), from: mac)
+        wait("the window's size once it types") { mac.text.contains("40 120") }
+    }
+
+    /// The one the session followed leaves: what is left takes it, at its size.
+    func testWhenTheFollowedTerminalLeavesTheOtherOnesSizeApplies() throws {
+        let id = try manager.open(phoneLabel: "Pixel", cols: 80, rows: 24)
+        let phone = Client(), mac = Client()
+        try manager.attach(id, client: mac, cols: 120, rows: 40, shared: true)
+        try manager.attach(id, client: phone, cols: 50, rows: 30)
+        manager.input(id, Data("stty size\n".utf8))
+        wait("the phone's size") { mac.text.contains("30 50") }
+        manager.detach(client: phone)
+        manager.input(id, Data("stty size\n".utf8))
+        wait("the window's size once the phone is gone") { mac.text.contains("40 120") }
+
+        // And the other way round: the window leaves, the phone left attached takes it back.
+        let other = Client()
+        try manager.attach(id, client: other, cols: 44, rows: 22)
+        manager.input(id, Data("echo x\n".utf8), from: mac)
+        manager.input(id, Data("stty size\n".utf8))
+        wait("the window's again") { other.text.contains("40 120") }
+        manager.detach(client: mac)
+        manager.input(id, Data("stty size\n".utf8))
+        wait("the phone's once the window is gone") { other.text.contains("22 44") }
+    }
+
+    /// A Mac terminal opening clears ended Mac terminals only: a phone's
+    /// ended session stays listed with its exit status for its time.
+    func testAMacTerminalOpeningKeepsAPhonesEndedSession() throws {
+        let id = try manager.open(phoneLabel: "Pixel", cols: 80, rows: 24)
+        manager.input(id, Data("exit 3\n".utf8))
+        wait("ended") { self.manager.sessions.first { $0.id == id }?.running == false }
+        let mac = try manager.open(phoneLabel: "This Mac", cols: 80, rows: 24, origin: .mac)
+        XCTAssertEqual(manager.sessions.first { $0.id == id }?.exitStatus, 3, "still listed")
+        manager.input(mac, Data("exit 0\n".utf8))
+        wait("the Mac's ended") { self.manager.sessions.first { $0.id == mac }?.running == false }
+        _ = try manager.open(phoneLabel: "This Mac", cols: 80, rows: 24, origin: .mac)
+        XCTAssertNil(manager.sessions.first { $0.id == mac }, "an ended Mac terminal makes room")
+        XCTAssertNotNil(manager.sessions.first { $0.id == id })
+        _ = try manager.open(phoneLabel: "Pixel", cols: 80, rows: 24)
+        XCTAssertNil(manager.sessions.first { $0.id == id }, "a phone's new session makes room, as before")
+    }
+
+    func testTerminalReportsAreToldFromTyping() {
+        func kept(_ text: String) -> String { String(decoding: TerminalReports.removing(from: Data(text.utf8)), as: UTF8.self) }
+        // Answers and focus: removed.
+        XCTAssertEqual(kept("\u{1B}[24;80R"), "")
+        XCTAssertEqual(kept("\u{1B}[?1;2c\u{1B}[>0;276;0c\u{1B}[0n\u{1B}[?2004;1$y\u{1B}[?0u\u{1B}[8;24;80t"), "")
+        XCTAssertEqual(kept("\u{1B}[I\u{1B}[O"), "")
+        XCTAssertEqual(kept("\u{1B}]11;rgb:1e1e/1e1e/1e1e\u{07}\u{1B}]10;rgb:ffff/ffff/ffff\u{1B}\\"), "")
+        XCTAssertEqual(kept("\u{1B}P>|xterm(390)\u{1B}\\"), "")
+        XCTAssertEqual(kept("a\u{1B}[3;1Rb"), "ab")
+        // Keys, mouse and paste: kept.
+        for keys in ["ls\r", "\u{1B}[A\u{1B}[B\u{1B}[C\u{1B}[D", "\u{1B}OP", "\u{1B}[3~", "\u{1B}[1;5C", "\u{1B}[<0;10;5M\u{1B}[<0;10;5m",
+                     "\u{1B}[200~text\u{1B}[201~", "\u{1B}", "\u{1B}b", "\u{1B}[Z"] {
+            XCTAssertEqual(kept(keys), keys, keys.debugDescription)
+        }
+        // Not finished: left as it is.
+        XCTAssertEqual(kept("\u{1B}]11;rgb:1e1e"), "\u{1B}]11;rgb:1e1e")
+        XCTAssertEqual(kept("\u{1B}[24;8"), "\u{1B}[24;8")
+    }
+
     func testAMacSessionStartsInTheTerminalsFolderWithItsEnvironmentAndSaysItIsOne() throws {
         let folder = directory.appendingPathComponent("work", isDirectory: true)
         try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)

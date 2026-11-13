@@ -13,7 +13,9 @@ final class LocalTerminalTests: XCTestCase {
     private var manager: ShellSessionManager!
     private var server: LocalTerminalServer!
     private var socketPath: String!
-    private let sharing = Locked(true)
+    /// The app's own rules for what the socket lets in, sharing new terminals on.
+    private let access = LocalTerminalAccess()
+
     private var windows: [Window] = []
 
     override func setUpWithError() throws {
@@ -29,8 +31,9 @@ final class LocalTerminalTests: XCTestCase {
             quietBeforeAsking: 0.2)
         // Short: a socket's path has little room.
         socketPath = "/tmp/pt-\(UUID().uuidString.prefix(8)).sock"
-        let sharing = sharing
-        server = LocalTerminalServer(path: socketPath, manager: manager) { mode in mode != .hook || sharing.get() }
+        access.isSharing = true
+        let access = access
+        server = LocalTerminalServer(path: socketPath, manager: manager) { access.admits($0) }
         try server.start()
     }
 
@@ -52,6 +55,8 @@ final class LocalTerminalTests: XCTestCase {
         private let stop = Locked(false)
         /// What the window answers when asked for its colours; nil: nothing, as a bare pseudo-terminal.
         let coloursAnswer = Locked<Data?>(nil)
+        /// How long the window takes to answer (past the tool's wait, its answer arrives late).
+        let coloursDelay = Locked<TimeInterval>(0)
         /// What was typed into the window and left unread when its client ended.
         let unreadAtEnd = Locked(-1)
         /// A client thread is using the far side and closes it when it is done.
@@ -76,6 +81,8 @@ final class LocalTerminalTests: XCTestCase {
                     self.lock.lock(); self.data.append(contentsOf: buffer[0..<n]); self.lock.unlock()
                     // A terminal that tells its colours when asked, as Terminal.app does.
                     if let answer = self.coloursAnswer.get(), Data(buffer[0..<n]).range(of: TerminalColors.question) != nil {
+                        let delay = self.coloursDelay.get()
+                        if delay > 0 { Thread.sleep(forTimeInterval: delay) }
                         _ = answer.withUnsafeBytes { write(near, $0.baseAddress, answer.count) }
                     }
                 }
@@ -106,16 +113,16 @@ final class LocalTerminalTests: XCTestCase {
         }
 
         /// Runs the client as the tool would in this window.
-        func run(_ socket: String, _ mode: LocalTerminalWire.Mode, session: String? = nil,
+        func run(_ socket: String, _ mode: LocalTerminalWire.Mode, session: String? = nil, token: String? = nil,
                  environment: [String: String] = ["PATH": "/usr/bin:/bin", "TERM": "xterm-256color", "PS1": "$ "],
                  directory: String = "/tmp", coloursTimeout: TimeInterval = 0) {
             let far = far
             clientRunning.set(true)
             Thread { [weak self] in
-                let outcome = LocalTerminalClient.run(.init(socketPath: socket, mode: mode, session: session, input: far, output: far,
+                let outcome = LocalTerminalClient.run(.init(socketPath: socket, mode: mode, session: session, token: token, input: far, output: far,
                                                             environment: environment, directory: directory, coloursTimeout: coloursTimeout))
                 var waiting: Int32 = 0
-                _ = ioctl(far, 0x4004_667F, &waiting)   // FIONREAD, a macro Swift does not import
+                _ = ioctl(far, LocalTerminalClient.fionread, &waiting)
                 Darwin.close(far)
                 guard let self else { return }
                 self.unreadAtEnd.set(Int(waiting))
@@ -180,6 +187,21 @@ final class LocalTerminalTests: XCTestCase {
         XCTAssertFalse(mac.text.contains("rgb:"), mac.text)
     }
 
+    /// A terminal slower to answer than the tool waits: its answer, arriving
+    /// once the session runs, is still kept from the shell.
+    func testALateAnswerAboutColoursNeverReachesTheShell() {
+        let mac = window()
+        mac.coloursAnswer.set(Self.coloursAnswer)
+        mac.coloursDelay.set(0.4)
+        mac.run(socketPath, .hook, coloursTimeout: 0.1)
+        wait("started") { self.running.count == 1 }
+        Thread.sleep(forTimeInterval: 0.6)
+        mac.type("echo clean-$((6+6))\r")
+        wait("the shell works") { mac.text.contains("clean-12") }
+        XCTAssertFalse(mac.text.contains("rgb:"), mac.text)
+        XCTAssertFalse(mac.text.contains("1;2c"), mac.text)
+    }
+
     /// A terminal that opens a window to run a command types it at once,
     /// before any shell reads: it must reach the session's shell, not be
     /// taken for the terminal's answer about its colours.
@@ -196,7 +218,7 @@ final class LocalTerminalTests: XCTestCase {
     /// The window "Open in Terminal" opens: its own shell is refused a
     /// session, and the command typed into it must still be there to run.
     func testAWindowRefusedASessionKeepsWhatWasTypedIntoIt() {
-        sharing.set(false)
+        access.isSharing = false
         let mac = window()
         mac.coloursAnswer.set(Self.coloursAnswer)
         let typed = "/path/to/Open.command ; exit;\n"
@@ -221,7 +243,7 @@ final class LocalTerminalTests: XCTestCase {
         let id = try manager.open(phoneLabel: "Pixel", cols: 80, rows: 24)
         let mac = window()
         mac.coloursAnswer.set(Self.coloursAnswer)
-        mac.run(socketPath, .attach, session: id, coloursTimeout: 2)
+        mac.run(socketPath, .attach, session: id, token: access.grant(session: id, plain: false), coloursTimeout: 2)
         wait("attached") { self.manager.details.first?.macViewers == 1 }
         XCTAssertNil(running.first?.theme)
         XCTAssertFalse(mac.text.contains("\u{1B}]11;?"), "and is not asked")
@@ -253,7 +275,7 @@ final class LocalTerminalTests: XCTestCase {
         wait("printed") { phone.text.contains("before-8") }
 
         let mac = window()
-        mac.run(socketPath, .attach, session: String(id.prefix(8)))
+        mac.run(socketPath, .attach, session: id, token: access.grant(session: id, plain: false))
         wait("the window is replayed the session") { mac.text.contains("before-8") }
         XCTAssertEqual(phone.detaches, 0, "the phone keeps the session")
         // Keys typed while the earlier output is drawn are dropped (the terminal's answers to old questions).
@@ -272,7 +294,7 @@ final class LocalTerminalTests: XCTestCase {
     func testCtrlBackslashTwiceLeavesASessionTheWindowOnlyShows() throws {
         let id = try manager.open(phoneLabel: "Pixel", cols: 80, rows: 24)
         let mac = window()
-        mac.run(socketPath, .attach, session: id)
+        mac.run(socketPath, .attach, session: id, token: access.grant(session: id, plain: false))
         wait("attached") { self.manager.details.first?.macViewers == 1 }
         Thread.sleep(forTimeInterval: LocalTerminalClient.settleAfterReplay + 0.2)
         mac.type("\u{1C}")
@@ -294,15 +316,150 @@ final class LocalTerminalTests: XCTestCase {
         wait("its new size") { mac.text.contains("43 132") }
     }
 
-    func testTheHookIsRefusedWhileSharingIsOffButAskingByNameStillWorks() {
-        sharing.set(false)
+    /// A session's shell runs inside Passthrough, with its privacy permissions:
+    /// with sharing off, nothing on the socket starts one or lists them.
+    func testWhileSharingIsOffNoNewSessionNorTheList() throws {
+        access.isSharing = false
         let plain = window()
         plain.run(socketPath, .hook)
-        wait("refused") { plain.outcome == .unavailable(LocalTerminalWire.Refused.notSharing) }
-        XCTAssertTrue(running.isEmpty)
+        wait("hook refused") { plain.outcome == .unavailable(LocalTerminalWire.Refused.notSharing) }
         let named = window()
         named.run(socketPath, .new)
-        wait("started") { self.running.count == 1 }
+        wait("new refused") { named.outcome == .unavailable(LocalTerminalWire.Refused.notSharing) }
+        let far = window().far
+        XCTAssertEqual(LocalTerminalClient.run(.init(socketPath: socketPath, mode: .list, input: far, output: far)),
+                       .unavailable(LocalTerminalWire.Refused.notSharing))
+        XCTAssertTrue(running.isEmpty)
+        // "Open here" still works: the window it opens has its token.
+        let id = try manager.open(phoneLabel: "Pixel", cols: 80, rows: 24)
+        let shown = window()
+        shown.run(socketPath, .attach, session: id, token: access.grant(session: id, plain: false))
+        wait("attached") { self.manager.details.first?.macViewers == 1 }
+    }
+
+    /// Showing a running session (a phone's, with what it printed and what is
+    /// typed into it) takes the token the app wrote for that window: once, for that session only.
+    func testAttachingTakesAOneTimeTokenForThatSession() throws {
+        let id = try manager.open(phoneLabel: "Pixel", cols: 80, rows: 24)
+        let other = try manager.open(phoneLabel: "Pixel", cols: 80, rows: 24)
+        func attach(_ session: String, _ token: String?) -> LocalTerminalClient.Outcome {
+            let far = window().far
+            return LocalTerminalClient.run(.init(socketPath: socketPath, mode: .attach, session: session, token: token,
+                                                 input: far, output: far, environment: [:]))
+        }
+        XCTAssertEqual(attach(id, nil), .unavailable(LocalTerminalWire.Refused.notAllowed), "no token")
+        XCTAssertEqual(attach(id, "00" + String(repeating: "f", count: 62)), .unavailable(LocalTerminalWire.Refused.notAllowed), "a made-up one")
+        let forOther = access.grant(session: other, plain: false)
+        XCTAssertEqual(attach(id, forOther), .unavailable(LocalTerminalWire.Refused.notAllowed), "another session's")
+        XCTAssertEqual(attach(String(id.prefix(8)), access.grant(session: id, plain: false)), .unavailable(LocalTerminalWire.Refused.notAllowed),
+                       "a token is for the session's whole id")
+
+        let token = access.grant(session: id, plain: false)
+        let mac = window()
+        mac.run(socketPath, .attach, session: id, token: token)
+        wait("attached with its token") { self.manager.details.first { $0.id == id }?.macViewers == 1 }
+        XCTAssertEqual(attach(id, token), .unavailable(LocalTerminalWire.Refused.notAllowed), "and only once")
+    }
+
+    /// The token came back after a window was let in with it: something else
+    /// had it, so the owner hears of it (and the app takes the session off its windows).
+    func testATokenUsedTwiceRaisesTheAlarm() throws {
+        let contested = Locked<String?>(nil)
+        access.onContested = { contested.set($0) }
+        let id = try manager.open(phoneLabel: "Pixel", cols: 80, rows: 24)
+        let token = access.grant(session: id, plain: false)
+        let first = window()
+        first.run(socketPath, .attach, session: id, token: token)
+        wait("shown") { self.manager.details.first?.macViewers == 1 }
+        let far = window().far
+        let again = LocalTerminalClient.run(.init(socketPath: socketPath, mode: .attach, session: id, token: token,
+                                                  input: far, output: far, environment: [:]))
+        XCTAssertEqual(again, .unavailable(LocalTerminalWire.Refused.notAllowed))
+        XCTAssertEqual(contested.get(), id)
+    }
+
+    /// The Mac can take a phone's session off its windows at any time; it carries on for the phone.
+    func testStopShowingHere() throws {
+        let id = try manager.open(phoneLabel: "Pixel", cols: 80, rows: 24)
+        let mac = window()
+        mac.run(socketPath, .attach, session: id, token: access.grant(session: id, plain: false))
+        wait("shown") { self.manager.details.first?.macViewers == 1 }
+        server.stopShowing(id)
+        wait("the window stops showing it") { mac.outcome == .detached }
+        wait("the Mac no longer shows it") { self.manager.details.first?.macViewers == 0 }
+        XCTAssertEqual(running.map(\.id), [id])
+    }
+
+    func testATokenRunsOutAndItsFileGoesWithIt() throws {
+        var now = Date()
+        let clock = Locked(now)
+        let access = LocalTerminalAccess(now: { clock.get() })
+        let file = directory.appendingPathComponent("Open.command")
+        try Data("x".utf8).write(to: file)
+        let token = access.grant(session: "S", file: file, plain: false)
+        now += LocalTerminalAccess.lifetime + 1
+        clock.set(now)
+        XCTAssertFalse(access.admits(.init(mode: .attach, session: "S", cols: 80, rows: 24, token: token)))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: file.path), "the expired command file is removed")
+
+        let used = directory.appendingPathComponent("Used.command")
+        try Data("x".utf8).write(to: used)
+        let fresh = access.grant(session: "S", file: used, plain: false)
+        let hello = LocalTerminalWire.Hello(mode: .attach, session: "S", cols: 80, rows: 24, token: fresh)
+        XCTAssertTrue(access.admits(hello))
+        // Kept for its minute: the window Passthrough opened must still find it,
+        // so that one asking first in its place is found out.
+        XCTAssertTrue(FileManager.default.fileExists(atPath: used.path))
+        // The token again: never a second window, and the owner hears of it, once.
+        let contested = Locked<[String]>([])
+        access.onContested = { session in contested.set(contested.get() + [session]) }
+        XCTAssertFalse(access.admits(hello))
+        XCTAssertEqual(contested.get(), ["S"])
+        XCTAssertFalse(FileManager.default.fileExists(atPath: used.path), "gone once found out")
+        XCTAssertFalse(access.admits(hello))
+        XCTAssertEqual(contested.get(), ["S"], "told once")
+        // A token is needed, and the session it was made for.
+        XCTAssertFalse(access.admits(.init(mode: .attach, cols: 80, rows: 24)))
+        XCTAssertFalse(access.admits(.init(mode: .attach, cols: 80, rows: 24, token: "nope")))
+        let other = access.grant(session: "S", plain: false)
+        XCTAssertFalse(access.admits(.init(mode: .attach, session: "T", cols: 80, rows: 24, token: other)))
+        XCTAssertEqual(contested.get(), ["S"])
+    }
+
+    /// With the hook on, the window "Open here" opens must keep its own shell
+    /// plain to run the command typed into it; it is the one with a line
+    /// typed ahead. A new tab meanwhile still becomes a session.
+    func testOnlyTheOpenedWindowStaysPlain() throws {
+        let id = try manager.open(phoneLabel: "Pixel", cols: 80, rows: 24)
+        _ = access.grant(session: id, plain: true)
+
+        let tab = window()
+        tab.run(socketPath, .hook)
+        wait("a new tab opened meanwhile is a session") { self.running.count == 2 }
+
+        let opened = window()
+        let typed = "'/path/Passthrough session.command' ; exit\n"
+        opened.type(typed)
+        opened.run(socketPath, .hook)
+        wait("the opened window stays plain") { opened.outcome == .unavailable(LocalTerminalWire.Refused.notSharing) }
+        wait("the client ended") { opened.unreadAtEnd.get() >= 0 }
+        XCTAssertEqual(opened.unreadAtEnd.get(), typed.utf8.count, "its command is left for its shell")
+
+        // Once: a later window with a line typed ahead is a session again.
+        let later = window()
+        later.type("echo ahead-$((1+1))\r")
+        later.run(socketPath, .hook)
+        wait("a later window is a session") { later.text.contains("ahead-2") }
+    }
+
+    /// A terminal shown inside itself would loop its own output back in.
+    func testAWindowCannotShowTheSessionItIsIn() throws {
+        let id = try manager.open(phoneLabel: "Pixel", cols: 80, rows: 24)
+        let far = window().far
+        let outcome = LocalTerminalClient.run(.init(socketPath: socketPath, mode: .attach, session: id, token: access.grant(session: id, plain: false),
+                                                    input: far, output: far, environment: [RemoteShell.sessionVariable: id]))
+        XCTAssertEqual(outcome, .unavailable(LocalTerminalWire.Refused.ownSession))
+        XCTAssertEqual(manager.details.first?.macViewers, 0)
     }
 
     func testWithoutTheAppTheTerminalCarriesOn() {
@@ -345,7 +502,8 @@ final class LocalTerminalTests: XCTestCase {
         let listed = LocalTerminalClient.run(.init(socketPath: socketPath, mode: .list, input: far, output: far))
         guard case .listed(let sessions) = listed else { return XCTFail("\(listed)") }
         XCTAssertEqual(sessions.map(\.id), [id])
-        let missing = LocalTerminalClient.run(.init(socketPath: socketPath, mode: .attach, session: "nope-nope", input: far, output: far))
+        let missing = LocalTerminalClient.run(.init(socketPath: socketPath, mode: .attach, session: "nope-nope",
+                                                    token: access.grant(session: "nope-nope", plain: false), input: far, output: far))
         XCTAssertEqual(missing, .unavailable(LocalTerminalWire.Refused.noSuchSession))
     }
 
@@ -359,7 +517,7 @@ final class LocalTerminalTests: XCTestCase {
     func testAPathTooLongForASocketIsRefused() {
         let long = "/tmp/" + String(repeating: "x", count: 200) + ".sock"
         XCTAssertFalse(LocalTerminalServer.fits(long))
-        XCTAssertThrowsError(try LocalTerminalServer(path: long, manager: manager).start())
+        XCTAssertThrowsError(try LocalTerminalServer(path: long, manager: manager) { _ in true }.start())
     }
 
     /// A window that stops drawing does not make the Mac buffer the shell's

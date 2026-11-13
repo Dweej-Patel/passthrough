@@ -357,6 +357,9 @@ private struct OpenSessionsSection: View {
                     if terminal.macViewers == 0 {
                         Button("Open in Terminal") { shell.openInTerminal(terminal.id) }
                             .help("Show this session in a terminal window here. A phone attached to it keeps it too.")
+                    } else if terminal.origin == .phone {
+                        Button("Stop Showing Here") { shell.stopShowingHere(terminal.id) }
+                            .help("Stop showing this session in terminal windows here. It keeps running for the phone.")
                     }
                     Button("End…") { ending = terminal.info }
                 }
@@ -425,10 +428,16 @@ private struct MacTerminalsSection: View {
     private var footer: String {
         if shell.sharesNewTerminals {
             return "Passthrough added a few lines to \(shell.startupFileName); turning this off removes them. Terminals already open are not changed. "
-                + "These terminals are recorded like any session, a phone with shell access can type into them, and quitting Passthrough closes their shells (the window then starts a new one)."
+                + "These terminals are recorded like any session, a phone with shell access can type into them, and quitting Passthrough closes their shells (the window then starts a new one). "
+                + "They run inside Passthrough with its permissions, such as Full Disk Access, and while this is on any program on this Mac can start one."
+        }
+        if shell.hookWithoutChoice {
+            return "Off, though Passthrough's lines are in \(shell.startupFileName) (an earlier version, or something else, put them there): "
+                + "new terminals stay plain. Turn this on to show them on your phones, or on and off again to remove the lines."
         }
         return "Off: phones see only the sessions they start. Turning it on adds a few lines to \(shell.startupFileName). "
-            + "Those terminals are then recorded like any session, a phone with shell access can type into them, and quitting Passthrough closes their shells."
+            + "Those terminals are then recorded like any session, a phone with shell access can type into them, and quitting Passthrough closes their shells. "
+            + "They run inside Passthrough with its permissions, such as Full Disk Access, and while it is on any program on this Mac can start one."
     }
 }
 

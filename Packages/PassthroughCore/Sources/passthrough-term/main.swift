@@ -7,10 +7,11 @@ import PassthroughCore
 // same terminal (`LocalTerminalClient`). The app installs a small script that
 // calls it with the app's socket; nobody needs to type it.
 //
-//   passthrough-term hook             a new terminal's shell asking by itself (the startup hook)
-//   passthrough-term new              start a shared session in this window
-//   passthrough-term attach SESSION   show a session that is already running
-//   passthrough-term list             the running sessions
+//   passthrough-term hook                   a new terminal's shell asking by itself (the startup hook)
+//   passthrough-term new                    start a shared session in this window (while sharing is on)
+//   passthrough-term attach SESSION TOKEN   show a session that is already running, with the
+//                                           one-time token the app wrote for this window ("Open here")
+//   passthrough-term list                   the running sessions (while sharing is on)
 
 var arguments = Array(CommandLine.arguments.dropFirst())
 var socketPath = ProcessInfo.processInfo.environment["PASSTHROUGH_SOCKET"]
@@ -33,14 +34,18 @@ func explain(_ reason: String) -> String {
     case LocalTerminalWire.Refused.tooManySessions:
         return "Too many terminals are shared already. Close one and try again."
     case LocalTerminalWire.Refused.noSuchSession:
-        return "No running session with that id. `passthrough-term list` shows them."
+        return "No running session with that id."
+    case LocalTerminalWire.Refused.notAllowed:
+        return "This window may not show that session. Use Open here in Passthrough."
+    case LocalTerminalWire.Refused.ownSession:
+        return "This terminal is that session already."
     default:
         return "Passthrough refused (\(reason))."
     }
 }
 
 guard let command = arguments.first else {
-    fail("usage: passthrough-term [--socket PATH] hook | new | attach SESSION | list")
+    fail("usage: passthrough-term [--socket PATH] hook | new | attach SESSION TOKEN | list")
 }
 guard let socketPath else { fail("no socket given (--socket PATH or PASSTHROUGH_SOCKET)") }
 
@@ -82,8 +87,13 @@ case "new":
     }
 
 case "attach":
-    guard arguments.count >= 2 else { fail("usage: passthrough-term attach SESSION") }
-    switch LocalTerminalClient.run(.init(socketPath: socketPath, mode: .attach, session: arguments[1])) {
+    guard arguments.count >= 3 else { fail("usage: passthrough-term attach SESSION TOKEN") }
+    // Shown inside itself, the session's output would be written back into it for ever.
+    if let own = environment[RemoteShell.sessionVariable], own.lowercased() == arguments[1].lowercased() {
+        fail(explain(LocalTerminalWire.Refused.ownSession))
+    }
+    switch LocalTerminalClient.run(.init(socketPath: socketPath, mode: .attach, session: arguments[1], token: arguments[2],
+                                         environment: environment)) {
     case .ended(let status):
         print("[session ended: \(status)]")
         exit(0)

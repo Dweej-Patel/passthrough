@@ -19,9 +19,30 @@ final class RemoteShellController: ObservableObject {
     /// file (`TerminalHook`), so every new terminal window is a session. The
     /// file is the truth: this is read from it, and setting it rewrites it.
     @Published private(set) var sharesNewTerminals = false
+    /// Passthrough's lines are in the startup file, but the choice that turns
+    /// them on isn't saved (an older version wrote them, or something else did).
+    @Published private(set) var hookWithoutChoice = false
     /// Why the last change to that setting, or the terminals' socket, failed.
     @Published private(set) var terminalsError: String?
     @Published private(set) var phones: [ShellPhone] = []
+
+    /// Running sessions a phone is using: the ones phones started, and a
+    /// terminal window's of this Mac's that a phone is attached to.
+    var phoneShells: [ShellSessionDetail] { terminals.filter { $0.origin == .phone || $0.phoneAttached } }
+
+    /// Phones' sessions waiting on a question. A terminal window on this Mac
+    /// asking is in front of whoever is at the Mac already, so not one of
+    /// them, unless a phone is attached to it.
+    var phonesAsking: [ShellSessionInfo] { sessions.filter { $0.isAsking && isPhones($0) } }
+
+    /// A session a phone started, or a terminal window's a phone has been attached to.
+    func isPhones(_ session: ShellSessionInfo) -> Bool {
+        !session.isOnMac || phoneHasBeenIn.contains(session.id)
+    }
+
+    /// Mac terminals' sessions a phone attached to at some point: kept past
+    /// the session's end, so what it did is still the phone's then.
+    private var phoneHasBeenIn: Set<String> = []
     @Published private(set) var history: [ShellHistoryEntry] = []
     @Published private(set) var historyBytes: Int64 = 0
     @Published private(set) var listenerError: String?
@@ -140,12 +161,11 @@ final class RemoteShellController: ObservableObject {
     private var listener: ShellListener?
     /// Where terminal windows on this Mac connect (`passthrough-term`), while Remote shell is on.
     private var terminalServer: LocalTerminalServer?
-    /// `sharesNewTerminals`, for the server's queue.
-    private let sharingNewTerminals = Locked(false)
-    /// Until then, the next new terminal's hook is refused once: "Open in
-    /// Terminal" opens a window whose own shell must stay plain, to run the
-    /// command that shows the session.
-    private let nextTerminalPlainUntil = Locked(Date.distantPast)
+    /// What the terminals socket lets in: new sessions only while
+    /// `sharesNewTerminals`, a running one only in a window "Open in Terminal" opened.
+    private let terminalAccess = LocalTerminalAccess()
+    /// Tells the owner when a window's token was used twice.
+    private let contestedNotice = TerminalContestedNotice()
     /// Shared by both listeners, so the caps on views of the screen hold across them.
     private let screenViews = ScreenViewLimit()
     /// Phones' addresses that proved a shell key lately, kept across launches
@@ -205,6 +225,25 @@ final class RemoteShellController: ObservableObject {
         refreshPhones()
         pruneHistory()
         refreshSharesNewTerminals()
+        terminalAccess.onContested = { [weak self] session in
+            Task { @MainActor in
+                guard let self else { return }
+                ptLog(.warning, "terminals: two windows asked to show one session with one token")
+                // Whichever was let in may be the wrong one: off the Mac's windows, then the owner hears why.
+                self.terminalServer?.stopShowing(session)
+                self.contestedNotice.show(self.title(of: session))
+            }
+        }
+    }
+
+    private func title(of session: String) -> String {
+        sessions.first { $0.id == session }?.title ?? "the session"
+    }
+
+    /// Windows on this Mac showing a session a phone started stop showing it; the session carries on.
+    func stopShowingHere(_ id: String) {
+        terminalServer?.stopShowing(id)
+        ptLog(.info, "terminals: stopped showing a session here")
     }
 
     // MARK: Listener
@@ -270,6 +309,7 @@ final class RemoteShellController: ObservableObject {
         let manager = self.manager
         let terminals = terminalServer
         terminalServer = nil
+        terminalAccess.revokeAll()
         let work = {
             // First, so no terminal window starts a session while the rest end.
             terminals?.stop()
@@ -501,22 +541,42 @@ final class RemoteShellController: ObservableObject {
         return FileManager.default.temporaryDirectory.appendingPathComponent("\(PassthroughProtocol.identifier).terminals.sock").path
     }
 
-    /// The shell startup file the hook goes in; nil for a login shell it isn't written for.
-    private static var startupFile: URL? {
-        TerminalHook.startupFile(shell: LoginShell.command().executable, home: FileManager.default.homeDirectoryForCurrentUser)
+    /// The shell startup file the hook goes in; nil for a login shell it isn't
+    /// written for. Found again whenever the setting is read or changed.
+    private var startupFile: URL? = RemoteShellController.findStartupFile()
+
+    private static func findStartupFile() -> URL? {
+        TerminalHook.startupFile(shell: LoginShell.command().executable, home: FileManager.default.homeDirectoryForCurrentUser,
+                                 zdotdir: zshStartupFolder)
     }
+
+    /// zsh's `ZDOTDIR` (where its `.zshrc` is), as `~/.zshenv` sets it; nil for another shell.
+    private static var zshStartupFolder: URL? {
+        guard URL(fileURLWithPath: LoginShell.command().executable).lastPathComponent == "zsh" else { return nil }
+        return TerminalHook.zshDirectory(home: FileManager.default.homeDirectoryForCurrentUser)
+    }
+
+    /// Keychain account holding the owner's choice to show new terminals on
+    /// phones. The lines in the startup file alone don't count: any program of
+    /// the user's can write those, and the setting lets the socket start shells
+    /// with Passthrough's permissions; only Passthrough can write this item.
+    private static let sharingChoiceAccount = "terminals.shareNew"
 
     /// Why new terminals can't be shown, when the login shell is one the hook isn't written for.
     var terminalsUnsupported: String? {
-        Self.startupFile == nil ? TerminalHook.HookError.unsupportedShell(URL(fileURLWithPath: LoginShell.command().executable).lastPathComponent).localizedDescription : nil
+        startupFile == nil ? TerminalHook.HookError.unsupportedShell(URL(fileURLWithPath: LoginShell.command().executable).lastPathComponent).localizedDescription : nil
     }
 
-    /// The startup file's name, for copy ("~/.zshrc").
-    var startupFileName: String { Self.startupFile.map { "~/" + $0.lastPathComponent } ?? "your shell's startup file" }
+    /// The startup file's name, for copy ("~/.zshrc", "~/.config/zsh/.zshrc").
+    var startupFileName: String { startupFile.map { ($0.path as NSString).abbreviatingWithTildeInPath } ?? "your shell's startup file" }
 
     private func refreshSharesNewTerminals() {
-        sharesNewTerminals = Self.startupFile.map { TerminalHook.isInstalled(in: $0) } ?? false
-        sharingNewTerminals.set(sharesNewTerminals)
+        startupFile = Self.findStartupFile()
+        let chosen = Keychain.read(Self.sharingChoiceAccount) == "on"
+        let installed = startupFile.map { TerminalHook.isInstalled(in: $0) } ?? false
+        sharesNewTerminals = chosen && installed
+        hookWithoutChoice = installed && !chosen
+        terminalAccess.isSharing = sharesNewTerminals
     }
 
     /// Puts the hook in the shell's startup file, or takes it out. Terminals
@@ -524,13 +584,20 @@ final class RemoteShellController: ObservableObject {
     func setSharesNewTerminals(_ on: Bool) {
         terminalsError = nil
         do {
-            guard let file = Self.startupFile else {
+            startupFile = Self.findStartupFile()
+            guard let file = startupFile else {
                 throw TerminalHook.HookError.unsupportedShell(URL(fileURLWithPath: LoginShell.command().executable).lastPathComponent)
             }
             if on {
                 try writeTerminalScript()
                 try TerminalHook.install(in: file, script: Self.terminalScript.path)
+                // Only once the lines are in: a choice left saved without them would let lines anyone writes turn it on.
+                guard Keychain.write("on", account: Self.sharingChoiceAccount) else {
+                    try? TerminalHook.remove(from: file)
+                    throw CocoaError(.fileWriteUnknown, userInfo: [NSLocalizedDescriptionKey: "Passthrough could not save the setting in its keychain."])
+                }
             } else {
+                Keychain.delete(Self.sharingChoiceAccount)
                 try TerminalHook.remove(from: file)
             }
             ptLog(.info, "terminals: showing new terminals turned \(on ? "on" : "off")")
@@ -552,14 +619,8 @@ final class RemoteShellController: ObservableObject {
     private func startTerminals() {
         guard terminalServer == nil, let manager else { return }
         refreshSharesNewTerminals()
-        let sharing = sharingNewTerminals, plainUntil = nextTerminalPlainUntil
-        let server = LocalTerminalServer(path: Self.terminalSocket, manager: manager) { mode in
-            guard mode == .hook else { return true }
-            guard sharing.get() else { return false }
-            // One window was asked to stay plain ("Open in Terminal").
-            if Date() < plainUntil.exchange(.distantPast) { return false }
-            return true
-        }
+        let access = terminalAccess
+        let server = LocalTerminalServer(path: Self.terminalSocket, manager: manager) { access.admits($0) }
         terminalServer = server
         terminalsError = nil
         // After any earlier stop has removed its socket.
@@ -589,7 +650,10 @@ final class RemoteShellController: ObservableObject {
             savedTerminalTheme = theme
             UserDefaults.standard.set(data, forKey: Self.terminalThemeKey)
         }
-        let updated = (manager?.details ?? []).filter(\.info.running)
+        let details = manager?.details ?? []
+        phoneHasBeenIn.formUnion(details.filter(\.phoneAttached).map(\.id))
+        phoneHasBeenIn.formIntersection(details.map(\.id))   // only sessions still listed
+        let updated = details.filter(\.info.running)
         if updated != terminals { terminals = updated }
     }
 
@@ -601,23 +665,37 @@ final class RemoteShellController: ObservableObject {
 
     /// Shows a running session in a new terminal window on this Mac, beside
     /// any phone attached to it: a `.command` file the default terminal app
-    /// opens, which runs the tool's `attach`. False if it could not be opened.
+    /// opens, which runs the tool's `attach` with a one-time token for that
+    /// session (`LocalTerminalAccess`). False if it could not be opened.
     @discardableResult
     func openInTerminal(_ id: String) -> Bool {
-        guard terminalServer != nil, id.allSatisfy({ $0.isHexDigit || $0 == "-" }) else { return false }
+        guard terminalServer != nil, !id.isEmpty, id.allSatisfy({ $0.isHexDigit || $0 == "-" }) else { return false }
         do {
             try writeTerminalScript()
             let folder = Self.openCommandsFolder
             try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
-            let file = folder.appendingPathComponent("Passthrough session \(id.prefix(8)).command")
+            let file = folder.appendingPathComponent("Passthrough session \(id.prefix(8)) \(UUID().uuidString.prefix(8)).command")
+            // The window's own shell must stay plain to run that command, when the hook would make it a session.
+            let token = terminalAccess.grant(session: id, file: file, plain: sharesNewTerminals)
             let script = "'" + Self.terminalScript.path.replacingOccurrences(of: "'", with: "'\\''") + "'"
-            let text = "#!/bin/sh\n# Written by Passthrough: shows one of its sessions in this window.\nexec \(script) attach \(id)\n"
-            try Data(text.utf8).write(to: file, options: .atomic)
-            try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: file.path)
-            // The window's own shell must stay plain to run that command.
-            if sharesNewTerminals { nextTerminalPlainUntil.set(Date().addingTimeInterval(15)) }
+            let text = "#!/bin/sh\n# Written by Passthrough: shows one of its sessions in this window. Good once, for a minute.\nexec \(script) attach \(id) \(token)\n"
+            do {
+                // Made with only the user's access, before anything is in it.
+                guard FileManager.default.createFile(atPath: file.path, contents: nil, attributes: [.posixPermissions: 0o700]) else {
+                    throw CocoaError(.fileWriteUnknown)
+                }
+                let handle = try FileHandle(forWritingTo: file)
+                defer { try? handle.close() }
+                try handle.write(contentsOf: Data(text.utf8))
+            } catch {
+                terminalAccess.revoke(token)
+                throw error
+            }
             let opened = NSWorkspace.shared.open(file)
-            if !opened { nextTerminalPlainUntil.set(.distantPast) }
+            if !opened { terminalAccess.revoke(token) }
+            // A window that never came: its file and token go once they run out.
+            let access = terminalAccess
+            DispatchQueue.global().asyncAfter(deadline: .now() + LocalTerminalAccess.lifetime + 1) { access.sweep() }
             ptLog(.info, "terminals: opened a session in a terminal window")
             return opened
         } catch {

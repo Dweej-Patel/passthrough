@@ -316,20 +316,37 @@ attached to it: it is added as a viewer, takes nothing over and is never sent
 `detached`, so phones see no difference except in what the session prints and
 how big it is. A session's terminal has the size of whoever attached or typed
 last: a phone's `resize` is remembered, and applied once that phone is the one
-the session follows (it attached last, or sends `input`). A session started in
+the session follows (it attached last, or types). What a terminal sends by
+itself in `input` (its answers to a program's questions: cursor position,
+device attributes, status, mode, window and colour reports, DCS and APC
+replies; and focus in and out) is not typing: it never moves the session, and
+it is dropped from any terminal but the one the session follows. When that
+one goes, the session follows whoever is left, at that one's size. A session started in
 a window on the Mac is listed with `origin` `mac`; the Mac keeps up to 32 of
 those, apart from the 8 sessions phones may open. Closing its window ends it.
 
 The window talks to the app over a Unix socket on the Mac, never the network
 (`LocalTerminalWire`): frames of one byte of kind, a big-endian UInt32 length
 and a payload. The window sends `hello` (1, JSON: `mode` `hook`, `new`,
-`attach` or `list`, `session`?, `cols`, `rows`, `directory`?, `environment`?),
+`attach` or `list`, `session`?, `cols`, `rows`, `directory`?, `environment`?,
+`token`?, `typeahead`?, `inside`?),
 then `input` (2, raw bytes), `resize` (3, two big-endian UInt16: columns,
 rows) and, for a session it started, `theme` (4, JSON: its colours). The app answers `started` (16, JSON `session`), `refused` (20, JSON
 `reason`) or `sessions` (21, the JSON list), then sends `output` (17, raw
 bytes), `replayed` (18, after the scrollback of a session that was already
 running) and `ended` (19, JSON `exitStatus`). Only connections from the app's
-own user are accepted.
+own user are accepted, and of those: `hook`, `new` and `list` only while *Show
+new terminals on my phones* is on (else `refused` `not_sharing`); `attach`
+only with the `token` the app wrote, for that exact `session`, into the
+command file of a window it opened (good once, for a minute; else `refused`
+`not_allowed`; a token used a second time is also refused, and the app then
+takes that session off its windows and tells the owner). The owner can stop a
+window showing a phone's session at any time (`refused` `stopped`, after
+`started`; the session carries on), and never to the session named in `inside`, the one the
+window is already in (`refused` `own_session`). `typeahead` (with `hook`): a
+whole line was waiting on the terminal before its shell asked, as a terminal
+types the command into a window it opens to run one; the window "Open here"
+opened is told `not_sharing` that way, so its own shell runs that command.
 
 ### Messages
 

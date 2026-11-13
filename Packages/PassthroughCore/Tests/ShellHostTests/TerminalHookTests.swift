@@ -72,6 +72,35 @@ final class TerminalHookTests: XCTestCase {
         XCTAssertEqual(TerminalHook.startupFile(shell: "/bin/bash", home: home, exists: { $0.lastPathComponent == ".profile" })?.lastPathComponent, ".profile")
     }
 
+    /// zsh reads `.zshrc` from `ZDOTDIR` when `~/.zshenv` sets it: the hook
+    /// goes there, or zsh would never read it. Found by reading the file, never running it.
+    func testZshsOwnFolderIsReadFromZshenv() throws {
+        let zshenv = home.appendingPathComponent(".zshenv")
+        XCTAssertEqual(TerminalHook.zshDirectory(home: home).path, home.path, "no ~/.zshenv: home")
+        let folder = home.appendingPathComponent(".config/zsh", isDirectory: true)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        for line in ["export ZDOTDIR=\"$HOME/.config/zsh\"", "ZDOTDIR=~/.config/zsh", "export ZDOTDIR=${XDG_CONFIG_HOME:-$HOME/.config}/zsh",
+                     "ZDOTDIR=\(folder.path)  # mine", "export ZDOTDIR='\(folder.path)'", "export XDG_CONFIG_HOME=\"$HOME/.config\"\nexport ZDOTDIR=\"$XDG_CONFIG_HOME/zsh\"",
+                     "export ZDOTDIR=${ZDOTDIR:-$HOME/.config/zsh}", "ZDOTDIR=${ZDOTDIR:=~/.config/zsh}", "ZDOTDIR=$HOME/.config/zsh; export ZDOTDIR",
+                     "# ZDOTDIR=/elsewhere\nZDOTDIR=$HOME/.config/zsh"] {
+            try Data("echo hello\n\(line)\n".utf8).write(to: zshenv)
+            XCTAssertEqual(TerminalHook.zshDirectory(home: home).path, folder.path, line)
+            XCTAssertEqual(TerminalHook.startupFile(shell: "/bin/zsh", home: home, zdotdir: TerminalHook.zshDirectory(home: home))?.path,
+                           folder.appendingPathComponent(".zshrc").path, line)
+        }
+        // What it would take running something to know, or a folder that isn't there: home.
+        for line in ["export ZDOTDIR=$(brew --prefix)/zsh", "ZDOTDIR=`pwd`", "ZDOTDIR=$OTHER/zsh", "ZDOTDIR=/nonexistent/zdot",
+                     "ZDOTDIR=\"~/.config/zsh\"", "ZDOTDIR=\(folder.path)\nZDOTDIR=$(whatever)"] {
+            try Data("\(line)\n".utf8).write(to: zshenv)
+            XCTAssertEqual(TerminalHook.zshDirectory(home: home).path, home.path, line)
+        }
+        // Nothing in the file is run.
+        let ran = home.appendingPathComponent("ran")
+        try Data("touch \(ran.path)\nZDOTDIR=$(touch \(ran.path))\n".utf8).write(to: zshenv)
+        _ = TerminalHook.zshDirectory(home: home)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: ran.path))
+    }
+
     // MARK: The file
 
     func testInstallKeepsPermissionsFollowsASymlinkAndRemoveUndoesIt() throws {
@@ -225,7 +254,7 @@ final class TerminalHookTests: XCTestCase {
                                               environment: { [:] }, directory: home)
             defer { manager.closeAll() }
             let socket = "/tmp/pt-\(UUID().uuidString.prefix(8)).sock"
-            let server = LocalTerminalServer(path: socket, manager: manager)
+            let server = LocalTerminalServer(path: socket, manager: manager) { _ in true }
             try server.start()
             defer { server.stop() }
 
@@ -272,7 +301,7 @@ final class TerminalHookTests: XCTestCase {
         let transcripts = try TranscriptStore(directory: home.appendingPathComponent("history", isDirectory: true))
         let manager = ShellSessionManager(transcripts: transcripts, command: { ("/bin/zsh", ["-l"]) }, environment: { [:] }, directory: home)
         let socket = "/tmp/pt-\(UUID().uuidString.prefix(8)).sock"
-        let server = LocalTerminalServer(path: socket, manager: manager)
+        let server = LocalTerminalServer(path: socket, manager: manager) { _ in true }
         try server.start()
         try TerminalHook.writeScript(at: script, tool: tool.path, socket: socket)
         let file = home.appendingPathComponent(".zshrc")

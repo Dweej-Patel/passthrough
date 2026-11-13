@@ -12,6 +12,8 @@ public enum LocalTerminalClient {
         public var mode: LocalTerminalWire.Mode
         /// The session to show (`attach`).
         public var session: String?
+        /// The one-time token that lets this window show it (`attach`).
+        public var token: String?
         /// The terminal: where keys are read and output is written.
         public var input: Int32
         public var output: Int32
@@ -23,12 +25,12 @@ public enum LocalTerminalClient {
         /// session; 0 does not ask.
         public var coloursTimeout: TimeInterval
 
-        public init(socketPath: String, mode: LocalTerminalWire.Mode, session: String? = nil,
+        public init(socketPath: String, mode: LocalTerminalWire.Mode, session: String? = nil, token: String? = nil,
                     input: Int32 = STDIN_FILENO, output: Int32 = STDOUT_FILENO,
                     environment: [String: String] = ProcessInfo.processInfo.environment,
                     directory: String = FileManager.default.currentDirectoryPath,
                     answerTimeout: TimeInterval = 2, coloursTimeout: TimeInterval = 0) {
-            self.socketPath = socketPath; self.mode = mode; self.session = session
+            self.socketPath = socketPath; self.mode = mode; self.session = session; self.token = token
             self.input = input; self.output = output
             self.environment = environment; self.directory = directory; self.answerTimeout = answerTimeout
             self.coloursTimeout = coloursTimeout
@@ -56,6 +58,10 @@ public enum LocalTerminalClient {
     /// (its colours, the cursor's place), and those answers are not keys.
     static let settleAfterReplay: TimeInterval = 0.3
 
+    /// How long after the colours were asked for a late answer is still
+    /// kept from the shell, when the terminal hadn't finished answering in time.
+    static let lateColours: TimeInterval = 2
+
     /// Leaves the alternate screen, mouse reporting and bracketed paste and
     /// shows the cursor: what a program in a session that is no longer shown
     /// may have left on.
@@ -69,7 +75,9 @@ public enum LocalTerminalClient {
         var size = windowSize(options.output)
         let hello = LocalTerminalWire.Hello(
             mode: options.mode, session: options.session, cols: size.cols, rows: size.rows,
-            directory: starts ? options.directory : nil, environment: starts ? options.environment : nil)
+            directory: starts ? options.directory : nil, environment: starts ? options.environment : nil,
+            token: options.token, typeahead: options.mode == .hook ? hasTypeahead(options.input) : nil,
+            inside: options.environment[RemoteShell.sessionVariable])
         // The hello and its answer share one deadline: an app that accepts
         // and then neither reads nor answers must not hold the terminal.
         let deadline = Date().addingTimeInterval(options.answerTimeout)
@@ -113,10 +121,18 @@ public enum LocalTerminalClient {
         defer { if isTerminal { tcsetattr(options.input, TCSANOW, &saved) } }
 
         // The window's colours, for the session it started; what was typed meanwhile goes to the shell.
-        if starts, isTerminal {
+        // A terminal that hadn't finished answering in time may still: its late
+        // answer is kept from the shell a while longer (`lateColours`).
+        var coloursUntil: Date?
+        var unfinished = Data()
+        if starts, isTerminal, options.coloursTimeout > 0 {
             let asked = TerminalColors.ask(input: options.input, output: options.output, timeout: options.coloursTimeout)
             if let theme = asked.theme, !writeAll(socket, LocalTerminalWire.encode(.theme, json: theme)) { return lost(options) }
             if !asked.typed.isEmpty, !writeAll(socket, LocalTerminalWire.encode(.input, asked.typed)) { return lost(options) }
+            if !asked.complete {
+                coloursUntil = Date().addingTimeInterval(lateColours)
+                unfinished = asked.unfinished
+            }
         }
 
         let resized = ResizeWatch()
@@ -136,6 +152,10 @@ public enum LocalTerminalClient {
                     if ignoreKeysUntil != nil { ignoreKeysUntil = Date().addingTimeInterval(settleAfterReplay) }
                 case .ended:
                     return .ended(LocalTerminalWire.decode(LocalTerminalWire.Ended.self, from: frame)?.exitStatus ?? 0)
+                case .refused:
+                    // The owner stopped this window showing it (`stopped`): the session carries on.
+                    _ = writeAll(options.output, restoreTerminal)
+                    return .detached
                 default:
                     continue
                 }
@@ -176,6 +196,25 @@ public enum LocalTerminalClient {
                     if Date() < until { continue }
                     ignoreKeysUntil = nil
                 }
+                if let until = coloursUntil {
+                    // The rest of a late answer to the colours: kept from the shell, keys around it sent on.
+                    let scan = TerminalColors.scan(unfinished + Data(keys[0..<n]))
+                    var typed = scan.typed
+                    unfinished = scan.unfinished
+                    // A lone ESC is the Escape key: it goes now, not with the next key.
+                    if unfinished.count == 1 { typed.append(unfinished); unfinished = Data() }
+                    // Done once the answer's end is in (its device attributes come last),
+                    // or the time is up. What is still held then is someone's typing
+                    // (a reply is never that long, nor that late): it goes to the shell.
+                    if TerminalColors.isComplete(scan.replies) || Date() >= until || unfinished.count > 512 {
+                        coloursUntil = nil
+                        typed.append(unfinished)
+                        unfinished = Data()
+                    }
+                    lastQuit = nil
+                    if !typed.isEmpty, !writeAll(socket, LocalTerminalWire.encode(.input, typed)) { return lost(options) }
+                    continue
+                }
                 // ctrl-\ twice within a second leaves a session this window only shows.
                 if options.mode == .attach, n == 1, keys[0] == 0x1C {
                     if let last = lastQuit, Date().timeIntervalSince(last) < 1 {
@@ -202,6 +241,18 @@ public enum LocalTerminalClient {
         public var cols: Int
         public var rows: Int
     }
+
+    /// Whether a whole line is waiting to be read on the terminal `fd`: what
+    /// a terminal types into a window it opens to run a command, before the
+    /// window's shell has read anything. (A terminal in its usual line mode
+    /// counts only finished lines.)
+    static func hasTypeahead(_ fd: Int32) -> Bool {
+        var count: Int32 = 0
+        return ioctl(fd, fionread, &count) == 0 && count > 0
+    }
+
+    /// `FIONREAD`, `_IOR('f', 127, int)`: a macro Swift doesn't import.
+    static let fionread: UInt = 0x4000_0000 | (UInt(MemoryLayout<Int32>.size) << 16) | (UInt(UInt8(ascii: "f")) << 8) | 127
 
     static func windowSize(_ fd: Int32) -> WindowSize {
         var size = winsize()
