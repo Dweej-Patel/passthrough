@@ -16,6 +16,7 @@ let package = Package(
         .library(name: "ScreenClient", targets: ["ScreenClient"]),
         .library(name: "ScreenHost", targets: ["ScreenHost"]),
         .executable(name: "passthrough-devserver", targets: ["passthrough-devserver"]),
+        .executable(name: "passthrough-term", targets: ["passthrough-term"]),
     ],
     dependencies: [
         // Remote shell over iroh (QUIC, hole punching, relays). Prebuilt
@@ -54,6 +55,9 @@ let package = Package(
         // Mac-only: streams the Mac's screen to a phone as H.264 and posts its input.
         .target(name: "ScreenHost", dependencies: ["PassthroughCore", "ShellHost"]),
         .executableTarget(name: "passthrough-devserver", dependencies: ["PassthroughCore"]),
+        // Mac-only: what a terminal window runs to show one of the app's sessions
+        // (the app's own copy is built by the Xcode project from the same source).
+        .executableTarget(name: "passthrough-term", dependencies: ["PassthroughCore"]),
         // Helpers shared by the test targets (not a product).
         .target(name: "TestSupport", dependencies: ["PhoneTransport"], path: "Tests/TestSupport"),
         .testTarget(name: "PassthroughCoreTests", dependencies: ["PassthroughCore", "PhoneTransport", "TestSupport"]),

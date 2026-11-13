@@ -1,3 +1,4 @@
+import AppKit
 import Foundation
 import Combine
 import IrohTransport
@@ -12,6 +13,14 @@ import ShellHost
 @MainActor
 final class RemoteShellController: ObservableObject {
     @Published private(set) var sessions: [ShellSessionInfo] = []
+    /// The running sessions with who is looking at each: a phone, a terminal window on this Mac, or both.
+    @Published private(set) var terminals: [ShellSessionDetail] = []
+    /// "Show new terminals on my phones": the hook is in the shell's startup
+    /// file (`TerminalHook`), so every new terminal window is a session. The
+    /// file is the truth: this is read from it, and setting it rewrites it.
+    @Published private(set) var sharesNewTerminals = false
+    /// Why the last change to that setting, or the terminals' socket, failed.
+    @Published private(set) var terminalsError: String?
     @Published private(set) var phones: [ShellPhone] = []
     @Published private(set) var history: [ShellHistoryEntry] = []
     @Published private(set) var historyBytes: Int64 = 0
@@ -126,6 +135,14 @@ final class RemoteShellController: ObservableObject {
     private let manager: ShellSessionManager?
     /// A stopped listener cannot start again: each start makes a new one.
     private var listener: ShellListener?
+    /// Where terminal windows on this Mac connect (`passthrough-term`), while Remote shell is on.
+    private var terminalServer: LocalTerminalServer?
+    /// `sharesNewTerminals`, for the server's queue.
+    private let sharingNewTerminals = Locked(false)
+    /// Until then, the next new terminal's hook is refused once: "Open in
+    /// Terminal" opens a window whose own shell must stay plain, to run the
+    /// command that shows the session.
+    private let nextTerminalPlainUntil = Locked(Date.distantPast)
     /// Shared by both listeners, so the caps on views of the screen hold across them.
     private let screenViews = ScreenViewLimit()
     /// Phones' addresses that proved a shell key lately, kept across launches
@@ -169,6 +186,9 @@ final class RemoteShellController: ObservableObject {
                     self?.iroh?.listener?.pushSessions()
                 }
             }
+            manager.onViewersChange = { [weak self] in
+                Task { @MainActor in self?.refreshTerminals() }
+            }
         } catch {
             ptLog(.error, "shell: could not open the history folder: \(error.localizedDescription)")
             transcripts = nil
@@ -178,6 +198,7 @@ final class RemoteShellController: ObservableObject {
         reach.set(ShellReach(reachAnywhere: reachAnywhere, relay: relay))
         refreshPhones()
         pruneHistory()
+        refreshSharesNewTerminals()
     }
 
     // MARK: Listener
@@ -226,6 +247,7 @@ final class RemoteShellController: ObservableObject {
         }
         startIroh()
         startStatusRefresh()
+        startTerminals()
     }
 
     /// Ends every session, then stops listening, then ends any session a phone
@@ -240,7 +262,11 @@ final class RemoteShellController: ObservableObject {
         statusRefresh?.cancel(); statusRefresh = nil
         let run = detachIroh()
         let manager = self.manager
+        let terminals = terminalServer
+        terminalServer = nil
         let work = {
+            // First, so no terminal window starts a session while the rest end.
+            terminals?.stop()
             manager?.closeAll()
             // Done once the port is free (so a restart can bind it) and no
             // connection is left to open a session.
@@ -452,6 +478,145 @@ final class RemoteShellController: ObservableObject {
         ptLog(.info, "shell: closed a session from this Mac")
     }
 
+    // MARK: Terminals on this Mac
+
+    nonisolated private static var supportFolder: URL {
+        FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent(PassthroughProtocol.identifier, isDirectory: true)
+    }
+
+    /// The script the startup hook and "Open in Terminal" call; it runs the app's own tool with the app's socket.
+    nonisolated private static var terminalScript: URL { supportFolder.appendingPathComponent("bin/passthrough-term") }
+
+    /// The socket: in the app's own folder, or the user's temporary folder when that path is too long for one.
+    nonisolated private static var terminalSocket: String {
+        let preferred = supportFolder.appendingPathComponent("terminals.sock").path
+        if LocalTerminalServer.fits(preferred) { return preferred }
+        return FileManager.default.temporaryDirectory.appendingPathComponent("\(PassthroughProtocol.identifier).terminals.sock").path
+    }
+
+    /// The shell startup file the hook goes in; nil for a login shell it isn't written for.
+    private static var startupFile: URL? {
+        TerminalHook.startupFile(shell: LoginShell.command().executable, home: FileManager.default.homeDirectoryForCurrentUser)
+    }
+
+    /// Why new terminals can't be shown, when the login shell is one the hook isn't written for.
+    var terminalsUnsupported: String? {
+        Self.startupFile == nil ? TerminalHook.HookError.unsupportedShell(URL(fileURLWithPath: LoginShell.command().executable).lastPathComponent).localizedDescription : nil
+    }
+
+    /// The startup file's name, for copy ("~/.zshrc").
+    var startupFileName: String { Self.startupFile.map { "~/" + $0.lastPathComponent } ?? "your shell's startup file" }
+
+    private func refreshSharesNewTerminals() {
+        sharesNewTerminals = Self.startupFile.map { TerminalHook.isInstalled(in: $0) } ?? false
+        sharingNewTerminals.set(sharesNewTerminals)
+    }
+
+    /// Puts the hook in the shell's startup file, or takes it out. Terminals
+    /// already open stay as they are: only a new one reads the file.
+    func setSharesNewTerminals(_ on: Bool) {
+        terminalsError = nil
+        do {
+            guard let file = Self.startupFile else {
+                throw TerminalHook.HookError.unsupportedShell(URL(fileURLWithPath: LoginShell.command().executable).lastPathComponent)
+            }
+            if on {
+                try writeTerminalScript()
+                try TerminalHook.install(in: file, script: Self.terminalScript.path)
+            } else {
+                try TerminalHook.remove(from: file)
+            }
+            ptLog(.info, "terminals: showing new terminals turned \(on ? "on" : "off")")
+        } catch {
+            terminalsError = error.localizedDescription
+            ptLog(.error, "terminals: could not change the startup file: \(error.localizedDescription)")
+        }
+        refreshSharesNewTerminals()
+    }
+
+    /// At every start, so the script follows the app when it moves or is updated.
+    private func writeTerminalScript() throws {
+        guard let tool = Bundle.main.url(forAuxiliaryExecutable: "passthrough-term") else {
+            throw CocoaError(.fileNoSuchFile, userInfo: [NSLocalizedDescriptionKey: "This copy of Passthrough has no terminal tool in it."])
+        }
+        try TerminalHook.writeScript(at: Self.terminalScript, tool: tool.path, socket: Self.terminalSocket)
+    }
+
+    private func startTerminals() {
+        guard terminalServer == nil, let manager else { return }
+        refreshSharesNewTerminals()
+        let sharing = sharingNewTerminals, plainUntil = nextTerminalPlainUntil
+        let server = LocalTerminalServer(path: Self.terminalSocket, manager: manager) { mode in
+            guard mode == .hook else { return true }
+            guard sharing.get() else { return false }
+            // One window was asked to stay plain ("Open in Terminal").
+            if Date() < plainUntil.exchange(.distantPast) { return false }
+            return true
+        }
+        terminalServer = server
+        terminalsError = nil
+        // After any earlier stop has removed its socket.
+        lifecycle.async {
+            do {
+                try FileManager.default.createDirectory(at: Self.supportFolder, withIntermediateDirectories: true)
+                try server.start()
+                ptLog(.info, "terminals: listening for this Mac's terminal windows")
+            } catch {
+                ptLog(.error, "terminals: could not listen: \(error.localizedDescription)")
+                Task { @MainActor [weak self] in
+                    guard let self, self.terminalServer === server else { return }
+                    self.terminalsError = "This Mac's terminals can't be shared: \(error.localizedDescription)"
+                }
+            }
+        }
+        do {
+            try writeTerminalScript()
+        } catch {
+            ptLog(.error, "terminals: could not write the script: \(error.localizedDescription)")
+        }
+        Self.removeOpenCommands()
+    }
+
+    private func refreshTerminals() {
+        let updated = (manager?.details ?? []).filter(\.info.running)
+        if updated != terminals { terminals = updated }
+    }
+
+    private static var openCommandsFolder: URL { supportFolder.appendingPathComponent("Open", isDirectory: true) }
+
+    private static func removeOpenCommands() {
+        try? FileManager.default.removeItem(at: openCommandsFolder)
+    }
+
+    /// Shows a running session in a new terminal window on this Mac, beside
+    /// any phone attached to it: a `.command` file the default terminal app
+    /// opens, which runs the tool's `attach`. False if it could not be opened.
+    @discardableResult
+    func openInTerminal(_ id: String) -> Bool {
+        guard terminalServer != nil, id.allSatisfy({ $0.isHexDigit || $0 == "-" }) else { return false }
+        do {
+            try writeTerminalScript()
+            let folder = Self.openCommandsFolder
+            try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+            let file = folder.appendingPathComponent("Passthrough session \(id.prefix(8)).command")
+            let script = "'" + Self.terminalScript.path.replacingOccurrences(of: "'", with: "'\\''") + "'"
+            let text = "#!/bin/sh\n# Written by Passthrough: shows one of its sessions in this window.\nexec \(script) attach \(id)\n"
+            try Data(text.utf8).write(to: file, options: .atomic)
+            try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: file.path)
+            // The window's own shell must stay plain to run that command.
+            if sharesNewTerminals { nextTerminalPlainUntil.set(Date().addingTimeInterval(15)) }
+            let opened = NSWorkspace.shared.open(file)
+            if !opened { nextTerminalPlainUntil.set(.distantPast) }
+            ptLog(.info, "terminals: opened a session in a terminal window")
+            return opened
+        } catch {
+            terminalsError = "Could not open the session in a terminal: \(error.localizedDescription)"
+            ptLog(.error, "terminals: could not open a session in a terminal: \(error.localizedDescription)")
+            return false
+        }
+    }
+
     /// The history changes when a session opens or ends, not when it gets
     /// its title (that only renames an entry) or is pruned (its entry stays).
     private func refreshSessions() {
@@ -461,6 +626,7 @@ final class RemoteShellController: ObservableObject {
         let wasRunning = Set(sessions.filter(\.running).map(\.id))
         let ended = updated.contains { !$0.running && wasRunning.contains($0.id) }
         sessions = updated
+        refreshTerminals()
         // A session that ended may be what takes the folder past its size cap.
         if ended { pruneHistory() } else if historyChanged { scheduleHistoryRefresh() }
     }

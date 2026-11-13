@@ -19,9 +19,27 @@ public extension ShellAttachment {
     func shellReplayed(session: String) {}
 }
 
+/// Where a session was started: by a phone, or in a terminal window on the Mac.
+public enum ShellSessionOrigin: String, Sendable {
+    case phone, mac
+}
+
+/// A live session as the Mac itself shows it: who is looking at it right now.
+public struct ShellSessionDetail: Equatable, Sendable, Identifiable {
+    public var info: ShellSessionInfo
+    public var origin: ShellSessionOrigin
+    /// A phone is attached.
+    public var phoneAttached: Bool
+    /// Terminal windows on the Mac showing it.
+    public var macViewers: Int
+    public var id: String { info.id }
+}
+
 /// The Mac's interactive shell sessions. They keep running while nothing is
 /// attached; a client that attaches is replayed the recent output, and a later
-/// attach takes the session over.
+/// attach takes the session over. A terminal on the Mac attaches as a viewer
+/// instead (`shared`): it sees and types into the session beside whoever is
+/// attached, and neither takes it from the other.
 public final class ShellSessionManager: @unchecked Sendable {
     /// Fires after the session list changes. Called off the manager's queue.
     public var onChange: (@Sendable () -> Void)? {
@@ -29,7 +47,24 @@ public final class ShellSessionManager: @unchecked Sendable {
         set { queue.sync { changeHandler = newValue } }
     }
 
+    /// Fires after who is looking at a session changes (`details`). Called off the manager's queue.
+    public var onViewersChange: (@Sendable () -> Void)? {
+        get { queue.sync { viewersHandler } }
+        set { queue.sync { viewersHandler = newValue } }
+    }
+
     enum InputEscape { case none, escape, csi, ss3 }
+
+    /// A terminal on the Mac showing a session beside its attachment.
+    private struct Viewer {
+        let client: ShellAttachment
+        var size: Size
+    }
+
+    private struct Size: Equatable {
+        var cols: UInt16
+        var rows: UInt16
+    }
 
     private final class Session {
         let id: String
@@ -37,6 +72,7 @@ public final class ShellSessionManager: @unchecked Sendable {
         /// The phone that opened it, so revoking that phone ends it; any
         /// authorized phone may still attach to it meanwhile.
         let openedBy: String?
+        let origin: ShellSessionOrigin
         let process: PTYProcess
         let writer: TranscriptWriter
         var scrollback = ScrollbackBuffer(capacity: RemoteShell.scrollbackBytes)
@@ -68,17 +104,32 @@ public final class ShellSessionManager: @unchecked Sendable {
         var attachment: ShellAttachment?
         /// What `attach` returned for `attachment`.
         var generation: UInt64 = 0
+        /// The terminal size `attachment` last asked for.
+        var attachmentSize: Size?
+        /// Terminals on the Mac showing the session too.
+        var viewers: [Viewer] = []
+        /// Whoever attached or typed last: the terminal's size follows it.
+        var active: ObjectIdentifier?
+        /// The size the terminal has now.
+        var size: Size
+        /// Viewers that can't take more output yet: reading the shell waits for them.
+        var pausedBy: Set<ObjectIdentifier> = []
 
-        init(id: String, startedAt: Date, openedBy: String?, process: PTYProcess, writer: TranscriptWriter) {
-            self.id = id; self.startedAt = startedAt; self.openedBy = openedBy; self.process = process; self.writer = writer
+        init(id: String, startedAt: Date, openedBy: String?, origin: ShellSessionOrigin, process: PTYProcess,
+             writer: TranscriptWriter, size: Size) {
+            self.id = id; self.startedAt = startedAt; self.openedBy = openedBy; self.origin = origin
+            self.process = process; self.writer = writer; self.size = size
             lastOutputAt = startedAt
         }
 
         var info: ShellSessionInfo {
             ShellSessionInfo(id: id, title: title, startedAt: startedAt.timeIntervalSince1970,
                              lastOutputAt: lastOutputAt.timeIntervalSince1970, running: running, exitStatus: exitStatus,
-                             waiting: running ? waiting : nil)
+                             waiting: running ? waiting : nil, origin: origin == .mac ? ShellSessionInfo.originMac : nil)
         }
+
+        /// Everyone output goes to.
+        var clients: [ShellAttachment] { (attachment.map { [$0] } ?? []) + viewers.map(\.client) }
     }
 
     /// For tests: the session object, to check it is freed once pruned.
@@ -111,10 +162,11 @@ public final class ShellSessionManager: @unchecked Sendable {
     private var table: [String: Session] = [:]
     private var order: [String] = []
     /// Sessions `open` is starting outside the queue, counted toward the cap.
-    private var opening = 0
+    private var opening: [ShellSessionOrigin: Int] = [:]
     /// Numbers every attach, so a late detach can be told from a current one.
     private var lastGeneration: UInt64 = 0
     private var changeHandler: (@Sendable () -> Void)?
+    private var viewersHandler: (@Sendable () -> Void)?
 
     public init(transcripts: TranscriptStore,
                 command: @escaping () -> (String, [String]) = { LoginShell.command() },
@@ -134,24 +186,45 @@ public final class ShellSessionManager: @unchecked Sendable {
         queue.sync { order.compactMap { table[$0]?.info } }
     }
 
+    /// The sessions with who is looking at each, for the Mac's own list.
+    public var details: [ShellSessionDetail] {
+        queue.sync {
+            order.compactMap { table[$0] }.map {
+                ShellSessionDetail(info: $0.info, origin: $0.origin, phoneAttached: $0.attachment != nil, macViewers: $0.viewers.count)
+            }
+        }
+    }
+
     /// Starts a login shell. The spawn and the transcript's first write happen
     /// outside the manager's queue, so listing or using other sessions never
     /// waits on them; a slot is held meanwhile so the cap still holds.
     /// `phoneID` is the phone opening it (`closeSessions(openedBy:)`).
-    public func open(phoneLabel: String, phoneID: String? = nil, cols: Int, rows: Int) throws -> String {
+    ///
+    /// A terminal on the Mac opens one with `origin: .mac`, its own
+    /// environment and its folder, so the shell starts as that terminal's
+    /// own would have. Those have a cap of their own
+    /// (`RemoteShell.maxMacSessions`) and never use up the phones' sessions.
+    public func open(phoneLabel: String, phoneID: String? = nil, cols: Int, rows: Int,
+                     origin: ShellSessionOrigin = .phone, environment given: [String: String]? = nil,
+                     directory givenDirectory: URL? = nil) throws -> String {
         try queue.sync {
             for id in order where table[id]?.running == false { remove(id) }
-            guard table.values.filter(\.running).count + opening < RemoteShell.maxSessions else { throw ShellError.tooManySessions }
-            opening += 1
+            let running = table.values.filter { $0.running && $0.origin == origin }.count + (opening[origin] ?? 0)
+            guard running < (origin == .mac ? RemoteShell.maxMacSessions : RemoteShell.maxSessions) else { throw ShellError.tooManySessions }
+            opening[origin, default: 0] += 1
         }
         var reserved = true
-        defer { if reserved { queue.sync { opening -= 1 } } }
+        defer { if reserved { queue.sync { opening[origin, default: 0] -= 1 } } }
 
         let id = UUID().uuidString
         let now = Date()
         let (executable, arguments) = command()
-        let process = try PTYProcess(executable: executable, arguments: arguments, directory: directory,
-                                     environment: environment(), cols: Self.dimension(cols), rows: Self.dimension(rows))
+        // Every session says it is one, so a shell started inside it never asks for another (`TerminalHook`).
+        var environment = given ?? environment()
+        environment[RemoteShell.sessionVariable] = id
+        let size = Size(cols: Self.dimension(cols), rows: Self.dimension(rows))
+        let process = try PTYProcess(executable: executable, arguments: arguments, directory: givenDirectory ?? directory,
+                                     environment: environment, cols: size.cols, rows: size.rows)
         let writer: TranscriptWriter
         do {
             writer = try transcripts.begin(id: id, title: "~", phoneLabel: phoneLabel, cols: cols, rows: rows, at: now)
@@ -159,7 +232,7 @@ public final class ShellSessionManager: @unchecked Sendable {
             process.terminate()   // never started; dropping it hangs up and reaps
             throw error
         }
-        let session = Session(id: id, startedAt: now, openedBy: phoneID, process: process, writer: writer)
+        let session = Session(id: id, startedAt: now, openedBy: phoneID, origin: origin, process: process, writer: writer, size: size)
         // Weak: the session owns the process, so a strong capture would be a cycle that leaks every session.
         process.onOutput = { [weak self, weak session] data in
             self?.queue.async { if let session { self?.received(data, session: session) } }
@@ -168,7 +241,7 @@ public final class ShellSessionManager: @unchecked Sendable {
             self?.queue.async { if let session { self?.ended(session, status: status) } }
         }
         queue.sync {
-            opening -= 1
+            opening[origin, default: 0] -= 1
             reserved = false
             table[id] = session
             order.append(id)
@@ -182,17 +255,25 @@ public final class ShellSessionManager: @unchecked Sendable {
     /// Replays the scrollback to `client`, then streams live output to it. A client
     /// attached earlier is told it was detached, with the generation its own
     /// attach returned. Returns this attach's generation, unique per manager.
+    ///
+    /// `shared` is a terminal on the Mac: it is added beside the attachment,
+    /// takes nothing over and is never taken over (`detach` removes it).
+    /// Either way the terminal takes this client's size, until someone else types.
     @discardableResult
-    public func attach(_ id: String, client: ShellAttachment, cols: Int, rows: Int) throws -> UInt64 {
+    public func attach(_ id: String, client: ShellAttachment, cols: Int, rows: Int, shared: Bool = false) throws -> UInt64 {
         try queue.sync {
             guard let session = table[id] else { throw ShellError.noSuchSession }
             lastGeneration += 1
             let generation = lastGeneration
-            if let previous = session.attachment, previous !== client {
+            let size = Size(cols: Self.dimension(cols), rows: Self.dimension(rows))
+            if !shared, let previous = session.attachment, previous !== client {
                 let old = session.generation
                 callouts.async { previous.shellDetached(session: id, generation: old) }
             }
-            if session.running { resize(session, cols: cols, rows: rows) }
+            if session.running {
+                session.active = ObjectIdentifier(client)
+                resize(session, to: size)
+            }
             let replay = session.scrollback.replay
             var offset = 0
             while offset < replay.count {
@@ -201,9 +282,15 @@ public final class ShellSessionManager: @unchecked Sendable {
                 callouts.async { client.shellOutput(chunk, session: id) }
             }
             callouts.async { client.shellReplayed(session: id) }
-            if session.running {
+            if session.running, shared {
+                session.viewers.removeAll { $0.client === client }
+                session.viewers.append(Viewer(client: client, size: size))
+                notifyViewers()
+            } else if session.running {
                 session.attachment = client
                 session.generation = generation
+                session.attachmentSize = size
+                notifyViewers()
             } else if let status = session.exitStatus {
                 callouts.async { client.shellEnded(session: id, exitStatus: status) }
             }
@@ -214,13 +301,33 @@ public final class ShellSessionManager: @unchecked Sendable {
     /// Stops sending to `client` without telling it.
     public func detach(client: ShellAttachment) {
         queue.sync {
-            for session in table.values where session.attachment === client { session.attachment = nil }
+            var changed = false
+            for session in table.values {
+                if session.attachment === client {
+                    session.attachment = nil
+                    session.attachmentSize = nil
+                    changed = true
+                }
+                if session.viewers.contains(where: { $0.client === client }) {
+                    session.viewers.removeAll { $0.client === client }
+                    changed = true
+                }
+                if session.active == ObjectIdentifier(client) { session.active = nil }
+                release(session, from: client)
+            }
+            if changed { notifyViewers() }
         }
     }
 
-    public func input(_ id: String, _ data: Data) {
+    /// `client` is who typed it, when known: the terminal takes that client's
+    /// size if it isn't already the one it follows.
+    public func input(_ id: String, _ data: Data, from client: ShellAttachment? = nil) {
         queue.async { [self] in
             guard let session = table[id], session.running else { return }
+            if let client, session.active != ObjectIdentifier(client), let size = size(of: client, in: session) {
+                session.active = ObjectIdentifier(client)
+                if size != session.size { resize(session, to: size) }
+            }
             session.process.write(data)
             if !session.titleKnown { learnTitle(from: data, session: session) }
             // Someone answered: it isn't waiting any more, and only what
@@ -233,10 +340,38 @@ public final class ShellSessionManager: @unchecked Sendable {
         }
     }
 
-    public func resize(_ id: String, cols: Int, rows: Int) {
+    /// `client` is whose terminal changed size, when known. Its size is
+    /// remembered; the session's terminal takes it only while that client is
+    /// the one it follows (the last to attach or type), so a phone turning
+    /// does not redraw what someone is typing into on the Mac.
+    public func resize(_ id: String, cols: Int, rows: Int, from client: ShellAttachment? = nil) {
         queue.async { [self] in
             guard let session = table[id], session.running else { return }
-            resize(session, cols: cols, rows: rows)
+            let size = Size(cols: Self.dimension(cols), rows: Self.dimension(rows))
+            if let client {
+                if session.attachment === client { session.attachmentSize = size }
+                if let index = session.viewers.firstIndex(where: { $0.client === client }) { session.viewers[index].size = size }
+                guard session.active == nil || session.active == ObjectIdentifier(client) else { return }
+            }
+            resize(session, to: size)
+        }
+    }
+
+    /// A viewer that writes to a terminal on the Mac has (`paused`) or no
+    /// longer has more output waiting than it should hold: the shell is not
+    /// read meanwhile, so it waits as it would on a slow terminal instead of
+    /// the Mac buffering its output without end.
+    public func setOutputPaused(_ id: String, _ paused: Bool, by client: ShellAttachment) {
+        queue.async { [self] in
+            guard let session = table[id], session.running else { return }
+            if paused {
+                guard session.viewers.contains(where: { $0.client === client }) else { return }
+                if session.pausedBy.insert(ObjectIdentifier(client)).inserted, session.pausedBy.count == 1 {
+                    session.process.setReadingPaused(true)
+                }
+            } else {
+                release(session, from: client)
+            }
         }
     }
 
@@ -272,10 +407,22 @@ public final class ShellSessionManager: @unchecked Sendable {
     // MARK: Queue-confined
 
     /// Resizes the PTY, and records the size so a replay draws what follows at it.
-    private func resize(_ session: Session, cols: Int, rows: Int) {
-        let cols = Self.dimension(cols), rows = Self.dimension(rows)
-        session.process.resize(cols: cols, rows: rows)
-        session.writer.resize(cols: Int(cols), rows: Int(rows), at: Date())
+    private func resize(_ session: Session, to size: Size) {
+        session.size = size
+        session.process.resize(cols: size.cols, rows: size.rows)
+        session.writer.resize(cols: Int(size.cols), rows: Int(size.rows), at: Date())
+    }
+
+    /// The size `client`'s terminal last had, if it is looking at `session`.
+    private func size(of client: ShellAttachment, in session: Session) -> Size? {
+        if session.attachment === client { return session.attachmentSize }
+        return session.viewers.first { $0.client === client }?.size
+    }
+
+    /// `client` no longer holds the shell's output back.
+    private func release(_ session: Session, from client: ShellAttachment) {
+        guard session.pausedBy.remove(ObjectIdentifier(client)) != nil, session.pausedBy.isEmpty else { return }
+        session.process.setReadingPaused(false)
     }
 
     private func received(_ data: Data, session: Session) {
@@ -287,8 +434,9 @@ public final class ShellSessionManager: @unchecked Sendable {
         session.lastOutputAt = now
         if session.pendingTitle != nil { adoptEchoedTitle(session) }
         noteOutput(data, session: session)
-        if let client = session.attachment, table[session.id] === session {
-            let id = session.id
+        guard table[session.id] === session else { return }
+        let id = session.id
+        for client in session.clients {
             callouts.async { client.shellOutput(data, session: id) }
         }
     }
@@ -330,13 +478,18 @@ public final class ShellSessionManager: @unchecked Sendable {
         session.running = false
         session.exitStatus = status
         session.writer.finish(exitStatus: status, at: Date())
-        if let client = session.attachment {
-            let id = session.id
+        let id = session.id
+        for client in session.clients {
             callouts.async { client.shellEnded(session: id, exitStatus: status) }
         }
         session.attachment = nil
+        session.attachmentSize = nil
+        session.viewers = []
+        session.active = nil
+        session.pausedBy = []
         ptLog(.info, "shell: session ended (\(status))")
         notifyChange()
+        notifyViewers()
         // Weak: a session pruned earlier (by `open`) must not be kept alive, with its scrollback, until this fires.
         queue.asyncAfter(deadline: .now() + endedRetention) { [weak self, weak session] in
             guard let self, let session, table[session.id] === session else { return }
@@ -450,6 +603,11 @@ public final class ShellSessionManager: @unchecked Sendable {
 
     private func notifyChange() {
         guard let handler = changeHandler else { return }
+        callouts.async { handler() }
+    }
+
+    private func notifyViewers() {
+        guard let handler = viewersHandler else { return }
         callouts.async { handler() }
     }
 

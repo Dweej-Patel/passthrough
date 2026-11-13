@@ -822,7 +822,7 @@ final class ShellConnection: ShellAttachment, @unchecked Sendable {
         case ShellEnvelope.input:
             guard let id = message.session, id == attached,
                   let data = message.data.flatMap({ Data(base64Encoded: $0) }) else { return fail(.badRequest, session: message.session) }
-            manager.input(id, data)
+            manager.input(id, data, from: self)
         case ShellEnvelope.resize:
             // The phone's terminal size, for whatever this connection has
             // attached when the line is read: lines wait behind an `open`, so a
@@ -831,7 +831,7 @@ final class ShellConnection: ShellAttachment, @unchecked Sendable {
             // required it): it may be the one an `open` or `attach` ahead just left.
             guard let cols = message.cols, let rows = message.rows else { return fail(.badRequest, session: message.session) }
             guard let id = attached else { return }
-            manager.resize(id, cols: cols, rows: rows)
+            manager.resize(id, cols: cols, rows: rows, from: self)
         case ShellEnvelope.close:
             guard let id = message.session else { return fail(.badRequest) }
             guard manager.sessions.contains(where: { $0.id == id && $0.running }) else { return fail(.noSuchSession, session: id) }

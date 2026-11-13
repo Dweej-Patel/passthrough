@@ -1,4 +1,5 @@
 import SwiftUI
+import ShellHost
 import PassthroughCore
 import PassthroughUI
 
@@ -542,6 +543,25 @@ struct PhoneHereSection: View {
                             .help("Disconnect \(viewer.label) from the screen. Its shells stay open.")
                     }
                 }
+                // Each running session, with the way to it from here: a phone's
+                // shell opens in a terminal window, beside the phone.
+                ForEach(shell.terminals.prefix(Self.sessionRows)) { terminal in
+                    row(symbol: terminal.origin == .mac ? "macwindow" : "iphone", attention: false) {
+                        VStack(alignment: .leading, spacing: 1) {
+                            Text(terminal.info.title).font(.system(size: 12.5, weight: .medium)).lineLimit(1).truncationMode(.middle)
+                            Text(Self.where(terminal)).font(.system(size: 10.5)).foregroundStyle(.secondary).lineLimit(1)
+                        }
+                    } trailing: {
+                        if terminal.macViewers == 0 {
+                            Button("Open here") { shell.openInTerminal(terminal.id) }
+                                .controlSize(.small)
+                                .help("Show this session in a terminal window on this Mac. A phone attached to it keeps it too.")
+                        } else if terminal.phoneAttached {
+                            Image(systemName: "iphone").font(.caption.weight(.semibold)).foregroundStyle(PTColor.tintText)
+                                .help("A phone is looking at this terminal")
+                        }
+                    }
+                }
                 Button { SettingsWindow.show(openSettings, tab: .remoteShell) } label: {
                     row(symbol: "apple.terminal", symbolColor: shellNeedsSetup ? .secondary : PTColor.tintText, attention: shellNeedsSetup) {
                         Text(shellStatus(open: running.count)).font(.system(size: 12.5, weight: .medium))
@@ -557,6 +577,20 @@ struct PhoneHereSection: View {
             }
             .task { fullDiskAccess = FullDiskAccess.isGranted }
         }
+    }
+
+    /// Most sessions listed one by one; the row under them counts them all.
+    private static let sessionRows = 5
+
+    /// "From a phone", "In a terminal here · a phone is attached".
+    private static func `where`(_ terminal: ShellSessionDetail) -> String {
+        let place: String
+        switch (terminal.origin, terminal.macViewers > 0) {
+        case (.mac, _): place = "In a terminal here"
+        case (.phone, true): place = "From a phone · open here too"
+        case (.phone, false): place = "From a phone"
+        }
+        return terminal.phoneAttached ? place + " · a phone is attached" : place
     }
 
     private var shellNeedsSetup: Bool {

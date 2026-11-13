@@ -146,6 +146,8 @@ final class MacEventRecorder {
         for now in list {
             let before = sessions[now.id]
             if before?.running == true, !now.running {
+                // A terminal window closed on the Mac itself is not news for a phone's timeline.
+                guard !now.isOnMac else { continue }
                 let minutes = max(0, Int((now.lastOutputAt - now.startedAt) / 60))
                 let exit = now.exitStatus.map { "exit \($0)" } ?? "ended"
                 log.record(MacEvent.kindShell, "\(now.title) finished", detail: "\(exit) · \(minutes) min", session: now.id,
