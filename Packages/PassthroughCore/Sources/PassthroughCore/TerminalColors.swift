@@ -91,18 +91,54 @@ public enum TerminalColors {
         return hex
     }
 
+    /// What was read while waiting for the answer, apart: the terminal's
+    /// replies (`ESC ] … BEL` or `ESC ] … ESC \`, and `ESC [ ? … c`), and
+    /// everything else, which is what someone typed (or a terminal typed for
+    /// them, as when it opens a window to run a command) and must still reach
+    /// the shell, in order.
+    public static func split(_ read: Data) -> (replies: Data, typed: Data) {
+        var replies = Data(), typed = Data()
+        let bytes = [UInt8](read)
+        var index = 0
+        while index < bytes.count {
+            guard bytes[index] == 0x1B, index + 1 < bytes.count else { typed.append(bytes[index]); index += 1; continue }
+            var end: Int?
+            if bytes[index + 1] == UInt8(ascii: "]") {
+                var scan = index + 2
+                while scan < bytes.count {
+                    if bytes[scan] == 0x07 { end = scan + 1; break }
+                    if bytes[scan] == 0x1B, scan + 1 < bytes.count, bytes[scan + 1] == UInt8(ascii: "\\") { end = scan + 2; break }
+                    scan += 1
+                }
+            } else if bytes[index + 1] == UInt8(ascii: "["), index + 2 < bytes.count, bytes[index + 2] == UInt8(ascii: "?") {
+                var scan = index + 3
+                while scan < bytes.count, bytes[scan] == UInt8(ascii: ";") || (UInt8(ascii: "0")...UInt8(ascii: "9")).contains(bytes[scan]) { scan += 1 }
+                if scan < bytes.count, bytes[scan] == UInt8(ascii: "c") { end = scan + 1 }
+            }
+            if let end {
+                replies.append(contentsOf: bytes[index..<end])
+                index = end
+            } else {
+                typed.append(bytes[index])
+                index += 1
+            }
+        }
+        return (replies, typed)
+    }
+
     #if os(macOS)
     /// Asks the terminal on `output` and reads its answer from `input`, which
     /// must be in raw mode (the answer is not a line, and must not be echoed).
-    /// Gives up after `timeout`: a terminal that says nothing has no colours to give.
-    public static func ask(input: Int32, output: Int32, timeout: TimeInterval) -> ShellTheme? {
-        guard timeout > 0 else { return nil }
+    /// Gives up after `timeout`: a terminal that says nothing has no colours
+    /// to give. `typed` is whatever else arrived meanwhile: keys, to pass on.
+    public static func ask(input: Int32, output: Int32, timeout: TimeInterval) -> (theme: ShellTheme?, typed: Data) {
+        guard timeout > 0 else { return (nil, Data()) }
         let sent = question.withUnsafeBytes { write(output, $0.baseAddress, question.count) }
-        guard sent == question.count else { return nil }
+        guard sent == question.count else { return (nil, Data()) }
         var answer = Data()
         var buffer = [UInt8](repeating: 0, count: 4096)
         let deadline = Date().addingTimeInterval(timeout)
-        while !isComplete(answer), answer.count < 16_384 {
+        while !isComplete(split(answer).replies), answer.count < 16_384 {
             let left = deadline.timeIntervalSinceNow
             guard left > 0 else { break }
             var p = pollfd(fd: input, events: Int16(POLLIN), revents: 0)
@@ -113,7 +149,8 @@ public enum TerminalColors {
             guard n > 0 else { break }
             answer.append(contentsOf: buffer[0..<n])
         }
-        return parse(answer)
+        let parts = split(answer)
+        return (parse(parts.replies), parts.typed)
     }
     #endif
 }

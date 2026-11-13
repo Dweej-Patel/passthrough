@@ -226,6 +226,10 @@ final class LocalTerminalConnection: ShellAttachment, @unchecked Sendable {
         case .input:
             guard let session else { return }
             manager.input(session, frame.payload, from: self)
+        case .theme:
+            // Only for the session this window started: one it joins keeps its own.
+            guard owner, let session, let theme = LocalTerminalWire.decode(ShellTheme.self, from: frame) else { return }
+            manager.setTheme(session, theme)
         case .resize:
             guard let session, let size = LocalTerminalWire.decodeResize(frame.payload) else { return }
             manager.resize(session, cols: size.cols, rows: size.rows, from: self)
@@ -254,7 +258,7 @@ final class LocalTerminalConnection: ShellAttachment, @unchecked Sendable {
                         ? URL(fileURLWithPath: path, isDirectory: true) : nil
                 }
                 let id = try manager.open(phoneLabel: label, cols: hello.cols, rows: hello.rows, origin: .mac,
-                                          environment: hello.environment, directory: directory, theme: hello.theme)
+                                          environment: hello.environment, directory: directory)
                 owner = true
                 show(id, hello)
             } catch let error as ShellError {

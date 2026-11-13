@@ -52,6 +52,8 @@ final class LocalTerminalTests: XCTestCase {
         private let stop = Locked(false)
         /// What the window answers when asked for its colours; nil: nothing, as a bare pseudo-terminal.
         let coloursAnswer = Locked<Data?>(nil)
+        /// What was typed into the window and left unread when its client ended.
+        let unreadAtEnd = Locked(-1)
         /// A client thread is using the far side and closes it when it is done.
         private let clientRunning = Locked(false)
 
@@ -112,8 +114,11 @@ final class LocalTerminalTests: XCTestCase {
             Thread { [weak self] in
                 let outcome = LocalTerminalClient.run(.init(socketPath: socket, mode: mode, session: session, input: far, output: far,
                                                             environment: environment, directory: directory, coloursTimeout: coloursTimeout))
+                var waiting: Int32 = 0
+                _ = ioctl(far, 0x4004_667F, &waiting)   // FIONREAD, a macro Swift does not import
                 Darwin.close(far)
                 guard let self else { return }
+                self.unreadAtEnd.set(Int(waiting))
                 self.lock.lock(); self.result = outcome; self.lock.unlock()
             }.start()
         }
@@ -168,12 +173,39 @@ final class LocalTerminalTests: XCTestCase {
         let mac = window()
         mac.coloursAnswer.set(Self.coloursAnswer)
         mac.run(socketPath, .hook, coloursTimeout: 2)
-        wait("started") { self.running.count == 1 }
-        XCTAssertEqual(running.first?.theme, ShellTheme(foreground: "#e6e6e6", background: "#212734"))
+        wait("the session has the window's colours") { self.running.first?.theme == ShellTheme(foreground: "#e6e6e6", background: "#212734") }
         // The answer was read by the tool: none of it reaches the shell as typing.
         mac.type("echo clean-$((7+7))\r")
         wait("the shell works") { mac.text.contains("clean-14") }
         XCTAssertFalse(mac.text.contains("rgb:"), mac.text)
+    }
+
+    /// A terminal that opens a window to run a command types it at once,
+    /// before any shell reads: it must reach the session's shell, not be
+    /// taken for the terminal's answer about its colours.
+    func testWhatWasTypedBeforeTheSessionStartedStillReachesItsShell() {
+        let mac = window()
+        mac.coloursAnswer.set(Self.coloursAnswer)
+        mac.type("echo ahead-$((2+3))\r")
+        mac.run(socketPath, .hook, coloursTimeout: 2)
+        wait("the typed-ahead command ran in the session") { mac.text.contains("ahead-5") }
+        wait("and the colours were still read") { self.running.first?.theme != nil }
+        XCTAssertFalse(mac.text.contains("rgb:"), mac.text)
+    }
+
+    /// The window "Open in Terminal" opens: its own shell is refused a
+    /// session, and the command typed into it must still be there to run.
+    func testAWindowRefusedASessionKeepsWhatWasTypedIntoIt() {
+        sharing.set(false)
+        let mac = window()
+        mac.coloursAnswer.set(Self.coloursAnswer)
+        let typed = "/path/to/Open.command ; exit;\n"
+        mac.type(typed)
+        mac.run(socketPath, .hook, coloursTimeout: 2)
+        wait("refused") { mac.outcome == .unavailable(LocalTerminalWire.Refused.notSharing) }
+        XCTAssertFalse(mac.text.contains("\u{1B}]11;?"), "the terminal was asked nothing")
+        wait("the client ended") { mac.unreadAtEnd.get() >= 0 }
+        XCTAssertEqual(mac.unreadAtEnd.get(), typed.utf8.count, "nothing typed was read")
     }
 
     func testAWindowThatDoesNotSayItsColoursStillStartsAfterAShortWait() {

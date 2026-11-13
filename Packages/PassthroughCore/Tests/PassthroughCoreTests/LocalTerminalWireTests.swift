@@ -103,6 +103,19 @@ final class LocalTerminalWireTests: XCTestCase {
         XCTAssertNil(TerminalColors.parse(Data("\u{1B}]11;notacolour\u{07}\u{1B}]4;99;rgb:0/0/0\u{07}\u{1B}[?1c".utf8)))
     }
 
+    func testKeysTypedWhileTheTerminalAnswersAreKeptApartAndInOrder() {
+        let read = Data("ls\r".utf8) + Self.terminalAnswer.prefix(40) + Data("\u{1B}[A".utf8) + Self.terminalAnswer.dropFirst(40) + Data("q".utf8)
+        // The first 40 bytes end inside a reply: joined back together it is whole.
+        let whole = Data("ls\r".utf8) + Self.terminalAnswer + Data("\u{1B}[Aq".utf8)
+        let parts = TerminalColors.split(whole)
+        XCTAssertEqual(parts.replies, Self.terminalAnswer)
+        XCTAssertEqual(parts.typed, Data("ls\r\u{1B}[Aq".utf8), "an arrow key is typing, not an answer")
+        XCTAssertNotNil(TerminalColors.parse(parts.replies))
+        // A key landing in the middle of a reply spoils that reply only, and is never lost... 
+        XCTAssertTrue(TerminalColors.split(read).typed.starts(with: Data("ls\r".utf8)))
+        XCTAssertEqual(TerminalColors.split(Data("/a/b.command ; exit;\n".utf8)).typed, Data("/a/b.command ; exit;\n".utf8))
+    }
+
     func testOnlyWellFormedColoursAreKept() {
         let theme = ShellTheme(foreground: "#FFAA00", background: "red; rm -rf", palette: Array(repeating: "#000000", count: 15))
         XCTAssertEqual(theme.sanitized, ShellTheme(foreground: "#ffaa00"))

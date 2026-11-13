@@ -74,7 +74,7 @@ public final class ShellSessionManager: @unchecked Sendable {
         let openedBy: String?
         let origin: ShellSessionOrigin
         /// The colours of the Mac terminal window it was started in.
-        let theme: ShellTheme?
+        var theme: ShellTheme?
         let process: PTYProcess
         let writer: TranscriptWriter
         var scrollback = ScrollbackBuffer(capacity: RemoteShell.scrollbackBytes)
@@ -378,6 +378,18 @@ public final class ShellSessionManager: @unchecked Sendable {
                 guard session.active == nil || session.active == ObjectIdentifier(client) else { return }
             }
             resize(session, to: size)
+        }
+    }
+
+    /// The colours of the terminal window on the Mac a session was started
+    /// in, once the window has told them: phones hear of it in the list.
+    public func setTheme(_ id: String, _ theme: ShellTheme) {
+        queue.async { [self] in
+            guard let session = table[id], session.running, let theme = theme.sanitized, theme != session.theme else { return }
+            session.theme = theme
+            fallbackTheme = theme
+            notifyChange()
+            notifyViewers()
         }
     }
 

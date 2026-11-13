@@ -323,10 +323,9 @@ those, apart from the 8 sessions phones may open. Closing its window ends it.
 The window talks to the app over a Unix socket on the Mac, never the network
 (`LocalTerminalWire`): frames of one byte of kind, a big-endian UInt32 length
 and a payload. The window sends `hello` (1, JSON: `mode` `hook`, `new`,
-`attach` or `list`, `session`?, `cols`, `rows`, `directory`?, `environment`?,
-`theme`?),
-then `input` (2, raw bytes) and `resize` (3, two big-endian UInt16: columns,
-rows). The app answers `started` (16, JSON `session`), `refused` (20, JSON
+`attach` or `list`, `session`?, `cols`, `rows`, `directory`?, `environment`?),
+then `input` (2, raw bytes), `resize` (3, two big-endian UInt16: columns,
+rows) and, for a session it started, `theme` (4, JSON: its colours). The app answers `started` (16, JSON `session`), `refused` (20, JSON
 `reason`) or `sessions` (21, the JSON list), then sends `output` (17, raw
 bytes), `replayed` (18, after the scrollback of a session that was already
 running) and `ended` (19, JSON `exitStatus`). Only connections from the app's

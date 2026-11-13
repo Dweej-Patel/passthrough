@@ -15,7 +15,8 @@ public enum LocalTerminalWire {
 
     public enum Kind: UInt8, Sendable {
         // Terminal to app.
-        case hello = 1, input = 2, resize = 3
+        /// `theme` (JSON `ShellTheme`): the window's colours, for the session it started.
+        case hello = 1, input = 2, resize = 3, theme = 4
         // App to terminal.
         case started = 16, output = 17, replayed = 18, ended = 19, refused = 20, sessions = 21
     }
@@ -49,13 +50,11 @@ public enum LocalTerminalWire {
         /// starts as the terminal's own would have.
         public var directory: String?
         public var environment: [String: String]?
-        /// The window's colours, when its terminal told them.
-        public var theme: ShellTheme?
 
         public init(mode: Mode, session: String? = nil, cols: Int, rows: Int, directory: String? = nil,
-                    environment: [String: String]? = nil, theme: ShellTheme? = nil) {
+                    environment: [String: String]? = nil) {
             self.mode = mode; self.session = session; self.cols = cols; self.rows = rows
-            self.directory = directory; self.environment = environment; self.theme = theme
+            self.directory = directory; self.environment = environment
         }
     }
 

@@ -65,25 +65,11 @@ public enum LocalTerminalClient {
         guard let socket = connect(options.socketPath) else { return .unavailable(notRunning) }
         defer { close(socket) }
 
-        // Raw from here: every key goes to the session's own terminal, which
-        // does the echo and the signals; and the terminal's answer about its
-        // colours is not a line, and must not be echoed.
-        var saved = termios()
-        let isTerminal = options.mode != .list && tcgetattr(options.input, &saved) == 0
-        if isTerminal {
-            var raw = saved
-            cfmakeraw(&raw)
-            tcsetattr(options.input, TCSANOW, &raw)
-        }
-        defer { if isTerminal { tcsetattr(options.input, TCSANOW, &saved) } }
-
         let starts = options.mode == .hook || options.mode == .new
-        // Only now that the app is there: a terminal with no Passthrough is asked nothing.
-        let theme = starts && isTerminal ? TerminalColors.ask(input: options.input, output: options.output, timeout: options.coloursTimeout) : nil
         var size = windowSize(options.output)
         let hello = LocalTerminalWire.Hello(
             mode: options.mode, session: options.session, cols: size.cols, rows: size.rows,
-            directory: starts ? options.directory : nil, environment: starts ? options.environment : nil, theme: theme)
+            directory: starts ? options.directory : nil, environment: starts ? options.environment : nil)
         // The hello and its answer share one deadline: an app that accepts
         // and then neither reads nor answers must not hold the terminal.
         let deadline = Date().addingTimeInterval(options.answerTimeout)
@@ -112,6 +98,25 @@ public enum LocalTerminalClient {
                     continue
                 }
             }
+        }
+
+        // Nothing is read from the terminal until here: a window that is not
+        // to be a session keeps every key typed into it, for its own shell.
+        // Raw: every key goes to the session's own terminal, which does the echo and the signals.
+        var saved = termios()
+        let isTerminal = tcgetattr(options.input, &saved) == 0
+        if isTerminal {
+            var raw = saved
+            cfmakeraw(&raw)
+            tcsetattr(options.input, TCSANOW, &raw)
+        }
+        defer { if isTerminal { tcsetattr(options.input, TCSANOW, &saved) } }
+
+        // The window's colours, for the session it started; what was typed meanwhile goes to the shell.
+        if starts, isTerminal {
+            let asked = TerminalColors.ask(input: options.input, output: options.output, timeout: options.coloursTimeout)
+            if let theme = asked.theme, !writeAll(socket, LocalTerminalWire.encode(.theme, json: theme)) { return lost(options) }
+            if !asked.typed.isEmpty, !writeAll(socket, LocalTerminalWire.encode(.input, asked.typed)) { return lost(options) }
         }
 
         let resized = ResizeWatch()
