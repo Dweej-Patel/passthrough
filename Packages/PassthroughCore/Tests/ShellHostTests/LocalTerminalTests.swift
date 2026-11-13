@@ -50,6 +50,8 @@ final class LocalTerminalTests: XCTestCase {
         private var data = Data()
         private var result: LocalTerminalClient.Outcome?
         private let stop = Locked(false)
+        /// A client thread is using the far side and closes it when it is done.
+        private let clientRunning = Locked(false)
 
         init(cols: UInt16 = 80, rows: UInt16 = 24) {
             var near: Int32 = -1, far: Int32 = -1
@@ -59,7 +61,7 @@ final class LocalTerminalTests: XCTestCase {
             self.far = far
             // The reader owns both ends and closes them itself once told to:
             // closing a pseudo-terminal another thread is reading can hang.
-            let stop = stop
+            let stop = stop, clientRunning = clientRunning
             let thread = Thread { [weak self] in
                 var buffer = [UInt8](repeating: 0, count: 65_536)
                 while !stop.get() {
@@ -69,8 +71,12 @@ final class LocalTerminalTests: XCTestCase {
                     guard n > 0, let self else { break }
                     self.lock.lock(); self.data.append(contentsOf: buffer[0..<n]); self.lock.unlock()
                 }
+                // As a window closing: the near side goes, and the client finds
+                // its terminal hung up. The far side is the client's to the end
+                // (closing a descriptor another thread waits on wakes it on some
+                // systems and not on others).
                 Darwin.close(near)
-                Darwin.close(far)
+                if !clientRunning.get() { Darwin.close(far) }
             }
             thread.start()
         }
@@ -96,9 +102,11 @@ final class LocalTerminalTests: XCTestCase {
                  environment: [String: String] = ["PATH": "/usr/bin:/bin", "TERM": "xterm-256color", "PS1": "$ "],
                  directory: String = "/tmp") {
             let far = far
+            clientRunning.set(true)
             Thread { [weak self] in
                 let outcome = LocalTerminalClient.run(.init(socketPath: socket, mode: mode, session: session, input: far, output: far,
                                                             environment: environment, directory: directory))
+                Darwin.close(far)
                 guard let self else { return }
                 self.lock.lock(); self.result = outcome; self.lock.unlock()
             }.start()
