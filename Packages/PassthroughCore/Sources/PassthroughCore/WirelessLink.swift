@@ -73,6 +73,9 @@ public enum WirelessLink {
         (stream as? ConnectionStream)?.connection.currentPath?.availableInterfaces.first?.name
     }
 
+    /// An iPhone's Personal Hotspot: its router and DNS server for the devices on it.
+    public static let hotspotGateway = "172.20.10.1"
+
     public static func isHotspotAddress(_ endpoint: NWEndpoint?) -> Bool {
         guard case .hostPort(.ipv4(let address), _)? = endpoint else { return false }
         let b = [UInt8](address.rawValue)

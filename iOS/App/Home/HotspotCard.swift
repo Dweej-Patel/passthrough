@@ -33,6 +33,7 @@ struct HotspotRow: View {
         switch hotspot.phase {
         case .unpaired: "Not paired with an iPhone"
         case .off: hotspot.onPhoneHotspot ? "Off \u{2014} on the hotspot like any device" : "Off"
+        case .standby: "On \u{2014} starts when this iPad joins \(phone)'s hotspot"
         case .starting: "Turning on\u{2026}"
         case .online: "On \u{2014} through \(phone), over its hotspot"
         case .waiting: "On \u{2014} waiting for \(phone)"
@@ -59,7 +60,7 @@ struct HotspotRow: View {
         case .unpaired:
             return .init("Pair with your iPhone to use its internet over its hotspot without spending hotspot data.",
                          fix: ("Pair with iPhone", pair))
-        case .off, .starting, .online:
+        case .off, .standby, .starting, .online:
             return nil
         case .waiting:
             let what = hotspot.onPhoneHotspot

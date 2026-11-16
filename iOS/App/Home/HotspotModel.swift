@@ -13,6 +13,9 @@ final class HotspotModel: ObservableObject {
         /// Not paired with an iPhone yet.
         case unpaired
         case off
+        /// On, but this iPad isn't on an iPhone's hotspot: it uses its network
+        /// as usual, and the tunnel starts by itself once it joins the hotspot.
+        case standby
         case starting
         /// On and linked: traffic goes through the iPhone.
         case online
@@ -32,6 +35,8 @@ final class HotspotModel: ObservableObject {
     /// On the iPhone's Personal Hotspot (172.20.10.0/28) right now.
     @Published private(set) var onPhoneHotspot = false
     @Published private(set) var startError: String?
+    /// The switch is on: iOS starts the tunnel whenever this iPad is on an iPhone's hotspot.
+    @Published private(set) var armed = false
 
     let store = UpstreamPhoneStore.shared()
     private let controller = TunnelController()
@@ -56,7 +61,7 @@ final class HotspotModel: ObservableObject {
         if let startError { return .failed(startError) }
         guard upstream != nil else { return .unpaired }
         switch tunnel {
-        case .invalid, .disconnected: return .off
+        case .invalid, .disconnected: return armed ? .standby : .off
         case .connecting, .disconnecting: return .starting
         case .connected, .reasserting:
             switch status?.phase {
@@ -76,11 +81,13 @@ final class HotspotModel: ObservableObject {
         if !loaded {
             loaded = true
             try? await controller.load()
+            await controller.updateClientRules()
             ticker = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
                 Task { @MainActor in await self?.tick() }
             }
         }
         tunnel = controller.status
+        armed = controller.onDemandEnabled
         await tick()
     }
 
@@ -92,12 +99,15 @@ final class HotspotModel: ObservableObject {
             if on {
                 do {
                     try await controller.configureClient(name: ThisDevice.displayName)
-                    try controller.start()
+                    armed = true
+                    // Off the hotspot, iOS starts it once this iPad joins one.
+                    if HotspotModel.onHotspotNetwork() { try controller.start() }
                 } catch {
                     startError = error.localizedDescription
                 }
             } else {
                 await controller.stop()
+                armed = false
             }
         }
     }

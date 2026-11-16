@@ -52,7 +52,10 @@ final class TunnelController {
     /// An iPad's "Internet through iPhone": the extension as the iPhone's
     /// client. It takes every route, local ones and push included, so with the
     /// link down nothing leaves over the hotspot (the guard). On demand, so iOS
-    /// brings it back after it's killed or the iPad restarts.
+    /// brings it back after it's killed or the iPad restarts, but only on an
+    /// iPhone's Personal Hotspot: on any other network the iPad uses that
+    /// network as usual (the iPhone only reaches it over the hotspot, so
+    /// holding the routes there would only cut the iPad off).
     func configureClient(name: String) async throws {
         if manager == nil { try await load() }
         let manager = self.manager ?? NETunnelProviderManager()
@@ -68,11 +71,35 @@ final class TunnelController {
         manager.localizedDescription = "Passthrough"
         manager.isEnabled = true
         manager.isOnDemandEnabled = true
-        manager.onDemandRules = [NEOnDemandRuleConnect()]
+        manager.onDemandRules = Self.hotspotOnlyRules
         try await manager.saveToPreferences()
         try await manager.loadFromPreferences()
         self.manager = manager
         observe()
+    }
+
+    /// Connect on an iPhone's hotspot, which hands out 172.20.10.1 as the DNS
+    /// server; disconnect anywhere else. The tunnel's own DNS address is in the
+    /// match too, in case iOS reads the DNS server with the tunnel up: the
+    /// rules must never take down a tunnel that's on the hotspot.
+    static var hotspotOnlyRules: [NEOnDemandRule] {
+        let hotspot = NEOnDemandRuleConnect()
+        hotspot.interfaceTypeMatch = .wiFi
+        hotspot.dnsServerAddressMatch = [WirelessLink.hotspotGateway, HotspotTunnel.dnsAddress]
+        return [hotspot, NEOnDemandRuleDisconnect()]
+    }
+
+    /// Whether iOS starts the tunnel by itself (the switch is on).
+    var onDemandEnabled: Bool { manager?.isOnDemandEnabled ?? false }
+
+    /// An iPad configured before the tunnel was limited to the hotspot: give it those rules.
+    func updateClientRules() async {
+        guard let manager, manager.isOnDemandEnabled,
+              (manager.protocolConfiguration as? NETunnelProviderProtocol)?.providerConfiguration?[HotspotTunnel.roleKey] as? String == HotspotTunnel.clientRole,
+              manager.onDemandRules?.count != Self.hotspotOnlyRules.count else { return }
+        manager.onDemandRules = Self.hotspotOnlyRules
+        try? await manager.saveToPreferences()
+        try? await manager.loadFromPreferences()
     }
 
     /// Sends the extension a message and waits (2 s at most) for its answer.
