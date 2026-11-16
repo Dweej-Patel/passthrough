@@ -148,6 +148,9 @@ public final class ShellSessionManager: @unchecked Sendable {
     private static let echoWindow = 2048
     private static let typedLimit = 512
     private static let closeTimeout: TimeInterval = 5
+    /// How long `redraw` leaves the terminal shorter: long enough for the
+    /// program to read the size while it is different.
+    static let redrawPause: TimeInterval = 0.25
 
     private let transcripts: TranscriptStore
     private let command: () -> (String, [String])
@@ -296,11 +299,21 @@ public final class ShellSessionManager: @unchecked Sendable {
             // size alone until someone types in the window: resizing redraws
             // the prompt, which can wipe the lines the window is about to be shown.
             let joins = shared && session.active != nil && session.active != ObjectIdentifier(client)
+            let sizeBefore = session.size
             if session.running, !joins {
                 session.active = ObjectIdentifier(client)
                 resize(session, to: size)
             }
             let replay = session.scrollback.replay
+            // A full-screen program replayed from partway: what it drew before
+            // the cut isn't in the replay, so have it draw its screen again,
+            // unless taking this client's size already does. Also for a Mac
+            // window joining: on the alternate screen there is no prompt to wipe.
+            let resized = !joins && size != sizeBefore
+            if session.running, !resized,
+               session.scrollback.isPartial, session.scrollback.modes.isAlternateScreen {
+                redraw(session)
+            }
             var offset = 0
             while offset < replay.count {
                 let chunk = Data(replay[(replay.startIndex + offset)..<(replay.startIndex + min(offset + RemoteShell.outputChunk, replay.count))])
@@ -463,6 +476,21 @@ public final class ShellSessionManager: @unchecked Sendable {
         session.size = size
         session.process.resize(cols: size.cols, rows: size.rows)
         session.writer.resize(cols: Int(size.cols), rows: Int(size.rows), at: Date())
+    }
+
+    /// Has the program draw its whole screen again. Programs do that when
+    /// the size changes, and only then (a SIGWINCH alone, at the same size,
+    /// is ignored), so the terminal is one row shorter for a moment.
+    private func redraw(_ session: Session) {
+        let size = session.size
+        guard size.rows > 1 else { return }
+        let shorter = Size(cols: size.cols, rows: size.rows - 1)
+        resize(session, to: shorter)
+        queue.asyncAfter(deadline: .now() + Self.redrawPause) { [weak session, self] in
+            // Unless someone's terminal changed size meanwhile: that size stands.
+            guard let session, session.running, session.size == shorter else { return }
+            resize(session, to: size)
+        }
     }
 
     /// The client the session followed is gone: it follows whoever is left
