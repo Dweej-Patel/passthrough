@@ -40,9 +40,11 @@ final class HotspotModel: ObservableObject {
 
     let store = UpstreamPhoneStore.shared()
     private let controller = TunnelController()
-    private let wifi = WiFiPathReader()
+    private var wifi: WiFiPathReader?
     private var ticker: Timer?
     private var loaded = false
+    /// The learned hotspots last put in the on-demand rule.
+    private var appliedHotspots: [String]?
 
     init() {
         controller.onStatusChange = { [weak self] status in
@@ -52,8 +54,8 @@ final class HotspotModel: ObservableObject {
                 if status == .disconnected || status == .invalid { self?.status = nil }
             }
         }
-        wifi.onChange = { _ in
-            Task { @MainActor [weak self] in self?.refreshOnHotspot() }
+        wifi = WiFiPathReader { [weak self] _ in
+            Task { @MainActor in self?.refreshOnHotspot() }
         }
     }
 
@@ -100,20 +102,16 @@ final class HotspotModel: ObservableObject {
             if on {
                 do {
                     // Read before the tunnel is up: then the DNS servers are the network's.
-                    let onHotspot = isOnHotspot()
-                    ptLog(.info, "hotspot: switched on; on the hotspot: \(onHotspot) (\(networkSummary))")
-                    // Turned on here, on the hotspot: remember this network now, so
-                    // the on-demand rule knows it from the start (an IPv6-only
-                    // hotspot names no 172.20.10.1).
-                    if onHotspot { learnThisNetwork() }
+                    let sign = hotspotSign()
+                    ptLog(.info, "hotspot: switched on; hotspot sign: \(sign) (\(networkSummary))")
                     try await controller.configureClient(name: ThisDevice.displayName)
+                    appliedHotspots = HotspotTunnel.knownHotspotDNS(AppModel.groupDefaults)
                     armed = true
-                    // Off the hotspot, iOS starts it once this iPad joins one.
-                    // Before the first link an IPv6-only hotspot may not be told
-                    // from other Wi-Fi, so try anyway (anywhere else the tunnel
-                    // steps aside within seconds).
-                    let unlearned = HotspotTunnel.knownHotspotDNS(AppModel.groupDefaults).isEmpty
-                    if onHotspot || (unlearned && wifi.facts?.up == true) { startNow(because: "turned on") }
+                    // A known hotspot, or one iOS counts as costly: start now (a
+                    // hotspot not yet known gets a minute for the iPhone to dial
+                    // in, which is how it becomes known). Anywhere else iOS starts
+                    // it once this iPad joins a known one.
+                    if sign != .none { startNow(because: "turned on") }
                 } catch {
                     startError = error.localizedDescription
                 }
@@ -124,29 +122,33 @@ final class HotspotModel: ObservableObject {
         }
     }
 
-    /// Stores a new iPhone (paired here, or introduced by a Mac) and has a
-    /// running tunnel use it.
-    /// A new iPhone, already saved to `store` (by the pairing listener).
+    /// A new iPhone, already saved to `store` (by the pairing listener). The
+    /// hotspots learned belonged to the one before (or were the same iPhone's,
+    /// and are learned again on its first link).
     func adopted(_ phone: UpstreamPhone) {
+        if upstream?.phoneID != phone.phoneID { HotspotTunnel.forgetHotspots(in: AppModel.groupDefaults) }
         upstream = phone
         notify_post(PairingRegistry.changedNotification)
     }
 
-    /// Forgets the iPhone: the switch goes off, and the iPad uses the hotspot like any device.
+    /// Forgets the iPhone: the switch goes off, and the iPad uses the hotspot
+    /// like any device. Its hotspots are forgotten too.
     func forget() {
         setOn(false)
         store.forget()
+        HotspotTunnel.forgetHotspots(in: AppModel.groupDefaults)
         upstream = nil
         notify_post(PairingRegistry.changedNotification)
     }
 
-    /// When the switch is on and this iPad is on the hotspot, but iOS didn't
-    /// start the tunnel: start it (it would otherwise use hotspot data).
+    /// When the switch is on and this iPad is on a known hotspot, but iOS
+    /// didn't start the tunnel: start it (it would otherwise use hotspot data).
+    /// Not on a hotspot only iOS counts as costly: that could be anyone's.
     private var standbyOnHotspotSince: Date?
     private var lastNudge: Date?
 
     private func nudgeIfIOSDidNotStart() async {
-        guard phase == .standby, onPhoneHotspot else { standbyOnHotspotSince = nil; return }
+        guard phase == .standby, hotspotSign() == .known else { standbyOnHotspotSince = nil; return }
         let since = standbyOnHotspotSince ?? Date()
         standbyOnHotspotSince = since
         guard Date().timeIntervalSince(since) >= 5, Date().timeIntervalSince(lastNudge ?? .distantPast) >= 30 else { return }
@@ -157,8 +159,6 @@ final class HotspotModel: ObservableObject {
         tunnel = controller.status
         guard phase == .standby else { return }
         ptLog(.warning, "hotspot: on the iPhone's hotspot, but iOS didn't start Internet through iPhone; starting it (\(networkSummary))")
-        learnThisNetwork()
-        await controller.updateClientRules()
         startNow(because: "nudge")
     }
 
@@ -173,36 +173,39 @@ final class HotspotModel: ObservableObject {
         }
     }
 
-    /// The network's DNS servers and routers, as this hotspot's (tunnel down).
-    private func learnThisNetwork() {
-        let servers = DNSRedirect.systemServers() + (wifi.facts?.gateways ?? [])
-        if HotspotTunnel.rememberHotspotDNS(servers, in: AppModel.groupDefaults) {
-            ptLog(.info, "hotspot: learned this hotspot (\(servers.joined(separator: ", ")))")
-        }
-    }
+    private var ticks = 0
 
     private func tick() async {
-        refreshOnHotspot()
+        ticks += 1
+        // The Wi-Fi reader reports changes; this catches what it doesn't (a new
+        // DNS server, a hotspot learned by the extension) every few seconds.
+        if ticks % 5 == 0 { refreshOnHotspot() }
         await nudgeIfIOSDidNotStart()
         guard tunnel == .connected || tunnel == .reasserting else { return }
-        // The extension learns the hotspot's DNS servers once linked: put them in the on-demand rule.
-        if status?.phase == .online { await controller.updateClientRules() }
+        // The extension learns the hotspot once linked: put it in the on-demand rule.
+        let learned = HotspotTunnel.knownHotspotDNS(AppModel.groupDefaults)
+        if learned != appliedHotspots {
+            appliedHotspots = learned
+            await controller.updateClientRules()
+        }
         if let data = await controller.message(HotspotTunnel.statusMessage),
            let status = try? JSONDecoder().decode(HotspotStatus.self, from: data) {
             self.status = status
         }
     }
 
-    /// Whether this iPad's Wi-Fi address is on an iPhone's Personal Hotspot.
     /// The resolver's DNS servers are the network's only while the tunnel is
     /// down; with it up they're the tunnel's, and only the other signs count.
-    private func isOnHotspot() -> Bool {
+    private func hotspotSign() -> WirelessLink.HotspotSign {
         let tunnelDown = tunnel == .disconnected || tunnel == .invalid
-        return WirelessLink.onPhoneHotspot(wifi: wifi.facts, dnsServers: tunnelDown ? DNSRedirect.systemServers() : [],
-                                           knownHotspotDNS: HotspotTunnel.knownHotspotDNS(AppModel.groupDefaults))
+        return WirelessLink.hotspotSign(wifi: wifi?.facts, dnsServers: tunnelDown ? DNSRedirect.systemServers() : [],
+                                        knownHotspotDNS: HotspotTunnel.knownHotspotDNS(AppModel.groupDefaults))
     }
 
-    private func refreshOnHotspot() { onPhoneHotspot = isOnHotspot() }
+    private func refreshOnHotspot() {
+        let on = hotspotSign() != .none
+        if on != onPhoneHotspot { onPhoneHotspot = on }
+    }
 
-    private var networkSummary: String { WirelessLink.networkSummary(wifi: wifi.facts, dnsServers: DNSRedirect.systemServers()) }
+    private var networkSummary: String { WirelessLink.networkSummary(wifi: wifi?.facts, dnsServers: DNSRedirect.systemServers()) }
 }

@@ -126,12 +126,15 @@ public struct PTPill: View {
 public struct PTStatusDot: View {
     let color: Color
     let live: Bool
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     public init(color: Color, live: Bool) { self.color = color; self.live = live }
     public var body: some View {
         // Clock-driven (see `StatusRing`): a repeating animation started on
-        // appear can carry the dot's position with it.
-        TimelineView(.animation(minimumInterval: 1.0 / 30, paused: !live)) { context in
-            let wave = live ? PTPulse.wave(context.date, period: 1.4) : 0
+        // appear can carry the dot's position with it. 20 fps; still when not
+        // live or under Reduce Motion.
+        let moving = live && !reduceMotion
+        TimelineView(.animation(minimumInterval: 1.0 / 20, paused: !moving)) { context in
+            let wave = moving ? PTPulse.wave(context.date, period: 1.4) : 0
             ZStack {
                 Circle().fill(color.opacity(0.35)).frame(width: 16, height: 16)
                     .scaleEffect(1 + 0.5 * wave).opacity(1 - wave)

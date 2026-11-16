@@ -117,21 +117,48 @@ public enum HotspotTunnel {
     /// on-demand rule (and the hotspot check) knows it next time.
     static let knownDNSKey = "hotspot.knownDNS"
 
+    /// Read clean: entries saved by earlier builds may hold duplicates or
+    /// addresses every network of a kind shares (192.0.0.1), which say nothing.
     public static func knownHotspotDNS(_ defaults: UserDefaults) -> [String] {
-        defaults.stringArray(forKey: knownDNSKey) ?? []
+        var known: [String] = []
+        for server in defaults.stringArray(forKey: knownDNSKey) ?? [] where
+            !WirelessLink.isGenericAddress(server) && server != dnsAddress && !known.contains(server) {
+            known.append(server)
+        }
+        return known
     }
 
-    /// Adds `servers` (as the network gave them, before the tunnel's settings
-    /// applied) to what's known. Keeps the newest few. True if anything changed.
+    /// Adds `servers` (the network's DNS servers and routers, as a link
+    /// through the iPhone found them) to what's known, newest first, a few at
+    /// most. Skips the tunnel's own address and addresses every network of a
+    /// kind shares. True if anything new was added.
     @discardableResult
     public static func rememberHotspotDNS(_ servers: [String], in defaults: UserDefaults) -> Bool {
-        let fresh = servers.map(WirelessLink.bareAddress).filter { server in
-            !server.isEmpty && server != dnsAddress && server != "127.0.0.1" && server != "::1"
-        }
         let known = knownHotspotDNS(defaults)
-        let merged = Array((fresh + known.filter { !fresh.contains($0) }).prefix(6))
-        guard merged != known else { return false }
-        defaults.set(merged, forKey: knownDNSKey)
+        var fresh: [String] = []
+        for server in servers.map(WirelessLink.bareAddress) where !server.isEmpty && server != dnsAddress
+            && server != "127.0.0.1" && server != "::1" && !WirelessLink.isGenericAddress(server)
+            && !known.contains(server) && !fresh.contains(server) {
+            fresh.append(server)
+        }
+        guard !fresh.isEmpty else { return false }
+        defaults.set(Array((fresh + known).prefix(6)), forKey: knownDNSKey)
         return true
+    }
+
+    /// Forgets every hotspot learned (the iPhone was forgotten or replaced).
+    public static func forgetHotspots(in defaults: UserDefaults) {
+        defaults.removeObject(forKey: knownDNSKey)
+    }
+
+    /// The on-demand rule's DNS matches: each known server, and a link-local
+    /// one also with its scope (iOS may report it either way).
+    public static func onDemandDNSMatches(_ defaults: UserDefaults) -> [String] {
+        var matches = [WirelessLink.hotspotGateway]
+        for server in knownHotspotDNS(defaults) where !matches.contains(server) {
+            matches.append(server)
+            if server.lowercased().hasPrefix("fe80:") { matches.append(server + "%en0") }
+        }
+        return matches
     }
 }

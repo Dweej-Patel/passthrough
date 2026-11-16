@@ -81,16 +81,16 @@ final class TunnelController {
     /// Connect on an iPhone's hotspot, known by its DNS server: 172.20.10.1 on
     /// an IPv4 hotspot, or the ones this iPad learned from the iPhone's hotspot
     /// once a link worked (an IPv6-only hotspot names the iPhone's link-local
-    /// address). Anywhere else iOS leaves it alone (Ignore, not Disconnect: a
-    /// Disconnect rule also blocks the app's own starts, which an unlearned
-    /// IPv6-only hotspot needs); the extension itself steps aside off the
-    /// hotspot (`HotspotPresenceWatch`). The tunnel's own DNS address is in
-    /// the match too, in case iOS reads the DNS server with the tunnel up.
+    /// address; listed with and without its scope). Anywhere else iOS leaves
+    /// it alone (Ignore, not Disconnect: a Disconnect rule also blocks the
+    /// app's own starts, which an unlearned IPv6-only hotspot needs); the
+    /// extension itself steps aside off the hotspot (`HotspotPresenceWatch`).
+    /// The tunnel's own DNS isn't listed: with Ignore nothing takes a running
+    /// tunnel down, and matching it would start one the extension refuses.
     static var hotspotOnlyRules: [NEOnDemandRule] {
         let hotspot = NEOnDemandRuleConnect()
         hotspot.interfaceTypeMatch = .wiFi
-        hotspot.dnsServerAddressMatch = [WirelessLink.hotspotGateway, HotspotTunnel.dnsAddress]
-            + HotspotTunnel.knownHotspotDNS(AppModel.groupDefaults)
+        hotspot.dnsServerAddressMatch = HotspotTunnel.onDemandDNSMatches(AppModel.groupDefaults)
         return [hotspot, NEOnDemandRuleIgnore()]
     }
 

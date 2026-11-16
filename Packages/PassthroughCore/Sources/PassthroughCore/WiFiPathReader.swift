@@ -10,10 +10,12 @@ public final class WiFiPathReader: @unchecked Sendable {
     private let lock = NSLock()
     private var latest: WirelessLink.WiFiFacts?
     private var waiting: [@Sendable (WirelessLink.WiFiFacts?) -> Void] = []
-    /// Each change, on the reader's queue.
-    public var onChange: (@Sendable (WirelessLink.WiFiFacts) -> Void)?
+    /// Each change, on the reader's queue. Given at init, so it's in place
+    /// before the first report.
+    private let onChange: (@Sendable (WirelessLink.WiFiFacts) -> Void)?
 
-    public init() {
+    public init(onChange: (@Sendable (WirelessLink.WiFiFacts) -> Void)? = nil) {
+        self.onChange = onChange
         monitor.pathUpdateHandler = { [weak self] path in
             guard let self else { return }
             let facts = WirelessLink.WiFiFacts(path: path)

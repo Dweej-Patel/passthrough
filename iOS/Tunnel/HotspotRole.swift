@@ -158,9 +158,8 @@ final class HotspotRole {
     }
 }
 
-/// Reports, once, that this iPad has left the iPhone's hotspot: not linked
-/// to the iPhone, and Wi-Fi down or on a network with none of the hotspot's signs
-/// (`WirelessLink.leftPhoneHotspot`), two checks in a row so a moment between
+/// Reports, once, that this iPad should step aside (`WirelessLink.shouldStepAside`:
+/// not linked, and off any known hotspot), two checks in a row so a moment between
 /// networks doesn't count. Checked on every Wi-Fi change, and every 30
 /// seconds in case a change goes unreported. All state lives on its own queue.
 final class HotspotPresenceWatch: @unchecked Sendable {
@@ -172,6 +171,9 @@ final class HotspotPresenceWatch: @unchecked Sendable {
     private var misses = 0
     private var checking = false
     private var done = false
+    private let started = Date()
+    /// How long the iPhone gets to dial in on a hotspot not yet known (only iOS's "costly").
+    static let grace: TimeInterval = 60
 
     /// `isLinked`: the iPhone is linked right now, which proves the iPad is on its hotspot.
     init(isLinked: @escaping @Sendable () -> Bool, onLeft: @escaping @Sendable () -> Void) {
@@ -181,9 +183,7 @@ final class HotspotPresenceWatch: @unchecked Sendable {
 
     func start() {
         queue.async { [self] in
-            let reader = WiFiPathReader()
-            reader.onChange = { [weak self] _ in self?.queue.async { self?.scheduleCheck(after: 2) } }
-            self.reader = reader
+            self.reader = WiFiPathReader { [weak self] _ in self?.queue.async { self?.scheduleCheck(after: 2) } }
             let timer = DispatchSource.makeTimerSource(queue: queue)
             timer.schedule(deadline: .now() + 30, repeating: 30, leeway: .seconds(5))
             timer.setEventHandler { [weak self] in self?.scheduleCheck(after: 0) }
@@ -206,9 +206,13 @@ final class HotspotPresenceWatch: @unchecked Sendable {
     private func check() {
         checking = false
         guard !done, let wifi = reader?.facts else { return }
-        guard !isLinked() else { misses = 0; return }
         let known = HotspotTunnel.knownHotspotDNS(UserDefaults(suiteName: PassthroughProtocol.appGroup) ?? .standard)
-        guard WirelessLink.leftPhoneHotspot(wifi: wifi, knownHotspotDNS: known) else { misses = 0; return }
+        let graceOver = Date().timeIntervalSince(started) >= Self.grace
+        // (A hotspot not yet known is looked at again by the 30-second timer once the grace is over.)
+        guard WirelessLink.shouldStepAside(wifi: wifi, knownHotspotDNS: known, linked: isLinked(), graceOver: graceOver) else {
+            misses = 0
+            return
+        }
         misses += 1
         guard misses >= 2 else { return scheduleCheck(after: 3) }
         finish()

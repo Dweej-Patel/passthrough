@@ -69,6 +69,19 @@ public enum WirelessLink {
         return carrier(interface: interfaceName(of: stream), onPhoneHotspot: hotspot)
     }
 
+    /// An iPhone's Personal Hotspot interface on the iPhone's side.
+    public static func isHotspotInterface(_ name: String) -> Bool {
+        name.hasPrefix("bridge") || name.hasPrefix("ap")
+    }
+
+    /// The link runs over this iPhone's Personal Hotspot (or loopback, as in
+    /// tests). An iPad is only ever linked this way, so on the iPad a link
+    /// proves the network it's on is the iPhone's hotspot.
+    public static func overHotspot(_ stream: ByteStream) -> Bool {
+        if interfaceName(of: stream)?.hasPrefix("lo") == true { return true }
+        return carrier(of: stream) == "Hotspot"
+    }
+
     public static func interfaceName(of stream: ByteStream) -> String? {
         (stream as? ConnectionStream)?.connection.currentPath?.availableInterfaces.first?.name
     }
@@ -119,30 +132,60 @@ public enum WirelessLink {
         }
     }
 
-    /// Whether this device is on an iPhone's Personal Hotspot, by any sign:
-    /// Wi-Fi that iOS counts as costly; a Wi-Fi address in 172.20.10.0/28
-    /// (an IPv4 hotspot); or a DNS server or router that is the hotspot's
-    /// 172.20.10.1 or one this iPad already learned from the iPhone's hotspot
-    /// (an IPv6-only hotspot names the iPhone's link-local address). Every
-    /// address on an IPv6-only hotspot can look like any other network's,
-    /// hence several signs. `dnsServers`: the resolver's, read while no
-    /// tunnel of this app holds the routes (else pass none).
-    public static func onPhoneHotspot(wifi: WiFiFacts?, dnsServers: [String], knownHotspotDNS: [String],
-                                      addresses: [(interface: String, address: String, isIPv4: Bool)] = wifiAddresses()) -> Bool {
-        if let wifi, wifi.up, wifi.expensive { return true }
-        if hasHotspotIPv4(addresses) { return true }
-        let markers = Set([hotspotGateway] + knownHotspotDNS.map(bareAddress))
-        let seen = dnsServers.map(bareAddress) + (wifi?.gateways ?? [])
-        return seen.contains(where: markers.contains)
+    /// How sure this iPad can be that it's on its iPhone's Personal Hotspot.
+    public enum HotspotSign: Equatable, Sendable {
+        /// A sign that belongs to this hotspot: a router or DNS server learned
+        /// from it (only ever learned from a working link, which the iPhone
+        /// makes over its hotspot alone), or an IPv4 hotspot's 172.20.10.x.
+        case known
+        /// Only that iOS counts the Wi-Fi as costly, as it does any hotspot
+        /// (an Android phone's or a travel router's too).
+        case maybe
+        case none
     }
 
-    /// Positively off the iPhone's hotspot: Wi-Fi is down, or up on a network
-    /// with none of the hotspot's signs. Used by a tunnel that holds the
-    /// routes, so DNS isn't consulted (it would be the tunnel's own).
-    public static func leftPhoneHotspot(wifi: WiFiFacts, knownHotspotDNS: [String],
-                                        addresses: [(interface: String, address: String, isIPv4: Bool)] = wifiAddresses()) -> Bool {
+    /// `dnsServers`: the resolver's, read while no tunnel of this app holds
+    /// the routes (the tunnel's own DNS address is ignored).
+    public static func hotspotSign(wifi: WiFiFacts?, dnsServers: [String], knownHotspotDNS: [String],
+                                   addresses: [(interface: String, address: String, isIPv4: Bool)] = wifiAddresses()) -> HotspotSign {
+        if hasHotspotIPv4(addresses) { return .known }
+        let markers = Set([hotspotGateway] + knownHotspotDNS.map(bareAddress))
+        let seen = dnsServers.map(bareAddress).filter { $0 != HotspotTunnel.dnsAddress } + (wifi?.gateways ?? [])
+        if seen.contains(where: markers.contains) { return .known }
+        if let wifi, wifi.up, wifi.expensive { return .maybe }
+        return .none
+    }
+
+    /// Whether this device may be on an iPhone's hotspot (`known` or `maybe`).
+    public static func onPhoneHotspot(wifi: WiFiFacts?, dnsServers: [String], knownHotspotDNS: [String],
+                                      addresses: [(interface: String, address: String, isIPv4: Bool)] = wifiAddresses()) -> Bool {
+        hotspotSign(wifi: wifi, dnsServers: dnsServers, knownHotspotDNS: knownHotspotDNS, addresses: addresses) != .none
+    }
+
+    /// Whether a tunnel holding every route should step aside. Never while
+    /// the iPhone is linked (proof of its hotspot), nor on a known hotspot
+    /// (with the iPhone away, offline there is on purpose). On a costly
+    /// network not yet known only once `graceOver` (the user turned it on
+    /// there; the iPhone gets time to dial in). Anywhere else, or with Wi-Fi
+    /// down, at once. DNS isn't consulted: with the tunnel up it's the tunnel's.
+    public static func shouldStepAside(wifi: WiFiFacts, knownHotspotDNS: [String], linked: Bool, graceOver: Bool,
+                                       addresses: [(interface: String, address: String, isIPv4: Bool)] = wifiAddresses()) -> Bool {
+        if linked { return false }
         guard wifi.up else { return true }
-        return !onPhoneHotspot(wifi: wifi, dnsServers: [], knownHotspotDNS: knownHotspotDNS, addresses: addresses)
+        switch hotspotSign(wifi: wifi, dnsServers: [], knownHotspotDNS: knownHotspotDNS, addresses: addresses) {
+        case .known: return false
+        case .maybe: return graceOver
+        case .none: return true
+        }
+    }
+
+    /// Addresses that say nothing about which network this is, so they're
+    /// never learned as a hotspot's: an IPv6-only network's CLAT range
+    /// (192.0.0.0/29, the same on every such network) and IPv4 link-local.
+    public static func isGenericAddress(_ address: String) -> Bool {
+        guard let v4 = IPv4Address(bareAddress(address)) else { return false }
+        let b = [UInt8](v4.rawValue)
+        return (b[0] == 192 && b[1] == 0 && b[2] == 0 && b[3] < 8) || (b[0] == 169 && b[1] == 254)
     }
 
     static func hasHotspotIPv4(_ addresses: [(interface: String, address: String, isIPv4: Bool)]) -> Bool {
@@ -291,7 +334,9 @@ public final class WirelessDialer: @unchecked Sendable {
 
     /// Dials `endpoint` directly (tests, and hosts found without Bonjour).
     public func dial(_ endpoint: NWEndpoint, credential: LinkCredential, peerToPeer: Bool = true) {
-        queue.async { [self] in link(for: credential.macTag, peerToPeer: peerToPeer) { credential }.reach(endpoint) }
+        queue.async { [self] in
+            link(for: credential.macTag, peerToPeer: peerToPeer, hotspotOnly: credential.hotspotOnly == true) { credential }.reach(endpoint)
+        }
     }
 
     private func found(_ results: Set<NWBrowser.Result>) {
@@ -308,8 +353,18 @@ public final class WirelessDialer: @unchecked Sendable {
         var inView: Set<String> = []
         for result in results {
             guard case .bonjour(let txt) = result.metadata, let tag = txt["m"], known.contains(tag) else { continue }
+            // An iPad is linked over this iPhone's hotspot only, never a Wi-Fi
+            // network both happen to share: its link is what tells the iPad it's
+            // on the hotspot (and "Internet through iPhone" is a hotspot feature).
+            var interface: NWInterface?
+            if hotspotOnly.contains(tag) {
+                interface = result.interfaces.first { WirelessLink.isHotspotInterface($0.name) }
+                guard interface != nil || result.interfaces.isEmpty else { continue }
+            }
             inView.insert(tag)
-            link(for: tag, peerToPeer: peerToPeer && !hotspotOnly.contains(tag)) { [weak self] in self?.credential(for: tag) }.reach(result.endpoint)
+            link(for: tag, peerToPeer: peerToPeer && !hotspotOnly.contains(tag), hotspotOnly: hotspotOnly.contains(tag)) { [weak self] in
+                self?.credential(for: tag)
+            }.reach(result.endpoint, over: interface)
         }
         for (tag, link) in links where !inView.contains(tag) { link.outOfView() }
     }
@@ -320,9 +375,10 @@ public final class WirelessDialer: @unchecked Sendable {
         credentials().first { $0.macTag == tag }
     }
 
-    private func link(for tag: String, peerToPeer: Bool, credential: @escaping () -> LinkCredential?) -> MacLink {
+    private func link(for tag: String, peerToPeer: Bool, hotspotOnly: Bool = false, credential: @escaping () -> LinkCredential?) -> MacLink {
         if let existing = links[tag], !existing.isStopped { return existing }   // a stopped one was forgotten
-        let link = MacLink(tag: tag, credential: credential, peerToPeer: peerToPeer, allowedPorts: allowedPorts, queue: queue)
+        let link = MacLink(tag: tag, credential: credential, peerToPeer: peerToPeer, hotspotOnly: hotspotOnly,
+                           allowedPorts: allowedPorts, queue: queue)
         links[tag] = link
         return link
     }
@@ -334,9 +390,12 @@ private final class MacLink: @unchecked Sendable {
     private let macTag: String
     private let credential: () -> LinkCredential?
     private let peerToPeer: Bool
+    /// An iPad: linked over this iPhone's hotspot only (`interface`, and checked before the proof).
+    private let hotspotOnly: Bool
     private let allowedPorts: Set<UInt16>
     private let queue: DispatchQueue
     private var endpoint: NWEndpoint?
+    private var interface: NWInterface?
     /// Advertising right now; a Mac out of view is redialed only to resume.
     private var inView = true
     private var mux: Mux?
@@ -350,10 +409,12 @@ private final class MacLink: @unchecked Sendable {
     private(set) var carrier: String?
     var isStopped: Bool { stopped }
 
-    init(tag: String, credential: @escaping () -> LinkCredential?, peerToPeer: Bool, allowedPorts: Set<UInt16>, queue: DispatchQueue) {
+    init(tag: String, credential: @escaping () -> LinkCredential?, peerToPeer: Bool, hotspotOnly: Bool,
+         allowedPorts: Set<UInt16>, queue: DispatchQueue) {
         self.macTag = tag
         self.credential = credential
         self.peerToPeer = peerToPeer
+        self.hotspotOnly = hotspotOnly
         self.allowedPorts = allowedPorts
         self.queue = queue
     }
@@ -361,8 +422,9 @@ private final class MacLink: @unchecked Sendable {
     private var tag: String { String(macTag.prefix(6)) }
 
     /// The Mac is (still) at `endpoint`: connect unless already up or trying.
-    func reach(_ endpoint: NWEndpoint) {
+    func reach(_ endpoint: NWEndpoint, over interface: NWInterface? = nil) {
         self.endpoint = endpoint
+        self.interface = interface
         inView = true
         guard !stopped, !isUp, attempt == nil, redial == nil else { return }
         dial()
@@ -395,7 +457,9 @@ private final class MacLink: @unchecked Sendable {
         }
         attemptID += 1
         let id = attemptID
-        let connection = NWConnection(to: endpoint, using: WirelessLink.pinnedClientParameters(pin: credential.certSHA256, peerToPeer: peerToPeer))
+        let params = WirelessLink.pinnedClientParameters(pin: credential.certSHA256, peerToPeer: peerToPeer)
+        if hotspotOnly, let interface { params.requiredInterface = interface }
+        let connection = NWConnection(to: endpoint, using: params)
         let stream = ConnectionStream(connection, queue: queue)
         attempt = stream
         stream.onTerminated = { [weak self] error in self?.queue.async { self?.attemptFailed(id, error) } }
@@ -408,6 +472,11 @@ private final class MacLink: @unchecked Sendable {
     private func challenged(_ id: Int, _ stream: ConnectionStream, _ credential: LinkCredential, _ result: Result<(Data, Data), Error>) {
         guard id == attemptID, attempt === stream else { return }
         guard case .success(let (line, _)) = result else { attemptFailed(id, result.failure); return }
+        // Before any proof: an iPad's link must run over this iPhone's hotspot.
+        if hotspotOnly, !WirelessLink.overHotspot(stream) {
+            attemptFailed(id, MuxError.protocolViolation("an iPad is linked over this iPhone's hotspot only, not \(WirelessLink.carrier(of: stream))"))
+            return
+        }
         guard let message = try? JSONDecoder().decode(WirelessLink.Handshake.self, from: line),
               message.t == "challenge", let nonce = message.nonce.flatMap({ Data(base64Encoded: $0) }), nonce.count == 32 else {
             attemptFailed(id, MuxError.protocolViolation("bad challenge")); return

@@ -64,10 +64,11 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
 
     /// Holding every route is only right on the iPhone's hotspot (that's where
     /// the iPhone reaches this iPad); anywhere else it would only cut the iPad
-    /// off. So iOS's own starts (on demand) go ahead only on the hotspot. A
-    /// start the user asked for (`manual`) goes ahead anyway, since an
-    /// IPv6-only hotspot can look like any network until its first link: the
-    /// watch then steps aside within seconds if it isn't the hotspot.
+    /// off. So iOS's own starts (on demand) go ahead only on a known hotspot.
+    /// A start the user asked for (`manual`) goes ahead anyway, since an
+    /// IPv6-only hotspot is only "costly Wi-Fi" until its first link: the
+    /// watch then gives the iPhone a minute to dial in there, and steps aside
+    /// within seconds anywhere else.
     private func startHotspot(name: String, manual: Bool, completionHandler: @escaping (Error?) -> Void) {
         // Read before this tunnel's settings apply, so the DNS servers are the network's.
         let dns = DNSRedirect.systemServers()
@@ -87,13 +88,14 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         let defaults = UserDefaults(suiteName: PassthroughProtocol.appGroup) ?? .standard
         let known = HotspotTunnel.knownHotspotDNS(defaults)
         let network = WirelessLink.networkSummary(wifi: wifi, dnsServers: dns)
-        guard manual || WirelessLink.onPhoneHotspot(wifi: wifi, dnsServers: dns, knownHotspotDNS: known) else {
+        let sign = WirelessLink.hotspotSign(wifi: wifi, dnsServers: dns, knownHotspotDNS: known)
+        guard manual || sign == .known else {
             ptLog(.info, "Internet through iPhone: not on an iPhone's hotspot, so not starting (\(network))")
             completionHandler(NSError(domain: "Passthrough", code: 12,
                                       userInfo: [NSLocalizedDescriptionKey: "This iPad isn't on the iPhone's Personal Hotspot."]))
             return
         }
-        ptLog(.info, "Internet through iPhone: \(manual ? "turned on" : "on the hotspot"), applying the tunnel (\(network))")
+        ptLog(.info, "Internet through iPhone: \(manual ? "turned on" : "on a known hotspot"), applying the tunnel (hotspot sign: \(sign); \(network))")
         setTunnelNetworkSettings(HotspotRole.settings(ipv6: false)) { [weak self] error in
             if let error {
                 ptLog(.error, "Tunnel settings rejected: \(error.localizedDescription)")
@@ -108,7 +110,8 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
                     let linked = self.hotspotLinked
                     try role.start(name: name, onLinked: { up in
                         linked.set(up)
-                        // A link worked over this network: remember its DNS servers and
+                        // A link worked over this network, and the iPhone links an iPad
+                        // over its hotspot only: remember the network's DNS servers and
                         // routers, so the on-demand rule (the app applies it) and the
                         // hotspot check know this hotspot next time.
                         if up, HotspotTunnel.rememberHotspotDNS(dns + (wifi?.gateways ?? []), in: defaults) {

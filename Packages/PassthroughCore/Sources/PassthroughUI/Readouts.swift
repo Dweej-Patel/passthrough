@@ -52,6 +52,7 @@ public struct StatusRing: View {
     let mode: Mode
     let size: CGFloat
     let lineWidth: CGFloat
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     public init(mode: Mode, size: CGFloat = 180, lineWidth: CGFloat = 10) {
         self.mode = mode; self.size = size; self.lineWidth = lineWidth
@@ -67,15 +68,18 @@ public struct StatusRing: View {
             // Driven by the clock, not a repeating animation started on appear:
             // one started mid-transition also animates the ring's position,
             // and it then slides back and forth for as long as it's shown.
+            // Capped like FlowMap (30 fps spinning, 20 live); under Reduce
+            // Motion the live ring holds still (the spinner still turns: it
+            // says something is happening).
             case .busy:
-                TimelineView(.animation) { context in
+                TimelineView(.animation(minimumInterval: 1.0 / 30)) { context in
                     Circle()
                         .trim(from: 0, to: 0.28)
                         .stroke(PTTheme.accentAngular, style: StrokeStyle(lineWidth: lineWidth, lineCap: .round))
                         .rotationEffect(.degrees(Self.turn(context.date, period: 1.1) * 360))
                 }
             case .live:
-                TimelineView(.animation(minimumInterval: 1.0 / 30)) { context in
+                TimelineView(.animation(minimumInterval: 1.0 / 20, paused: reduceMotion)) { context in
                     // Breathes in and out over 4.4 s (2.2 s each way, eased).
                     let breath = (1 - cos(Self.turn(context.date, period: 4.4) * 2 * .pi)) / 2
                     Circle()

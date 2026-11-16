@@ -164,7 +164,7 @@ struct NeedsYouDot: View {
 
     var body: some View {
         // Clock-driven, so it can't carry the dot's position (see `StatusRing`).
-        TimelineView(.animation(minimumInterval: 1.0 / 30, paused: reduceMotion)) { context in
+        TimelineView(.animation(minimumInterval: 1.0 / 20, paused: reduceMotion)) { context in
             let wave = reduceMotion ? 0 : PTPulse.wave(context.date, period: 1.6)
             Circle()
                 .fill(PTColor.attention)
