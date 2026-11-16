@@ -101,6 +101,8 @@ final class HotspotModel: ObservableObject {
                 do {
                     try await controller.configureClient(name: ThisDevice.displayName)
                     armed = true
+                    let dns = HotspotModel.dnsServers()
+                    ptLog(.info, "hotspot: switched on; on the hotspot: \(WirelessLink.onPhoneHotspot(dnsServers: dns)) (\(WirelessLink.networkSummary(dnsServers: dns)))")
                     // Off the hotspot, iOS starts it once this iPad joins one.
                     if HotspotModel.onHotspotNetwork() { try controller.start() }
                 } catch {
@@ -159,5 +161,8 @@ final class HotspotModel: ObservableObject {
     }
 
     /// Whether this iPad's Wi-Fi address is on an iPhone's Personal Hotspot.
-    nonisolated static func onHotspotNetwork() -> Bool { WirelessLink.onPhoneHotspot() }
+    nonisolated static func onHotspotNetwork() -> Bool { WirelessLink.onPhoneHotspot(dnsServers: dnsServers()) }
+
+    /// The resolver's DNS servers: the network's while the tunnel is down.
+    nonisolated static func dnsServers() -> [String] { DNSRedirect.systemServers() }
 }

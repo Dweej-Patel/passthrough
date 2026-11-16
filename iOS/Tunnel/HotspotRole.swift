@@ -150,8 +150,9 @@ final class HotspotRole {
     }
 }
 
-/// Reports, once, that this iPad has left the iPhone's hotspot: two checks in
-/// a row off it, so a moment between networks doesn't count. Checked on every
+/// Reports, once, that this iPad has left the iPhone's hotspot for another
+/// Wi-Fi network: two checks in a row, so a moment between networks doesn't
+/// count, and only on proof (`WirelessLink.onAnotherWiFiNetwork`). Checked on every
 /// network change, and every 30 seconds in case a change goes unreported.
 /// All state lives on its own queue.
 final class HotspotPresenceWatch: @unchecked Sendable {
@@ -193,10 +194,11 @@ final class HotspotPresenceWatch: @unchecked Sendable {
     private func check() {
         checking = false
         guard !done else { return }
-        if WirelessLink.onPhoneHotspot() { misses = 0; return }
+        guard WirelessLink.onAnotherWiFiNetwork() else { misses = 0; return }
         misses += 1
         guard misses >= 2 else { return scheduleCheck(after: 3) }
         finish()
+        ptLog(.info, "Internet through iPhone: \(WirelessLink.networkSummary(dnsServers: []))")
         onLeft()
     }
 

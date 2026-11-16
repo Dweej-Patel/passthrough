@@ -63,18 +63,23 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         // Holding every route is only right on the iPhone's hotspot (that's
         // where the iPhone reaches this iPad). Anywhere else it would only cut
         // the iPad off, whatever started the tunnel.
-        guard WirelessLink.onPhoneHotspot() else {
-            ptLog(.info, "Internet through iPhone: not on an iPhone's hotspot, so not starting")
+        // Read before this tunnel's settings apply, so the DNS servers are the network's.
+        let dns = DNSRedirect.systemServers()
+        let network = WirelessLink.networkSummary(dnsServers: dns)
+        guard WirelessLink.onPhoneHotspot(dnsServers: dns) else {
+            ptLog(.info, "Internet through iPhone: not on an iPhone's hotspot, so not starting (\(network))")
             completionHandler(NSError(domain: "Passthrough", code: 12,
                                       userInfo: [NSLocalizedDescriptionKey: "This iPad isn't on the iPhone's Personal Hotspot."]))
             return
         }
+        ptLog(.info, "Internet through iPhone: on the hotspot, applying the tunnel (\(network))")
         setTunnelNetworkSettings(HotspotRole.settings(ipv6: false)) { [weak self] error in
             if let error {
                 ptLog(.error, "Tunnel settings rejected: \(error.localizedDescription)")
                 completionHandler(error)
                 return
             }
+            ptLog(.info, "Internet through iPhone: tunnel applied, starting the link")
             Task { @MainActor in
                 guard let self else { return }
                 let role = HotspotRole()
