@@ -12,13 +12,21 @@ struct ThisPhoneView: View {
     var body: some View {
         ScrollView {
             VStack(spacing: 14) {
-                HeroCard(showPairing: $showPairing)
-                MacsCard(showPairing: $showPairing)
-                FlowCard()
-                ThroughputCard()
-                UsageCard()
-                footer
+                if let hotspot = model.hotspot {
+                    // iPad: the iPhone it gets its internet from, and its Macs.
+                    UpstreamPhoneCard(hotspot: hotspot)
+                    MacsCard(showPairing: $showPairing)
+                } else {
+                    HeroCard(showPairing: $showPairing)
+                    MacsCard(showPairing: $showPairing)
+                    FlowCard()
+                    ThroughputCard()
+                    UsageCard()
+                    footer
+                }
             }
+            .frame(maxWidth: 720)
+            .frame(maxWidth: .infinity)
             .padding(.horizontal, 16)
             .padding(.top, 4)
             .padding(.bottom, 24)

@@ -570,7 +570,8 @@ struct MacHomeView: View {
                 SwitchIcon(symbol: ThisDevice.symbol, on: false, warning: false)
                 VStack(alignment: .leading, spacing: 2) {
                     Text("This \(ThisDevice.name)").font(.body.weight(.semibold))
-                    Text(!paired ? "Pair a Mac, data used, connection details" : "Paired Macs, data used, connection details")
+                    Text(ThisDevice.isPad ? "Your iPhone and Macs, pairing"
+                         : !paired ? "Pair a Mac, data used, connection details" : "Paired Macs, data used, connection details")
                         .font(.subheadline).foregroundStyle(.secondary)
                 }
                 Spacer(minLength: 8)

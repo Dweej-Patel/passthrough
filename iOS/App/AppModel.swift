@@ -137,9 +137,14 @@ final class AppModel: ObservableObject {
         extensionAvailable = false
         if hosting == .background { hosting = .foreground }
         #endif
-        // On an iPad the extension is "Internet through iPhone" (`HotspotModel`);
-        // anything this app hosts for a Mac runs in the app.
-        if ThisDevice.isPad { extensionAvailable = false; return }
+        // On an iPad the extension is "Internet through iPhone" (`HotspotModel`).
+        // What a Mac reaches over the cable (pairing, the shell key) is served
+        // by the app whenever it's open: an iPad never carries a Mac's internet.
+        if ThisDevice.isPad {
+            extensionAvailable = false
+            if !state.isActive { start() }
+            return
+        }
         guard hosting == .background else { return }
         do {
             try await extensionHost.load()

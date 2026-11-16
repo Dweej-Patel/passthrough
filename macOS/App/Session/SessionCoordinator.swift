@@ -382,7 +382,10 @@ final class SessionCoordinator: ObservableObject {
     /// else the first allowed one, the cable first when both are possible.
     private func preferredDevice() -> PhoneDevice? {
         let allowed = directory.devices.filter { connectionMode.allows($0) }
-        return allowed.first { $0.medium == .usb } ?? allowed.first
+        // A phone that can carry the Mac's internet before an iPad, which only
+        // ever pairs (as a remote: shell, screen, switches).
+        let phones = allowed.filter(\.routes)
+        return phones.first { $0.medium == .usb } ?? phones.first ?? allowed.first { $0.medium == .usb }
     }
 
     private func reconsiderDevice() {
@@ -398,7 +401,7 @@ final class SessionCoordinator: ObservableObject {
             shellControlRetryAt = .distantPast
             shellControlBackoff.succeeded()
             ensureShellControl()
-            if autoConnect, !suppressAutoConnect, !heldOff { beginConnect() }
+            if autoConnect, !suppressAutoConnect, !heldOff, best?.routes == true { beginConnect() }
         } else {
             phase = .noDevice
         }
@@ -416,7 +419,8 @@ final class SessionCoordinator: ObservableObject {
     /// Over the cable, after pairing: hand the phone what it needs to reach
     /// this Mac wirelessly later (certificate pin and link key).
     private func sendLink() {
-        guard let device, device.medium == .usb, let control else { return }
+        // An iPad is a remote only: it never carries the Mac's traffic, so it isn't linked.
+        guard let device, device.medium == .usb, device.routes, let control else { return }
         do {
             let identity = try MacIdentity.loadOrCreate(label: Self.identityLabel)
             guard let key = links.key(forSlot: device.pairingSlot) else {
@@ -605,6 +609,10 @@ final class SessionCoordinator: ObservableObject {
 
     private func beginConnect() {
         guard let device else { phase = .noDevice; return }
+        guard device.routes else {
+            phase = .error("An iPad can't share its internet with this Mac. Plug in your iPhone (or Android phone) instead.")
+            return
+        }
         // "Register again" is replacing the helper: connect once it is done.
         guard !helperRetryInFlight else {
             connectAfterHelperRetry = true

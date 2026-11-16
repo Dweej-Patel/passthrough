@@ -60,7 +60,7 @@ struct MenuPanelView: View {
 
     private var header: some View {
         HStack(spacing: 10) {
-            Image(systemName: session.device?.kind == .android ? "smartphone" : "iphone.gen3")
+            Image(systemName: session.device?.kind == .android ? "smartphone" : session.device?.kind == .iPad ? "ipad" : "iphone.gen3")
                 .font(.system(size: 16, weight: .semibold))
                 .foregroundStyle(session.phase.isConnected ? PTColor.onTint : Color.secondary)
                 .frame(width: 34, height: 34)
@@ -681,7 +681,7 @@ struct FlowCard: View {
         let viaWiFi = vpnLayer.isWanted && !session.phase.isConnected && !session.phase.isBusy
         let localName = vpnLayer.status.underlay.map { $0 == "iPhone" ? "Wi-Fi" : $0 } ?? "Wi-Fi"
         return FlowMapState(perspective: .mac, macName: session.macName, phoneName: session.phoneStatus?.deviceName ?? session.phoneKindName,
-                            phoneIcon: session.device?.kind == .android ? "smartphone" : "iphone.gen3",
+                            phoneIcon: session.device?.kind == .android ? "smartphone" : session.device?.kind == .iPad ? "ipad" : "iphone.gen3",
                             linkUp: session.phase.isConnected || (viaWiFi && vpnLayer.status.isConnected),
                             busy: session.phase.isBusy || (viaWiFi && vpnLayer.status.isBusy),
                             radio: viaWiFi ? nil : session.phoneStatus?.radio,

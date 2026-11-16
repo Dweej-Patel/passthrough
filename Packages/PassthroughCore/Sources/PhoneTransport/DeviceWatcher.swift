@@ -103,10 +103,10 @@ public final class USBMuxWatcher: DeviceWatcher {
         switch event {
         case .listening:
             status = WatchStatus(state: .watching)
-            ptLog(.debug, "Watching usbmuxd for iPhones")
+            ptLog(.debug, "Watching usbmuxd for iPhones and iPads")
         case .attached(let d):
             guard d.isUSB, !devices.contains(where: { $0.id == "usbmux:\(d.id)" }) else { return }
-            publish(devices + [.iPhone(deviceID: d.id, udid: d.udid)])
+            publish(devices + [.usbmux(deviceID: d.id, udid: d.udid, productID: d.productID)])
         case .detached(let id):
             publish(devices.filter { $0.id != "usbmux:\(id)" })
         case .failed(let error):

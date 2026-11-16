@@ -15,7 +15,7 @@ struct PairSheet: View {
             VStack(spacing: 26) {
                 Capsule().fill(.secondary.opacity(0.4)).frame(width: 40, height: 5).padding(.top, 10)
                 Spacer(minLength: 0)
-                Image(systemName: "laptopcomputer.and.iphone")
+                Image(systemName: ThisDevice.isPad ? "laptopcomputer.and.ipad" : "laptopcomputer.and.iphone")
                     .font(.system(size: 54, weight: .medium))
                     .foregroundStyle(PTTheme.accent)
                 VStack(spacing: 6) {
@@ -24,7 +24,7 @@ struct PairSheet: View {
                         .font(.subheadline).foregroundStyle(.secondary).multilineTextAlignment(.center)
                         .padding(.horizontal, 24)
                 }
-                if model.state != .running {
+                if model.state != .running, !ThisDevice.isPad {
                     PTCard {
                         VStack(alignment: .leading, spacing: 10) {
                             Label("This \(ThisDevice.name)'s internet sharing is off, so the Mac can't reach it to pair.", systemImage: "exclamationmark.triangle.fill")

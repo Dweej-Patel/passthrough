@@ -165,3 +165,66 @@ private struct WireLine: Shape {
         return path
     }
 }
+
+/// iPad, This iPad: the iPhone it uses for internet, with Pair and Forget.
+struct UpstreamPhoneCard: View {
+    @ObservedObject var hotspot: HotspotModel
+    @State private var pairing = false
+    @State private var confirmForget = false
+
+    var body: some View {
+        PTSurface {
+            VStack(alignment: .leading, spacing: 12) {
+                HStack {
+                    PTSectionTitle("iPhone", icon: "iphone")
+                    Spacer()
+                    Button { pairing = true } label: {
+                        Label(hotspot.upstream == nil ? "Pair" : "Pair again", systemImage: "qrcode").font(.caption.weight(.bold))
+                    }
+                    .buttonStyle(.bordered).buttonBorderShape(.capsule).tint(PTColor.tintText).controlSize(.small)
+                }
+                if let phone = hotspot.upstream {
+                    HStack(spacing: 12) {
+                        PTStatusDot(color: hotspot.phase == .online ? PTColor.tint : .secondary.opacity(0.5), live: hotspot.phase == .online)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(hotspot.status?.phoneName ?? phone.name).font(.subheadline.weight(.semibold))
+                            Text(detail(phone)).font(.caption).foregroundStyle(.secondary)
+                        }
+                        Spacer()
+                        Menu {
+                            Button(role: .destructive) { confirmForget = true } label: { Label("Forget this iPhone", systemImage: "trash") }
+                        } label: {
+                            Image(systemName: "ellipsis.circle").foregroundStyle(.secondary).frame(width: 44, height: 44).contentShape(Rectangle())
+                        }
+                        .accessibilityLabel("More for \(phone.name)")
+                    }
+                    .frame(minHeight: 44)
+                } else {
+                    Text("Not paired yet. Pair to use your iPhone's internet over its hotspot without spending hotspot data.")
+                        .font(.subheadline).foregroundStyle(.secondary)
+                }
+                Text("This iPad joins the iPhone's Personal Hotspot, and Passthrough sends its traffic out from the iPhone itself, not through the hotspot.")
+                    .font(.caption).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .sheet(isPresented: $pairing) { PairWithPhoneSheet(hotspot: hotspot) }
+        .confirmationDialog("Forget \(hotspot.phoneName)?", isPresented: $confirmForget, titleVisibility: .visible) {
+            Button("Forget", role: .destructive) { hotspot.forget() }
+        } message: {
+            Text("Internet through iPhone turns off. To use it again, pair again.")
+        }
+    }
+
+    private func detail(_ phone: UpstreamPhone) -> String {
+        var parts: [String] = []
+        if hotspot.phase == .online {
+            if let radio = hotspot.status?.radio { parts.append(radio) }
+            if let battery = hotspot.status?.battery { parts.append("\(Int(battery * 100))% battery") }
+            parts.insert("Connected", at: 0)
+        } else {
+            parts.append("Paired \(phone.pairedAt.formatted(.relative(presentation: .named)))")
+        }
+        return parts.joined(separator: " \u{00B7} ")
+    }
+}
