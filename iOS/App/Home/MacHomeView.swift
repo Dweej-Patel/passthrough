@@ -290,9 +290,17 @@ struct MacHomeView: View {
             .accessibilityHint(model.state.isActive ? "Stops sharing this \(ThisDevice.name)'s internet with the Mac" : "Shares this \(ThisDevice.name)'s internet with the Mac")
     }
 
+    /// iPads using this iPhone's internet right now (over its hotspot).
+    private var connectedIPads: Int { model.stats.macs.filter { $0.kind == .ipad }.count }
+
     private var internetStatus: String {
         switch model.state {
-        case .running: macOnline ? "Mac online through this \(ThisDevice.name)" : "Sharing \u{2014} waiting for the Mac"
+        case .running:
+            switch (macOnline, connectedIPads) {
+            case (_, 0): macOnline ? "Mac online through this \(ThisDevice.name)" : "Sharing \u{2014} waiting for the Mac"
+            case (true, let n): "Sharing with the Mac and \(n == 1 ? "an iPad" : "\(n) iPads")"
+            case (false, let n): "Sharing with \(n == 1 ? "an iPad" : "\(n) iPads")"
+            }
         case .starting: "Turning on\u{2026}"
         case .stopping: "Turning off\u{2026}"
         case .failed: "Off \u{2014} couldn't turn on"

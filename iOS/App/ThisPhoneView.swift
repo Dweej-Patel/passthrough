@@ -18,6 +18,7 @@ struct ThisPhoneView: View {
                     MacsCard(showPairing: $showPairing)
                 } else {
                     HeroCard(showPairing: $showPairing)
+                    if model.state == .running, !model.stats.macs.isEmpty { SharingCard() }
                     MacsCard(showPairing: $showPairing)
                     FlowCard()
                     ThroughputCard()
@@ -274,6 +275,47 @@ struct UsageBar: View {
         }
         .frame(height: 6)
         .accessibilityLabel("Download \(ByteFormat.bytes(Int64(down))), upload \(ByteFormat.bytes(Int64(up)))")
+    }
+}
+
+// MARK: - Sharing with
+
+/// Who is using this phone's internet right now: Macs over the cable or the
+/// wireless link, iPads over the hotspot.
+struct SharingCard: View {
+    @EnvironmentObject private var model: AppModel
+
+    var body: some View {
+        PTSurface {
+            VStack(alignment: .leading, spacing: 10) {
+                PTSectionTitle("Sharing with", icon: "dot.radiowaves.left.and.right")
+                ForEach(model.stats.macs) { client in
+                    HStack(spacing: 12) {
+                        Image(systemName: client.kind == .ipad ? "ipad" : "laptopcomputer")
+                            .frame(width: 24).foregroundStyle(PTColor.tintText)
+                            .accessibilityHidden(true)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(client.name).font(.subheadline.weight(.semibold))
+                            Text(how(client)).font(.caption).foregroundStyle(.secondary)
+                        }
+                        Spacer()
+                        PTStatusDot(color: PTColor.tint, live: true)
+                    }
+                    .frame(minHeight: 44)
+                }
+                if model.stats.macs.contains(where: { $0.kind == .ipad }) {
+                    Text("An iPad's traffic leaves from this iPhone itself. Personal Hotspot stays on so the iPad can find this iPhone, but its traffic doesn't go through the hotspot.")
+                        .font(.caption).foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+        }
+    }
+
+    private func how(_ client: ConnectedMac) -> String {
+        let since = "since \(client.since.formatted(date: .omitted, time: .shortened))"
+        if client.kind == .ipad { return "Over the hotspot \u{00B7} \(since)" }
+        return "\(client.wireless == true ? "Wireless link" : "USB") \u{00B7} \(since)"
     }
 }
 
