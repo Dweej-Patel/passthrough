@@ -1,4 +1,5 @@
 import Foundation
+import Network
 import NetworkExtension
 import PassthroughCore
 import PhoneTransport
@@ -146,5 +147,62 @@ final class HotspotRole {
           tcp-read-write-timeout: 300000
           udp-read-write-timeout: 60000
         """ + "\n"
+    }
+}
+
+/// Reports, once, that this iPad has left the iPhone's hotspot: two checks in
+/// a row off it, so a moment between networks doesn't count. Checked on every
+/// network change, and every 30 seconds in case a change goes unreported.
+/// All state lives on its own queue.
+final class HotspotPresenceWatch: @unchecked Sendable {
+    private let queue = DispatchQueue(label: "\(PassthroughProtocol.identifier).hotspot-watch")
+    private let onLeft: @Sendable () -> Void
+    private var monitor: NWPathMonitor?
+    private var timer: DispatchSourceTimer?
+    private var misses = 0
+    private var checking = false
+    private var done = false
+
+    init(onLeft: @escaping @Sendable () -> Void) { self.onLeft = onLeft }
+
+    func start() {
+        queue.async { [self] in
+            let monitor = NWPathMonitor()
+            monitor.pathUpdateHandler = { [weak self] _ in self?.scheduleCheck(after: 2) }
+            monitor.start(queue: queue)
+            self.monitor = monitor
+            let timer = DispatchSource.makeTimerSource(queue: queue)
+            timer.schedule(deadline: .now() + 30, repeating: 30, leeway: .seconds(5))
+            timer.setEventHandler { [weak self] in self?.scheduleCheck(after: 0) }
+            timer.resume()
+            self.timer = timer
+        }
+    }
+
+    func cancel() {
+        queue.async { [self] in finish() }
+    }
+
+    /// On the queue.
+    private func scheduleCheck(after delay: TimeInterval) {
+        guard !done, !checking else { return }
+        checking = true
+        queue.asyncAfter(deadline: .now() + delay) { [weak self] in self?.check() }
+    }
+
+    private func check() {
+        checking = false
+        guard !done else { return }
+        if WirelessLink.onPhoneHotspot() { misses = 0; return }
+        misses += 1
+        guard misses >= 2 else { return scheduleCheck(after: 3) }
+        finish()
+        onLeft()
+    }
+
+    private func finish() {
+        done = true
+        monitor?.cancel(); monitor = nil
+        timer?.cancel(); timer = nil
     }
 }

@@ -78,9 +78,10 @@ final class HotspotModel: ObservableObject {
     func load() async {
         upstream = store.load()
         onPhoneHotspot = Self.onHotspotNetwork()
+        // Every time: the switch may have been changed in Settings meanwhile.
+        try? await controller.load()
         if !loaded {
             loaded = true
-            try? await controller.load()
             await controller.updateClientRules()
             ticker = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
                 Task { @MainActor in await self?.tick() }
@@ -128,7 +129,28 @@ final class HotspotModel: ObservableObject {
         notify_post(PairingRegistry.changedNotification)
     }
 
+    /// When the switch is on and this iPad is on the hotspot, but iOS didn't
+    /// start the tunnel: start it (it would otherwise use hotspot data).
+    private var standbyOnHotspotSince: Date?
+    private var lastNudge: Date?
+
+    private func nudgeIfIOSDidNotStart() async {
+        guard phase == .standby, onPhoneHotspot else { standbyOnHotspotSince = nil; return }
+        let since = standbyOnHotspotSince ?? Date()
+        standbyOnHotspotSince = since
+        guard Date().timeIntervalSince(since) >= 5, Date().timeIntervalSince(lastNudge ?? .distantPast) >= 30 else { return }
+        lastNudge = Date()
+        // Still on? (Turning the VPN off in Settings turns on-demand off too.)
+        try? await controller.load()
+        armed = controller.onDemandEnabled
+        tunnel = controller.status
+        guard phase == .standby else { return }
+        ptLog(.warning, "hotspot: on the iPhone's hotspot, but iOS didn't start Internet through iPhone; starting it")
+        try? controller.start()
+    }
+
     private func tick() async {
+        await nudgeIfIOSDidNotStart()
         guard tunnel == .connected || tunnel == .reasserting else { return }
         if let data = await controller.message(HotspotTunnel.statusMessage),
            let status = try? JSONDecoder().decode(HotspotStatus.self, from: data) {
@@ -137,19 +159,5 @@ final class HotspotModel: ObservableObject {
     }
 
     /// Whether this iPad's Wi-Fi address is on an iPhone's Personal Hotspot.
-    nonisolated static func onHotspotNetwork() -> Bool {
-        var list: UnsafeMutablePointer<ifaddrs>?
-        guard getifaddrs(&list) == 0, let first = list else { return false }
-        defer { freeifaddrs(list) }
-        for pointer in sequence(first: first, next: { $0.pointee.ifa_next }) {
-            let entry = pointer.pointee
-            guard let address = entry.ifa_addr, address.pointee.sa_family == UInt8(AF_INET),
-                  String(cString: entry.ifa_name).hasPrefix("en") else { continue }
-            var ipv4 = address.withMemoryRebound(to: sockaddr_in.self, capacity: 1) { $0.pointee.sin_addr }
-            var buffer = [CChar](repeating: 0, count: Int(INET_ADDRSTRLEN))
-            guard inet_ntop(AF_INET, &ipv4, &buffer, socklen_t(INET_ADDRSTRLEN)) != nil else { continue }
-            if WirelessLink.isHotspotAddress(.hostPort(host: .init(String(cString: buffer)), port: 1)) { return true }
-        }
-        return false
-    }
+    nonisolated static func onHotspotNetwork() -> Bool { WirelessLink.onPhoneHotspot() }
 }

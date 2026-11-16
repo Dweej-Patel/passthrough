@@ -92,11 +92,13 @@ final class TunnelController {
     /// Whether iOS starts the tunnel by itself (the switch is on).
     var onDemandEnabled: Bool { manager?.isOnDemandEnabled ?? false }
 
-    /// An iPad configured before the tunnel was limited to the hotspot: give it those rules.
+    /// An iPad configured with other rules (before the tunnel was limited to
+    /// the hotspot): give it the current ones.
     func updateClientRules() async {
         guard let manager, manager.isOnDemandEnabled,
               (manager.protocolConfiguration as? NETunnelProviderProtocol)?.providerConfiguration?[HotspotTunnel.roleKey] as? String == HotspotTunnel.clientRole,
-              manager.onDemandRules?.count != Self.hotspotOnlyRules.count else { return }
+              (manager.onDemandRules?.first as? NEOnDemandRuleConnect)?.dnsServerAddressMatch
+                != (Self.hotspotOnlyRules.first as? NEOnDemandRuleConnect)?.dnsServerAddressMatch else { return }
         manager.onDemandRules = Self.hotspotOnlyRules
         try? await manager.saveToPreferences()
         try? await manager.loadFromPreferences()

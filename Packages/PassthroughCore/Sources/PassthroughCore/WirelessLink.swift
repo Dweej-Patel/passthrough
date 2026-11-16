@@ -76,6 +76,24 @@ public enum WirelessLink {
     /// An iPhone's Personal Hotspot: its router and DNS server for the devices on it.
     public static let hotspotGateway = "172.20.10.1"
 
+    /// Whether this device's Wi-Fi has an address on an iPhone's Personal
+    /// Hotspot (172.20.10.0/28). Reads the interfaces themselves, so it's the
+    /// same answer inside a tunnel that holds every route.
+    public static func onPhoneHotspot() -> Bool {
+        var list: UnsafeMutablePointer<ifaddrs>?
+        guard getifaddrs(&list) == 0, let first = list else { return false }
+        defer { freeifaddrs(list) }
+        for pointer in sequence(first: first, next: { $0.pointee.ifa_next }) {
+            let entry = pointer.pointee
+            guard let address = entry.ifa_addr, address.pointee.sa_family == UInt8(AF_INET),
+                  String(cString: entry.ifa_name).hasPrefix("en") else { continue }
+            let ipv4 = address.withMemoryRebound(to: sockaddr_in.self, capacity: 1) { $0.pointee.sin_addr }
+            if let v4 = IPv4Address(withUnsafeBytes(of: ipv4) { Data($0) }),
+               isHotspotAddress(.hostPort(host: .ipv4(v4), port: 1)) { return true }
+        }
+        return false
+    }
+
     public static func isHotspotAddress(_ endpoint: NWEndpoint?) -> Bool {
         guard case .hostPort(.ipv4(let address), _)? = endpoint else { return false }
         let b = [UInt8](address.rawValue)

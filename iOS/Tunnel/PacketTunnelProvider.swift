@@ -10,6 +10,8 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
     /// On an iPad: "Internet through iPhone" instead of the phone's proxy.
     private var hotspot: HotspotRole?
     private var pairingsToken: Int32?
+    /// iPad: watches for this iPad leaving the iPhone's hotspot.
+    private var hotspotWatch: HotspotPresenceWatch?
 
     override init() {
         super.init()
@@ -58,6 +60,15 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
     // MARK: iPad: Internet through iPhone
 
     private func startHotspot(name: String, completionHandler: @escaping (Error?) -> Void) {
+        // Holding every route is only right on the iPhone's hotspot (that's
+        // where the iPhone reaches this iPad). Anywhere else it would only cut
+        // the iPad off, whatever started the tunnel.
+        guard WirelessLink.onPhoneHotspot() else {
+            ptLog(.info, "Internet through iPhone: not on an iPhone's hotspot, so not starting")
+            completionHandler(NSError(domain: "Passthrough", code: 12,
+                                      userInfo: [NSLocalizedDescriptionKey: "This iPad isn't on the iPhone's Personal Hotspot."]))
+            return
+        }
         setTunnelNetworkSettings(HotspotRole.settings(ipv6: false)) { [weak self] error in
             if let error {
                 ptLog(.error, "Tunnel settings rejected: \(error.localizedDescription)")
@@ -71,6 +82,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
                     try role.start(name: name)
                     self.hotspot = role
                     self.watchPairings()
+                    self.watchForLeavingTheHotspot()
                     completionHandler(nil)
                 } catch {
                     ptLog(.error, "Internet through iPhone could not start: \(error.localizedDescription)")
@@ -79,6 +91,23 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
                 }
             }
         }
+    }
+
+    /// Steps aside once this iPad has left the iPhone's hotspot: the iPad
+    /// then uses whatever network it's on, and on-demand starts the tunnel
+    /// again on the hotspot.
+    private func watchForLeavingTheHotspot() {
+        let watch = HotspotPresenceWatch { [weak self] in
+            ptLog(.info, "Internet through iPhone: this iPad left the iPhone's hotspot; stepping aside so it uses its network")
+            self?.cancelTunnelWithError(nil)
+        }
+        watch.start()
+        hotspotWatch = watch
+    }
+
+    private func stopWatchingTheHotspot() {
+        hotspotWatch?.cancel()
+        hotspotWatch = nil
     }
 
     /// The app re-paired or forgot the iPhone: drop the link so it proves itself again.
@@ -94,6 +123,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         ptLog(.info, "Background host stopping (\(reason.rawValue))")
         if let pairingsToken { notify_cancel(pairingsToken) }
         pairingsToken = nil
+        stopWatchingTheHotspot()
         // Turned off by the user: tell the Macs and iPads first, and give it a moment to go out.
         if let service, reason == .userInitiated {
             service.sayGoodbye()
