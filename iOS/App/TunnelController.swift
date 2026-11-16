@@ -81,16 +81,22 @@ final class TunnelController {
     /// Connect on an iPhone's hotspot, known by its DNS server: 172.20.10.1 on
     /// an IPv4 hotspot, or the ones this iPad learned from the iPhone's hotspot
     /// once a link worked (an IPv6-only hotspot names the iPhone's link-local
-    /// address); disconnect anywhere else. The tunnel's own DNS address is in
-    /// the match too, in case iOS reads the DNS server with the tunnel up: the
-    /// rules must never take down a tunnel that's on the hotspot. Until a
-    /// hotspot's DNS is learned, the app starts the tunnel itself there.
+    /// address). Anywhere else iOS leaves it alone (Ignore, not Disconnect: a
+    /// Disconnect rule also blocks the app's own starts, which an unlearned
+    /// IPv6-only hotspot needs); the extension itself steps aside off the
+    /// hotspot (`HotspotPresenceWatch`). The tunnel's own DNS address is in
+    /// the match too, in case iOS reads the DNS server with the tunnel up.
     static var hotspotOnlyRules: [NEOnDemandRule] {
         let hotspot = NEOnDemandRuleConnect()
         hotspot.interfaceTypeMatch = .wiFi
         hotspot.dnsServerAddressMatch = [WirelessLink.hotspotGateway, HotspotTunnel.dnsAddress]
             + HotspotTunnel.knownHotspotDNS(AppModel.groupDefaults)
-        return [hotspot, NEOnDemandRuleDisconnect()]
+        return [hotspot, NEOnDemandRuleIgnore()]
+    }
+
+    /// What decides whether saved rules are current: each rule's action and DNS match.
+    private static func signature(_ rules: [NEOnDemandRule]?) -> [String] {
+        (rules ?? []).map { "\($0.action.rawValue):\(($0.dnsServerAddressMatch ?? []).joined(separator: ","))" }
     }
 
     /// Whether iOS starts the tunnel by itself (the switch is on).
@@ -101,8 +107,7 @@ final class TunnelController {
     func updateClientRules() async {
         guard let manager, manager.isOnDemandEnabled,
               (manager.protocolConfiguration as? NETunnelProviderProtocol)?.providerConfiguration?[HotspotTunnel.roleKey] as? String == HotspotTunnel.clientRole,
-              (manager.onDemandRules?.first as? NEOnDemandRuleConnect)?.dnsServerAddressMatch
-                != (Self.hotspotOnlyRules.first as? NEOnDemandRuleConnect)?.dnsServerAddressMatch else { return }
+              Self.signature(manager.onDemandRules) != Self.signature(Self.hotspotOnlyRules) else { return }
         manager.onDemandRules = Self.hotspotOnlyRules
         try? await manager.saveToPreferences()
         try? await manager.loadFromPreferences()
@@ -147,5 +152,20 @@ final class TunnelController {
         // The extension can be killed between the status check and its reply (`message` times out).
         guard let data = await message(Data("stats".utf8)) else { return nil }
         return try? JSONDecoder().decode(ProviderStats.self, from: data)
+    }
+}
+
+extension NEVPNStatus {
+    /// For the log.
+    var name: String {
+        switch self {
+        case .invalid: "invalid"
+        case .disconnected: "disconnected"
+        case .connecting: "connecting"
+        case .connected: "connected"
+        case .reasserting: "reasserting"
+        case .disconnecting: "disconnecting"
+        @unknown default: "unknown (\(rawValue))"
+        }
     }
 }

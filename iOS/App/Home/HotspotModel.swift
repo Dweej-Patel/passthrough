@@ -47,6 +47,7 @@ final class HotspotModel: ObservableObject {
     init() {
         controller.onStatusChange = { [weak self] status in
             Task { @MainActor in
+                if self?.tunnel != status { ptLog(.info, "hotspot: tunnel \(status.name)") }
                 self?.tunnel = status
                 if status == .disconnected || status == .invalid { self?.status = nil }
             }
@@ -98,16 +99,21 @@ final class HotspotModel: ObservableObject {
         Task {
             if on {
                 do {
-                    try await controller.configureClient(name: ThisDevice.displayName)
-                    armed = true
+                    // Read before the tunnel is up: then the DNS servers are the network's.
                     let onHotspot = isOnHotspot()
                     ptLog(.info, "hotspot: switched on; on the hotspot: \(onHotspot) (\(networkSummary))")
+                    // Turned on here, on the hotspot: remember this network now, so
+                    // the on-demand rule knows it from the start (an IPv6-only
+                    // hotspot names no 172.20.10.1).
+                    if onHotspot { learnThisNetwork() }
+                    try await controller.configureClient(name: ThisDevice.displayName)
+                    armed = true
                     // Off the hotspot, iOS starts it once this iPad joins one.
-                    // On the hotspot, or perhaps on it: before its first link, an
-                    // IPv6-only hotspot can't be told from other Wi-Fi. (Anywhere
-                    // else the tunnel steps aside within seconds.)
+                    // Before the first link an IPv6-only hotspot may not be told
+                    // from other Wi-Fi, so try anyway (anywhere else the tunnel
+                    // steps aside within seconds).
                     let unlearned = HotspotTunnel.knownHotspotDNS(AppModel.groupDefaults).isEmpty
-                    if onHotspot || (unlearned && wifi.facts?.up == true) { try controller.start(manual: true) }
+                    if onHotspot || (unlearned && wifi.facts?.up == true) { startNow(because: "turned on") }
                 } catch {
                     startError = error.localizedDescription
                 }
@@ -151,7 +157,28 @@ final class HotspotModel: ObservableObject {
         tunnel = controller.status
         guard phase == .standby else { return }
         ptLog(.warning, "hotspot: on the iPhone's hotspot, but iOS didn't start Internet through iPhone; starting it (\(networkSummary))")
-        try? controller.start(manual: true)
+        learnThisNetwork()
+        await controller.updateClientRules()
+        startNow(because: "nudge")
+    }
+
+    /// Asks iOS to start the tunnel, saying in the log if it refuses.
+    private func startNow(because reason: String) {
+        do {
+            try controller.start(manual: true)
+            ptLog(.info, "hotspot: asked iOS to start the tunnel (\(reason)); it says \(controller.status.name)")
+        } catch {
+            ptLog(.error, "hotspot: iOS refused to start the tunnel (\(reason)): \(error.localizedDescription)")
+            startError = error.localizedDescription
+        }
+    }
+
+    /// The network's DNS servers and routers, as this hotspot's (tunnel down).
+    private func learnThisNetwork() {
+        let servers = DNSRedirect.systemServers() + (wifi.facts?.gateways ?? [])
+        if HotspotTunnel.rememberHotspotDNS(servers, in: AppModel.groupDefaults) {
+            ptLog(.info, "hotspot: learned this hotspot (\(servers.joined(separator: ", ")))")
+        }
     }
 
     private func tick() async {
