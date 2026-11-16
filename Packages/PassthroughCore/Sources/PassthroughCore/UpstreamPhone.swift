@@ -102,10 +102,36 @@ public enum HotspotTunnel {
     public static let nameKey = "name"
     /// The app message that asks the extension for its `HotspotStatus`.
     public static let statusMessage = Data("hotspot".utf8)
+    /// In the start options: the user turned it on (iOS didn't start it on demand).
+    public static let manualStartKey = "manual"
     /// The Keychain label of the iPad's TLS identity (its iPhone pins the certificate).
     public static let identityLabel = "\(PassthroughProtocol.identifier).ipad-link"
     /// The tunnel's addresses: the iPad's side, and the DNS server apps are
     /// told to use (a private address, so the iPhone sends it to its own resolver).
     public static let ipv4Address = "10.255.253.2"
     public static let dnsAddress = "10.255.253.53"
+
+    /// The DNS servers the iPhone's hotspot handed this iPad, learned once a
+    /// link through it worked. An IPv6-only hotspot names the iPhone's own
+    /// link-local address rather than 172.20.10.1, so this is how the
+    /// on-demand rule (and the hotspot check) knows it next time.
+    static let knownDNSKey = "hotspot.knownDNS"
+
+    public static func knownHotspotDNS(_ defaults: UserDefaults) -> [String] {
+        defaults.stringArray(forKey: knownDNSKey) ?? []
+    }
+
+    /// Adds `servers` (as the network gave them, before the tunnel's settings
+    /// applied) to what's known. Keeps the newest few. True if anything changed.
+    @discardableResult
+    public static func rememberHotspotDNS(_ servers: [String], in defaults: UserDefaults) -> Bool {
+        let fresh = servers.map(WirelessLink.bareAddress).filter { server in
+            !server.isEmpty && server != dnsAddress && server != "127.0.0.1" && server != "::1"
+        }
+        let known = knownHotspotDNS(defaults)
+        let merged = Array((fresh + known.filter { !fresh.contains($0) }).prefix(6))
+        guard merged != known else { return false }
+        defaults.set(merged, forKey: knownDNSKey)
+        return true
+    }
 }

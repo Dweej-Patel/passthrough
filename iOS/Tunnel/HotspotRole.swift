@@ -40,7 +40,8 @@ final class HotspotRole {
         return settings
     }
 
-    func start(name: String) throws {
+    /// `onLinked`: whether the iPhone is linked and has said welcome, on each change.
+    func start(name: String, onLinked: @escaping (Bool) -> Void = { _ in }) throws {
         let store = UpstreamPhoneStore.shared()
         guard let phone = store.load() else {
             throw NSError(domain: "Passthrough", code: 10, userInfo: [NSLocalizedDescriptionKey: "Pair this iPad with an iPhone first."])
@@ -49,6 +50,13 @@ final class HotspotRole {
         let client = HotspotClient(clientID: clientID, name: name, identity: {
             try MacIdentity.loadOrCreate(label: HotspotTunnel.identityLabel, accessGroup: PassthroughProtocol.appGroup)
         }, upstream: { store.load() }, provenAddresses: FileProvenAddressStore.inApplicationSupport(named: "ipad-proven-addresses"))
+        var linked = false
+        client.onStatusChange = { status in
+            let up = status.phase == .online
+            guard up != linked else { return }
+            linked = up
+            onLinked(up)
+        }
         try client.start()
         self.client = client
 
@@ -150,28 +158,32 @@ final class HotspotRole {
     }
 }
 
-/// Reports, once, that this iPad has left the iPhone's hotspot for another
-/// Wi-Fi network: two checks in a row, so a moment between networks doesn't
-/// count, and only on proof (`WirelessLink.onAnotherWiFiNetwork`). Checked on every
-/// network change, and every 30 seconds in case a change goes unreported.
-/// All state lives on its own queue.
+/// Reports, once, that this iPad has left the iPhone's hotspot: not linked
+/// to the iPhone, and Wi-Fi down or on a network with none of the hotspot's signs
+/// (`WirelessLink.leftPhoneHotspot`), two checks in a row so a moment between
+/// networks doesn't count. Checked on every Wi-Fi change, and every 30
+/// seconds in case a change goes unreported. All state lives on its own queue.
 final class HotspotPresenceWatch: @unchecked Sendable {
     private let queue = DispatchQueue(label: "\(PassthroughProtocol.identifier).hotspot-watch")
     private let onLeft: @Sendable () -> Void
-    private var monitor: NWPathMonitor?
+    private let isLinked: @Sendable () -> Bool
+    private var reader: WiFiPathReader?
     private var timer: DispatchSourceTimer?
     private var misses = 0
     private var checking = false
     private var done = false
 
-    init(onLeft: @escaping @Sendable () -> Void) { self.onLeft = onLeft }
+    /// `isLinked`: the iPhone is linked right now, which proves the iPad is on its hotspot.
+    init(isLinked: @escaping @Sendable () -> Bool, onLeft: @escaping @Sendable () -> Void) {
+        self.isLinked = isLinked
+        self.onLeft = onLeft
+    }
 
     func start() {
         queue.async { [self] in
-            let monitor = NWPathMonitor()
-            monitor.pathUpdateHandler = { [weak self] _ in self?.scheduleCheck(after: 2) }
-            monitor.start(queue: queue)
-            self.monitor = monitor
+            let reader = WiFiPathReader()
+            reader.onChange = { [weak self] _ in self?.queue.async { self?.scheduleCheck(after: 2) } }
+            self.reader = reader
             let timer = DispatchSource.makeTimerSource(queue: queue)
             timer.schedule(deadline: .now() + 30, repeating: 30, leeway: .seconds(5))
             timer.setEventHandler { [weak self] in self?.scheduleCheck(after: 0) }
@@ -193,18 +205,20 @@ final class HotspotPresenceWatch: @unchecked Sendable {
 
     private func check() {
         checking = false
-        guard !done else { return }
-        guard WirelessLink.onAnotherWiFiNetwork() else { misses = 0; return }
+        guard !done, let wifi = reader?.facts else { return }
+        guard !isLinked() else { misses = 0; return }
+        let known = HotspotTunnel.knownHotspotDNS(UserDefaults(suiteName: PassthroughProtocol.appGroup) ?? .standard)
+        guard WirelessLink.leftPhoneHotspot(wifi: wifi, knownHotspotDNS: known) else { misses = 0; return }
         misses += 1
         guard misses >= 2 else { return scheduleCheck(after: 3) }
         finish()
-        ptLog(.info, "Internet through iPhone: \(WirelessLink.networkSummary(dnsServers: []))")
+        ptLog(.info, "Internet through iPhone: \(WirelessLink.networkSummary(wifi: wifi, dnsServers: []))")
         onLeft()
     }
 
     private func finish() {
         done = true
-        monitor?.cancel(); monitor = nil
+        reader?.cancel(); reader = nil
         timer?.cancel(); timer = nil
     }
 }

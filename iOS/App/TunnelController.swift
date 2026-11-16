@@ -78,22 +78,26 @@ final class TunnelController {
         observe()
     }
 
-    /// Connect on an iPhone's hotspot, which hands out 172.20.10.1 as the DNS
-    /// server; disconnect anywhere else. The tunnel's own DNS address is in the
-    /// match too, in case iOS reads the DNS server with the tunnel up: the
-    /// rules must never take down a tunnel that's on the hotspot.
+    /// Connect on an iPhone's hotspot, known by its DNS server: 172.20.10.1 on
+    /// an IPv4 hotspot, or the ones this iPad learned from the iPhone's hotspot
+    /// once a link worked (an IPv6-only hotspot names the iPhone's link-local
+    /// address); disconnect anywhere else. The tunnel's own DNS address is in
+    /// the match too, in case iOS reads the DNS server with the tunnel up: the
+    /// rules must never take down a tunnel that's on the hotspot. Until a
+    /// hotspot's DNS is learned, the app starts the tunnel itself there.
     static var hotspotOnlyRules: [NEOnDemandRule] {
         let hotspot = NEOnDemandRuleConnect()
         hotspot.interfaceTypeMatch = .wiFi
         hotspot.dnsServerAddressMatch = [WirelessLink.hotspotGateway, HotspotTunnel.dnsAddress]
+            + HotspotTunnel.knownHotspotDNS(AppModel.groupDefaults)
         return [hotspot, NEOnDemandRuleDisconnect()]
     }
 
     /// Whether iOS starts the tunnel by itself (the switch is on).
     var onDemandEnabled: Bool { manager?.isOnDemandEnabled ?? false }
 
-    /// An iPad configured with other rules (before the tunnel was limited to
-    /// the hotspot): give it the current ones.
+    /// An iPad whose saved rules differ from the current ones (configured
+    /// before, or a hotspot's DNS learned since): save the current ones.
     func updateClientRules() async {
         guard let manager, manager.isOnDemandEnabled,
               (manager.protocolConfiguration as? NETunnelProviderProtocol)?.providerConfiguration?[HotspotTunnel.roleKey] as? String == HotspotTunnel.clientRole,
@@ -121,9 +125,11 @@ final class TunnelController {
         }
     }
 
-    func start() throws {
+    /// `manual`: the user asked (the iPad's tunnel then starts even where it
+    /// can't yet tell the iPhone's hotspot from another network).
+    func start(manual: Bool = false) throws {
         guard let manager else { throw NSError(domain: "Passthrough", code: 2, userInfo: [NSLocalizedDescriptionKey: "Tunnel not configured"]) }
-        try manager.connection.startVPNTunnel(options: nil)
+        try manager.connection.startVPNTunnel(options: manual ? [HotspotTunnel.manualStartKey: NSNumber(value: true)] : nil)
     }
 
     /// Manual stop: drop the on-demand rule first, otherwise iOS restarts the

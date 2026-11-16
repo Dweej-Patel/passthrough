@@ -161,18 +161,17 @@ private struct BatteryLine: View {
 /// Motion it stays still, a plain dot.
 struct NeedsYouDot: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    @State private var pulse = false
 
     var body: some View {
-        Circle()
-            .fill(PTColor.attention)
-            .frame(width: 10, height: 10)
-            .background(Circle().fill(PTColor.attention.opacity(0.35)).scaleEffect(pulse ? 2.2 : 1).opacity(pulse ? 0 : 1))
-            .onAppear {
-                guard !reduceMotion else { return }
-                withAnimation(.easeOut(duration: 1.6).repeatForever(autoreverses: false)) { pulse = true }
-            }
-            .accessibilityHidden(true)
+        // Clock-driven, so it can't carry the dot's position (see `StatusRing`).
+        TimelineView(.animation(minimumInterval: 1.0 / 30, paused: reduceMotion)) { context in
+            let wave = reduceMotion ? 0 : PTPulse.wave(context.date, period: 1.6)
+            Circle()
+                .fill(PTColor.attention)
+                .frame(width: 10, height: 10)
+                .background(Circle().fill(PTColor.attention.opacity(0.35)).scaleEffect(1 + 1.2 * wave).opacity(1 - wave))
+        }
+        .accessibilityHidden(true)
     }
 }
 

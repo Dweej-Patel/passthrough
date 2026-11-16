@@ -12,6 +12,8 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
     private var pairingsToken: Int32?
     /// iPad: watches for this iPad leaving the iPhone's hotspot.
     private var hotspotWatch: HotspotPresenceWatch?
+    /// The iPhone is linked right now: proof this iPad is on its hotspot.
+    private let hotspotLinked = Locked(false)
 
     override init() {
         super.init()
@@ -23,7 +25,8 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         ptLog(.info, "Extension starting")
         let config = (protocolConfiguration as? NETunnelProviderProtocol)?.providerConfiguration ?? [:]
         if config[HotspotTunnel.roleKey] as? String == HotspotTunnel.clientRole {
-            startHotspot(name: config[HotspotTunnel.nameKey] as? String ?? "iPad", completionHandler: completionHandler)
+            let manual = (options?[HotspotTunnel.manualStartKey] as? NSNumber)?.boolValue ?? false
+            startHotspot(name: config[HotspotTunnel.nameKey] as? String ?? "iPad", manual: manual, completionHandler: completionHandler)
             return
         }
         let service = PassthroughService.sharing(defaults, options: .init(providerConfiguration: config), hosting: "background")
@@ -59,20 +62,38 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
 
     // MARK: iPad: Internet through iPhone
 
-    private func startHotspot(name: String, completionHandler: @escaping (Error?) -> Void) {
-        // Holding every route is only right on the iPhone's hotspot (that's
-        // where the iPhone reaches this iPad). Anywhere else it would only cut
-        // the iPad off, whatever started the tunnel.
+    /// Holding every route is only right on the iPhone's hotspot (that's where
+    /// the iPhone reaches this iPad); anywhere else it would only cut the iPad
+    /// off. So iOS's own starts (on demand) go ahead only on the hotspot. A
+    /// start the user asked for (`manual`) goes ahead anyway, since an
+    /// IPv6-only hotspot can look like any network until its first link: the
+    /// watch then steps aside within seconds if it isn't the hotspot.
+    private func startHotspot(name: String, manual: Bool, completionHandler: @escaping (Error?) -> Void) {
         // Read before this tunnel's settings apply, so the DNS servers are the network's.
         let dns = DNSRedirect.systemServers()
-        let network = WirelessLink.networkSummary(dnsServers: dns)
-        guard WirelessLink.onPhoneHotspot(dnsServers: dns) else {
+        let wifi = WiFiPathReader()
+        // The provider and its completion handler only go on to the main queue.
+        let resume = UncheckedSendable { [weak self] (facts: WirelessLink.WiFiFacts?) in
+            self?.startHotspot(name: name, manual: manual, wifi: facts, dns: dns, completionHandler: completionHandler)
+        }
+        wifi.whenKnown { facts in
+            wifi.cancel()
+            DispatchQueue.main.async { resume.value(facts) }
+        }
+    }
+
+    private func startHotspot(name: String, manual: Bool, wifi: WirelessLink.WiFiFacts?, dns: [String],
+                              completionHandler: @escaping (Error?) -> Void) {
+        let defaults = UserDefaults(suiteName: PassthroughProtocol.appGroup) ?? .standard
+        let known = HotspotTunnel.knownHotspotDNS(defaults)
+        let network = WirelessLink.networkSummary(wifi: wifi, dnsServers: dns)
+        guard manual || WirelessLink.onPhoneHotspot(wifi: wifi, dnsServers: dns, knownHotspotDNS: known) else {
             ptLog(.info, "Internet through iPhone: not on an iPhone's hotspot, so not starting (\(network))")
             completionHandler(NSError(domain: "Passthrough", code: 12,
                                       userInfo: [NSLocalizedDescriptionKey: "This iPad isn't on the iPhone's Personal Hotspot."]))
             return
         }
-        ptLog(.info, "Internet through iPhone: on the hotspot, applying the tunnel (\(network))")
+        ptLog(.info, "Internet through iPhone: \(manual ? "turned on" : "on the hotspot"), applying the tunnel (\(network))")
         setTunnelNetworkSettings(HotspotRole.settings(ipv6: false)) { [weak self] error in
             if let error {
                 ptLog(.error, "Tunnel settings rejected: \(error.localizedDescription)")
@@ -84,7 +105,16 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
                 guard let self else { return }
                 let role = HotspotRole()
                 do {
-                    try role.start(name: name)
+                    let linked = self.hotspotLinked
+                    try role.start(name: name, onLinked: { up in
+                        linked.set(up)
+                        // A link worked over this network: remember its DNS servers and
+                        // routers, so the on-demand rule (the app applies it) and the
+                        // hotspot check know this hotspot next time.
+                        if up, HotspotTunnel.rememberHotspotDNS(dns + (wifi?.gateways ?? []), in: defaults) {
+                            ptLog(.info, "Internet through iPhone: learned this hotspot (\(network))")
+                        }
+                    })
                     self.hotspot = role
                     self.watchPairings()
                     self.watchForLeavingTheHotspot()
@@ -102,7 +132,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
     /// then uses whatever network it's on, and on-demand starts the tunnel
     /// again on the hotspot.
     private func watchForLeavingTheHotspot() {
-        let watch = HotspotPresenceWatch { [weak self] in
+        let watch = HotspotPresenceWatch(isLinked: { [hotspotLinked] in hotspotLinked.get() }) { [weak self] in
             ptLog(.info, "Internet through iPhone: this iPad left the iPhone's hotspot; stepping aside so it uses its network")
             self?.cancelTunnelWithError(nil)
         }
@@ -163,4 +193,10 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
 
     override func sleep(completionHandler: @escaping () -> Void) { completionHandler() }
     override func wake() {}
+}
+
+/// Carries a value the compiler can't prove Sendable to the one queue that uses it.
+private struct UncheckedSendable<Value>: @unchecked Sendable {
+    let value: Value
+    init(_ value: Value) { self.value = value }
 }

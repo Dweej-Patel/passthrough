@@ -204,3 +204,60 @@ final class HotspotClientTests: XCTestCase {
     }
 
 }
+
+/// Telling the iPhone's Personal Hotspot from other networks, from what the
+/// iPad sees (`WirelessLink.onPhoneHotspot`, `leftPhoneHotspot`).
+final class HotspotDetectionTests: XCTestCase {
+    typealias Facts = WirelessLink.WiFiFacts
+    /// What an iPad saw on an IPv6-only iPhone hotspot (iOS 27, a carrier without IPv4).
+    let ipv6Hotspot: [(interface: String, address: String, isIPv4: Bool)] = [
+        ("en0", "fe80::8ac:39d1:216:5ce8%en0", false), ("en0", "2607:fb90:fe00:c951:c8d:cec2:7936:c680", false),
+        ("en0", "192.0.0.2", true), ("en1", "169.254.96.51", true),
+    ]
+    let homeWiFi: [(interface: String, address: String, isIPv4: Bool)] = [("en0", "192.168.1.23", true), ("en0", "fe80::1%en0", false)]
+    let phoneLinkLocal = "fe80::74d5:e8ff:fea7:5164"
+
+    func testCostlyWiFiIsTheHotspot() {
+        XCTAssertTrue(WirelessLink.onPhoneHotspot(wifi: Facts(up: true, expensive: true, gateways: []), dnsServers: [],
+                                                  knownHotspotDNS: [], addresses: ipv6Hotspot))
+    }
+
+    func testAnIPv6OnlyHotspotIsKnownByItsLearnedDNS() {
+        let wifi = Facts(up: true, expensive: false, gateways: [phoneLinkLocal + "%en0"])
+        XCTAssertFalse(WirelessLink.onPhoneHotspot(wifi: wifi, dnsServers: [phoneLinkLocal], knownHotspotDNS: [], addresses: ipv6Hotspot),
+                       "nothing about it says hotspot until it's learned")
+        XCTAssertTrue(WirelessLink.onPhoneHotspot(wifi: wifi, dnsServers: [phoneLinkLocal], knownHotspotDNS: [phoneLinkLocal], addresses: ipv6Hotspot))
+        XCTAssertTrue(WirelessLink.onPhoneHotspot(wifi: wifi, dnsServers: [], knownHotspotDNS: [phoneLinkLocal], addresses: ipv6Hotspot),
+                      "by its router, with the tunnel's DNS in the way")
+    }
+
+    func testAnIPv4HotspotIsKnownByItsAddressOrDNS() {
+        XCTAssertTrue(WirelessLink.onPhoneHotspot(wifi: nil, dnsServers: [], knownHotspotDNS: [], addresses: [("en0", "172.20.10.4", true)]))
+        XCTAssertTrue(WirelessLink.onPhoneHotspot(wifi: nil, dnsServers: ["172.20.10.1"], knownHotspotDNS: [], addresses: []))
+    }
+
+    func testHomeWiFiIsNotTheHotspot() {
+        let wifi = Facts(up: true, expensive: false, gateways: ["192.168.1.1"])
+        XCTAssertFalse(WirelessLink.onPhoneHotspot(wifi: wifi, dnsServers: ["192.168.1.1"], knownHotspotDNS: [phoneLinkLocal], addresses: homeWiFi))
+        XCTAssertTrue(WirelessLink.leftPhoneHotspot(wifi: wifi, knownHotspotDNS: [phoneLinkLocal], addresses: homeWiFi))
+    }
+
+    /// The CLAT address (192.0.0.2) an IPv6-only hotspot gives is no sign of another network.
+    func testStayingOnAnIPv6OnlyHotspotIsNotLeaving() {
+        XCTAssertFalse(WirelessLink.leftPhoneHotspot(wifi: Facts(up: true, expensive: true, gateways: [phoneLinkLocal]),
+                                                     knownHotspotDNS: [], addresses: ipv6Hotspot))
+        XCTAssertFalse(WirelessLink.leftPhoneHotspot(wifi: Facts(up: true, expensive: false, gateways: [phoneLinkLocal]),
+                                                     knownHotspotDNS: [phoneLinkLocal], addresses: ipv6Hotspot))
+    }
+
+    func testWiFiDownIsLeaving() {
+        XCTAssertTrue(WirelessLink.leftPhoneHotspot(wifi: Facts(up: false, expensive: false, gateways: []), knownHotspotDNS: [], addresses: []))
+    }
+
+    func testLearnedDNSDropsScopesAndTheTunnelsOwn() {
+        let defaults = UserDefaults(suiteName: "hotspot-dns-\(UUID().uuidString)")!
+        XCTAssertTrue(HotspotTunnel.rememberHotspotDNS([phoneLinkLocal + "%en0", HotspotTunnel.dnsAddress], in: defaults))
+        XCTAssertEqual(HotspotTunnel.knownHotspotDNS(defaults), [phoneLinkLocal])
+        XCTAssertFalse(HotspotTunnel.rememberHotspotDNS([phoneLinkLocal], in: defaults), "nothing new")
+    }
+}

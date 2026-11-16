@@ -96,36 +96,67 @@ public enum WirelessLink {
         return found
     }
 
-    /// Wi-Fi IPv4 addresses on an iPhone's Personal Hotspot (172.20.10.0/28), and elsewhere.
-    private static func wifiIPv4() -> (onHotspot: Bool, elsewhere: Bool) {
-        var on = false, elsewhere = false
-        for entry in wifiAddresses() where entry.isIPv4 {
-            guard let v4 = IPv4Address(entry.address), !v4.isLinkLocal else { continue }
-            if isHotspotAddress(.hostPort(host: .ipv4(v4), port: 1)) { on = true } else { elsewhere = true }
+    /// An address without its scope ("fe80::1%en0" is "fe80::1").
+    public static func bareAddress(_ address: String) -> String {
+        address.split(separator: "%", maxSplits: 1).first.map(String.init) ?? address
+    }
+
+    /// What this device's Wi-Fi path says: whether it's up, whether iOS counts
+    /// it as costly (it does for an iPhone's Personal Hotspot, as for
+    /// cellular), and its routers.
+    public struct WiFiFacts: Equatable, Sendable {
+        public var up: Bool
+        public var expensive: Bool
+        public var gateways: [String]
+        public init(up: Bool, expensive: Bool, gateways: [String]) {
+            self.up = up; self.expensive = expensive; self.gateways = gateways.map(WirelessLink.bareAddress)
         }
-        return (on, elsewhere)
+        /// From a monitor that requires the Wi-Fi interface.
+        public init(path: NWPath) {
+            self.init(up: path.status == .satisfied, expensive: path.isExpensive, gateways: path.gateways.compactMap {
+                if case .hostPort(let host, _) = $0 { return "\(host)" } else { return nil }
+            })
+        }
     }
 
-    /// Whether this device is on an iPhone's Personal Hotspot: a Wi-Fi
-    /// address in 172.20.10.0/28, or `dnsServers` (the resolver's, read
-    /// while no tunnel of this app's holds the routes) naming the hotspot's
-    /// 172.20.10.1, which is what the iPad's on-demand rule matches.
-    public static func onPhoneHotspot(dnsServers: [String] = []) -> Bool {
-        wifiIPv4().onHotspot || dnsServers.contains(hotspotGateway)
+    /// Whether this device is on an iPhone's Personal Hotspot, by any sign:
+    /// Wi-Fi that iOS counts as costly; a Wi-Fi address in 172.20.10.0/28
+    /// (an IPv4 hotspot); or a DNS server or router that is the hotspot's
+    /// 172.20.10.1 or one this iPad already learned from the iPhone's hotspot
+    /// (an IPv6-only hotspot names the iPhone's link-local address). Every
+    /// address on an IPv6-only hotspot can look like any other network's,
+    /// hence several signs. `dnsServers`: the resolver's, read while no
+    /// tunnel of this app holds the routes (else pass none).
+    public static func onPhoneHotspot(wifi: WiFiFacts?, dnsServers: [String], knownHotspotDNS: [String],
+                                      addresses: [(interface: String, address: String, isIPv4: Bool)] = wifiAddresses()) -> Bool {
+        if let wifi, wifi.up, wifi.expensive { return true }
+        if hasHotspotIPv4(addresses) { return true }
+        let markers = Set([hotspotGateway] + knownHotspotDNS.map(bareAddress))
+        let seen = dnsServers.map(bareAddress) + (wifi?.gateways ?? [])
+        return seen.contains(where: markers.contains)
     }
 
-    /// Positively on some other network: a Wi-Fi IPv4 address outside the
-    /// hotspot's range and none in it. (No address at all, or only IPv6,
-    /// proves nothing, so a tunnel on the hotspot is never stopped on a guess.)
-    public static func onAnotherWiFiNetwork() -> Bool {
-        let v4 = wifiIPv4()
-        return v4.elsewhere && !v4.onHotspot
+    /// Positively off the iPhone's hotspot: Wi-Fi is down, or up on a network
+    /// with none of the hotspot's signs. Used by a tunnel that holds the
+    /// routes, so DNS isn't consulted (it would be the tunnel's own).
+    public static func leftPhoneHotspot(wifi: WiFiFacts, knownHotspotDNS: [String],
+                                        addresses: [(interface: String, address: String, isIPv4: Bool)] = wifiAddresses()) -> Bool {
+        guard wifi.up else { return true }
+        return !onPhoneHotspot(wifi: wifi, dnsServers: [], knownHotspotDNS: knownHotspotDNS, addresses: addresses)
     }
 
-    /// For the log: the Wi-Fi addresses and DNS servers this device sees.
-    public static func networkSummary(dnsServers: [String]) -> String {
+    static func hasHotspotIPv4(_ addresses: [(interface: String, address: String, isIPv4: Bool)]) -> Bool {
+        addresses.contains { entry in
+            guard entry.isIPv4, let v4 = IPv4Address(entry.address) else { return false }
+            return isHotspotAddress(.hostPort(host: .ipv4(v4), port: 1))
+        }
+    }
+
+    /// For the log: the Wi-Fi path, addresses and DNS servers this device sees.
+    public static func networkSummary(wifi: WiFiFacts?, dnsServers: [String]) -> String {
         let addresses = wifiAddresses().map { "\($0.interface) \($0.address)" }
-        return "Wi-Fi: \(addresses.isEmpty ? "none" : addresses.joined(separator: ", ")); DNS: \(dnsServers.isEmpty ? "none" : dnsServers.joined(separator: ", "))"
+        let path = wifi.map { "Wi-Fi \($0.up ? "up" : "down")\($0.expensive ? ", costly" : ""), routers: \($0.gateways.isEmpty ? "none" : $0.gateways.joined(separator: ", "))" } ?? "Wi-Fi path unknown"
+        return "\(path); addresses: \(addresses.isEmpty ? "none" : addresses.joined(separator: ", ")); DNS: \(dnsServers.isEmpty ? "none" : dnsServers.joined(separator: ", "))"
     }
 
     public static func isHotspotAddress(_ endpoint: NWEndpoint?) -> Bool {
