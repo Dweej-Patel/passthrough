@@ -167,6 +167,15 @@ public final class PTYProcess: @unchecked Sendable {
         _ = ioctl(master, TIOCSWINSZ, &size)   // the kernel signals the foreground group with SIGWINCH
     }
 
+    /// The process group the terminal's foreground job is (the shell's own,
+    /// `pid`, at its prompt); nil once the terminal is closed or can't tell.
+    public var foregroundGroup: pid_t? {
+        state.lock.lock(); defer { state.lock.unlock() }
+        guard !state.closed else { return nil }
+        let group = tcgetpgrp(master)
+        return group > 0 ? group : nil
+    }
+
     /// Hangs up the shell's session, as closing a terminal window does; a
     /// process that ignores that is killed after two seconds.
     public func terminate() {

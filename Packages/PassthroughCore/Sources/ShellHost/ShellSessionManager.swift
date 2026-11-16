@@ -97,6 +97,15 @@ public final class ShellSessionManager: @unchecked Sendable {
         var tail = Data()
         /// The question it seems to be waiting on (`ShellQuestion`); nil once input answers it.
         var waiting: String?
+        /// What the program in front says about itself (OSC 7501), and the
+        /// sum of it phones see; nil for a plain shell.
+        var programStatus = ProgramStatus()
+        var status: ShellStatus?
+        /// A change to what `status` says (not its state) waits to go out with others.
+        var statusNotifyScheduled = false
+        /// The foreground job when the program said it was working or blocked:
+        /// once another job is in front (the shell's prompt), it is gone.
+        var statusOwner: pid_t?
         /// Looked for a question since the last output.
         var checkedSinceOutput = true
         /// A look is already scheduled; output meanwhile pushes it back.
@@ -127,8 +136,16 @@ public final class ShellSessionManager: @unchecked Sendable {
         var info: ShellSessionInfo {
             ShellSessionInfo(id: id, title: title, startedAt: startedAt.timeIntervalSince1970,
                              lastOutputAt: lastOutputAt.timeIntervalSince1970, running: running, exitStatus: exitStatus,
-                             waiting: running ? waiting : nil, origin: origin == .mac ? ShellSessionInfo.originMac : nil,
-                             theme: theme)
+                             waiting: running ? question : nil, origin: origin == .mac ? ShellSessionInfo.originMac : nil,
+                             theme: theme, status: running ? status : nil)
+        }
+
+        /// The question it waits on: what the program says when it reports
+        /// its status (nothing while it isn't blocked), else what its screen
+        /// seems to ask.
+        var question: String? {
+            guard let status else { return waiting }
+            return status.isBlocked ? (status.message ?? "Needs you") : nil
         }
 
         /// Everyone output goes to.
@@ -151,6 +168,8 @@ public final class ShellSessionManager: @unchecked Sendable {
     /// How long `redraw` leaves the terminal shorter: long enough for the
     /// program to read the size while it is different.
     static let redrawPause: TimeInterval = 0.25
+    /// How often a change to what a status says (not to its state) goes out.
+    static let statusMessagePause: TimeInterval = 1
 
     private let transcripts: TranscriptStore
     private let command: () -> (String, [String])
@@ -321,6 +340,7 @@ public final class ShellSessionManager: @unchecked Sendable {
                 callouts.async { client.shellOutput(chunk, session: id) }
             }
             callouts.async { client.shellReplayed(session: id) }
+            if session.running { markResultSeen(session) }
             if session.running, shared {
                 session.viewers.removeAll { $0.client === client }
                 session.viewers.append(Viewer(client: client, size: size))
@@ -368,8 +388,8 @@ public final class ShellSessionManager: @unchecked Sendable {
     public func input(_ id: String, _ data: Data, from client: ShellAttachment? = nil) {
         queue.async { [self] in
             guard let session = table[id], session.running else { return }
+            var data = TerminalReports.removingProgramStatusReplies(from: data)
             let typed = TerminalReports.removing(from: data)
-            var data = data
             if let client {
                 let followed = session.active == nil || session.active == ObjectIdentifier(client)
                 if !followed { data = typed }
@@ -382,6 +402,7 @@ public final class ShellSessionManager: @unchecked Sendable {
             session.process.write(data)
             // A terminal's answers alone: nobody typed, so nothing was answered either.
             guard !typed.isEmpty else { return }
+            markResultSeen(session)
             if !session.titleKnown { learnTitle(from: typed, session: session) }
             // Someone answered: it isn't waiting any more, and only what
             // comes next can ask again.
@@ -531,6 +552,7 @@ public final class ShellSessionManager: @unchecked Sendable {
         session.writer.append(data, at: now)
         session.lastOutputAt = now
         if session.pendingTitle != nil { adoptEchoedTitle(session) }
+        readStatus(data, session: session, at: now)
         noteOutput(data, session: session)
         guard table[session.id] === session else { return }
         let id = session.id
@@ -562,8 +584,73 @@ public final class ShellSessionManager: @unchecked Sendable {
         }
     }
 
+    /// Answers a program asking whether the terminal speaks OSC 7501 (before
+    /// anything goes out: its answer must arrive ahead of the terminal's
+    /// reply to the device attributes query that follows), and follows what
+    /// it then reports.
+    private func readStatus(_ data: Data, session: Session, at now: Date) {
+        let outcome = session.programStatus.scan(data)
+        if outcome.contains(.queried) { session.process.write(ProgramStatus.supportReply) }
+        var changed = outcome.contains(.changed)
+        // A program killed mid-task never clears its records: once another
+        // job is in front (the shell's prompt is output too), it is no longer
+        // working or waiting. One ioctl, and only while something is unfinished.
+        // (Not "the shell is in front": a program the shell `exec`ed is the shell.)
+        if session.programStatus.hasUnfinished {
+            let group = session.process.foregroundGroup
+            if let owner = session.statusOwner, let group, group != owner, !changed {
+                changed = session.programStatus.dropUnfinished()
+            } else if session.statusOwner == nil {
+                session.statusOwner = group
+            }
+        }
+        if !session.programStatus.hasUnfinished { session.statusOwner = nil }
+        if changed { updateStatus(session, at: now) }
+    }
+
+    private func updateStatus(_ session: Session, at now: Date) {
+        let previous = session.status
+        var next: ShellStatus?
+        if let summary = session.programStatus.summary {
+            let sameState = previous?.state == summary.state
+            let finished = summary.state == ShellStatus.done || summary.state == ShellStatus.error
+            next = ShellStatus(state: summary.state, kind: summary.kind,
+                               message: summary.message.map { Self.oneLine($0, limit: ShellStatus.maxMessage) },
+                               agents: summary.agents,
+                               since: sameState ? (previous?.since ?? now.timeIntervalSince1970) : now.timeIntervalSince1970,
+                               // Done while someone has it open: they saw it.
+                               seen: finished && ((sameState && previous?.seen == true) || !session.clients.isEmpty))
+        }
+        guard next != previous else { return }
+        session.status = next
+        if next?.state != previous?.state || next?.kind != previous?.kind || next?.seen != previous?.seen {
+            notifyChange()
+        } else if !session.statusNotifyScheduled {
+            // What it is doing changes with each step; phones hear of it a little later.
+            session.statusNotifyScheduled = true
+            queue.asyncAfter(deadline: .now() + Self.statusMessagePause) { [weak self, weak session] in
+                guard let self, let session else { return }
+                session.statusNotifyScheduled = false
+                if table[session.id] === session { notifyChange() }
+            }
+        }
+    }
+
+    /// Someone has the session in front of them: a result waiting there is seen.
+    private func markResultSeen(_ session: Session) {
+        guard let status = session.status, status.isUnseenResult else { return }
+        session.status?.seen = true
+        notifyChange()
+    }
+
+    private static func oneLine(_ text: String, limit: Int) -> String {
+        let line = text.split(whereSeparator: \.isNewline).joined(separator: " ")
+        return line.count > limit ? String(line.prefix(limit - 1)) + "…" : line
+    }
+
     private func lookForQuestion(_ session: Session) {
-        guard session.running, !session.checkedSinceOutput, table[session.id] === session else { return }
+        // A program that reports its status says when it is asking.
+        guard session.running, !session.checkedSinceOutput, session.status == nil, table[session.id] === session else { return }
         session.checkedSinceOutput = true
         let question = ShellQuestion.find(in: session.tail)
         guard question != session.waiting else { return }
