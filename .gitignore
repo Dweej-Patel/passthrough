@@ -26,3 +26,6 @@ Vendor/vpn-engines-src/
 build-ios/
 build-device/
 .superpowers/
+
+# Spikes generate their own Xcode projects
+Spikes/*/*.xcodeproj/
