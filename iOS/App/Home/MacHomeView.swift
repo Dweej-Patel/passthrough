@@ -67,9 +67,6 @@ struct MacHomeView: View {
                     }
                 }
             }
-            .navigationDestination(isPresented: $router.showThisPhone) {
-                ThisPhoneView(showPairing: $showPairing, showSettings: $showSettings)
-            }
         }
         .confirmationDialog("Let \(macName) sleep?", isPresented: $confirmSleep, titleVisibility: .visible) {
             Button("Let it sleep") { shell.control(.awake(false)) }
@@ -113,7 +110,6 @@ struct MacHomeView: View {
             hero
             if shell.reach == .ready { needsYou }
             switches
-            thisPhoneRow
             if shell.reach == .noAccess, !model.pairedClients.isEmpty { setupCard }
             if shell.reach == .ready { shells }
             Color.clear.frame(height: 0).id("end")
@@ -124,9 +120,14 @@ struct MacHomeView: View {
     /// This device's own card sits beside the Mac, and the screen gets a card of its own.
     private var wideLayout: some View {
         Grid(horizontalSpacing: 20, verticalSpacing: 16) {
-            GridRow {
-                hero.environment(\.surfaceFill, .center)
-                thisDeviceCard.environment(\.surfaceFill, .center)
+            if let hotspot = model.hotspot {
+                GridRow {
+                    hero.environment(\.surfaceFill, .center)
+                    PTSurface(padding: 6) { HotspotRow(hotspot: hotspot) { showPhonePairing = true } }
+                        .environment(\.surfaceFill, .center)
+                }
+            } else {
+                GridRow { hero.gridCellColumns(2) }
             }
             if shell.reach == .ready, shell.visibleSessions.contains(where: \.isAsking) {
                 GridRow { VStack(spacing: 10) { needsYou }.gridCellColumns(2) }
@@ -173,19 +174,6 @@ struct MacHomeView: View {
         .sensoryFeedback(.selection, trigger: state?.vpn)
         .sensoryFeedback(.selection, trigger: state?.locked)
         .animation(.easeOut(duration: 0.25), value: shell.controlMisses)
-    }
-
-    /// Beside the Mac on iPad: this device's own card, its internet first.
-    @ViewBuilder private var thisDeviceCard: some View {
-        PTSurface(padding: 6) {
-            VStack(alignment: .leading, spacing: 0) {
-                if let hotspot = model.hotspot {
-                    HotspotRow(hotspot: hotspot) { showPhonePairing = true }
-                    Divider().padding(.leading, 58)
-                }
-                thisDeviceRow
-            }
-        }
     }
 
     private func runAfterSwitcher() {
@@ -561,36 +549,6 @@ struct MacHomeView: View {
             return .init("This \(ThisDevice.name) isn't allowed to change Keep awake and the VPN, or lock the screen. To allow it, on the Mac open Passthrough's Settings, go to Remote Shell and turn on Awake & VPN for this \(ThisDevice.name).")
         }
         return nil
-    }
-
-    // MARK: This iPhone
-
-    private var thisPhoneRow: some View {
-        thisDeviceRow
-            .padding(6)
-            .background(PTColor.surface, in: RoundedRectangle(cornerRadius: 24, style: .continuous))
-            .overlay(RoundedRectangle(cornerRadius: 24, style: .continuous).strokeBorder(PTColor.hairline))
-    }
-
-    private var thisDeviceRow: some View {
-        Button { router.showThisPhone = true } label: {
-            HStack(spacing: 12) {
-                SwitchIcon(symbol: ThisDevice.symbol, on: false, warning: false)
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("This \(ThisDevice.name)").font(.body.weight(.semibold))
-                    Text(ThisDevice.isPad ? "Your iPhone and Macs, pairing"
-                         : !paired ? "Pair a Mac, data used, connection details" : "Paired Macs, data used, connection details")
-                        .font(.subheadline).foregroundStyle(.secondary)
-                }
-                Spacer(minLength: 8)
-                Image(systemName: "chevron.right").font(.subheadline.weight(.semibold)).foregroundStyle(.tertiary)
-            }
-            .padding(10)
-            .frame(minHeight: 60)
-            .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-        .accessibilityHint("Opens this \(ThisDevice.name)'s sharing, pairing and data use")
     }
 
     // MARK: Shells

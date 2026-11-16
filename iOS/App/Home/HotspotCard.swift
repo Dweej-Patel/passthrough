@@ -228,3 +228,14 @@ struct UpstreamPhoneCard: View {
         return parts.joined(separator: " \u{00B7} ")
     }
 }
+
+/// The switch with its own pairing sheet, for places without one (the iPad tab).
+struct HotspotPairingRow: View {
+    @ObservedObject var hotspot: HotspotModel
+    @State private var pairing = false
+
+    var body: some View {
+        HotspotRow(hotspot: hotspot) { pairing = true }
+            .sheet(isPresented: $pairing) { PairWithPhoneSheet(hotspot: hotspot) }
+    }
+}

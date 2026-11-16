@@ -6,6 +6,7 @@ import PassthroughUI
 /// traffic and data use, and the Macs it's paired with.
 struct ThisPhoneView: View {
     @EnvironmentObject private var model: AppModel
+    @Environment(\.horizontalSizeClass) private var widthClass
     @Binding var showPairing: Bool
     @Binding var showSettings: Bool
 
@@ -13,7 +14,8 @@ struct ThisPhoneView: View {
         ScrollView {
             VStack(spacing: 14) {
                 if let hotspot = model.hotspot {
-                    // iPad: the iPhone it gets its internet from, and its Macs.
+                    // iPad: its internet, the iPhone it comes from, and its Macs.
+                    PTSurface(padding: 6) { HotspotPairingRow(hotspot: hotspot) }
                     UpstreamPhoneCard(hotspot: hotspot)
                     MacsCard(showPairing: $showPairing)
                 } else {
@@ -26,9 +28,7 @@ struct ThisPhoneView: View {
                     footer
                 }
             }
-            .frame(maxWidth: 720)
-            .frame(maxWidth: .infinity)
-            .padding(.horizontal, 16)
+            .padding(.horizontal, widthClass == .regular ? 32 : 16)
             .padding(.top, 4)
             .padding(.bottom, 24)
         }
