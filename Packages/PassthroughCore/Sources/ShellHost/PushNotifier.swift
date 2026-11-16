@@ -27,7 +27,6 @@ public final class PushNotifier: @unchecked Sendable {
     }
 
     private struct Tracked {
-        var state: String
         var workingSince: Double?
         /// What the last notice (or look) was about, so it isn't sent twice.
         var settled: String?
@@ -48,56 +47,48 @@ public final class PushNotifier: @unchecked Sendable {
 
     public init(now: @escaping @Sendable () -> Date = Date.init) { self.now = now }
 
-    /// The sessions as they are now, and those someone is looking at. Sends
-    /// what that calls for to every registered phone.
-    public func update(_ sessions: [ShellSessionInfo], looking: Set<String>, macName: String) {
-        let planned = plan(sessions, looking: looking, macName: macName)
-        guard !planned.isEmpty, let client = client?(), let registrations = registrations?(), !registrations.isEmpty else { return }
-        for item in planned {
-            for (phoneID, registration) in registrations where allow(phoneID) {
-                send(item, to: registration, phoneID: phoneID, client: client)
-            }
+    /// A session's status changed (`ShellSessionManager.onStatusChange`):
+    /// sends what that calls for to every registered phone.
+    public func observe(_ session: ShellSessionInfo, looking: Bool, macName: String) {
+        guard let item = plan(session, looking: looking, macName: macName),
+              let client = client?(), let registrations = registrations?() else { return }
+        for (phoneID, registration) in registrations where allow(phoneID) {
+            Task { _ = await deliver(item.notice, timeSensitive: item.timeSensitive, to: registration, phoneID: phoneID, client: client) }
         }
     }
 
-    /// What the change from the last list calls for. Exposed for tests.
-    func plan(_ sessions: [ShellSessionInfo], looking: Set<String>, macName: String) -> [Planned] {
+    /// What one change calls for. Exposed for tests.
+    func plan(_ session: ShellSessionInfo, looking watched: Bool, macName: String) -> Planned? {
         lock.lock(); defer { lock.unlock() }
-        var planned: [Planned] = []
-        var next: [String: Tracked] = [:]
-        for session in sessions where session.running {
-            guard let status = session.status else { continue }
-            var track = tracked[session.id] ?? Tracked(state: status.state)
-            // A turn starts when it starts working, and lasts through its
-            // questions until it is done, fails or goes idle.
-            if status.isWorking, track.workingSince == nil { track.workingSince = status.since }
-            if status.state == ShellStatus.idle { track.workingSince = nil }
-            track.state = status.state
-            let watched = looking.contains(session.id)
-            switch status.state {
-            case ShellStatus.blocked:
-                let about = "blocked|\(status.kind ?? "")|\(status.message ?? "")"
-                if track.settled != about {
-                    track.settled = about
-                    if !watched { planned.append(Planned(notice: Self.notice(session, status, worked: nil, macName: macName), timeSensitive: true)) }
-                }
-            case ShellStatus.done, ShellStatus.error:
-                let about = "\(status.state)|\(status.since)"
-                if track.settled != about {
-                    track.settled = about
-                    let worked = track.workingSince.map { status.since - $0 }
-                    if !watched, !status.seen, let worked, worked >= Self.minimumWork {
-                        planned.append(Planned(notice: Self.notice(session, status, worked: worked, macName: macName), timeSensitive: false))
-                    }
-                    track.workingSince = nil
-                }
-            default:
-                break
-            }
-            next[session.id] = track
+        guard session.running, let status = session.status else {
+            tracked[session.id] = nil   // ended, or a plain shell again
+            return nil
         }
-        tracked = next
-        return planned
+        var track = tracked[session.id] ?? Tracked()
+        defer { tracked[session.id] = track }
+        // A turn starts when it starts working, and lasts through its
+        // questions until it is done, fails or goes idle.
+        if status.isWorking, track.workingSince == nil { track.workingSince = status.since }
+        if status.state == ShellStatus.idle { track.workingSince = nil }
+        switch status.state {
+        case ShellStatus.blocked:
+            let about = "blocked|\(status.kind ?? "")|\(status.message ?? "")"
+            guard track.settled != about else { return nil }
+            track.settled = about
+            return watched ? nil : Planned(notice: Self.notice(session, status, worked: nil, macName: macName), timeSensitive: true)
+        case ShellStatus.done, ShellStatus.error:
+            let about = "\(status.state)|\(status.since)"
+            guard track.settled != about else { return nil }
+            track.settled = about
+            let worked = track.workingSince.map { status.since - $0 }
+            track.workingSince = nil
+            guard !watched, !status.seen, let worked, worked >= Self.minimumWork else { return nil }
+            return Planned(notice: Self.notice(session, status, worked: worked, macName: macName), timeSensitive: false)
+        default:
+            // Answered: the same question asked again later is news again.
+            if track.settled?.hasPrefix("blocked|") == true { track.settled = nil }
+            return nil
+        }
     }
 
     static func notice(_ session: ShellSessionInfo, _ status: ShellStatus, worked: TimeInterval?, macName: String) -> PushNotice {
@@ -149,26 +140,30 @@ public final class PushNotifier: @unchecked Sendable {
         return true
     }
 
-    private func send(_ item: Planned, to registration: PushRegistration, phoneID: String, client: APNsClient) {
+    /// Seals `notice` for one phone and sends it; a token that stopped
+    /// working is forgotten (`onTokenGone`) and how it went is said (`onResult`).
+    /// Also what Settings' test notice goes through.
+    public func deliver(_ notice: PushNotice, timeSensitive: Bool, to registration: PushRegistration, phoneID: String,
+                        client: APNsClient) async -> APNsClient.Outcome {
         guard let key = Data(base64Encoded: registration.key),
-              let sealed = try? PushBox.seal(item.notice, key: key, macID: registration.mac) else { return }
-        let payload = Self.payload(sealed: sealed, macID: registration.mac, session: item.notice.session, timeSensitive: item.timeSensitive)
-        let onTokenGone = onTokenGone, onResult = onResult
-        Task {
-            switch await client.send(payload, to: registration, collapseID: item.notice.session, timeSensitive: item.timeSensitive) {
-            case .sent:
-                onResult?(nil)
-            case .tokenGone:
-                ptLog(.info, "push: a phone's token no longer works; forgetting it")
-                onTokenGone?(phoneID)
-            case .credentialsRefused(let reason):
-                ptLog(.error, "push: APNs refused the key (\(reason))")
-                onResult?("Apple refused the push key (\(reason)). Check the Team ID, the Key ID and the key file.")
-            case .failed(let reason):
-                ptLog(.warning, "push: a notice was not sent (\(reason))")
-                onResult?("The last notice was not sent (\(reason)).")
-            }
+              let sealed = try? PushBox.seal(notice, key: key, macID: registration.mac) else { return .failed("unreadable registration") }
+        let payload = Self.payload(sealed: sealed, macID: registration.mac, session: notice.session, timeSensitive: timeSensitive)
+        let outcome = await client.send(payload, to: registration, collapseID: notice.session.isEmpty ? nil : notice.session,
+                                        timeSensitive: timeSensitive)
+        switch outcome {
+        case .sent:
+            onResult?(nil)
+        case .tokenGone:
+            ptLog(.info, "push: a phone's token no longer works; forgetting it")
+            onTokenGone?(phoneID)
+        case .credentialsRefused(let reason):
+            ptLog(.error, "push: APNs refused the key (\(reason))")
+            onResult?("Apple refused the push key (\(reason)). Check the Team ID, the Key ID and the key file.")
+        case .failed(let reason):
+            ptLog(.warning, "push: a notice was not sent (\(reason))")
+            onResult?("The last notice was not sent (\(reason)).")
         }
+        return outcome
     }
 }
 #endif

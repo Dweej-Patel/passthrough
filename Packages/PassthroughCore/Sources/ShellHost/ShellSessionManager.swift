@@ -52,6 +52,16 @@ public final class ShellSessionManager: @unchecked Sendable {
         set { queue.sync { changeHandler = newValue } }
     }
 
+    /// Fires as a session's `status` changes in a way anyone shows (its state,
+    /// kind, agents, whether it was seen, a blocked one's question), and as
+    /// the session ends, with the session as it is then and whether someone
+    /// is looking at it: what happened, not what is left of it by the time a
+    /// list is read. Called off the manager's queue, in order.
+    public var onStatusChange: (@Sendable (_ session: ShellSessionInfo, _ looking: Bool) -> Void)? {
+        get { queue.sync { statusHandler } }
+        set { queue.sync { statusHandler = newValue } }
+    }
+
     /// Fires after who is looking at a session changes (`details`). Called off the manager's queue.
     public var onViewersChange: (@Sendable () -> Void)? {
         get { queue.sync { viewersHandler } }
@@ -106,13 +116,11 @@ public final class ShellSessionManager: @unchecked Sendable {
         /// sum of it phones see; nil for a plain shell.
         var programStatus = ProgramStatus()
         var status: ShellStatus?
-        /// A change to what `status` says (not its state) waits to go out with others.
-        var statusNotifyScheduled = false
         /// The foreground job (process group) when the program first reported:
         /// once that group is gone, so is everything it said.
         var statusOwner: pid_t?
-        /// The size a `redraw` under way goes back to.
-        var redrawRestoring: Size?
+        /// A `redraw` is under way.
+        var redrawing = false
         /// Looked for a question since the last output.
         var checkedSinceOutput = true
         /// A look is already scheduled; output meanwhile pushes it back.
@@ -175,8 +183,6 @@ public final class ShellSessionManager: @unchecked Sendable {
     /// How long `redraw` leaves the terminal shorter: long enough for the
     /// program to read the size while it is different.
     static let redrawPause: TimeInterval = 0.25
-    /// How often a change to what a status says (not to its state) goes out.
-    static let statusMessagePause: TimeInterval = 1
 
     private let transcripts: TranscriptStore
     private let command: () -> (String, [String])
@@ -198,6 +204,7 @@ public final class ShellSessionManager: @unchecked Sendable {
     /// Numbers every attach, so a late detach can be told from a current one.
     private var lastGeneration: UInt64 = 0
     private var changeHandler: (@Sendable () -> Void)?
+    private var statusHandler: (@Sendable (ShellSessionInfo, Bool) -> Void)?
     private var viewersHandler: (@Sendable () -> Void)?
     private var fallbackTheme: ShellTheme?
 
@@ -232,12 +239,6 @@ public final class ShellSessionManager: @unchecked Sendable {
         var info = info
         info.theme = fallbackTheme
         return info
-    }
-
-    /// Running sessions someone is looking at (`ShellAttachment.isLooking`):
-    /// nothing about them is news.
-    public var lookingSessions: Set<String> {
-        queue.sync { Set(table.values.filter { $0.running && $0.clients.contains { $0.isLooking } }.map(\.id)) }
     }
 
     /// The sessions with who is looking at each, for the Mac's own list.
@@ -527,15 +528,15 @@ public final class ShellSessionManager: @unchecked Sendable {
     /// is ignored), so the terminal is one row shorter for a moment.
     private func redraw(_ session: Session) {
         // One at a time: a second would take the shorter size for the real one.
-        guard session.redrawRestoring == nil else { return }
+        guard !session.redrawing else { return }
         let size = session.size
         guard size.rows > 1 else { return }
         let shorter = Size(cols: size.cols, rows: size.rows - 1)
-        session.redrawRestoring = size
+        session.redrawing = true
         resize(session, to: shorter)
         queue.asyncAfter(deadline: .now() + Self.redrawPause) { [weak session, self] in
             guard let session else { return }
-            session.redrawRestoring = nil
+            session.redrawing = false
             // Unless someone's terminal changed size meanwhile: that size stands.
             guard session.running, session.size == shorter else { return }
             resize(session, to: size)
@@ -617,9 +618,10 @@ public final class ShellSessionManager: @unchecked Sendable {
     /// reply to the device attributes query that follows), and follows what
     /// it then reports.
     private func readStatus(_ data: Data, session: Session, at now: Date) {
-        let outcome = session.programStatus.scan(data)
+        var summaries: [ProgramStatus.Summary?] = []
+        let outcome = session.programStatus.scan(data, summaries: &summaries)
         if outcome.contains(.queried) { session.process.write(ProgramStatus.supportReply) }
-        var changed = outcome.contains(.changed)
+        let changed = outcome.contains(.changed)
         // A program killed mid-task never clears its records. Once another job
         // is in front (the shell's prompt is output too) and the reporting
         // job's process group is gone, nothing it said holds any more. A job
@@ -630,18 +632,20 @@ public final class ShellSessionManager: @unchecked Sendable {
             let group = session.process.foregroundGroup
             if session.statusOwner == nil {
                 session.statusOwner = group
-            } else if let owner = session.statusOwner, let group, group != owner, !changed, !Self.groupExists(owner) {
-                changed = session.programStatus.forgetAll()
+            } else if let owner = session.statusOwner, let group, group != owner, !changed, !Self.groupExists(owner),
+                      session.programStatus.forgetAll() {
+                summaries.append(nil)
             }
         }
         if session.programStatus.isEmpty { session.statusOwner = nil }
-        if changed { updateStatus(session, at: now) }
+        // Each change in turn: a moment's state (done, then the program gone) still counts.
+        for summary in summaries { updateStatus(session, to: summary, at: now) }
     }
 
-    private func updateStatus(_ session: Session, at now: Date) {
+    private func updateStatus(_ session: Session, to summary: ProgramStatus.Summary?, at now: Date) {
         let previous = session.status
         var next: ShellStatus?
-        if let summary = session.programStatus.summary {
+        if let summary {
             let sameState = previous?.state == summary.state
             let finished = summary.state == ShellStatus.done || summary.state == ShellStatus.error
             next = ShellStatus(state: summary.state, kind: summary.kind,
@@ -653,17 +657,20 @@ public final class ShellSessionManager: @unchecked Sendable {
         }
         guard next != previous else { return }
         session.status = next
-        if next?.state != previous?.state || next?.kind != previous?.kind || next?.seen != previous?.seen {
-            notifyChange()
-        } else if !session.statusNotifyScheduled {
-            // What it is doing changes with each step; phones hear of it a little later.
-            session.statusNotifyScheduled = true
-            queue.asyncAfter(deadline: .now() + Self.statusMessagePause) { [weak self, weak session] in
-                guard let self, let session else { return }
-                session.statusNotifyScheduled = false
-                if table[session.id] === session { notifyChange() }
-            }
-        }
+        // What it is doing while it works changes with every step and nothing
+        // shows it: that alone goes out with the next change that shows.
+        let shown = next?.state != previous?.state || next?.kind != previous?.kind || next?.seen != previous?.seen
+            || next?.agents != previous?.agents || (next?.isBlocked == true && next?.message != previous?.message)
+        guard shown else { return }
+        notifyChange()
+        notifyStatus(session)
+    }
+
+    private func notifyStatus(_ session: Session) {
+        guard let handler = statusHandler else { return }
+        let info = session.info
+        let looking = session.clients.contains { $0.isLooking }
+        callouts.async { handler(info, looking) }
     }
 
     /// Someone has the session in front of them: a result waiting there is seen.
@@ -671,6 +678,7 @@ public final class ShellSessionManager: @unchecked Sendable {
         guard let status = session.status, status.isUnseenResult else { return }
         session.status?.seen = true
         notifyChange()
+        notifyStatus(session)
     }
 
     /// Whether any process is left in process group `group`.
@@ -698,6 +706,7 @@ public final class ShellSessionManager: @unchecked Sendable {
         session.running = false
         session.exitStatus = status
         session.writer.finish(exitStatus: status, at: Date())
+        if session.status != nil { notifyStatus(session) }
         let id = session.id
         for client in session.clients {
             callouts.async { client.shellEnded(session: id, exitStatus: status) }

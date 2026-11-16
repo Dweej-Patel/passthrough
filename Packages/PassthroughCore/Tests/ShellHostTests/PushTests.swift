@@ -116,6 +116,7 @@ final class PushTests: XCTestCase {
             (410, #"{"reason":"Unregistered"}"#, .tokenGone),
             (400, #"{"reason":"BadDeviceToken"}"#, .tokenGone),
             (403, #"{"reason":"InvalidProviderToken"}"#, .credentialsRefused("InvalidProviderToken")),
+            (400, #"{"reason":"TopicDisallowed"}"#, .credentialsRefused("TopicDisallowed")),
             (429, #"{"reason":"TooManyRequests"}"#, .failed("TooManyRequests")),
             (500, "", .failed("HTTP 500")),
         ]
@@ -135,7 +136,8 @@ final class PushTests: XCTestCase {
     }
 
     private func plan(_ notifier: PushNotifier, _ sessions: [ShellSessionInfo], looking: Set<String> = []) -> [String] {
-        notifier.plan(sessions, looking: looking, macName: "Studio").map { "\($0.notice.title) | \($0.notice.body)\($0.timeSensitive ? " !" : "")" }
+        sessions.compactMap { notifier.plan($0, looking: looking.contains($0.id), macName: "Studio") }
+            .map { "\($0.notice.title) | \($0.notice.body)\($0.timeSensitive ? " !" : "")" }
     }
 
     func testAQuestionIsToldOnceAndANewOneAgain() {
@@ -146,6 +148,26 @@ final class PushTests: XCTestCase {
         XCTAssertEqual(plan(notifier, [session("blocked", since: 110, kind: "permission", message: "approve Bash: ls")]), [], "the same question")
         XCTAssertEqual(plan(notifier, [session("blocked", since: 120, kind: "question", message: "answer: Pick (A · B)")]),
                        ["claude needs you | answer: Pick (A · B) !"])
+    }
+
+    /// Answered, then the same question again in the same turn: news again.
+    func testTheSameQuestionAgainAfterAnAnswerIsToldAgain() {
+        let notifier = PushNotifier()
+        let ask = session("blocked", since: 110, kind: "permission", message: "approve Bash: npm test")
+        XCTAssertEqual(plan(notifier, [ask]).count, 1)
+        _ = plan(notifier, [session("working", since: 115)])
+        XCTAssertEqual(plan(notifier, [session("blocked", since: 130, kind: "permission", message: "approve Bash: npm test")]),
+                       ["claude needs you | approve Bash: npm test !"])
+    }
+
+    /// A session gone, or back to a plain shell, starts over.
+    func testAnEndedSessionIsForgotten() {
+        let notifier = PushNotifier()
+        XCTAssertEqual(plan(notifier, [session("blocked", since: 1, kind: "question", message: "q")]).count, 1)
+        var ended = session("blocked", since: 1, kind: "question", message: "q")
+        ended.running = false
+        XCTAssertEqual(plan(notifier, [ended]), [])
+        XCTAssertEqual(plan(notifier, [session("blocked", since: 1, kind: "question", message: "q")]).count, 1, "a new start")
     }
 
     func testNothingAboutASessionSomeoneIsLookingAt() {
@@ -187,7 +209,7 @@ final class PushTests: XCTestCase {
         let registration = self.registration
         notifier.client = { client }
         notifier.registrations = { ["phone-1": registration] }
-        notifier.update([session("blocked", since: 1, kind: "question", message: "answer: Pick (A · B)")], looking: [], macName: "Studio")
+        notifier.observe(session("blocked", since: 1, kind: "question", message: "answer: Pick (A · B)"), looking: false, macName: "Studio")
         let deadline = Date().addingTimeInterval(5)
         while transport.sent.isEmpty, Date() < deadline { try await Task.sleep(for: .milliseconds(20)) }
         let body = try XCTUnwrap(transport.sent.first?.httpBody)
@@ -212,7 +234,7 @@ final class PushTests: XCTestCase {
         notifier.client = { client }
         notifier.registrations = { ["phone-1": registration] }
         for n in 0..<15 {
-            notifier.update([session("blocked", since: Double(n), kind: "question", message: "q\(n)")], looking: [], macName: "Studio")
+            notifier.observe(session("blocked", since: Double(n), kind: "question", message: "q\(n)"), looking: false, macName: "Studio")
         }
         let deadline = Date().addingTimeInterval(5)
         while transport.sent.count < PushNotifier.perPhoneLimit, Date() < deadline { Thread.sleep(forTimeInterval: 0.02) }
@@ -223,16 +245,59 @@ final class PushTests: XCTestCase {
 
     // MARK: Registry
 
-    func testTheRegistryKeepsPhonesWithAccessOnly() {
+    func testTheRegistryKeepsPhonesUntilRemoved() {
         let secrets = InMemorySecrets()
         let registry = PushRegistry(secrets: secrets)
         registry.set(registration, for: "phone-1")
         registry.set(registration, for: "phone-2")
         XCTAssertEqual(Set(PushRegistry(secrets: secrets).all.keys), ["phone-1", "phone-2"], "kept across launches")
-        registry.keep(only: ["phone-2"])
+        registry.remove("phone-1")
         XCTAssertEqual(Set(registry.all.keys), ["phone-2"])
         registry.remove("phone-2")
         XCTAssertNil(secrets.read(PushRegistry.account), "nothing left in the Keychain")
+    }
+
+    /// A build's tokens are for the APNs its profile names.
+    func testTheEnvironmentComesFromTheProvisioningProfile() {
+        func profile(_ aps: String?) -> Data {
+            let entitlements = aps.map { "<key>aps-environment</key><string>\($0)</string>" } ?? ""
+            return Data(("\u{30}\u{82}signed-junk<?xml version=\"1.0\" encoding=\"UTF-8\"?><plist version=\"1.0\"><dict>"
+                + "<key>Entitlements</key><dict>\(entitlements)</dict></dict></plist>more-junk").utf8)
+        }
+        XCTAssertEqual(PushRegistration.environment(ofProfile: profile("development")), PushRegistration.sandbox)
+        XCTAssertEqual(PushRegistration.environment(ofProfile: profile("production")), PushRegistration.production)
+        XCTAssertEqual(PushRegistration.environment(ofProfile: profile(nil)), PushRegistration.production)
+        XCTAssertEqual(PushRegistration.environment(ofProfile: Data("garbage".utf8)), PushRegistration.production)
+    }
+
+    // MARK: The session manager
+
+    final class Recorder: @unchecked Sendable {
+        private let lock = NSLock()
+        private var items: [(ShellSessionInfo, Bool)] = []
+        func add(_ s: ShellSessionInfo, _ l: Bool) { lock.lock(); items.append((s, l)); lock.unlock() }
+        var states: [String] { lock.lock(); defer { lock.unlock() }; return items.map { $0.0.running ? ($0.0.status?.state ?? "none") : "ended" } }
+    }
+
+    /// A status that lasts a moment (done, then the program gone) still
+    /// reaches the notifier: each change is handed over as it happens.
+    func testEveryShownStatusChangeIsHandedOverInOrder() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("PushTests-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let manager = ShellSessionManager(transcripts: try TranscriptStore(directory: directory), command: { ("/bin/sh", []) },
+                                          environment: { ["PATH": "/usr/bin:/bin", "TERM": "xterm-256color", "PS1": "$ "] },
+                                          directory: URL(fileURLWithPath: "/tmp"), endedRetention: 600, quietBeforeAsking: 0.2)
+        defer { manager.closeAll() }
+        let recorder = Recorder()
+        manager.onStatusChange = { recorder.add($0, $1) }
+        let id = try manager.open(phoneLabel: "iPhone", cols: 80, rows: 24)
+        // Working with changing messages (not handed over), done, then gone at once.
+        let msg = { (t: String) in Data(t.utf8).base64EncodedString() }
+        manager.input(id, Data(("sh -c \"printf '\\033]7501;state=working:msg=\(msg("a"))\\007'; printf '\\033]7501;state=working:msg=\(msg("b"))\\007'; "
+            + "printf '\\033]7501;state=done\\007'\"\n").utf8))
+        let deadline = Date().addingTimeInterval(10)
+        while recorder.states.count < 3, Date() < deadline { Thread.sleep(forTimeInterval: 0.02) }
+        XCTAssertEqual(recorder.states, ["working", "done", "none"])
     }
 }
 #endif

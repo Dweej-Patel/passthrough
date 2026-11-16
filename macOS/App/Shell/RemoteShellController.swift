@@ -209,13 +209,13 @@ final class RemoteShellController: ObservableObject {
                     // Phones hear of new, ended and waiting sessions without asking.
                     self?.listener?.pushSessions()
                     self?.iroh?.listener?.pushSessions()
-                    // And through Apple's push service, when one needs them or is done.
-                    self?.notifyPhones()
                 }
             }
             // The Mac terminal's colours, kept across launches, for sessions phones start.
             manager.defaultTheme = (UserDefaults.standard.data(forKey: Self.terminalThemeKey))
                 .flatMap { try? JSONDecoder().decode(ShellTheme.self, from: $0) }
+            // Through Apple's push service, when a session needs a phone or is done.
+            manager.onStatusChange = notifications.statusHandler()
             manager.onViewersChange = { [weak self] in
                 Task { @MainActor in self?.refreshTerminals() }
             }
@@ -788,12 +788,6 @@ final class RemoteShellController: ObservableObject {
 
     private func refreshPhones() {
         phones = store.phones.sorted { $0.grantedAt > $1.grantedAt }
-        notifications.keep(only: Set(phones.map(\.phoneID)))
-    }
-
-    private func notifyPhones() {
-        guard let manager else { return }
-        notifications.sessionsChanged(manager.sessions, looking: manager.lookingSessions)
     }
 
     // MARK: Screen

@@ -4,7 +4,8 @@ import PassthroughCore
 
 /// The phones that asked this Mac for notices (`PushRegistration`), by
 /// phone ID, kept in the Keychain: each one holds the key its notices are
-/// sealed with. A phone that loses shell access is removed.
+/// sealed with. Revoking a phone's shell access removes it (the app does,
+/// as it revokes: never by comparing with a list that may have failed to load).
 public final class PushRegistry: @unchecked Sendable {
     private let secrets: SecretStore
     private let lock = NSLock()
@@ -32,11 +33,6 @@ public final class PushRegistry: @unchecked Sendable {
     }
 
     public func remove(_ phoneID: String) { set(nil, for: phoneID) }
-
-    /// Removes every phone not in `phoneIDs` (access revoked while this Mac wasn't running, say).
-    public func keep(only phoneIDs: Set<String>) {
-        for phoneID in all.keys where !phoneIDs.contains(phoneID) { remove(phoneID) }
-    }
 
     private func load() -> [String: PushRegistration] {
         if let cached { return cached }

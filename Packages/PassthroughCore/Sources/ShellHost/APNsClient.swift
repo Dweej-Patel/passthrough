@@ -88,8 +88,12 @@ public actor APNsClient {
         if status == 200 { return .sent }
         let reason = (try? JSONSerialization.jsonObject(with: body) as? [String: Any])?["reason"] as? String ?? "HTTP \(status)"
         switch (status, reason) {
-        case (410, _), (400, "BadDeviceToken"), (400, "DeviceTokenNotForTopic"), (400, "TopicDisallowed"):
+        case (410, _), (400, "BadDeviceToken"):
             return .tokenGone
+        case (400, "TopicDisallowed"), (400, "DeviceTokenNotForTopic"):
+            // The key's team isn't the app's (or the app is another build's): a
+            // phone asking again would get the same, so it is kept and the key questioned.
+            return .credentialsRefused(reason)
         case (403, "ExpiredProviderToken"):
             self.token = nil
             return .failed(reason)

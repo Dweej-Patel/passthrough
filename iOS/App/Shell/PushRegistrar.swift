@@ -68,14 +68,15 @@ final class PushRegistrar: NSObject, ObservableObject {
         return PushRegistration(token: token, environment: Self.environment, topic: topic, key: key.base64EncodedString(), mac: mac)
     }
 
-    /// Development builds (from Xcode) get tokens for APNs' sandbox.
-    static var environment: String {
-        #if DEBUG
-        PushRegistration.sandbox
-        #else
-        PushRegistration.production
-        #endif
-    }
+    /// Which APNs the device token is for: what the build was signed with
+    /// (`aps-environment` in its provisioning profile: `development` from
+    /// Xcode, whatever the configuration), production for an App Store or
+    /// TestFlight build, which carries no profile.
+    static let environment: String = {
+        guard let url = Bundle.main.url(forResource: "embedded", withExtension: "mobileprovision"),
+              let data = try? Data(contentsOf: url) else { return PushRegistration.production }
+        return PushRegistration.environment(ofProfile: data)
+    }()
 }
 
 extension PushRegistrar: UNUserNotificationCenterDelegate {

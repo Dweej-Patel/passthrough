@@ -23,6 +23,18 @@ public struct PushRegistration: Codable, Equatable, Sendable {
 
     public static let sandbox = "sandbox", production = "production"
 
+    /// Which APNs a build's tokens are for, from its provisioning profile
+    /// (`embedded.mobileprovision`, a signed message around a property list):
+    /// sandbox when it says `aps-environment` `development`, else production.
+    public static func environment(ofProfile data: Data) -> String {
+        guard let start = data.range(of: Data("<?xml".utf8)),
+              let end = data.range(of: Data("</plist>".utf8), in: start.lowerBound..<data.endIndex),
+              let plist = try? PropertyListSerialization.propertyList(from: data[start.lowerBound..<end.upperBound], format: nil) as? [String: Any],
+              let entitlements = plist["Entitlements"] as? [String: Any],
+              entitlements["aps-environment"] as? String == "development" else { return production }
+        return sandbox
+    }
+
     public init(token: String, environment: String, topic: String, key: String, mac: String) {
         self.token = token; self.environment = environment; self.topic = topic; self.key = key; self.mac = mac
     }

@@ -51,8 +51,17 @@ struct ProgramStatus {
         static let changed = Outcome(rawValue: 2)
     }
 
+    typealias Summary = (state: String, kind: String?, message: String?, agents: Int)
+
     /// Records are left as they were when nothing in `data` changes them.
     mutating func scan(_ data: Data) -> Outcome {
+        var ignored: [Summary?] = []
+        return scan(data, summaries: &ignored)
+    }
+
+    /// As `scan`, adding `summary` as it is after each change: several
+    /// reports in one chunk (working, then done, then cleared) each count.
+    mutating func scan(_ data: Data, summaries: inout [Summary?]) -> Outcome {
         var outcome: Outcome = []
         var index = data.startIndex
         while index < data.endIndex {
@@ -61,7 +70,9 @@ struct ProgramStatus {
                 guard let escape = data[index...].firstIndex(of: 0x1B) else { break }
                 index = escape
             }
-            outcome.formUnion(step(data[index]))
+            let step = step(data[index])
+            if step.contains(.changed) { summaries.append(summary) }
+            outcome.formUnion(step)
             index += 1
         }
         return outcome
@@ -85,7 +96,7 @@ struct ProgramStatus {
     /// What the session as a whole is doing. Blocked anywhere is blocked
     /// (the root's question first); otherwise working while the root or any
     /// agent still is; otherwise the root's own state. Nil without records.
-    var summary: (state: String, kind: String?, message: String?, agents: Int)? {
+    var summary: Summary? {
         guard !records.isEmpty else { return nil }
         let root = records[""]
         let agents = records.filter { !$0.key.isEmpty && Self.isUnfinished($0.value) }

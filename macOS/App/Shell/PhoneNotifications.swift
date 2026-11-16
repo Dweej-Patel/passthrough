@@ -102,20 +102,15 @@ final class PhoneNotifications: ObservableObject {
         }
     }
 
-    /// The sessions changed: tell phones what calls for it.
-    func sessionsChanged(_ sessions: [ShellSessionInfo], looking: Set<String>) {
-        notifier.update(sessions, looking: looking, macName: Self.macName)
+    /// For the session manager (`onStatusChange`): each change, as it happens, goes to the rules.
+    func statusHandler() -> @Sendable (ShellSessionInfo, Bool) -> Void {
+        let notifier = self.notifier, macName = Self.macName
+        return { session, looking in notifier.observe(session, looking: looking, macName: macName) }
     }
 
     /// The phone lost shell access (or a pairing was forgotten): no more notices for it.
     func forget(_ phoneIDs: [String]) {
         for phoneID in phoneIDs { registry.remove(phoneID) }
-        registeredPhones = Set(registry.all.keys)
-    }
-
-    /// Only phones that still have shell access keep their registration.
-    func keep(only phoneIDs: Set<String>) {
-        registry.keep(only: phoneIDs)
         registeredPhones = Set(registry.all.keys)
     }
 
@@ -125,16 +120,13 @@ final class PhoneNotifications: ObservableObject {
         let registrations = registry.all
         guard !registrations.isEmpty else { testResult = "No phone has asked for notices yet: turn them on in Passthrough on the iPhone."; return }
         testResult = "Sending…"
-        let macName = Self.macName
+        let macName = Self.macName, notifier = self.notifier
+        let notice = PushNotice(macName: macName, title: "Notifications work", body: "\(macName) can tell this iPhone when a shell needs you.",
+                                session: "", state: "test")
         Task { [weak self] in
             var results: [String] = []
-            for (_, registration) in registrations {
-                guard let key = Data(base64Encoded: registration.key) else { continue }
-                let notice = PushNotice(macName: macName, title: "Notifications work", body: "\(macName) can tell this iPhone when a shell needs you.",
-                                        session: "", state: "test")
-                guard let sealed = try? PushBox.seal(notice, key: key, macID: registration.mac) else { continue }
-                let payload = PushNotifier.payload(sealed: sealed, macID: registration.mac, session: "test", timeSensitive: false)
-                switch await client.send(payload, to: registration, collapseID: "test", timeSensitive: false) {
+            for (phoneID, registration) in registrations {
+                switch await notifier.deliver(notice, timeSensitive: false, to: registration, phoneID: phoneID, client: client) {
                 case .sent: results.append("sent")
                 case .tokenGone: results.append("a phone's registration no longer works")
                 case .credentialsRefused(let reason): results.append("Apple refused the key (\(reason))")

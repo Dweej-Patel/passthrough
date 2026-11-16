@@ -205,13 +205,14 @@ final class ShellModel: ObservableObject {
         })
         // The foreground refresh runs while the app still counts as in the background,
         // when `updateWatcher` stops watches: start them once it is active.
+        observers.append(NotificationCenter.default.addObserver(forName: UIApplication.didBecomeActiveNotification, object: nil, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated { self?.updateWatcher() }
+        })
+        // Notices turned on or off, or a new device token: the Mac connected now hears.
         // `@Published` fires before the change lands: read it on the next turn.
         pushChanges = PushRegistrar.shared.$token.combineLatest(PushRegistrar.shared.$enabled, PushRegistrar.shared.$denied)
             .dropFirst()
             .sink { [weak self] _ in DispatchQueue.main.async { self?.sendPushRegistration() } }
-        observers.append(NotificationCenter.default.addObserver(forName: UIApplication.didBecomeActiveNotification, object: nil, queue: .main) { [weak self] _ in
-            MainActor.assumeIsolated { self?.updateWatcher() }
-        })
         watcher.hiddenSessions = { [weak self] in self?.hiddenSessions ?? ShellHiddenSessions() }
         watcher.discovered = { [weak self] credential in
             guard let self else { return nil }
@@ -569,12 +570,14 @@ final class ShellModel: ObservableObject {
 
     /// The terminal screen is up: what the attached session shows is being
     /// looked at, so a result it reports (Claude Code's "done") is seen.
-    /// Said again on each connection.
-    private(set) var viewing = false
+    /// Said again on each connection. Counted: a screen being replaced can
+    /// appear before the one it replaces disappears.
+    private var terminalScreens = 0
+    var viewing: Bool { terminalScreens > 0 }
     func setViewing(_ on: Bool) {
-        guard on != viewing else { return }
-        viewing = on
-        client?.setViewing(on)
+        let was = viewing
+        terminalScreens = max(0, terminalScreens + (on ? 1 : -1))
+        if viewing != was { client?.setViewing(viewing) }
     }
 
     /// Ends a running session. A finished one is removed instead (`remove`):
