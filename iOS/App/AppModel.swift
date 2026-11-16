@@ -23,12 +23,25 @@ final class AppModel: ObservableObject {
     let registry = PairingRegistry(defaults: AppModel.groupDefaults, secrets: KeychainSecrets(accessGroup: PassthroughProtocol.appGroup))
     let log = PassthroughLog.shared
     let shell = ShellModel()
+    /// iPad only: "Internet through iPhone".
+    let hotspot: HotspotModel? = ThisDevice.isPad ? HotspotModel() : nil
     /// Set by the app scene; the shell reads its evaluated context after unlock.
     weak var lock: AppLock?
 
     @Published private(set) var state: ServiceState = .stopped
     @Published private(set) var meter = TrafficMeter()
     @Published private(set) var stats = ProviderStats(rx: 0, tx: 0, active: 0, totalConnections: 0, macs: [], startedAt: nil)
+    /// iPads paired with this iPhone (they use its internet over its hotspot).
+    @Published private(set) var pairedIPads: [PairedClient] = []
+
+    /// Splits the registry: Macs (everything Mac-facing reads `pairedClients`) and iPads.
+    private func reloadClients() {
+        let all = registry.clients
+        pairedClients = all.filter { !$0.isIPad }
+        pairedIPads = all.filter(\.isIPad)
+    }
+
+    /// The Macs paired with this device.
     @Published private(set) var pairedClients: [PairedClient] = [] {
         didSet {
             #if DEBUG
@@ -77,7 +90,7 @@ final class AppModel: ObservableObject {
     private var logFileDate: Date?
 
     init() {
-        pairedClients = registry.clients
+        reloadClients()
         // The servers run in the tunnel extension, a separate process, so the
         // log lives in a shared file both processes append to.
         if let url = PassthroughProtocol.sharedLogURL { log.attachFile(url) }
@@ -89,7 +102,7 @@ final class AppModel: ObservableObject {
                 if self.logEntries.count > 400 { self.logEntries.removeFirst(self.logEntries.count - 400) }
             }
         }
-        registry.onChange = { [weak self] in Task { @MainActor in self?.pairedClients = self?.registry.clients ?? [] } }
+        registry.onChange = { [weak self] in Task { @MainActor in self?.reloadClients() } }
         facts.onChange = { [weak self] in self?.refreshDeviceFacts() }
         refreshDeviceFacts()
         extensionHost.onStateChange = { [weak self] state in
@@ -116,13 +129,17 @@ final class AppModel: ObservableObject {
     // MARK: Lifecycle
 
     private func bootstrap() async {
-        pairedClients = registry.clients
+        await hotspot?.load()
+        reloadClients()
         refreshShell()
         refreshDeviceFacts()
         #if targetEnvironment(simulator)
         extensionAvailable = false
         if hosting == .background { hosting = .foreground }
         #endif
+        // On an iPad the extension is "Internet through iPhone" (`HotspotModel`);
+        // anything this app hosts for a Mac runs in the app.
+        if ThisDevice.isPad { extensionAvailable = false; return }
         guard hosting == .background else { return }
         do {
             try await extensionHost.load()
@@ -224,7 +241,7 @@ final class AppModel: ObservableObject {
             usage.add(rx: max(0, fresh.rx - last.rx), tx: max(0, fresh.tx - last.tx))
         }
         lastUsageSnapshot = (fresh.rx, fresh.tx)
-        pairedClients = registry.clients
+        reloadClients()
     }
 
     /// Publishes the radio and battery, and hands them to whichever process hosts the service.
@@ -252,16 +269,40 @@ final class AppModel: ObservableObject {
         pairingCodeWithdrawn = false
     }
 
+    /// Adds an iPad from the code it showed: issues its token and link key,
+    /// then hands them to it over this phone's hotspot (`IPadEnrollment`). If
+    /// the iPad doesn't take them, it isn't paired.
+    func addIPad(_ invitation: IPadEnrollment.Invitation) async -> Result<Void, IPadEnrollment.EnrollmentError> {
+        let linkKey = WirelessLink.randomBytes(32)
+        guard let token = registry.addClient(id: invitation.clientID, name: invitation.name, kind: .ipad,
+                                             certificateSHA256: invitation.certSHA256, linkKey: linkKey) else {
+            return .failure(.failed("this iPhone couldn't store the iPad's key"))
+        }
+        let registry = self.registry
+        let result: Result<Void, IPadEnrollment.EnrollmentError> = await withCheckedContinuation { continuation in
+            IPadEnrollment.enroll(invitation, phoneID: registry.phoneID, phoneName: deviceName, token: token, linkKey: linkKey) {
+                continuation.resume(returning: $0)
+            }
+        }
+        if case .failure = result { registry.revoke(clientID: invitation.clientID) }
+        reloadClients()
+        switch result {
+        case .success: log.log(.info, "Paired \(invitation.name)")
+        case .failure(let error): log.log(.warning, "Pairing \(invitation.name) didn't finish: \(error.localizedDescription)")
+        }
+        return result
+    }
+
     func revoke(_ client: PairedClient) {
         registry.revoke(clientID: client.id)
         shell.forget(macID: client.id)
-        pairedClients = registry.clients
+        reloadClients()
     }
 
     func revokeAll() {
         registry.revokeAll()
         shell.forgetAll()
-        pairedClients = registry.clients
+        reloadClients()
     }
 
     // MARK: Remote shell

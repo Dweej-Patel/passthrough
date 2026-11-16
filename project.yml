@@ -46,6 +46,9 @@ targets:
         product: PassthroughCore
       - package: PassthroughCore
         product: PassthroughUI
+      # iPad: QR pairing with its iPhone (the iPad's pairing listener).
+      - package: PassthroughCore
+        product: PhoneTransport
       # Remote shell over iroh. App only: never link it into the tunnel extension.
       - package: PassthroughCore
         product: IrohTransport
@@ -72,6 +75,7 @@ targets:
           UIApplicationSupportsMultipleScenes: false
         NSLocalNetworkUsageDescription: Passthrough finds your linked Mac on this iPhone's Personal Hotspot, or over peer-to-peer Wi-Fi, when the wireless link is on, and reaches your Mac's shell on the same network.
         NSFaceIDUsageDescription: Passthrough uses Face ID to keep your Mac's shell and settings private.
+        NSCameraUsageDescription: Passthrough scans the code an iPad shows, to let it use this iPhone's internet.
         NSBonjourServices: [_passthrough._tcp, _passthrough-sh._tcp]
         # Step away's Live Activity: started and updated by the app only (no push).
         NSSupportsLiveActivities: true
@@ -109,6 +113,13 @@ targets:
     dependencies:
       - package: PassthroughCore
         product: PassthroughCore
+      # iPad: "Internet through iPhone" (the Mac's side of the link, and tun2socks).
+      - package: PassthroughCore
+        product: PhoneTransport
+      - package: PassthroughCore
+        product: CUtun
+      - framework: Vendor/HevSocks5Tunnel/HevSocks5Tunnel.xcframework
+        embed: false
     info:
       path: iOS/Tunnel/Info.plist
       properties:
@@ -128,6 +139,8 @@ targets:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: $(PASSTHROUGH_ID).ios.tunnel
         PRODUCT_NAME: PassthroughTunnel
+        SWIFT_INCLUDE_PATHS: $(SRCROOT)/Vendor/HevSocks5Tunnel/include
+        OTHER_LDFLAGS: ["-lresolv"]
 
   # The Live Activity, the Home Screen widget and the Control Center buttons.
   # It never reaches the Mac: it shows what the app last saw (an app group of its

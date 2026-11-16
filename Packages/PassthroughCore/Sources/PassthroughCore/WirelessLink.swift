@@ -73,7 +73,7 @@ public enum WirelessLink {
         (stream as? ConnectionStream)?.connection.currentPath?.availableInterfaces.first?.name
     }
 
-    static func isHotspotAddress(_ endpoint: NWEndpoint?) -> Bool {
+    public static func isHotspotAddress(_ endpoint: NWEndpoint?) -> Bool {
         guard case .hostPort(.ipv4(let address), _)? = endpoint else { return false }
         let b = [UInt8](address.rawValue)
         return b.count == 4 && b[0] == 172 && b[1] == 20 && b[2] == 10 && b[3] < 16

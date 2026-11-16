@@ -20,6 +20,8 @@ struct MacHomeView: View {
     @State private var confirmVPNOff = false
     /// The switch last changed here, so a refusal without a switch named lands under it.
     @State private var lastTouched: MacSwitch?
+    /// iPad: pairing with the iPhone whose internet it uses.
+    @State private var showPhonePairing = false
     @ObservedObject private var links = PendingLinks.shared
 
     /// The Mac on screen: the shell's selection, else the first paired Mac.
@@ -77,6 +79,9 @@ struct MacHomeView: View {
         .sheet(isPresented: $showSwitcher, onDismiss: runAfterSwitcher) {
             MacSwitcherSheet(shell: shell, then: $afterSwitcher)
         }
+        .sheet(isPresented: $showPhonePairing) {
+            if let hotspot = model.hotspot { PairWithPhoneSheet(hotspot: hotspot) }
+        }
         .sheet(isPresented: $confirmVPNOff) {
             VPNOffSheet(macName: macName, killSwitch: state?.killSwitch == true) { shell.control(.vpn(false)) }
         }
@@ -133,6 +138,12 @@ struct MacHomeView: View {
                         .environment(\.surfaceFill, .center)
                 }
             }
+            if let hotspot = model.hotspot {
+                GridRow {
+                    DevicesStrip(hotspot: hotspot, macName: paired ? macName : nil, macOnline: state?.internet == true)
+                        .gridCellColumns(2)
+                }
+            }
             if shell.reach == .noAccess, paired { GridRow { setupCard.gridCellColumns(2) } }
             if shell.reach == .ready { GridRow { shells.gridCellColumns(2) } }
             GridRow { Color.clear.frame(height: 0).id("end").gridCellColumns(2) }
@@ -164,9 +175,17 @@ struct MacHomeView: View {
         .animation(.easeOut(duration: 0.25), value: shell.controlMisses)
     }
 
-    /// Beside the Mac on iPad: this device's own card.
+    /// Beside the Mac on iPad: this device's own card, its internet first.
     @ViewBuilder private var thisDeviceCard: some View {
-        PTSurface(padding: 6) { thisDeviceRow }
+        PTSurface(padding: 6) {
+            VStack(alignment: .leading, spacing: 0) {
+                if let hotspot = model.hotspot {
+                    HotspotRow(hotspot: hotspot) { showPhonePairing = true }
+                    Divider().padding(.leading, 58)
+                }
+                thisDeviceRow
+            }
+        }
     }
 
     private func runAfterSwitcher() {
@@ -224,7 +243,11 @@ struct MacHomeView: View {
     private var switches: some View {
         PTSurface(padding: 6) {
             VStack(alignment: .leading, spacing: 0) {
-                internetRow
+                if let hotspot = model.hotspot {
+                    HotspotRow(hotspot: hotspot) { showPhonePairing = true }
+                } else {
+                    internetRow
+                }
                 if paired {
                     Divider().padding(.leading, 58)
                     awakeRow

@@ -49,6 +49,49 @@ final class TunnelController {
         observe()
     }
 
+    /// An iPad's "Internet through iPhone": the extension as the iPhone's
+    /// client. It takes every route, local ones and push included, so with the
+    /// link down nothing leaves over the hotspot (the guard). On demand, so iOS
+    /// brings it back after it's killed or the iPad restarts.
+    func configureClient(name: String) async throws {
+        if manager == nil { try await load() }
+        let manager = self.manager ?? NETunnelProviderManager()
+        let proto = NETunnelProviderProtocol()
+        proto.providerBundleIdentifier = Self.providerBundleID
+        proto.serverAddress = "iPhone"
+        proto.providerConfiguration = [HotspotTunnel.roleKey: HotspotTunnel.clientRole, HotspotTunnel.nameKey: name]
+        proto.disconnectOnSleep = false
+        proto.includeAllNetworks = true
+        proto.excludeLocalNetworks = false
+        proto.excludeAPNs = false
+        manager.protocolConfiguration = proto
+        manager.localizedDescription = "Passthrough"
+        manager.isEnabled = true
+        manager.isOnDemandEnabled = true
+        manager.onDemandRules = [NEOnDemandRuleConnect()]
+        try await manager.saveToPreferences()
+        try await manager.loadFromPreferences()
+        self.manager = manager
+        observe()
+    }
+
+    /// Sends the extension a message and waits (2 s at most) for its answer.
+    func message(_ data: Data) async -> Data? {
+        guard let session = manager?.connection as? NETunnelProviderSession, session.status == .connected else { return nil }
+        return await withCheckedContinuation { continuation in
+            let done = NSLock()
+            var resumed = false
+            func finish(_ value: Data?) {
+                done.lock(); defer { done.unlock() }
+                guard !resumed else { return }
+                resumed = true
+                continuation.resume(returning: value)
+            }
+            do { try session.sendProviderMessage(data) { finish($0) } } catch { finish(nil) }
+            DispatchQueue.global().asyncAfter(deadline: .now() + 2) { finish(nil) }
+        }
+    }
+
     func start() throws {
         guard let manager else { throw NSError(domain: "Passthrough", code: 2, userInfo: [NSLocalizedDescriptionKey: "Tunnel not configured"]) }
         try manager.connection.startVPNTunnel(options: nil)

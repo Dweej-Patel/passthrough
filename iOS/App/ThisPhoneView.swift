@@ -34,7 +34,7 @@ struct ThisPhoneView: View {
     }
 
     private var footer: some View {
-        Text("Traffic between the Mac and this \(ThisDevice.name) travels only over the USB cable. The Mac's connections are opened by this phone's own network stack.")
+        Text("A Mac reaches this \(ThisDevice.name) over the USB cable (or its wireless link), an iPad over its Personal Hotspot. Their connections are opened by this phone's own network stack, not shared through the hotspot.")
             .font(.caption)
             .foregroundStyle(.secondary)
             .multilineTextAlignment(.center)
@@ -271,39 +271,56 @@ struct UsageBar: View {
 
 // MARK: - Macs
 
+/// The Macs and iPads paired with this phone. An iPad is added by scanning
+/// the code it shows (iPhone only: an iPad isn't another iPad's internet).
 struct MacsCard: View {
     @EnvironmentObject private var model: AppModel
     @Binding var showPairing: Bool
+    @State private var scanIPad = false
 
     var body: some View {
         PTSurface {
             VStack(alignment: .leading, spacing: 12) {
                 HStack {
-                    PTSectionTitle("Paired Macs", icon: "laptopcomputer")
+                    PTSectionTitle(ThisDevice.isPad ? "Paired Macs" : "Paired devices", icon: "laptopcomputer")
                     Spacer()
-                    Button { showPairing = true } label: {
+                    Menu {
+                        Button { showPairing = true } label: { Label("Pair a Mac", systemImage: "laptopcomputer") }
+                        if !ThisDevice.isPad {
+                            Button { scanIPad = true } label: { Label("Scan an iPad's code", systemImage: "qrcode.viewfinder") }
+                        }
+                    } label: {
                         Label("Pair", systemImage: "plus").font(.caption.weight(.bold))
                     }
                     .buttonStyle(.bordered)
                     .buttonBorderShape(.capsule)
                     .tint(PTColor.tintText)
                     .controlSize(.small)
+                    .accessibilityLabel("Pair a Mac or iPad")
                 }
-                if model.pairedClients.isEmpty {
-                    Text("No Mac paired yet. Tap Pair and enter the code in Passthrough on your Mac, with the cable plugged in.")
+                if model.pairedClients.isEmpty && model.pairedIPads.isEmpty {
+                    Text(ThisDevice.isPad
+                         ? "No Mac paired yet. Tap Pair and enter the code in Passthrough on your Mac, with the cable plugged in."
+                         : "Nothing paired yet. Tap Pair: a Mac enters a code with the cable plugged in, and an iPad shows a code to scan.")
                         .font(.subheadline).foregroundStyle(.secondary)
                 } else {
-                    ForEach(model.pairedClients) { client in
+                    ForEach(model.pairedClients + model.pairedIPads) { client in
                         let live = model.connectedMacIDs.contains(client.id)
                         HStack(spacing: 12) {
                             PTStatusDot(color: live ? PTColor.tint : .secondary.opacity(0.5), live: live)
+                            Image(systemName: client.isIPad ? "ipad" : "laptopcomputer")
+                                .foregroundStyle(.secondary)
+                                .accessibilityHidden(true)
                             VStack(alignment: .leading, spacing: 2) {
                                 Text(client.name).font(.subheadline.weight(.semibold))
-                                Text(live ? "Connected now" : lastSeen(client)).font(.caption).foregroundStyle(.secondary)
+                                Text(live ? (client.isIPad ? "Using this iPhone's internet over its hotspot" : "Connected now") : lastSeen(client))
+                                    .font(.caption).foregroundStyle(.secondary)
                             }
                             Spacer()
                             Menu {
-                                Button(role: .destructive) { model.revoke(client) } label: { Label("Forget this Mac", systemImage: "trash") }
+                                Button(role: .destructive) { model.revoke(client) } label: {
+                                    Label(client.isIPad ? "Forget this iPad" : "Forget this Mac", systemImage: "trash")
+                                }
                             } label: {
                                 Image(systemName: "ellipsis.circle")
                                     .foregroundStyle(.secondary)
@@ -317,6 +334,7 @@ struct MacsCard: View {
                 }
             }
         }
+        .sheet(isPresented: $scanIPad) { IPadScannerSheet() }
     }
 
     private func lastSeen(_ client: PairedClient) -> String {

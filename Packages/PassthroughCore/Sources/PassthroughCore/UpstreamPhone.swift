@@ -91,3 +91,21 @@ public struct HotspotStatus: Codable, Equatable, Sendable {
         self.since = since; self.rx = rx; self.tx = tx; self.message = message
     }
 }
+
+/// What the iPad's app and its tunnel extension agree on for "Internet through iPhone".
+public enum HotspotTunnel {
+    /// `providerConfiguration[roleKey] == clientRole`: the extension is an
+    /// iPad's client, not a phone's proxy host.
+    public static let roleKey = "role"
+    public static let clientRole = "hotspotClient"
+    /// The iPad's name, as its iPhone lists it.
+    public static let nameKey = "name"
+    /// The app message that asks the extension for its `HotspotStatus`.
+    public static let statusMessage = Data("hotspot".utf8)
+    /// The Keychain label of the iPad's TLS identity (its iPhone pins the certificate).
+    public static let identityLabel = "\(PassthroughProtocol.identifier).ipad-link"
+    /// The tunnel's addresses: the iPad's side, and the DNS server apps are
+    /// told to use (a private address, so the iPhone sends it to its own resolver).
+    public static let ipv4Address = "10.255.253.2"
+    public static let dnsAddress = "10.255.253.53"
+}
