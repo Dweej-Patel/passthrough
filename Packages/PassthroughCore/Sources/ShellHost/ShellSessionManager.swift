@@ -119,6 +119,9 @@ public final class ShellSessionManager: @unchecked Sendable {
         /// The foreground job (process group) when the program first reported:
         /// once that group is gone, so is everything it said.
         var statusOwner: pid_t?
+        /// What the session's first process (the shell) runs, as of its first
+        /// output: if it runs something else later, the shell `exec`ed it.
+        var shellPath: String?
         /// A `redraw` is under way.
         var redrawing = false
         /// Looked for a question since the last output.
@@ -580,6 +583,7 @@ public final class ShellSessionManager: @unchecked Sendable {
         session.outputCount += data.count
         session.writer.append(data, at: now)
         session.lastOutputAt = now
+        if session.shellPath == nil { session.shellPath = Self.executablePath(session.process.pid) }
         if session.pendingTitle != nil { adoptEchoedTitle(session) }
         readStatus(data, session: session, at: now)
         noteOutput(data, session: session)
@@ -631,7 +635,15 @@ public final class ShellSessionManager: @unchecked Sendable {
         if !session.programStatus.isEmpty {
             let group = session.process.foregroundGroup
             if session.statusOwner == nil {
-                session.statusOwner = group
+                if let group, group == session.process.pid, let shell = session.shellPath,
+                   Self.executablePath(group) == shell {
+                    // The shell itself is in front again: the job that reported
+                    // ended before its output was read (done, then gone at once).
+                    // What it said still counts, in turn, and then it is over.
+                    if session.programStatus.forgetAll() { summaries.append(nil) }
+                } else {
+                    session.statusOwner = group
+                }
             } else if let owner = session.statusOwner, let group, group != owner, !changed, !Self.groupExists(owner),
                       session.programStatus.forgetAll() {
                 summaries.append(nil)
@@ -684,6 +696,13 @@ public final class ShellSessionManager: @unchecked Sendable {
     /// Whether any process is left in process group `group`.
     private static func groupExists(_ group: pid_t) -> Bool {
         kill(-group, 0) == 0 || errno == EPERM
+    }
+
+    /// The program `pid` runs, or nil once it is gone.
+    private static func executablePath(_ pid: pid_t) -> String? {
+        var buffer = [CChar](repeating: 0, count: Int(MAXPATHLEN) * 4)   // PROC_PIDPATHINFO_MAXSIZE
+        let length = proc_pidpath(pid, &buffer, UInt32(buffer.count))
+        return length > 0 ? String(cString: buffer) : nil
     }
 
     private static func oneLine(_ text: String, limit: Int) -> String {

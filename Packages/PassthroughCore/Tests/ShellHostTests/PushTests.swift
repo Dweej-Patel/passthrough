@@ -299,5 +299,26 @@ final class PushTests: XCTestCase {
         while recorder.states.count < 3, Date() < deadline { Thread.sleep(forTimeInterval: 0.02) }
         XCTAssertEqual(recorder.states, ["working", "done", "none"])
     }
+
+    /// A program the shell `exec`ed runs in the shell's own process: what it
+    /// reports lasts while it runs, though the shell's group is in front.
+    func testAProgramTheShellExecedKeepsItsStatus() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("PushTests-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let manager = ShellSessionManager(transcripts: try TranscriptStore(directory: directory), command: { ("/bin/sh", []) },
+                                          environment: { ["PATH": "/usr/bin:/bin", "TERM": "xterm-256color", "PS1": "$ "] },
+                                          directory: URL(fileURLWithPath: "/tmp"), endedRetention: 600, quietBeforeAsking: 0.2)
+        defer { manager.closeAll() }
+        let id = try manager.open(phoneLabel: "iPhone", cols: 80, rows: 24)
+        let status = { manager.sessions.first { $0.id == id }?.status?.state }
+        // awk replaces the shell, reports, then keeps running.
+        manager.input(id, Data("exec /usr/bin/awk 'BEGIN { printf \"\\033]7501;state=working\\007\"; system(\"sleep 5\") }'\n".utf8))
+        let deadline = Date().addingTimeInterval(5)
+        while status() == nil, Date() < deadline { Thread.sleep(forTimeInterval: 0.02) }
+        XCTAssertEqual(status(), "working")
+        manager.input(id, Data("x\n".utf8))   // more output while it runs: still its status
+        Thread.sleep(forTimeInterval: 0.5)
+        XCTAssertEqual(status(), "working")
+    }
 }
 #endif
