@@ -234,6 +234,12 @@ public final class ShellSessionManager: @unchecked Sendable {
         return info
     }
 
+    /// Running sessions someone is looking at (`ShellAttachment.isLooking`):
+    /// nothing about them is news.
+    public var lookingSessions: Set<String> {
+        queue.sync { Set(table.values.filter { $0.running && $0.clients.contains { $0.isLooking } }.map(\.id)) }
+    }
+
     /// The sessions with who is looking at each, for the Mac's own list.
     public var details: [ShellSessionDetail] {
         queue.sync {

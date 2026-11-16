@@ -12,6 +12,20 @@ final class AppOrientation: NSObject, UIApplicationDelegate {
         Self.allowed
     }
 
+    // Notices from Macs (`PushRegistrar`): set up before launch ends, so a tap that launched the app is handled.
+    func application(_ application: UIApplication, didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]? = nil) -> Bool {
+        MainActor.assumeIsolated { PushRegistrar.shared.start() }
+        return true
+    }
+
+    func application(_ application: UIApplication, didRegisterForRemoteNotificationsWithDeviceToken deviceToken: Data) {
+        MainActor.assumeIsolated { PushRegistrar.shared.registered(deviceToken) }
+    }
+
+    func application(_ application: UIApplication, didFailToRegisterForRemoteNotificationsWithError error: Error) {
+        MainActor.assumeIsolated { PushRegistrar.shared.registrationFailed(error) }
+    }
+
     /// Re-asks the windows, and turns the phone back to portrait when that's all that's left.
     @MainActor private static func apply() {
         for case let scene as UIWindowScene in UIApplication.shared.connectedScenes {

@@ -59,6 +59,19 @@ outside the threat model (it can read the user's files and drive the user's
 apps). The fix would be an encrypted control channel bound to the pairing
 (keys derived from K and both nonces), which Passthrough does not have.
 
+Notifications to phones (off until a phone asks and the Mac has a push key)
+go through Apple's push service, the one part of the remote shell that
+leaves the user's devices. A phone asks for them over the authenticated shell
+connection, handing the Mac its APNs device token and a key it made for that
+Mac; each notice's content is sealed with that key (ChaCha20-Poly1305, the
+phone's ID for the Mac bound in) and opened by the phone's notification
+extension, whose app group holds only those keys, never the pairing or shell
+secrets. Apple sees the device token, the time, the Time Sensitive flag and a
+session ID used to group notices. The Mac's APNs key (`.p8`) stays in its
+data-protection keychain. Anything that lets content out unsealed, sends a
+phone notices it did not ask for, or reaches a phone's pairing or shell
+secrets from the notification extension is a vulnerability.
+
 The Mac app reads its secrets only from the data-protection keychain, never
 the legacy file keychain, where any process running as the user could plant
 an item under Passthrough's name.

@@ -154,6 +154,7 @@ private struct RemoteShellSettings: View {
             } header: {
                 Text("Connect from")
             }
+            NotificationSettings(shell: shell)
             Section {
                 ForEach(shellMacs, id: \.id) { mac in
                     ManualShellAddressRow(shell: shell, macID: mac.id, macName: mac.name)
@@ -164,6 +165,39 @@ private struct RemoteShellSettings: View {
                 Text("Only needed when this iPhone can't find your Mac by itself, for example over Tailscale. Enter its Tailscale name or IP address. Leave blank to use the addresses your Mac shares.")
             }
         }
+    }
+}
+
+/// Notices from Macs when a shell needs you or finishes (`PushRegistrar`).
+private struct NotificationSettings: View {
+    @ObservedObject var shell: ShellModel
+    @ObservedObject private var push = PushRegistrar.shared
+    @State private var asking = false
+
+    var body: some View {
+        Section {
+            Toggle("Tell me when a shell needs me", isOn: Binding(get: { push.enabled }, set: { on in
+                asking = true
+                Task { await push.setEnabled(on); asking = false }
+            }))
+            .disabled(asking)
+            if push.denied {
+                Label("Notifications are off for Passthrough in the iPhone's Settings.", systemImage: "bell.slash")
+                    .font(.footnote).foregroundStyle(.secondary)
+            } else if push.enabled, shell.macSendsNotices == false {
+                Label("\(macName) can't send them yet. In Passthrough on the Mac, open Settings › Remote Shell › Notifications and add a push key.",
+                      systemImage: "exclamationmark.triangle")
+                    .font(.footnote).foregroundStyle(.secondary)
+            }
+        } header: {
+            Text("Notifications")
+        } footer: {
+            Text("When Claude Code or another program asks you something, or finishes a long task while you aren't looking. Your Mac sends them through Apple's push service, sealed so only this iPhone can read them. Each Mac starts sending once the app has connected to it.")
+        }
+    }
+
+    private var macName: String {
+        shell.macs.first { $0.macID == shell.selectedMacID }?.macName ?? "Your Mac"
     }
 }
 

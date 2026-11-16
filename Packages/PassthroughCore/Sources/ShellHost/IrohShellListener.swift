@@ -71,6 +71,12 @@ public final class IrohShellListener: @unchecked Sendable {
         set { gate.macStateProvider.set(newValue) }
     }
 
+    /// As `ShellListener.onPushRegistration`.
+    public var onPushRegistration: (@Sendable (_ phoneID: String, _ registration: PushRegistration?) -> Bool)? {
+        get { gate.pushRegistration.get() }
+        set { gate.pushRegistration.set(newValue) }
+    }
+
     /// As `ShellListener.onMacControl`.
     public var onMacControl: (@Sendable (_ phoneID: String, _ label: String, _ change: MacControl) -> ShellError?)? {
         get { gate.macControl.get() }

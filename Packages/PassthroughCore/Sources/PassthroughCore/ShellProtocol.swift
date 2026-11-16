@@ -65,6 +65,8 @@ public struct ShellEnvelope: Codable, Equatable, Sendable {
     public var state: MacState?
     /// setAwake / setVPN: what the phone asks for.
     public var on: Bool?
+    /// `push`: where and how to send this phone notices.
+    public var push: PushRegistration?
     /// events: from when (Unix seconds). eventList: what happened since, oldest first, and the battery meanwhile.
     public var since: Double?
     public var events: [MacEvent]?
@@ -111,6 +113,12 @@ public struct ShellEnvelope: Codable, Equatable, Sendable {
     /// stays attached to the last session it showed), and a result that
     /// arrives while it looks is seen.
     public static let viewing = "viewing"
+    /// A phone asking for notices through Apple's push service (`push`), or
+    /// to stop (`on` false, no `push`); answered `pushState`.
+    public static let pushRegister = "push"
+    /// Whether this Mac will send this phone notices (`on`): false while it
+    /// has no push key set up, or after the phone stopped them.
+    public static let pushState = "pushState"
     /// A phone asking what happened on the Mac since a time (`since`); answered `eventList`.
     public static let events = "events"
     public static let eventList = "eventList"

@@ -55,6 +55,7 @@ targets:
         product: SwiftTerm
       - target: PassthroughTunnel
       - target: PassthroughWidgets
+      - target: PassthroughNotifications
     info:
       path: iOS/App/Info.plist
       properties:
@@ -80,8 +81,14 @@ targets:
       path: iOS/App/Passthrough.entitlements
       properties:
         com.apple.developer.networking.networkextension: [packet-tunnel-provider]
-        # The second group is the widget's (MacSnapshot.appGroup): it holds no secrets.
-        com.apple.security.application-groups: [group.$(PASSTHROUGH_ID), group.$(PASSTHROUGH_ID).widget]
+        # The second group is the widget's (MacSnapshot.appGroup): it holds no
+        # secrets. The third is the notification extension's: only the keys
+        # Macs seal notices with (PushKeys), never the pairing secrets.
+        com.apple.security.application-groups: [group.$(PASSTHROUGH_ID), group.$(PASSTHROUGH_ID).widget, group.$(PASSTHROUGH_ID).push]
+        # Notices from Macs through Apple's push service (Xcode switches to
+        # production for an archive). Time Sensitive: "needs you" gets through Focus.
+        aps-environment: development
+        com.apple.developer.usernotifications.time-sensitive: true
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: $(PASSTHROUGH_ID).ios
@@ -152,6 +159,35 @@ targets:
         PRODUCT_NAME: PassthroughWidgets
         TARGETED_DEVICE_FAMILY: "1"
 
+  # Opens the sealed notices Macs send through Apple's push service
+  # (PushBox) and shows what they say. Its app group holds only those keys.
+  PassthroughNotifications:
+    type: app-extension
+    platform: iOS
+    sources:
+      - path: iOS/Notifications
+        excludes: ["Info.plist", "*.entitlements"]
+    dependencies:
+      - package: PassthroughCore
+        product: PassthroughCore
+    info:
+      path: iOS/Notifications/Info.plist
+      properties:
+        PassthroughID: $(PASSTHROUGH_ID)
+        CFBundleDisplayName: Passthrough Notifications
+        NSExtension:
+          NSExtensionPointIdentifier: com.apple.usernotifications.service
+          NSExtensionPrincipalClass: $(PRODUCT_MODULE_NAME).NotificationService
+    entitlements:
+      path: iOS/Notifications/PassthroughNotifications.entitlements
+      properties:
+        com.apple.security.application-groups: [group.$(PASSTHROUGH_ID).push]
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: $(PASSTHROUGH_ID).ios.notifications
+        PRODUCT_NAME: PassthroughNotifications
+        TARGETED_DEVICE_FAMILY: "1"
+
   # ───────────────────────── macOS ─────────────────────────
   PassthroughMac:
     type: application
@@ -213,6 +249,8 @@ targets:
       path: macOS/App/Info.plist
       properties:
         PassthroughID: $(PASSTHROUGH_ID)
+        # Settings › Notifications offers it as the push key's team.
+        PassthroughTeamID: $(DEVELOPMENT_TEAM)
         CFBundleDisplayName: Passthrough
         LSUIElement: true
         LSMinimumSystemVersion: "14.5"

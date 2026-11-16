@@ -179,9 +179,19 @@ The phone can be paired with more than one Mac. Pairing still happens over the c
 
 * **Your Macs.** Tap the round avatar with the Mac's initial, where the Settings gear used to be. It opens *Your Macs*, which lists every paired Mac with its status: connected, shells open, a shell waiting on a question, last heard, or paired with no Remote shell. A checkmark marks the current one. *Add a Mac* opens the usual pairing code, and *Settings* is there too.
 * **Switching.** It works like switching profiles: the whole app moves to the Mac you pick. Each Mac remembers its open shell tabs and which one was in front, and the app opens on the Mac you used last. Shells keep running on the Mac you left, and nothing there is closed or changed.
-* **Other Macs.** While the app is open, the phone keeps an eye on up to four of your other Macs, and on the Mac a Keep awake Live Activity is running for on iPhone. An amber dot on the avatar means another Mac has a shell waiting on a question. Tap that Mac's row to switch to it and open that shell. This only works while the app is open; there are no alerts in the background.
+* **Other Macs.** While the app is open, the phone keeps an eye on up to four of your other Macs, and on the Mac a Keep awake Live Activity is running for on iPhone. An amber dot on the avatar means another Mac has a shell waiting on a question. Tap that Mac's row to switch to it and open that shell. This only works while the app is open; for alerts in the background, turn on notifications (below).
 * **Keep awake.** On iPhone, the Keep awake Live Activity stays with the Mac it was started for when you switch.
 * **Removing a session.** A finished session can be removed with *Remove*. This only hides it on this phone.
+
+### Notifications
+
+A Mac can tell your iPhone when a shell needs you or has finished a long task, even with Passthrough closed and the phone locked. They come from what the program in the shell reports about itself (Claude Code does: working, a permission prompt or a question, done), not from reading its screen.
+
+* **When.** When a session asks for permission or asks a question: at once, as a Time Sensitive notification, so it gets through Focus. When it finishes or fails after working for at least 30 seconds and nobody saw it finish. Never about a session you are looking at: on the phone with its terminal open, or in a terminal window on the Mac while you are at the Mac (a key or the mouse used in the last two minutes, screen unlocked). At most ten a minute to one phone.
+* **Tap** a notification to open that session, on its Mac.
+* **On the iPhone,** turn on *Settings › Notifications › Tell me when a shell needs me*. Each Mac starts sending once the app has connected to it, and stops when you turn it off (again, the next time the app connects) or when the Mac revokes the phone's shell access.
+* **On the Mac,** notifications need a push key, made once in your Apple Developer account: *Certificates, IDs & Profiles › Keys*, add a key with *Apple Push Notifications service (APNs)*, and download its `.p8` file (Apple lets you download it only once). In Passthrough's *Settings › Remote Shell › Notifications*, enter your Team ID and the Key ID, choose the `.p8` file (a file named `AuthKey_<Key ID>.p8` fills in the Key ID) and click *Save*; *Send Test Notification* checks it all works. The key is kept in the Mac's Keychain. The iPhone build needs the Push Notifications and Time Sensitive Notifications capabilities, which Xcode adds to the app ID when it signs the app.
+* **What Apple sees.** Notifications go through Apple's push service. What one says (which session, its question, the Mac's name) is sealed (ChaCha20-Poly1305) with a key this iPhone made for that Mac and handed it over the shell connection; the phone's notification extension opens it. Apple sees only that a notice went to this device, when, and whether it was Time Sensitive. If the extension can't open one, it shows "Something on your Mac needs a look."
 
 ### Self-hosting a relay
 

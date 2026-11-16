@@ -1357,6 +1357,47 @@ final class ShellListenerTests: XCTestCase {
         wait(for: [probe.expect(self, "refused") { _ in probe.failures == [.badRequest] }], timeout: 5)
     }
 
+    private static let pushRegistration = PushRegistration(token: String(repeating: "ab", count: 32), environment: PushRegistration.sandbox,
+                                                           topic: "dev.example.ios", key: Data(repeating: 7, count: 32).base64EncodedString(), mac: "mac-1")
+
+    /// A phone asking for notices reaches the handler with its ID, and hears whether the Mac will send them.
+    func testAPushRegistrationReachesTheHandlerAndIsAnswered() {
+        let listener = startListener()
+        let asked = Locked<[String]>([])
+        listener.onPushRegistration = { phoneID, registration in
+            asked.set(asked.get() + ["\(phoneID) \(registration?.mac ?? "stop")"])
+            return true
+        }
+        let (client, probe) = readyClient(listener)
+        client.setPush(Self.pushRegistration)
+        wait(for: [probe.expect(self, "answered") { Self.pushStates($0) == [true] }], timeout: 5)
+        client.setPush(nil)
+        wait(for: [probe.expect(self, "stopped") { Self.pushStates($0) == [true, false] }], timeout: 5)
+        XCTAssertEqual(asked.get(), ["phone-1 mac-1", "phone-1 stop"])
+        XCTAssertTrue(probe.failures.isEmpty)
+    }
+
+    func testAPushRegistrationWithoutAKeyOnTheMacIsAnsweredFalse() {
+        let listener = startListener()
+        let (client, probe) = readyClient(listener)
+        client.setPush(Self.pushRegistration)
+        wait(for: [probe.expect(self, "answered") { Self.pushStates($0) == [false] }], timeout: 5)
+    }
+
+    func testAMalformedPushRegistrationIsABadRequest() {
+        let listener = startListener()
+        listener.onPushRegistration = { _, _ in XCTFail("never asked"); return true }
+        let (client, probe) = readyClient(listener)
+        var bad = Self.pushRegistration
+        bad.token = "../../evil"
+        client.setPush(bad)
+        wait(for: [probe.expect(self, "refused") { _ in probe.failures == [.badRequest] }], timeout: 5)
+    }
+
+    private static func pushStates(_ events: [ShellClient.Event]) -> [Bool] {
+        events.compactMap { if case .pushState(let on) = $0 { on } else { nil } }
+    }
+
     func testControlRequestsReachTheHandlerWithThePhone() {
         let listener = startListener()
         let asked = Locked<[String]>([])
