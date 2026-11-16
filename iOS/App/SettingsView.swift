@@ -185,7 +185,7 @@ private struct NotificationSettings: View {
                 Label("Notifications are off for Passthrough in the iPhone's Settings.", systemImage: "bell.slash")
                     .font(.footnote).foregroundStyle(.secondary)
             } else if push.enabled, shell.macSendsNotices == false {
-                Label("\(macName) can't send them yet. In Passthrough on the Mac, open Settings › Remote Shell › Notifications and add a push key.",
+                Label("\(macName) can't send them: its Passthrough has no usable push key. See Settings › Remote Shell on the Mac, and PASSTHROUGH_PUSH_KEY_FILE in Config/Signing.xcconfig. The widget and Live Activity still show when a shell needs you.",
                       systemImage: "exclamationmark.triangle")
                     .font(.footnote).foregroundStyle(.secondary)
             }

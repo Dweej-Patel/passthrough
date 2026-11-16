@@ -1,7 +1,22 @@
 // Copy this file to Signing.xcconfig and set your Apple Developer Team ID.
 // Find it in Xcode ▸ Settings ▸ Accounts, or developer.apple.com ▸ Membership.
 // Signing.xcconfig is gitignored so your Team ID is never committed.
-DEVELOPMENT_TEAM = 
+DEVELOPMENT_TEAM =
 
 // Optional: your own bundle ID base (defaults to Identity.xcconfig's).
 // PASSTHROUGH_ID = com.example.passthrough
+
+// Optional: phone notifications (a shell needs you, or finished). Without
+// this the Mac sends none; the iPhone's widget and Live Activity still work.
+// Make the key once at developer.apple.com ▸ Certificates, IDs & Profiles ▸
+// Keys ▸ Apple Push Notifications service (APNs), download its .p8 (Apple
+// lets you download it only once) and put it in Config/, where *.p8 is
+// gitignored. A path relative to the repo, or absolute. The Key ID is read
+// from an AuthKey_<Key ID>.p8 name; set it as well if you renamed the file.
+// The key is built into the Mac app: don't hand a built Passthrough.app to
+// anyone else.
+// PASSTHROUGH_PUSH_KEY_FILE = Config/AuthKey_ABC123DEFG.p8
+// PASSTHROUGH_PUSH_KEY_ID = ABC123DEFG
+// The key's team, if it isn't DEVELOPMENT_TEAM (a free Mac team with the
+// iPhone app signed by a paid one: use the iPhone's team).
+// PASSTHROUGH_PUSH_TEAM_ID = YYYYYYYYYY

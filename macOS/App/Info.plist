@@ -37,7 +37,7 @@
 	<string>Passthrough listens for your linked phone on the local network, such as the phone's Personal Hotspot, when it connects wirelessly.</string>
 	<key>PassthroughID</key>
 	<string>$(PASSTHROUGH_ID)</string>
-	<key>PassthroughTeamID</key>
-	<string>$(DEVELOPMENT_TEAM)</string>
+	<key>PassthroughPushTeamID</key>
+	<string>$(PASSTHROUGH_PUSH_TEAM_ID)</string>
 </dict>
 </plist>

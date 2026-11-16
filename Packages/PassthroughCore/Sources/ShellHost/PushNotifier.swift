@@ -158,7 +158,7 @@ public final class PushNotifier: @unchecked Sendable {
             onTokenGone?(phoneID)
         case .credentialsRefused(let reason):
             ptLog(.error, "push: APNs refused the key (\(reason))")
-            onResult?("Apple refused the push key (\(reason)). Check the Team ID, the Key ID and the key file.")
+            onResult?("Apple refused the push key (\(reason)). Check PASSTHROUGH_PUSH_KEY_FILE and the key's team (DEVELOPMENT_TEAM or PASSTHROUGH_PUSH_TEAM_ID) in Config/Signing.xcconfig, then rebuild.")
         case .failed(let reason):
             ptLog(.warning, "push: a notice was not sent (\(reason))")
             onResult?("The last notice was not sent (\(reason)).")

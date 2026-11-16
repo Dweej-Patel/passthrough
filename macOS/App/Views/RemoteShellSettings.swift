@@ -1,5 +1,4 @@
 import SwiftUI
-import UniformTypeIdentifiers
 import IrohTransport
 import PassthroughCore
 import PassthroughUI
@@ -261,77 +260,33 @@ private struct SetupStep<Accessory: View>: View {
 
 // MARK: - Phones and sessions
 
-/// The push key notices to phones are signed with: made once in the
-/// developer account, kept in this Mac's Keychain.
+/// Notices to phones: on when the build carries a push key
+/// (Config/Signing.xcconfig), hidden when it doesn't.
 private struct PhoneNotificationsSection: View {
     @EnvironmentObject private var shell: RemoteShellController
-    @State private var teamID = ""
-    @State private var keyID = ""
-    @State private var pickedKey: String?
-    @State private var pickedName: String?
-    @State private var importing = false
-
-    private var notifications: PhoneNotifications { shell.notifications }
 
     var body: some View {
-        Section {
-            NotificationsContent(notifications: notifications, teamID: $teamID, keyID: $keyID,
-                                 pickedKey: $pickedKey, pickedName: $pickedName, importing: $importing)
-        } header: {
-            Text("Notifications")
-        } footer: {
-            Text("Phones that turn on notifications hear when a shell needs them or finishes a long task, even with Passthrough closed. Notices go through Apple's push service sealed with a key only that phone holds: Apple sees that a notice was sent, not what it says. Make the key once in your Apple Developer account (Certificates, IDs & Profiles › Keys › Apple Push Notifications service) and choose its .p8 file here.")
-        }
-        .onAppear {
-            teamID = notifications.teamID.isEmpty ? (Bundle.main.object(forInfoDictionaryKey: "PassthroughTeamID") as? String ?? "") : notifications.teamID
-            keyID = notifications.keyID
-        }
-        .fileImporter(isPresented: $importing, allowedContentTypes: [.data, .text]) { result in
-            guard case let .success(url) = result else { return }
-            let scoped = url.startAccessingSecurityScopedResource()
-            defer { if scoped { url.stopAccessingSecurityScopedResource() } }
-            pickedKey = try? String(contentsOf: url, encoding: .utf8)
-            pickedName = url.lastPathComponent
-            // AuthKey_ABC123DEFG.p8: the Key ID is in the name.
-            let stem = url.deletingPathExtension().lastPathComponent
-            if keyID.isEmpty, stem.hasPrefix("AuthKey_") { keyID = String(stem.dropFirst("AuthKey_".count)) }
+        if shell.notifications.isBuiltWithKey {
+            Section {
+                NotificationsContent(notifications: shell.notifications)
+            } header: {
+                Text("Notifications")
+            } footer: {
+                Text("Phones that turn on notifications hear when a shell needs them or finishes a long task, even with Passthrough closed. Notices go through Apple's push service sealed with a key only that phone holds: Apple sees that a notice was sent, not what it says. The push key comes from this build (Config/Signing.xcconfig).")
+            }
         }
     }
 }
 
 private struct NotificationsContent: View {
     @ObservedObject var notifications: PhoneNotifications
-    @Binding var teamID: String
-    @Binding var keyID: String
-    @Binding var pickedKey: String?
-    @Binding var pickedName: String?
-    @Binding var importing: Bool
 
     var body: some View {
         LabeledContent("Status") {
             Text(status).foregroundStyle(notifications.isSetUp ? Color.primary : Color.secondary)
         }
-        TextField("Team ID", text: $teamID).textFieldStyle(.roundedBorder)
-        TextField("Key ID", text: $keyID).textFieldStyle(.roundedBorder)
-        LabeledContent("Key") {
-            HStack {
-                Text(pickedName ?? (notifications.hasKey ? "Stored in the Keychain" : "None")).foregroundStyle(.secondary)
-                Button("Choose .p8…") { importing = true }
-            }
-        }
-        HStack {
-            Button("Save") {
-                notifications.save(teamID: teamID, keyID: keyID, privateKey: pickedKey)
-                if notifications.problem == nil { pickedKey = nil; pickedName = nil }
-            }
-            .disabled(teamID.isEmpty || keyID.isEmpty || (pickedKey == nil && !notifications.hasKey))
-            Button("Send Test Notification") { notifications.sendTest() }
-                .disabled(!notifications.isSetUp)
-            if notifications.hasKey {
-                Spacer()
-                Button("Remove Key", role: .destructive) { notifications.removeKey() }
-            }
-        }
+        Button("Send Test Notification") { notifications.sendTest() }
+            .disabled(!notifications.isSetUp)
         if let problem = notifications.problem {
             Label(problem, systemImage: "exclamationmark.triangle.fill").foregroundStyle(.orange).font(.caption)
         }

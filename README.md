@@ -95,6 +95,8 @@ xcodegen generate && open Passthrough.xcodeproj
 2. **iPhone:** run the `Passthrough` scheme on your phone and tap the power button. **Android:** `./gradlew installDebug` in `android/`, then turn on USB debugging.
 3. Plug the phone in, flip the switch in the menu bar, and type the code the phone shows.
 
+**Phone notifications are optional and come from the build.** To have the Mac tell your iPhone when a shell needs you, put your APNs key (`AuthKey_<Key ID>.p8`, from *Certificates, IDs & Profiles › Keys*) in `Config/` and set `PASSTHROUGH_PUSH_KEY_FILE = Config/AuthKey_<Key ID>.p8` in `Config/Signing.xcconfig` before building the Mac app. Without it the build still works and sends no notifications; the widget and Live Activity still work. When reinstalling, keep that line and the `.p8` in place or notifications stop. Step-by-step setup (which Claude can follow too) is in the [changelog](CHANGELOG.md); more in [Notifications](docs/GUIDE.md#notifications).
+
 The [full setup](docs/GUIDE.md#setup) covers bundle IDs, signing, the wireless link and recovery.
 
 ## More

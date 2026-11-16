@@ -42,8 +42,9 @@ back to `Config/Package.resolved` in the same PR. `Packages/PassthroughCore` als
 depends on iroh-ffi and has its own `Package.resolved`; if you change that pin,
 run `swift package resolve` there and commit both files.
 
-`Config/Signing.xcconfig` and the generated `.xcodeproj` are gitignored. Never
-commit your Team ID, provisioning profiles or device identifiers.
+`Config/Signing.xcconfig`, `*.p8` push keys and the generated `.xcodeproj` are
+gitignored. Never commit your Team ID, push key, provisioning profiles or device
+identifiers.
 
 The protocol core has no Apple-framework dependencies beyond Foundation and
 Network, so it can be tested from the command line:

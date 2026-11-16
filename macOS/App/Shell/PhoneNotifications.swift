@@ -4,19 +4,18 @@ import ShellHost
 import SystemConfiguration
 
 /// Notices to phones through Apple's push service, for the app: the phones
-/// that asked for them, the push key they are signed with (Settings ›
-/// Remote Shell › Notifications), and the rules (`PushNotifier`).
+/// that asked for them, the push key they are signed with, and the rules
+/// (`PushNotifier`).
 ///
-/// Without a key nothing is sent; phones that asked are kept, and hear
-/// "not set up" until there is one.
+/// The key comes from the build: Config/Signing.xcconfig names a `.p8`
+/// (`PASSTHROUGH_PUSH_KEY_FILE`), which the build copies into the app as
+/// `AuthKey_<Key ID>.p8`, signed by the team in `PassthroughPushTeamID`. Built
+/// without one, nothing is sent; phones that asked are kept and hear "not
+/// set up", and their widget and Live Activity work as before.
 @MainActor
 final class PhoneNotifications: ObservableObject {
     /// Phone IDs that asked for notices.
     @Published private(set) var registeredPhones: Set<String> = []
-    /// The Team ID and Key ID as saved; the key itself stays in the Keychain.
-    @Published private(set) var teamID: String
-    @Published private(set) var keyID: String
-    @Published private(set) var hasKey: Bool
     /// Why notices can't go out, or why the last one didn't; nil when fine.
     @Published private(set) var problem: String?
     @Published private(set) var testResult: String?
@@ -25,14 +24,13 @@ final class PhoneNotifications: ObservableObject {
     private let notifier = PushNotifier()
     private let client = Locked<APNsClient?>(nil)
 
-    static let teamKey = "PTPushTeamID", keyIDKey = "PTPushKeyID", keyAccount = "apns.key"
-
+    /// This build carries a push key (it may still be unusable: see `problem`).
+    let isBuiltWithKey: Bool
     var isSetUp: Bool { client.get() != nil }
 
     init() {
-        teamID = UserDefaults.standard.string(forKey: Self.teamKey) ?? ""
-        keyID = UserDefaults.standard.string(forKey: Self.keyIDKey) ?? ""
-        hasKey = Keychain.read(Self.keyAccount) != nil
+        let bundled = Self.bundledCredentials()
+        isBuiltWithKey = bundled != nil
         registeredPhones = Set(registry.all.keys)
         let client = self.client, registry = self.registry
         notifier.client = { client.get() }
@@ -42,51 +40,26 @@ final class PhoneNotifications: ObservableObject {
             Task { @MainActor in self?.registeredPhones = Set(registry.all.keys) }
         }
         notifier.onResult = { [weak self] problem in Task { @MainActor in self?.problem = problem } }
-        rebuildClient()
+        if let bundled {
+            if let problem = bundled.problem {
+                self.problem = "The push key built into this app can't be used: \(problem) Fix it in Config/Signing.xcconfig (PASSTHROUGH_PUSH_KEY_FILE, PASSTHROUGH_PUSH_TEAM_ID) and rebuild."
+                ptLog(.error, "push: the bundled key can't be used (\(problem))")
+            } else {
+                client.set(APNsClient(credentials: bundled))
+                ptLog(.info, "push: key \(bundled.keyID) from the build")
+            }
+        }
     }
 
-    /// Saves the push key's details and starts using them, or says what is wrong.
-    func save(teamID: String, keyID: String, privateKey: String?) {
-        let teamID = teamID.trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
-        let keyID = keyID.trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
-        let pem = privateKey ?? Keychain.read(Self.keyAccount) ?? ""
-        if let problem = APNsCredentials(teamID: teamID, keyID: keyID, privateKey: pem).problem {
-            self.problem = problem
-            return
-        }
-        if let privateKey, !Keychain.write(privateKey, account: Self.keyAccount) {
-            problem = "Could not store the key in the Keychain."
-            return
-        }
-        UserDefaults.standard.set(teamID, forKey: Self.teamKey)
-        UserDefaults.standard.set(keyID, forKey: Self.keyIDKey)
-        self.teamID = teamID
-        self.keyID = keyID
-        hasKey = true
-        problem = nil
-        rebuildClient()
-        ptLog(.info, "push: key set up")
-    }
-
-    /// Forgets the push key: no more notices until one is set up again.
-    func removeKey() {
-        Keychain.delete(Self.keyAccount)
-        hasKey = false
-        problem = nil
-        testResult = nil
-        rebuildClient()
-        ptLog(.info, "push: key removed")
-    }
-
-    private func rebuildClient() {
-        guard let pem = Keychain.read(Self.keyAccount) else { return client.set(nil) }
-        let credentials = APNsCredentials(teamID: teamID, keyID: keyID, privateKey: pem)
-        if let problem = credentials.problem {
-            client.set(nil)
-            self.problem = problem
-        } else {
-            client.set(APNsClient(credentials: credentials))
-        }
+    /// The key the build put in the app, with its team; nil when built without one.
+    static func bundledCredentials(_ bundle: Bundle = .main) -> APNsCredentials? {
+        guard let resources = bundle.resourceURL,
+              let names = try? FileManager.default.contentsOfDirectory(atPath: resources.path),
+              let name = names.sorted().first(where: { $0.hasPrefix("AuthKey_") && $0.hasSuffix(".p8") }) else { return nil }
+        let keyID = String(name.dropFirst("AuthKey_".count).dropLast(".p8".count))
+        let teamID = (bundle.object(forInfoDictionaryKey: "PassthroughPushTeamID") as? String ?? "").uppercased()
+        let pem = (try? String(contentsOf: resources.appendingPathComponent(name), encoding: .utf8)) ?? ""
+        return APNsCredentials(teamID: teamID, keyID: keyID, privateKey: pem)
     }
 
     // MARK: From the shell
@@ -116,7 +89,7 @@ final class PhoneNotifications: ObservableObject {
 
     /// One notice to every phone that asked, to see it all works.
     func sendTest() {
-        guard let client = client.get() else { testResult = "Set up a push key first."; return }
+        guard let client = client.get() else { testResult = "This build has no usable push key."; return }
         let registrations = registry.all
         guard !registrations.isEmpty else { testResult = "No phone has asked for notices yet: turn them on in Passthrough on the iPhone."; return }
         testResult = "Sending…"

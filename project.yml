@@ -245,12 +245,59 @@ targets:
         script: |
           mkdir -p "$(dirname "$SCRIPT_OUTPUT_FILE_0")"
           sed "s/\$(PASSTHROUGH_ID)/$PASSTHROUGH_ID/g" "$SCRIPT_INPUT_FILE_0" > "$SCRIPT_OUTPUT_FILE_0"
+      # The APNs key for phone notifications, if Signing.xcconfig names one
+      # (PASSTHROUGH_PUSH_KEY_FILE), as Resources/AuthKey_<Key ID>.p8;
+      # PhoneNotifications reads it. Runs every build so removing the setting removes the key.
+      - name: Bundle push key
+        basedOnDependencyAnalysis: false
+        script: |
+          set -eu
+          dest="$TARGET_BUILD_DIR/$UNLOCALIZED_RESOURCES_FOLDER_PATH"
+          file="${PASSTHROUGH_PUSH_KEY_FILE:-}"
+          if [ -z "$file" ]; then
+            rm -f "$dest"/AuthKey_*.p8
+            echo "No PASSTHROUGH_PUSH_KEY_FILE: building without phone notifications."
+            exit 0
+          fi
+          case "$file" in
+            /*) src="$file" ;;
+            "~/"*) src="$HOME/${file#\~/}" ;;
+            *) src="$SRCROOT/$file" ;;
+          esac
+          if [ ! -f "$src" ]; then
+            echo "error: PASSTHROUGH_PUSH_KEY_FILE in Config/Signing.xcconfig names $src, which isn't there."
+            exit 1
+          fi
+          if ! grep -q "BEGIN PRIVATE KEY" "$src"; then
+            echo "error: $src isn't an APNs key (.p8) file."
+            exit 1
+          fi
+          id="${PASSTHROUGH_PUSH_KEY_ID:-}"
+          name="$(basename "$src" .p8)"
+          if [ -z "$id" ]; then
+            case "$name" in AuthKey_*) id="${name#AuthKey_}" ;; esac
+          fi
+          if ! printf '%s' "$id" | grep -Eq '^[A-Z0-9]{10}$'; then
+            echo "error: set PASSTHROUGH_PUSH_KEY_ID in Config/Signing.xcconfig (ten letters and digits): the key file's name doesn't give it."
+            exit 1
+          fi
+          if ! printf '%s' "${PASSTHROUGH_PUSH_TEAM_ID:-}" | grep -Eq '^[A-Z0-9]{10}$'; then
+            echo "error: a push key needs its team: DEVELOPMENT_TEAM, or PASSTHROUGH_PUSH_TEAM_ID if the key is another team's, in Config/Signing.xcconfig."
+            exit 1
+          fi
+          mkdir -p "$dest"
+          # Only another key is removed, and an unchanged one isn't rewritten (which would make Xcode re-sign the app).
+          find "$dest" -maxdepth 1 -name 'AuthKey_*.p8' ! -name "AuthKey_$id.p8" -delete
+          cmp -s "$src" "$dest/AuthKey_$id.p8" || cp "$src" "$dest/AuthKey_$id.p8"
+          # Readable only by the account that owns the app.
+          chmod 0600 "$dest/AuthKey_$id.p8"
+          echo "Bundled push key $id for team $PASSTHROUGH_PUSH_TEAM_ID."
     info:
       path: macOS/App/Info.plist
       properties:
         PassthroughID: $(PASSTHROUGH_ID)
-        # Settings › Notifications offers it as the push key's team.
-        PassthroughTeamID: $(DEVELOPMENT_TEAM)
+        # The bundled push key's team (PhoneNotifications); DEVELOPMENT_TEAM unless Signing.xcconfig says otherwise.
+        PassthroughPushTeamID: $(PASSTHROUGH_PUSH_TEAM_ID)
         CFBundleDisplayName: Passthrough
         LSUIElement: true
         LSMinimumSystemVersion: "14.5"
