@@ -134,7 +134,7 @@ final class MacWatcher: ObservableObject {
         case let .screen(stream, _):
             // A watch never asks for the screen.
             stream.cancel()
-        case .macInfo, .events, .opened, .openedDetached, .openFailed, .output, .attached,
+        case .macInfo, .events, .pushState, .opened, .openedDetached, .openFailed, .output, .attached,
              .ended, .detached, .history, .transcript, .transcriptResize, .failed:
             // Nothing a watch asks for (`ended` is followed by a fresh `sessions`).
             break

@@ -189,7 +189,11 @@ struct TerminalScreen: View {
             // Typing into a terminal no one can see would be blind.
             if covered { _ = controller.driver.view.resignFirstResponder() }
         }
-        .onAppear { controller.start(intent) }
+        .onAppear {
+            controller.start(intent)
+            shell.setViewing(true)
+        }
+        .onDisappear { shell.setViewing(false) }
     }
 
     // MARK: Tabs
@@ -249,7 +253,7 @@ struct TerminalScreen: View {
         } label: {
             HStack(spacing: 6) {
                 Circle()
-                    .fill(running ? PTTheme.success : Color.secondary.opacity(0.5))
+                    .fill(running ? Self.dotColor(info) : Color.secondary.opacity(0.5))
                     .frame(width: 6, height: 6)
                 Text(info?.title ?? "Session")
                     .font(.caption.weight(.semibold))
@@ -274,6 +278,15 @@ struct TerminalScreen: View {
                 Button(role: .destructive) { shell.close(id) } label: { Label("End session", systemImage: "xmark") }
             }
         }
+    }
+
+    /// A running tab's dot: amber while it needs you, red when it failed
+    /// unseen (what the program reports, e.g. Claude Code), else green.
+    private static func dotColor(_ info: ShellSessionInfo?) -> Color {
+        guard let info else { return PTTheme.success }
+        if info.isAsking { return PTColor.attention }
+        if let status = info.status, status.isUnseenResult, status.state == ShellStatus.error { return PTColor.problem }
+        return PTTheme.success
     }
 
     // MARK: Banners

@@ -184,6 +184,8 @@ final class ShellModel: ObservableObject {
                                     continuation: CheckedContinuation<[ShellReplayChunk]?, Never>)?
     private var observers: [NSObjectProtocol] = []
     private var watcherChanges: AnyCancellable?
+    /// Notices turned on or off, or a new device token: the Mac connected now hears.
+    private var pushChanges: AnyCancellable?
     /// What each Mac switched away from had said ended, in memory only: a remembered finished
     /// tab can still be removed after switching back while that Mac is out of reach.
     private var endedByMac: [String: ShellEndedSessions] = [:]
@@ -206,6 +208,11 @@ final class ShellModel: ObservableObject {
         observers.append(NotificationCenter.default.addObserver(forName: UIApplication.didBecomeActiveNotification, object: nil, queue: .main) { [weak self] _ in
             MainActor.assumeIsolated { self?.updateWatcher() }
         })
+        // Notices turned on or off, or a new device token: the Mac connected now hears.
+        // `@Published` fires before the change lands: read it on the next turn.
+        pushChanges = PushRegistrar.shared.$token.combineLatest(PushRegistrar.shared.$enabled, PushRegistrar.shared.$denied)
+            .dropFirst()
+            .sink { [weak self] _ in DispatchQueue.main.async { self?.sendPushRegistration() } }
         watcher.hiddenSessions = { [weak self] in self?.hiddenSessions ?? ShellHiddenSessions() }
         watcher.discovered = { [weak self] credential in
             guard let self else { return nil }
@@ -549,6 +556,30 @@ final class ShellModel: ObservableObject {
         client?.resize(cols: cols, rows: rows)
     }
 
+    /// Whether the Mac connected now will send this phone notices (nil: not asked yet).
+    @Published private(set) var macSendsNotices: Bool?
+
+    /// Tells the Mac connected now what this phone wants: notices sealed with
+    /// that Mac's key, or none. Sent on every connection and whenever it changes.
+    func sendPushRegistration() {
+        guard reach == .ready, let client, let mac = clientMacID else { return }
+        let registration = PushRegistrar.shared.registration(for: mac)
+        if registration == nil, !PushRegistrar.shared.enabled { macSendsNotices = nil }
+        client.setPush(registration)
+    }
+
+    /// The terminal screen is up: what the attached session shows is being
+    /// looked at, so a result it reports (Claude Code's "done") is seen.
+    /// Said again on each connection. Counted: a screen being replaced can
+    /// appear before the one it replaces disappears.
+    private var terminalScreens = 0
+    var viewing: Bool { terminalScreens > 0 }
+    func setViewing(_ on: Bool) {
+        let was = viewing
+        terminalScreens = max(0, terminalScreens + (on ? 1 : -1))
+        if viewing != was { client?.setViewing(viewing) }
+    }
+
     /// Ends a running session. A finished one is removed instead (`remove`):
     /// its tab closes and it's hidden on this phone, since the Mac would refuse to close it again.
     func close(_ id: String) {
@@ -696,11 +727,15 @@ final class ShellModel: ObservableObject {
                 streamStarting.send((active, true))
                 client?.attach(active, cols: size.cols, rows: size.rows)
             }
+            if viewing { client?.setViewing(true) }
+            sendPushRegistration()
         case let .macInfo(info):
             apply(info)
         case let .macState(state):
             macState = state
             settlePending(state)
+        case let .pushState(on):
+            macSendsNotices = on
         case let .events(since, events, battery):
             timeline = MacTimeline(since: Date(timeIntervalSince1970: since), events: events, battery: battery, loadedAt: .now)
             timelineLoading = false

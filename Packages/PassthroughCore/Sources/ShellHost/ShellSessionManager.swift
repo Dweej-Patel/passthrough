@@ -13,10 +13,15 @@ public protocol ShellAttachment: AnyObject, Sendable {
     func shellDetached(session: String, generation: UInt64)
     /// The scrollback replay for an attach has been handed over; what follows is live.
     func shellReplayed(session: String)
+    /// Someone is looking at what this client shows: a result that arrives
+    /// then (Claude Code's "done") is seen. A phone says so; a terminal
+    /// window on the Mac is on its screen.
+    var isLooking: Bool { get }
 }
 
 public extension ShellAttachment {
     func shellReplayed(session: String) {}
+    var isLooking: Bool { true }
 }
 
 /// Where a session was started: by a phone, or in a terminal window on the Mac.
@@ -45,6 +50,16 @@ public final class ShellSessionManager: @unchecked Sendable {
     public var onChange: (@Sendable () -> Void)? {
         get { queue.sync { changeHandler } }
         set { queue.sync { changeHandler = newValue } }
+    }
+
+    /// Fires as a session's `status` changes in a way anyone shows (its state,
+    /// kind, agents, whether it was seen, a blocked one's question), and as
+    /// the session ends, with the session as it is then and whether someone
+    /// is looking at it: what happened, not what is left of it by the time a
+    /// list is read. Called off the manager's queue, in order.
+    public var onStatusChange: (@Sendable (_ session: ShellSessionInfo, _ looking: Bool) -> Void)? {
+        get { queue.sync { statusHandler } }
+        set { queue.sync { statusHandler = newValue } }
     }
 
     /// Fires after who is looking at a session changes (`details`). Called off the manager's queue.
@@ -97,6 +112,18 @@ public final class ShellSessionManager: @unchecked Sendable {
         var tail = Data()
         /// The question it seems to be waiting on (`ShellQuestion`); nil once input answers it.
         var waiting: String?
+        /// What the program in front says about itself (OSC 7501), and the
+        /// sum of it phones see; nil for a plain shell.
+        var programStatus = ProgramStatus()
+        var status: ShellStatus?
+        /// The foreground job (process group) when the program first reported:
+        /// once that group is gone, so is everything it said.
+        var statusOwner: pid_t?
+        /// The arguments the session's shell started with (the program first):
+        /// once they differ, the shell `exec`ed another program.
+        var shellArguments: [String] = []
+        /// A `redraw` is under way.
+        var redrawing = false
         /// Looked for a question since the last output.
         var checkedSinceOutput = true
         /// A look is already scheduled; output meanwhile pushes it back.
@@ -127,8 +154,16 @@ public final class ShellSessionManager: @unchecked Sendable {
         var info: ShellSessionInfo {
             ShellSessionInfo(id: id, title: title, startedAt: startedAt.timeIntervalSince1970,
                              lastOutputAt: lastOutputAt.timeIntervalSince1970, running: running, exitStatus: exitStatus,
-                             waiting: running ? waiting : nil, origin: origin == .mac ? ShellSessionInfo.originMac : nil,
-                             theme: theme)
+                             waiting: running ? question : nil, origin: origin == .mac ? ShellSessionInfo.originMac : nil,
+                             theme: theme, status: running ? status : nil)
+        }
+
+        /// The question it waits on: what the program says when it reports
+        /// its status (nothing while it isn't blocked), else what its screen
+        /// seems to ask.
+        var question: String? {
+            guard let status else { return waiting }
+            return status.isBlocked ? (status.message ?? "Needs you") : nil
         }
 
         /// Everyone output goes to.
@@ -148,6 +183,9 @@ public final class ShellSessionManager: @unchecked Sendable {
     private static let echoWindow = 2048
     private static let typedLimit = 512
     private static let closeTimeout: TimeInterval = 5
+    /// How long `redraw` leaves the terminal shorter: long enough for the
+    /// program to read the size while it is different.
+    static let redrawPause: TimeInterval = 0.25
 
     private let transcripts: TranscriptStore
     private let command: () -> (String, [String])
@@ -169,6 +207,7 @@ public final class ShellSessionManager: @unchecked Sendable {
     /// Numbers every attach, so a late detach can be told from a current one.
     private var lastGeneration: UInt64 = 0
     private var changeHandler: (@Sendable () -> Void)?
+    private var statusHandler: (@Sendable (ShellSessionInfo, Bool) -> Void)?
     private var viewersHandler: (@Sendable () -> Void)?
     private var fallbackTheme: ShellTheme?
 
@@ -254,6 +293,7 @@ public final class ShellSessionManager: @unchecked Sendable {
             throw error
         }
         let session = Session(id: id, startedAt: now, openedBy: phoneID, origin: origin, theme: theme?.sanitized, process: process, writer: writer, size: size)
+        session.shellArguments = [executable] + arguments
         // Weak: the session owns the process, so a strong capture would be a cycle that leaks every session.
         process.onOutput = { [weak self, weak session] data in
             self?.queue.async { if let session { self?.received(data, session: session) } }
@@ -296,11 +336,21 @@ public final class ShellSessionManager: @unchecked Sendable {
             // size alone until someone types in the window: resizing redraws
             // the prompt, which can wipe the lines the window is about to be shown.
             let joins = shared && session.active != nil && session.active != ObjectIdentifier(client)
+            let sizeBefore = session.size
             if session.running, !joins {
                 session.active = ObjectIdentifier(client)
                 resize(session, to: size)
             }
             let replay = session.scrollback.replay
+            // A full-screen program replayed from partway: what it drew before
+            // the cut isn't in the replay, so have it draw its screen again,
+            // unless taking this client's size already does. Also for a Mac
+            // window joining: on the alternate screen there is no prompt to wipe.
+            let resized = !joins && size != sizeBefore
+            if session.running, !resized,
+               session.scrollback.isPartial, session.scrollback.modes.isAlternateScreen {
+                redraw(session)
+            }
             var offset = 0
             while offset < replay.count {
                 let chunk = Data(replay[(replay.startIndex + offset)..<(replay.startIndex + min(offset + RemoteShell.outputChunk, replay.count))])
@@ -308,6 +358,7 @@ public final class ShellSessionManager: @unchecked Sendable {
                 callouts.async { client.shellOutput(chunk, session: id) }
             }
             callouts.async { client.shellReplayed(session: id) }
+            if session.running, client.isLooking { markResultSeen(session) }
             if session.running, shared {
                 session.viewers.removeAll { $0.client === client }
                 session.viewers.append(Viewer(client: client, size: size))
@@ -345,6 +396,16 @@ public final class ShellSessionManager: @unchecked Sendable {
         }
     }
 
+    /// `client` (a phone) has its terminal on screen now: a result waiting
+    /// in what it shows is seen.
+    public func lookedAt(client: ShellAttachment) {
+        queue.async { [self] in
+            for session in table.values where session.attachment === client || session.viewers.contains(where: { $0.client === client }) {
+                markResultSeen(session)
+            }
+        }
+    }
+
     /// `client` is who typed it, when known: the terminal takes that client's
     /// size if it isn't already the one it follows.
     ///
@@ -355,8 +416,8 @@ public final class ShellSessionManager: @unchecked Sendable {
     public func input(_ id: String, _ data: Data, from client: ShellAttachment? = nil) {
         queue.async { [self] in
             guard let session = table[id], session.running else { return }
+            var data = TerminalReports.removingProgramStatusReplies(from: data)
             let typed = TerminalReports.removing(from: data)
-            var data = data
             if let client {
                 let followed = session.active == nil || session.active == ObjectIdentifier(client)
                 if !followed { data = typed }
@@ -369,6 +430,7 @@ public final class ShellSessionManager: @unchecked Sendable {
             session.process.write(data)
             // A terminal's answers alone: nobody typed, so nothing was answered either.
             guard !typed.isEmpty else { return }
+            markResultSeen(session)
             if !session.titleKnown { learnTitle(from: typed, session: session) }
             // Someone answered: it isn't waiting any more, and only what
             // comes next can ask again.
@@ -465,6 +527,26 @@ public final class ShellSessionManager: @unchecked Sendable {
         session.writer.resize(cols: Int(size.cols), rows: Int(size.rows), at: Date())
     }
 
+    /// Has the program draw its whole screen again. Programs do that when
+    /// the size changes, and only then (a SIGWINCH alone, at the same size,
+    /// is ignored), so the terminal is one row shorter for a moment.
+    private func redraw(_ session: Session) {
+        // One at a time: a second would take the shorter size for the real one.
+        guard !session.redrawing else { return }
+        let size = session.size
+        guard size.rows > 1 else { return }
+        let shorter = Size(cols: size.cols, rows: size.rows - 1)
+        session.redrawing = true
+        resize(session, to: shorter)
+        queue.asyncAfter(deadline: .now() + Self.redrawPause) { [weak session, self] in
+            guard let session else { return }
+            session.redrawing = false
+            // Unless someone's terminal changed size meanwhile: that size stands.
+            guard session.running, session.size == shorter else { return }
+            resize(session, to: size)
+        }
+    }
+
     /// The client the session followed is gone: it follows whoever is left
     /// (the attachment, else the Mac window that came last) at that one's
     /// size, so what that terminal shows isn't drawn for one that isn't there.
@@ -503,6 +585,7 @@ public final class ShellSessionManager: @unchecked Sendable {
         session.writer.append(data, at: now)
         session.lastOutputAt = now
         if session.pendingTitle != nil { adoptEchoedTitle(session) }
+        readStatus(data, session: session, at: now)
         noteOutput(data, session: session)
         guard table[session.id] === session else { return }
         let id = session.id
@@ -534,8 +617,130 @@ public final class ShellSessionManager: @unchecked Sendable {
         }
     }
 
+    /// Answers a program asking whether the terminal speaks OSC 7501 (before
+    /// anything goes out: its answer must arrive ahead of the terminal's
+    /// reply to the device attributes query that follows), and follows what
+    /// it then reports.
+    private func readStatus(_ data: Data, session: Session, at now: Date) {
+        var summaries: [ProgramStatus.Summary?] = []
+        let outcome = session.programStatus.scan(data, summaries: &summaries)
+        if outcome.contains(.queried) { session.process.write(ProgramStatus.supportReply) }
+        let changed = outcome.contains(.changed)
+        // A program killed mid-task never clears its records. Once another job
+        // is in front (the shell's prompt is output too) and the reporting
+        // job's process group is gone, nothing it said holds any more. A job
+        // that is only stopped (^Z) or in the background keeps its status for
+        // when it comes back. One ioctl per chunk, only while there are records.
+        // The shell's own group alone doesn't mean the shell is in front: a
+        // program the shell `exec`ed runs in it (`shellIsInFront`).
+        //
+        // The reporter may be gone by the time its output is read, with its
+        // last reports and the prompt in one chunk: those reports still count,
+        // in turn, and then it is over.
+        if !session.programStatus.isEmpty {
+            let group = session.process.foregroundGroup
+            if session.statusOwner == nil {
+                if shellIsInFront(session, group: group) {
+                    if session.programStatus.forgetAll() { summaries.append(nil) }
+                } else {
+                    session.statusOwner = group
+                }
+            } else if let owner = session.statusOwner, let group, group != owner, !Self.groupExists(owner) {
+                if !changed || shellIsInFront(session, group: group) {
+                    if session.programStatus.forgetAll() { summaries.append(nil) }
+                } else {
+                    // Another program in front reported: what is said now is its.
+                    session.statusOwner = group
+                }
+            }
+        }
+        if session.programStatus.isEmpty { session.statusOwner = nil }
+        // Each change in turn: a moment's state (done, then the program gone) still counts.
+        for summary in summaries { updateStatus(session, to: summary, at: now) }
+    }
+
+    private func updateStatus(_ session: Session, to summary: ProgramStatus.Summary?, at now: Date) {
+        let previous = session.status
+        var next: ShellStatus?
+        if let summary {
+            let sameState = previous?.state == summary.state
+            let finished = summary.state == ShellStatus.done || summary.state == ShellStatus.error
+            next = ShellStatus(state: summary.state, kind: summary.kind,
+                               message: summary.message.map { Self.oneLine($0, limit: ShellStatus.maxMessage) },
+                               agents: summary.agents,
+                               since: sameState ? (previous?.since ?? now.timeIntervalSince1970) : now.timeIntervalSince1970,
+                               // Done while someone is looking at it: they saw it.
+                               seen: finished && ((sameState && previous?.seen == true) || session.clients.contains { $0.isLooking }))
+        }
+        guard next != previous else { return }
+        session.status = next
+        // What it is doing while it works changes with every step and nothing
+        // shows it: that alone goes out with the next change that shows.
+        let shown = next?.state != previous?.state || next?.kind != previous?.kind || next?.seen != previous?.seen
+            || next?.agents != previous?.agents || (next?.isBlocked == true && next?.message != previous?.message)
+        guard shown else { return }
+        notifyChange()
+        notifyStatus(session)
+    }
+
+    private func notifyStatus(_ session: Session) {
+        guard let handler = statusHandler else { return }
+        let info = session.info
+        let looking = session.clients.contains { $0.isLooking }
+        callouts.async { handler(info, looking) }
+    }
+
+    /// Someone has the session in front of them: a result waiting there is seen.
+    private func markResultSeen(_ session: Session) {
+        guard let status = session.status, status.isUnseenResult else { return }
+        session.status?.seen = true
+        notifyChange()
+        notifyStatus(session)
+    }
+
+    /// Whether any process is left in process group `group`.
+    private static func groupExists(_ group: pid_t) -> Bool {
+        kill(-group, 0) == 0 || errno == EPERM
+    }
+
+    /// The shell itself is in front: its own group, with the arguments it
+    /// started with (a program it `exec`ed has its own; macOS's /bin/sh
+    /// becomes bash but keeps them).
+    private func shellIsInFront(_ session: Session, group: pid_t?) -> Bool {
+        guard let group, group == session.process.pid else { return false }
+        return Self.arguments(of: group) == session.shellArguments
+    }
+
+    /// The arguments `pid` runs with, the program first (KERN_PROCARGS2), or
+    /// nil once it is gone.
+    private static func arguments(of pid: pid_t) -> [String]? {
+        var mib: [Int32] = [CTL_KERN, KERN_PROCARGS2, pid]
+        var size = 0
+        guard sysctl(&mib, 3, nil, &size, nil, 0) == 0, size > MemoryLayout<Int32>.size else { return nil }
+        var buffer = [UInt8](repeating: 0, count: size)
+        guard sysctl(&mib, 3, &buffer, &size, nil, 0) == 0, size > MemoryLayout<Int32>.size else { return nil }
+        let count = buffer.withUnsafeBytes { Int($0.loadUnaligned(as: Int32.self)) }
+        var index = MemoryLayout<Int32>.size
+        while index < size, buffer[index] != 0 { index += 1 }   // the executable's path
+        while index < size, buffer[index] == 0 { index += 1 }   // and its padding
+        var arguments: [String] = []
+        while arguments.count < count, index < size {
+            let start = index
+            while index < size, buffer[index] != 0 { index += 1 }
+            arguments.append(String(decoding: buffer[start..<index], as: UTF8.self))
+            index += 1
+        }
+        return arguments
+    }
+
+    private static func oneLine(_ text: String, limit: Int) -> String {
+        let line = text.split(whereSeparator: \.isNewline).joined(separator: " ")
+        return line.count > limit ? String(line.prefix(limit - 1)) + "…" : line
+    }
+
     private func lookForQuestion(_ session: Session) {
-        guard session.running, !session.checkedSinceOutput, table[session.id] === session else { return }
+        // A program that reports its status says when it is asking.
+        guard session.running, !session.checkedSinceOutput, session.status == nil, table[session.id] === session else { return }
         session.checkedSinceOutput = true
         let question = ShellQuestion.find(in: session.tail)
         guard question != session.waiting else { return }
@@ -548,6 +753,7 @@ public final class ShellSessionManager: @unchecked Sendable {
         session.running = false
         session.exitStatus = status
         session.writer.finish(exitStatus: status, at: Date())
+        if session.status != nil { notifyStatus(session) }
         let id = session.id
         for client in session.clients {
             callouts.async { client.shellEnded(session: id, exitStatus: status) }

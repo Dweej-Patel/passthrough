@@ -55,6 +55,7 @@ targets:
         product: SwiftTerm
       - target: PassthroughTunnel
       - target: PassthroughWidgets
+      - target: PassthroughNotifications
     info:
       path: iOS/App/Info.plist
       properties:
@@ -80,8 +81,14 @@ targets:
       path: iOS/App/Passthrough.entitlements
       properties:
         com.apple.developer.networking.networkextension: [packet-tunnel-provider]
-        # The second group is the widget's (MacSnapshot.appGroup): it holds no secrets.
-        com.apple.security.application-groups: [group.$(PASSTHROUGH_ID), group.$(PASSTHROUGH_ID).widget]
+        # The second group is the widget's (MacSnapshot.appGroup): it holds no
+        # secrets. The third is the notification extension's: only the keys
+        # Macs seal notices with (PushKeys), never the pairing secrets.
+        com.apple.security.application-groups: [group.$(PASSTHROUGH_ID), group.$(PASSTHROUGH_ID).widget, group.$(PASSTHROUGH_ID).push]
+        # Notices from Macs through Apple's push service (Xcode switches to
+        # production for an archive). Time Sensitive: "needs you" gets through Focus.
+        aps-environment: development
+        com.apple.developer.usernotifications.time-sensitive: true
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: $(PASSTHROUGH_ID).ios
@@ -152,6 +159,35 @@ targets:
         PRODUCT_NAME: PassthroughWidgets
         TARGETED_DEVICE_FAMILY: "1"
 
+  # Opens the sealed notices Macs send through Apple's push service
+  # (PushBox) and shows what they say. Its app group holds only those keys.
+  PassthroughNotifications:
+    type: app-extension
+    platform: iOS
+    sources:
+      - path: iOS/Notifications
+        excludes: ["Info.plist", "*.entitlements"]
+    dependencies:
+      - package: PassthroughCore
+        product: PassthroughCore
+    info:
+      path: iOS/Notifications/Info.plist
+      properties:
+        PassthroughID: $(PASSTHROUGH_ID)
+        CFBundleDisplayName: Passthrough Notifications
+        NSExtension:
+          NSExtensionPointIdentifier: com.apple.usernotifications.service
+          NSExtensionPrincipalClass: $(PRODUCT_MODULE_NAME).NotificationService
+    entitlements:
+      path: iOS/Notifications/PassthroughNotifications.entitlements
+      properties:
+        com.apple.security.application-groups: [group.$(PASSTHROUGH_ID).push]
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: $(PASSTHROUGH_ID).ios.notifications
+        PRODUCT_NAME: PassthroughNotifications
+        TARGETED_DEVICE_FAMILY: "1"
+
   # ───────────────────────── macOS ─────────────────────────
   PassthroughMac:
     type: application
@@ -209,10 +245,59 @@ targets:
         script: |
           mkdir -p "$(dirname "$SCRIPT_OUTPUT_FILE_0")"
           sed "s/\$(PASSTHROUGH_ID)/$PASSTHROUGH_ID/g" "$SCRIPT_INPUT_FILE_0" > "$SCRIPT_OUTPUT_FILE_0"
+      # The APNs key for phone notifications, if Signing.xcconfig names one
+      # (PASSTHROUGH_PUSH_KEY_FILE), as Resources/AuthKey_<Key ID>.p8;
+      # PhoneNotifications reads it. Runs every build so removing the setting removes the key.
+      - name: Bundle push key
+        basedOnDependencyAnalysis: false
+        script: |
+          set -eu
+          dest="$TARGET_BUILD_DIR/$UNLOCALIZED_RESOURCES_FOLDER_PATH"
+          file="${PASSTHROUGH_PUSH_KEY_FILE:-}"
+          if [ -z "$file" ]; then
+            rm -f "$dest"/AuthKey_*.p8
+            echo "No PASSTHROUGH_PUSH_KEY_FILE: building without phone notifications."
+            exit 0
+          fi
+          case "$file" in
+            /*) src="$file" ;;
+            "~/"*) src="$HOME/${file#\~/}" ;;
+            *) src="$SRCROOT/$file" ;;
+          esac
+          if [ ! -f "$src" ]; then
+            echo "error: PASSTHROUGH_PUSH_KEY_FILE in Config/Signing.xcconfig names $src, which isn't there."
+            exit 1
+          fi
+          if ! grep -q "BEGIN PRIVATE KEY" "$src"; then
+            echo "error: $src isn't an APNs key (.p8) file."
+            exit 1
+          fi
+          id="${PASSTHROUGH_PUSH_KEY_ID:-}"
+          name="$(basename "$src" .p8)"
+          if [ -z "$id" ]; then
+            case "$name" in AuthKey_*) id="${name#AuthKey_}" ;; esac
+          fi
+          if ! printf '%s' "$id" | grep -Eq '^[A-Z0-9]{10}$'; then
+            echo "error: set PASSTHROUGH_PUSH_KEY_ID in Config/Signing.xcconfig (ten letters and digits): the key file's name doesn't give it."
+            exit 1
+          fi
+          if ! printf '%s' "${PASSTHROUGH_PUSH_TEAM_ID:-}" | grep -Eq '^[A-Z0-9]{10}$'; then
+            echo "error: a push key needs its team: DEVELOPMENT_TEAM, or PASSTHROUGH_PUSH_TEAM_ID if the key is another team's, in Config/Signing.xcconfig."
+            exit 1
+          fi
+          mkdir -p "$dest"
+          # Only another key is removed, and an unchanged one isn't rewritten (which would make Xcode re-sign the app).
+          find "$dest" -maxdepth 1 -name 'AuthKey_*.p8' ! -name "AuthKey_$id.p8" -delete
+          cmp -s "$src" "$dest/AuthKey_$id.p8" || cp "$src" "$dest/AuthKey_$id.p8"
+          # Readable only by the account that owns the app.
+          chmod 0600 "$dest/AuthKey_$id.p8"
+          echo "Bundled push key $id for team $PASSTHROUGH_PUSH_TEAM_ID."
     info:
       path: macOS/App/Info.plist
       properties:
         PassthroughID: $(PASSTHROUGH_ID)
+        # The bundled push key's team (PhoneNotifications); DEVELOPMENT_TEAM unless Signing.xcconfig says otherwise.
+        PassthroughPushTeamID: $(PASSTHROUGH_PUSH_TEAM_ID)
         CFBundleDisplayName: Passthrough
         LSUIElement: true
         LSMinimumSystemVersion: "14.5"

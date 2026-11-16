@@ -24,6 +24,7 @@ struct RemoteShellSettings: View {
                 PhonesSection()
                 OpenSessionsSection()
                 MacTerminalsSection()
+                PhoneNotificationsSection()
                 ReachAnywhereSettings()
             } else {
                 HowItWorks()
@@ -258,6 +259,48 @@ private struct SetupStep<Accessory: View>: View {
 }
 
 // MARK: - Phones and sessions
+
+/// Notices to phones: on when the build carries a push key
+/// (Config/Signing.xcconfig), hidden when it doesn't.
+private struct PhoneNotificationsSection: View {
+    @EnvironmentObject private var shell: RemoteShellController
+
+    var body: some View {
+        if shell.notifications.isBuiltWithKey {
+            Section {
+                NotificationsContent(notifications: shell.notifications)
+            } header: {
+                Text("Notifications")
+            } footer: {
+                Text("Phones that turn on notifications hear when a shell needs them or finishes a long task, even with Passthrough closed. Notices go through Apple's push service sealed with a key only that phone holds: Apple sees that a notice was sent, not what it says. The push key comes from this build (Config/Signing.xcconfig).")
+            }
+        }
+    }
+}
+
+private struct NotificationsContent: View {
+    @ObservedObject var notifications: PhoneNotifications
+
+    var body: some View {
+        LabeledContent("Status") {
+            Text(status).foregroundStyle(notifications.isSetUp ? Color.primary : Color.secondary)
+        }
+        Button("Send Test Notification") { notifications.sendTest() }
+            .disabled(!notifications.isSetUp)
+        if let problem = notifications.problem {
+            Label(problem, systemImage: "exclamationmark.triangle.fill").foregroundStyle(.orange).font(.caption)
+        }
+        if let result = notifications.testResult {
+            Text(result).font(.caption).foregroundStyle(.secondary)
+        }
+    }
+
+    private var status: String {
+        let phones = notifications.registeredPhones.count
+        let asked = phones == 0 ? "no phone has asked yet" : phones == 1 ? "1 phone asked" : "\(phones) phones asked"
+        return (notifications.isSetUp ? "Ready" : "Not set up") + " · " + asked
+    }
+}
 
 private struct PhonesSection: View {
     @EnvironmentObject private var shell: RemoteShellController

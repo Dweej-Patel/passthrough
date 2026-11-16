@@ -3,4 +3,7 @@
 // team; Swift reads it back through PassthroughProtocol.identifier.
 PASSTHROUGH_ID = dev.dpatel.passthrough
 
+// The team the APNs push key belongs to (Signing.xcconfig may name another).
+PASSTHROUGH_PUSH_TEAM_ID = $(DEVELOPMENT_TEAM)
+
 #include? "Signing.xcconfig"

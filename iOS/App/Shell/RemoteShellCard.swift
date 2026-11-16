@@ -134,6 +134,13 @@ struct RemoteShellCard: View {
                 HStack(spacing: 12) {
                     if session.isAsking {
                         NeedsYouDot().frame(width: 16, height: 16)
+                    } else if let status = session.status, session.running, status.isUnseenResult {
+                        // Finished while nobody was looking (what the program reports, e.g. Claude Code).
+                        Image(systemName: status.state == ShellStatus.error ? "exclamationmark.circle.fill" : "checkmark.circle.fill")
+                            .font(.body)
+                            .foregroundStyle(status.state == ShellStatus.error ? PTColor.problem : PTColor.tint)
+                            .frame(width: 16, height: 16)
+                            .accessibilityHidden(true)
                     } else {
                         PTStatusDot(color: session.running ? PTColor.tint : .secondary.opacity(0.5), live: session.running)
                     }
@@ -169,10 +176,21 @@ struct RemoteShellCard: View {
 
     /// "running · 4m" (since it started) or "exited 0 · 1h" (since its last output).
     /// A session started in a terminal window on the Mac says so first ("on the Mac · running · 4m").
+    /// A program that reports its status (Claude Code) is described by it:
+    /// "working · 3m · 2 agents", "done · 1m", "failed · 1m" (since it got there).
     static func status(_ session: ShellSessionInfo, now: Date) -> String {
         if session.running, let question = session.waiting { return "needs you · " + question }
         if session.running {
-            return (session.isOnMac ? "on the Mac · " : "") + "running · " + age(now.timeIntervalSince1970 - session.startedAt)
+            let place = session.isOnMac ? "on the Mac · " : ""
+            if let status = session.status {
+                let since = age(now.timeIntervalSince1970 - status.since)
+                if status.isWorking {
+                    let agents = status.agents == 0 ? "" : " · " + (status.agents == 1 ? "1 agent" : "\(status.agents) agents")
+                    return place + "working · " + since + agents
+                }
+                if status.isUnseenResult { return place + (status.state == ShellStatus.error ? "failed · " : "done · ") + since }
+            }
+            return place + "running · " + age(now.timeIntervalSince1970 - session.startedAt)
         }
         let exited = session.exitStatus.map { "exited \($0)" } ?? "exited"
         return exited + " · " + age(now.timeIntervalSince1970 - session.lastOutputAt)

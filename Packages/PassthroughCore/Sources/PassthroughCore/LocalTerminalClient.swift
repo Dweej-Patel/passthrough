@@ -62,10 +62,16 @@ public enum LocalTerminalClient {
     /// kept from the shell, when the terminal hadn't finished answering in time.
     static let lateColours: TimeInterval = 2
 
-    /// Leaves the alternate screen, mouse reporting and bracketed paste and
-    /// shows the cursor: what a program in a session that is no longer shown
-    /// may have left on.
-    static let restoreTerminal = Data("\u{1B}[?1049l\u{1B}[?1000l\u{1B}[?1002l\u{1B}[?1003l\u{1B}[?1006l\u{1B}[?2004l\u{1B}[?25h\u{1B}[0m\r\n".utf8)
+    /// Leaves the alternate screen, mouse reporting, bracketed paste, focus
+    /// and colour-scheme reports, application cursor keys and keypad, and the
+    /// kitty and modifyOtherKeys keyboard modes (on each screen), and turns
+    /// autowrap and the cursor back on: what a program in a session that is
+    /// no longer shown may have left on, or a replay turned on (every mode
+    /// ShellHost's `TerminalModes` restores; Claude Code uses most of them).
+    static let restoreTerminal = Data(("\u{1B}[<99u\u{1B}[?1049l\u{1B}[<99u\u{1B}[>4m"
+        + "\u{1B}[?9l\u{1B}[?1000l\u{1B}[?1001l\u{1B}[?1002l\u{1B}[?1003l"
+        + "\u{1B}[?1005l\u{1B}[?1006l\u{1B}[?1015l\u{1B}[?1016l"
+        + "\u{1B}[?2004l\u{1B}[?1004l\u{1B}[?2031l\u{1B}[?1l\u{1B}[?66l\u{1B}>\u{1B}[?7h\u{1B}[?25h\u{1B}[0m\r\n").utf8)
 
     public static func run(_ options: Options) -> Outcome {
         guard let socket = connect(options.socketPath) else { return .unavailable(notRunning) }

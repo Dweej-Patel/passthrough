@@ -103,6 +103,8 @@ public final class ShellClient: @unchecked Sendable {
         case macInfo(ShellEnvelope)
         /// How the Mac is doing (after `ready`, and whenever it changes).
         case macState(MacState)
+        /// Whether the Mac will send this phone notices (the answer to `setPush`).
+        case pushState(Bool)
         /// The answer to `requestEvents`: what happened since then, oldest first, and the battery meanwhile.
         case events(since: Double, [MacEvent], battery: [BatterySample])
         case sessions([ShellSessionInfo])
@@ -372,6 +374,21 @@ public final class ShellClient: @unchecked Sendable {
 
     /// Asks the Mac to turn Keep awake on or off. The new state comes back as
     /// `.macState`, or `.failed` says why not.
+    /// Asks the Mac for notices sent to `registration`, or (nil) to stop; `.pushState` answers.
+    public func setPush(_ registration: PushRegistration?) {
+        var m = ShellEnvelope(t: ShellEnvelope.pushRegister)
+        m.on = registration != nil
+        m.push = registration
+        command(m)
+    }
+
+    /// Whether this phone's terminal is on screen for the attached session (`ShellEnvelope.viewing`).
+    public func setViewing(_ on: Bool) {
+        var m = ShellEnvelope(t: ShellEnvelope.viewing)
+        m.on = on
+        command(m)
+    }
+
     public func setAwake(_ on: Bool) {
         var m = ShellEnvelope(t: ShellEnvelope.setAwake)
         m.on = on
@@ -652,6 +669,8 @@ public final class ShellClient: @unchecked Sendable {
         case ShellEnvelope.macState:
             guard let state = message.state else { return }
             emit(.macState(state))
+        case ShellEnvelope.pushState:
+            emit(.pushState(message.on ?? false))
         case ShellEnvelope.eventList:
             emit(.events(since: message.since ?? 0, message.events ?? [], battery: message.battery ?? []))
         case ShellEnvelope.sessions:

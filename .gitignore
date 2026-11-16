@@ -13,6 +13,8 @@ Passthrough.xcodeproj/
 
 # Personal: signing identity (copy Signing.xcconfig.example → Signing.xcconfig)
 Config/Signing.xcconfig
+# Personal: the APNs push key Signing.xcconfig may name (PASSTHROUGH_PUSH_KEY_FILE)
+*.p8
 
 # Screenshots may contain a personal device name; regenerate locally if needed
 docs/screenshots/

@@ -65,6 +65,8 @@ public struct ShellEnvelope: Codable, Equatable, Sendable {
     public var state: MacState?
     /// setAwake / setVPN: what the phone asks for.
     public var on: Bool?
+    /// `push`: where and how to send this phone notices.
+    public var push: PushRegistration?
     /// events: from when (Unix seconds). eventList: what happened since, oldest first, and the battery meanwhile.
     public var since: Double?
     public var events: [MacEvent]?
@@ -106,6 +108,17 @@ public struct ShellEnvelope: Codable, Equatable, Sendable {
     /// A phone asking the Mac to lock its screen (no fields). The Mac stays
     /// awake and everything keeps running; `macState` follows with `locked`.
     public static let lock = "lock"
+    /// A phone saying whether its terminal is on screen for the session it
+    /// has attached (`on`): attached is not the same as looking (a phone
+    /// stays attached to the last session it showed), and a result that
+    /// arrives while it looks is seen.
+    public static let viewing = "viewing"
+    /// A phone asking for notices through Apple's push service (`push`), or
+    /// to stop (`on` false, no `push`); answered `pushState`.
+    public static let pushRegister = "push"
+    /// Whether this Mac will send this phone notices (`on`): false while it
+    /// has no push key set up, or after the phone stopped them.
+    public static let pushState = "pushState"
     /// A phone asking what happened on the Mac since a time (`since`); answered `eventList`.
     public static let events = "events"
     public static let eventList = "eventList"
@@ -168,17 +181,53 @@ public struct ShellSessionInfo: Codable, Equatable, Sendable {
     /// The colours of the terminal window on the Mac that shows the session,
     /// when it said; a phone draws the session with them.
     public var theme: ShellTheme?
+    /// What the program in it says it is doing (Claude Code: working, needs
+    /// you, done), when it says; absent for a plain shell. `waiting` carries
+    /// a blocked one's question too, so everything that shows "needs you" sees it.
+    public var status: ShellStatus?
 
     public static let originMac = "mac"
 
     public init(id: String, title: String, startedAt: Double, lastOutputAt: Double, running: Bool, exitStatus: Int32? = nil,
-                waiting: String? = nil, origin: String? = nil, theme: ShellTheme? = nil) {
+                waiting: String? = nil, origin: String? = nil, theme: ShellTheme? = nil, status: ShellStatus? = nil) {
         self.id = id; self.title = title; self.startedAt = startedAt; self.lastOutputAt = lastOutputAt
         self.running = running; self.exitStatus = exitStatus; self.waiting = waiting; self.origin = origin; self.theme = theme
+        self.status = status
     }
 
     /// Started in a terminal window on the Mac.
     public var isOnMac: Bool { origin == Self.originMac }
+}
+
+/// What a program in a session reports about itself (OSC 7501, the Program
+/// Status Protocol, which Claude Code speaks), as the Mac sums it up.
+public struct ShellStatus: Codable, Equatable, Sendable {
+    /// `working`, `blocked` (needs someone), `done`, `error` or `idle`.
+    public var state: String
+    /// Why it is blocked: `permission`, `question` or `auth`.
+    public var kind: String?
+    /// What it says: the question while blocked ("answer: Pick a colour (Red ·
+    /// Blue)"), what it is doing while working. One line, cut to `maxMessage`.
+    public var message: String?
+    /// Its agents still working or blocked (Claude Code's subagents).
+    public var agents: Int
+    /// When it went into this state, Unix seconds.
+    public var since: Double
+    /// Done or error, and someone has had the session in front of them since:
+    /// nothing to tell anyone about.
+    public var seen: Bool
+
+    public static let working = "working", blocked = "blocked", done = "done", error = "error", idle = "idle"
+    public static let maxMessage = 300
+
+    public init(state: String, kind: String? = nil, message: String? = nil, agents: Int = 0, since: Double, seen: Bool = false) {
+        self.state = state; self.kind = kind; self.message = message; self.agents = agents; self.since = since; self.seen = seen
+    }
+
+    public var isWorking: Bool { state == Self.working }
+    public var isBlocked: Bool { state == Self.blocked }
+    /// Finished (done or failed) and not seen yet.
+    public var isUnseenResult: Bool { (state == Self.done || state == Self.error) && !seen }
 }
 
 /// A past session in the Mac's history. Times are Unix seconds.

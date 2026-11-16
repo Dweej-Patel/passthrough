@@ -353,6 +353,9 @@ final class LocalTerminalConnection: ShellAttachment, @unchecked Sendable {
 
     // MARK: ShellAttachment (on the manager's callouts queue: hand off, never block)
 
+    /// A window on this Mac is looked at while someone is at the Mac.
+    var isLooking: Bool { MacPresence.userIsActive }
+
     func shellOutput(_ data: Data, session: String) {
         queue.async { [self] in
             guard session == self.session else { return }

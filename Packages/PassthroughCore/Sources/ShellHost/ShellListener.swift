@@ -105,6 +105,14 @@ public final class ShellListener: @unchecked Sendable {
         set { gate.macControl.set(newValue) }
     }
 
+    /// A phone asking for notices (`registration`) or to stop them (nil).
+    /// Returns whether this Mac will send it any (it has a push key). Asked
+    /// on the listener's queue, so it must not block. Unset: answered false.
+    public var onPushRegistration: (@Sendable (_ phoneID: String, _ registration: PushRegistration?) -> Bool)? {
+        get { gate.pushRegistration.get() }
+        set { gate.pushRegistration.set(newValue) }
+    }
+
     /// What happened on the Mac since a time, and its battery meanwhile, for
     /// a phone's `events` request (oldest first). Asked on the listener's
     /// queue, so it must not block. Unset: answered `bad_request`.
@@ -364,6 +372,7 @@ final class ShellGate: @unchecked Sendable {
     let screenPort = Locked(RemoteShell.screenSharingPort)
     let macStateProvider = Locked<(@Sendable (String) -> MacState?)?>(nil)
     let macControl = Locked<(@Sendable (_ phoneID: String, _ label: String, _ change: MacControl) -> ShellError?)?>(nil)
+    let pushRegistration = Locked<(@Sendable (_ phoneID: String, _ registration: PushRegistration?) -> Bool)?>(nil)
     let eventsProvider = Locked<(@Sendable (_ phoneID: String, _ since: Double) -> (events: [MacEvent], battery: [BatterySample]))?>(nil)
     private let shellKeys: @Sendable (String) -> [Data]
     private let keyConfirmed: @Sendable (_ phoneID: String, _ key: Data) -> Void
@@ -640,6 +649,9 @@ final class ShellConnection: ShellAttachment, @unchecked Sendable {
     private var closed = false
     /// `!closed`, for work running off the queue.
     private let isOpen = Locked(true)
+    /// The phone says its terminal is on screen (`ShellEnvelope.viewing`).
+    private let looking = Locked(false)
+    var isLooking: Bool { looking.get() }
     /// Lines received but not yet handled: they wait while a request is
     /// handled off the queue (`busy`), so replies keep the requests' order.
     private var inbox: [Data] = []
@@ -805,6 +817,17 @@ final class ShellConnection: ShellAttachment, @unchecked Sendable {
             // already on): answer anyway, once the change has had its moment,
             // so the phone always hears back.
             queue.asyncAfter(deadline: .now() + Self.controlAnswerDelay) { [weak self] in self?.sendMacState() }
+        case ShellEnvelope.pushRegister:
+            let registration = message.on == false ? nil : message.push
+            if message.on != false, !(registration?.isValid ?? false) { return fail(.badRequest) }
+            let sends = gate?.pushRegistration.get()?(phoneID, registration) ?? false
+            var reply = ShellEnvelope(t: ShellEnvelope.pushState)
+            reply.on = sends && registration != nil
+            send(reply)
+        case ShellEnvelope.viewing:
+            guard let on = message.on else { return fail(.badRequest) }
+            looking.set(on)
+            if on { manager.lookedAt(client: self) }
         case ShellEnvelope.lock:
             guard let gate else { return fail(.badRequest) }
             if let refused = gate.control(phoneID, label, .lock) { return fail(refused) }

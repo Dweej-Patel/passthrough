@@ -25,6 +25,8 @@ final class RemoteShellController: ObservableObject {
     /// Why the last change to that setting, or the terminals' socket, failed.
     @Published private(set) var terminalsError: String?
     @Published private(set) var phones: [ShellPhone] = []
+    /// Notices to phones through Apple's push service.
+    let notifications = PhoneNotifications()
 
     /// Running sessions a phone is using: the ones phones started, and a
     /// terminal window's of this Mac's that a phone is attached to.
@@ -212,6 +214,8 @@ final class RemoteShellController: ObservableObject {
             // The Mac terminal's colours, kept across launches, for sessions phones start.
             manager.defaultTheme = (UserDefaults.standard.data(forKey: Self.terminalThemeKey))
                 .flatMap { try? JSONDecoder().decode(ShellTheme.self, from: $0) }
+            // Through Apple's push service, when a session needs a phone or is done.
+            manager.onStatusChange = notifications.statusHandler()
             manager.onViewersChange = { [weak self] in
                 Task { @MainActor in self?.refreshTerminals() }
             }
@@ -268,6 +272,7 @@ final class RemoteShellController: ObservableObject {
         listener.onScreenViewer = screenViewerHandler()
         listener.macState = macStateProvider()
         listener.onMacControl = macControlHandler()
+        listener.onPushRegistration = notifications.registrationHandler()
         listener.macEvents = macEventsProvider()
         listener.onFailure = { [weak self, weak listener] error in
             Task { @MainActor in
@@ -352,6 +357,7 @@ final class RemoteShellController: ObservableObject {
         let store = self.store, reach = self.reach, relay = self.relay, onScreenViewer = screenViewerHandler()
         let screenViews = self.screenViews
         let macState = macStateProvider(), onMacControl = macControlHandler(), macEvents = macEventsProvider()
+        let onPushRegistration = notifications.registrationHandler()
         let screenSharingVerified = screenSharingVerifier()
         lifecycle.async { [weak self] in
             let host: IrohEndpointHost
@@ -392,6 +398,7 @@ final class RemoteShellController: ObservableObject {
             listener.onScreenViewer = onScreenViewer
             listener.macState = macState
             listener.onMacControl = onMacControl
+            listener.onPushRegistration = onPushRegistration
             listener.macEvents = macEvents
             listener.onFailure = { [weak self] error in
                 Task { @MainActor in
@@ -754,6 +761,7 @@ final class RemoteShellController: ObservableObject {
         iroh?.listener?.disconnect(phoneID: phoneID)
         // The listeners also end one being opened as this runs; this covers them being off.
         manager?.closeSessions(openedBy: phoneID)
+        notifications.forget([phoneID])
         refreshPhones()
         onAccessRevoked?(slots)
     }
@@ -768,6 +776,7 @@ final class RemoteShellController: ObservableObject {
             ptLog(.info, "shell: revoked access for \(removed.map(\.label).joined(separator: ", "))")
         }
         let irohListener = iroh?.listener
+        notifications.forget(removed.map(\.phoneID))
         for phone in removed {
             listener?.disconnect(phoneID: phone.phoneID)
             irohListener?.disconnect(phoneID: phone.phoneID)

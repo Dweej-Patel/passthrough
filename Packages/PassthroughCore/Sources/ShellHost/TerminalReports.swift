@@ -30,6 +30,28 @@ enum TerminalReports {
         return kept
     }
 
+    /// `data` without a terminal's answers to OSC 7501's question
+    /// (`ESC ] 7501 ; ? …`): the Mac answers that itself for every terminal
+    /// a session is shown in (`ProgramStatus`), so a second answer, from a
+    /// Mac terminal that speaks the protocol too, would reach the program as typing.
+    static func removingProgramStatusReplies(from data: Data) -> Data {
+        let marker = Array("\u{1b}]7501;?".utf8)
+        guard data.contains(0x1B) else { return data }
+        let bytes = [UInt8](data)
+        var kept = Data()
+        var index = 0
+        while index < bytes.count {
+            if bytes[index] == 0x1B, index + marker.count <= bytes.count, Array(bytes[index..<(index + marker.count)]) == marker,
+               let end = stringEnd(in: bytes, from: index + 2) {
+                index = end
+            } else {
+                kept.append(bytes[index])
+                index += 1
+            }
+        }
+        return kept
+    }
+
     /// Where the report that starts at `start` (an ESC) ends, or nil when none does.
     private static func report(in bytes: [UInt8], at start: Int) -> Int? {
         guard start + 1 < bytes.count else { return nil }
