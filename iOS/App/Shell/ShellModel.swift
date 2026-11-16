@@ -722,7 +722,11 @@ final class ShellModel: ObservableObject {
                 openWhenReady = false
                 reattachIfRefused = active != nil
                 client?.open(cols: size.cols, rows: size.rows)
-            } else if let active {
+            } else if let active, viewing {
+                // Only while a terminal is on screen: attaching takes the
+                // session over and the Mac sizes it to this phone, so doing
+                // it from the home screen would resize a shell someone is
+                // using on the Mac. The terminal attaches when it opens.
                 reattachIfRefused = false
                 streamStarting.send((active, true))
                 client?.attach(active, cols: size.cols, rows: size.rows)
