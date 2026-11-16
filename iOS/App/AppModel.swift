@@ -167,7 +167,7 @@ final class AppModel: ObservableObject {
         var options = PassthroughService.Options()
         options.socksPort = UInt16(socksPort)
         options.controlPort = UInt16(controlPort)
-        options.cellularOnly = cellularOnly
+        options.cellularOnly = cellularOnly && !ThisDevice.isPad   // an iPad has no cellular to prefer
         options.allowUDP = allowUDP
         options.wireless = wireless
         options.peerToPeer = peerToPeer

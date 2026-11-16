@@ -373,7 +373,7 @@ private final class MacLink: @unchecked Sendable {
             mux.start()
         }
         isUp = true
-        ptLog(.info, "wireless: linked with Mac \(tag) over \(carrier ?? "?") (\(via))")
+        ptLog(.info, "wireless: linked with \(credential()?.hotspotOnly == true ? "iPad" : "Mac") \(tag) over \(carrier ?? "?") (\(via))")
     }
 
     private func suspended() {
