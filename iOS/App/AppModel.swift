@@ -62,7 +62,7 @@ final class AppModel: ObservableObject {
     @Published var usage = UsageLedger(defaults: AppModel.groupDefaults)
 
     // Settings live in the App Group so the extension sees them.
-    @AppStorage(SharedKeys.deviceName, store: AppModel.groupDefaults) var deviceName = "iPhone"
+    @AppStorage(SharedKeys.deviceName, store: AppModel.groupDefaults) var deviceName = ThisDevice.name
     @AppStorage(SharedKeys.cellularOnly, store: AppModel.groupDefaults) var cellularOnly = true
     @AppStorage(SharedKeys.allowUDP, store: AppModel.groupDefaults) var allowUDP = true
     @AppStorage(SharedKeys.socksPort, store: AppModel.groupDefaults) var socksPort = Int(PassthroughProtocol.defaultSOCKSPort)
@@ -239,7 +239,8 @@ final class AppModel: ObservableObject {
         if let pairingCode, pairingCode.expiry <= Date() { self.pairingCode = nil }
         if pairingCode != nil, registry.codeWasWithdrawn { pairingCode = nil; pairingCodeWithdrawn = true }
         guard state == .running, let fresh = await activeHost.stats() else { return }
-        if stats.macs.count < fresh.macs.count, pairingCode != nil { pairingCode = nil }
+        // A Mac that just paired connects: the code is spent. (An iPad linking says nothing about it.)
+        if stats.connectedMacs.count < fresh.connectedMacs.count, pairingCode != nil { pairingCode = nil }
         stats = fresh
         meter.record(ByteCounter.Snapshot(rx: fresh.rx, tx: fresh.tx, active: fresh.active, totalConnections: fresh.totalConnections))
         if let last = lastUsageSnapshot {
@@ -275,21 +276,23 @@ final class AppModel: ObservableObject {
     }
 
     /// Adds an iPad from the code it showed: issues its token and link key,
-    /// then hands them to it over this phone's hotspot (`IPadEnrollment`). If
-    /// the iPad doesn't take them, it isn't paired.
+    /// then hands them to it over this phone's hotspot (`IPadEnrollment`). It's
+    /// paired only once the iPad has taken them; until then an earlier pairing
+    /// of the same iPad keeps working.
     func addIPad(_ invitation: IPadEnrollment.Invitation) async -> Result<Void, IPadEnrollment.EnrollmentError> {
-        let linkKey = WirelessLink.randomBytes(32)
-        guard let token = registry.addClient(id: invitation.clientID, name: invitation.name, kind: .ipad,
-                                             certificateSHA256: invitation.certSHA256, linkKey: linkKey) else {
-            return .failure(.failed("this iPhone couldn't store the iPad's key"))
+        guard let new = registry.prepareClient(id: invitation.clientID, name: invitation.name, kind: .ipad,
+                                               certificateSHA256: invitation.certSHA256, linkKey: WirelessLink.randomBytes(32)) else {
+            return .failure(.refused("that code names a device already paired as a Mac"))
         }
         let registry = self.registry
-        let result: Result<Void, IPadEnrollment.EnrollmentError> = await withCheckedContinuation { continuation in
-            IPadEnrollment.enroll(invitation, phoneID: registry.phoneID, phoneName: deviceName, token: token, linkKey: linkKey) {
+        var result: Result<Void, IPadEnrollment.EnrollmentError> = await withCheckedContinuation { continuation in
+            IPadEnrollment.enroll(invitation, phoneID: registry.phoneID, phoneName: ThisDevice.displayName, token: new.token, linkKey: new.linkKey) {
                 continuation.resume(returning: $0)
             }
         }
-        if case .failure = result { registry.revoke(clientID: invitation.clientID) }
+        if case .success = result, !registry.commit(new) {
+            result = .failure(.failed("this iPhone couldn't store the iPad's key. Pair again."))
+        }
         reloadClients()
         switch result {
         case .success: log.log(.info, "Paired \(invitation.name)")
@@ -319,9 +322,12 @@ final class AppModel: ObservableObject {
         shell.refresh(lock: lock, registry: registry)
     }
 
-    var connectedMacIDs: Set<String> { Set(stats.macs.map(\.id)) }
+    var connectedMacIDs: Set<String> { Set(stats.connectedMacs.map(\.id)) }
     /// Every Mac this iPhone serves right now is on the wireless link.
-    var servingWirelessly: Bool { !stats.macs.isEmpty && stats.macs.allSatisfy { stats.isWireless($0) } }
+    var servingWirelessly: Bool {
+        let macs = stats.connectedMacs
+        return !macs.isEmpty && macs.allSatisfy { stats.isWireless($0) }
+    }
 
     var sessionDuration: TimeInterval? {
         guard let start = stats.startedAt, state == .running else { return nil }

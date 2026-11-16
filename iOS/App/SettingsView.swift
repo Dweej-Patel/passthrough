@@ -15,14 +15,14 @@ struct SettingsView: View {
             Form {
                 Section {
                     LabeledContent("Name") {
-                        TextField("iPhone", text: $model.deviceName)
+                        TextField(ThisDevice.name, text: $model.deviceName)
                             .multilineTextAlignment(.trailing)
                             .submitLabel(.done)
                     }
                 } header: {
                     Text("This \(ThisDevice.name)")
                 } footer: {
-                    Text("Shown on your Mac.")
+                    Text(ThisDevice.isPad ? "Shown on your Mac and iPhone." : "Shown on your Mac and iPads.")
                 }
                 Section {
                     Picker("Hosting", selection: Binding(get: { model.hosting }, set: { model.hosting = $0 })) {

@@ -59,7 +59,7 @@ struct FlowCard: View {
     @Environment(\.scenePhase) private var scenePhase
 
     private var flowState: FlowMapState {
-        let macs = model.stats.macs
+        let macs = model.stats.connectedMacs
         let macName = macs.count > 1 ? "\(macs.count) Macs" : (macs.first?.name ?? "Mac")
         return FlowMapState(perspective: .iphone, macName: macName, phoneName: model.deviceName,
                             linkUp: model.state == .running && !macs.isEmpty,
@@ -144,7 +144,7 @@ struct HeroCard: View {
         case .stopping: return "Turning off…"
         case .failed: return "Couldn't turn on"
         case .running:
-            if let mac = model.stats.macs.first { return "\(mac.name) is online through this \(ThisDevice.name)" }
+            if let mac = model.stats.connectedMacs.first { return "\(mac.name) is online through this \(ThisDevice.name)" }
             return "Sharing. Plug in your Mac and connect from its menu bar."
         }
     }
@@ -303,7 +303,7 @@ struct SharingCard: View {
                     }
                     .frame(minHeight: 44)
                 }
-                if model.stats.macs.contains(where: { $0.kind == .ipad }) {
+                if !model.stats.connectedIPads.isEmpty {
                     Text("An iPad's traffic leaves from this iPhone itself. Personal Hotspot stays on so the iPad can find this iPhone, but its traffic doesn't go through the hotspot.")
                         .font(.caption).foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)

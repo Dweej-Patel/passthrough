@@ -223,22 +223,52 @@ public final class PairingRegistry: @unchecked Sendable {
         }
     }
 
+    /// A client about to be paired without a code: its token is issued, but
+    /// nothing is stored until `commit` (after it has taken the token).
+    public struct NewClient: Sendable {
+        public let id: String
+        public let name: String
+        public let kind: ClientKind
+        public let certificateSHA256: String
+        public let linkKey: Data
+        /// Handed over on the trusted path, never stored here in the clear.
+        public let token: String
+    }
+
     /// Pairs and links a client in one step, where something it already trusts
     /// vouches for it instead of a code: an iPad, introduced by a Mac paired with
-    /// both, or scanned from its screen. Issues its pairing token and returns
-    /// it (to be handed over on that trusted path, never stored here in the
-    /// clear). Replaces an earlier pairing of the same client. Nil if its link
-    /// key could not be stored.
-    public func addClient(id clientID: String, name: String, kind: ClientKind, certificateSHA256: String, linkKey: Data) -> String? {
-        let token = PairingToken.generate()
+    /// both, or scanned from its screen. Nil if the ID already belongs to a
+    /// client of another kind (a scanned code never replaces a Mac).
+    /// Nothing changes until `commit`, so an attempt that fails leaves an
+    /// earlier pairing of the same iPad working.
+    public func prepareClient(id clientID: String, name: String, kind: ClientKind, certificateSHA256: String, linkKey: Data) -> NewClient? {
         lock.lock(); defer { lock.unlock() }
-        guard secrets.write(linkKey, account: "link." + clientID) else { return nil }
-        var list = loadClients().filter { $0.id != clientID }
-        var client = PairedClient(id: clientID, name: name, kind: kind, tokenHash: PairingToken.hash(token), pairedAt: Date())
-        client.linkCertificate = certificateSHA256
+        if let existing = loadClients().first(where: { $0.id == clientID }), (existing.kind ?? .mac) != kind { return nil }
+        return NewClient(id: clientID, name: name, kind: kind, certificateSHA256: certificateSHA256, linkKey: linkKey,
+                         token: PairingToken.generate())
+    }
+
+    /// Stores a prepared client, replacing an earlier pairing of the same one.
+    /// False if its link key could not be stored, or the ID now belongs to another kind.
+    @discardableResult
+    public func commit(_ new: NewClient) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        var list = loadClients()
+        if let existing = list.first(where: { $0.id == new.id }), (existing.kind ?? .mac) != new.kind { return false }
+        guard secrets.write(new.linkKey, account: "link." + new.id) else { return false }
+        list.removeAll { $0.id == new.id }
+        var client = PairedClient(id: new.id, name: new.name, kind: new.kind, tokenHash: PairingToken.hash(new.token), pairedAt: Date())
+        client.linkCertificate = new.certificateSHA256
         list.append(client)
         save(list)
-        return token
+        return true
+    }
+
+    /// `prepareClient` and `commit` at once; returns the token.
+    public func addClient(id clientID: String, name: String, kind: ClientKind, certificateSHA256: String, linkKey: Data) -> String? {
+        guard let new = prepareClient(id: clientID, name: name, kind: kind, certificateSHA256: certificateSHA256, linkKey: linkKey),
+              commit(new) else { return nil }
+        return new.token
     }
 
     /// Whether any paired client is an iPad (the phone then dials over its hotspot).

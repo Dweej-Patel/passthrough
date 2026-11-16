@@ -167,6 +167,11 @@ public struct ProviderStats: Codable, Sendable, Equatable {
     public func isWireless(_ mac: ConnectedMac) -> Bool {
         mac.wireless ?? wirelessMacTags?.contains(WirelessLink.macTag(clientID: mac.id)) ?? false
     }
+
+    /// The Macs among the connected clients (`macs` also lists iPads).
+    public var connectedMacs: [ConnectedMac] { macs.filter { $0.kind != .ipad } }
+    /// The iPads using this phone's internet over its hotspot.
+    public var connectedIPads: [ConnectedMac] { macs.filter { $0.kind == .ipad } }
 }
 
 /// Keys the iOS app and extension share through the App Group defaults.

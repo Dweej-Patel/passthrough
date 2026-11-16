@@ -46,7 +46,7 @@ final class IPadEnrollmentTests: XCTestCase {
         let outcome = Locked<Result<Void, IPadEnrollment.EnrollmentError>?>(nil)
         IPadEnrollment.enroll(invitation, phoneID: "phone-1", phoneName: "Test iPhone", token: token, linkKey: linkKey,
                               timeout: 10, queue: .global()) { result in outcome.set(result); done.fulfill() }
-        wait(for: [done], timeout: 15)
+        wait(for: [done], timeout: 10 + IPadEnrollment.exchangeTimeout + 5)   // a stale Bonjour entry is dialed, then times out
         return outcome.get() ?? .failure(.notFound)
     }
 

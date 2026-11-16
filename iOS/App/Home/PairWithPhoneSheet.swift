@@ -64,7 +64,7 @@ struct PairWithPhoneSheet: View {
                 .background(Color.white, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
                 VStack(alignment: .leading, spacing: 10) {
                     Text("Scan with iPhone").font(.headline)
-                    Text("On the iPhone, open Passthrough, then This iPhone \u{25B8} Pair a Mac or iPad \u{25B8} Scan an iPad's code.")
+                    Text("On the iPhone, open Passthrough, go to the iPhone tab, then Pair \u{25B8} Scan an iPad's code.")
                         .font(.subheadline)
                         .fixedSize(horizontal: false, vertical: true)
                     if !hotspot.onPhoneHotspot {
@@ -92,13 +92,14 @@ struct PairWithPhoneSheet: View {
         }
         let store = hotspot.store
         while paired == nil, !Task.isCancelled {
-            let invitation = IPadEnrollment.Invitation(clientID: store.clientID(), name: ThisDevice.name,
+            let invitation = IPadEnrollment.Invitation(clientID: store.clientID(), name: ThisDevice.displayName,
                                                        certSHA256: identity.fingerprint)
             let listener = EnrollmentListener(invitation: invitation, identity: identity)
             listener.onEnrolled = { phone in
+                // Kept before answering "enrolled", so the iPhone stores it only once this iPad has.
                 guard store.save(phone) else { return false }
                 Task { @MainActor in
-                    hotspot.adopt(phone)
+                    hotspot.adopted(phone)
                     paired = phone.name
                 }
                 return true

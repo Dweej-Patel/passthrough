@@ -82,9 +82,13 @@ public final class HotspotClient {
         status = HotspotStatus(phase: .waiting)
     }
 
-    /// The iPhone was forgotten or re-paired: drop its link so it proves itself again.
+    /// The iPhone was forgotten or re-paired (perhaps with another iPhone):
+    /// drop every link, so only the iPhone paired now links again, proving
+    /// the new credentials.
     public func credentialsChanged() {
-        if let phone = upstream() { watcher.drop(phoneID: phone.phoneID) } else { linked(nil) }
+        watcher.linkedPhoneIDs.forEach(watcher.drop(phoneID:))
+        linked(nil)
+        status = HotspotStatus(phase: .waiting, phoneName: upstream()?.name, rx: counters.rx, tx: counters.tx)
     }
 
     /// Bytes this iPad sent through the iPhone, for the status.
@@ -98,8 +102,10 @@ public final class HotspotClient {
         controlDevice = device
         guard let device else {
             if status.phase == .online { ptLog(.info, "hotspot: \(status.phoneName ?? "the iPhone") went out of reach") }
+            // A refusal, or the iPhone's goodbye, still explains why it's waiting.
+            let keepMessage = status.phase == .refused || status.phase == .waiting
             status = HotspotStatus(phase: status.phase == .refused ? .refused : .waiting, phoneName: upstream()?.name,
-                                   rx: counters.rx, tx: counters.tx, message: status.phase == .refused ? status.message : nil)
+                                   rx: counters.rx, tx: counters.tx, message: keepMessage ? status.message : nil)
             return
         }
         openControl(device)

@@ -70,8 +70,13 @@ final class InProcessHost: ProxyHost {
         let service = PassthroughService.sharing(defaults, registry: registry, options: options, hosting: "foreground")
         try service.start()
         self.service = service
-        UIApplication.shared.isIdleTimerDisabled = true
-        ptLog(.info, "Serving in the foreground. Keep Passthrough open.")
+        // A phone serving in the foreground stays awake so the Mac keeps its
+        // internet. An iPad's app serves only pairing and the shell key while
+        // it's open, and should lock as usual.
+        if !ThisDevice.isPad {
+            UIApplication.shared.isIdleTimerDisabled = true
+            ptLog(.info, "Serving in the foreground. Keep Passthrough open.")
+        }
         onStateChange?(.running)
     }
 

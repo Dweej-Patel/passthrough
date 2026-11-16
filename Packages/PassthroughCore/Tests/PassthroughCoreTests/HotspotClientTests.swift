@@ -147,4 +147,60 @@ final class HotspotClientTests: XCTestCase {
         XCTAssertEqual(client.status.phase, .waiting)
     }
 
+    /// Pairing an iPad again only replaces its pairing once the iPad has taken
+    /// the new token: an attempt that fails leaves the old one working.
+    func testAFailedRepairLeavesTheEarlierPairingWorking() throws {
+        let phone = try pairIPad()
+        let attempt = try XCTUnwrap(registry.prepareClient(id: clientID, name: "iPad", kind: .ipad,
+                                                           certificateSHA256: identity.fingerprint, linkKey: WirelessLink.randomBytes(32)))
+        XCTAssertTrue(registry.verifySOCKS(clientID: clientID, password: ControlAuth.socksPassword(token: phone.token)),
+                      "nothing changes before the commit")
+        XCTAssertTrue(registry.commit(attempt))
+        XCTAssertFalse(registry.verifySOCKS(clientID: clientID, password: ControlAuth.socksPassword(token: phone.token)))
+        XCTAssertTrue(registry.verifySOCKS(clientID: clientID, password: ControlAuth.socksPassword(token: attempt.token)))
+        XCTAssertEqual(registry.clients.count, 1)
+    }
+
+    /// A scanned code naming a Mac's ID never replaces the Mac.
+    func testAnIPadCodeNeverReplacesAMac() throws {
+        let macToken = try XCTUnwrap(registry.addClient(id: "mac-1", name: "Mac", kind: .mac,
+                                                        certificateSHA256: identity.fingerprint, linkKey: linkKey))
+        XCTAssertNil(registry.prepareClient(id: "mac-1", name: "iPad", kind: .ipad, certificateSHA256: identity.fingerprint, linkKey: linkKey))
+        XCTAssertNil(registry.addClient(id: "mac-1", name: "iPad", kind: .ipad, certificateSHA256: identity.fingerprint, linkKey: linkKey))
+        XCTAssertTrue(registry.verifySOCKS(clientID: "mac-1", password: ControlAuth.socksPassword(token: macToken)))
+        XCTAssertFalse(registry.clients.contains(where: \.isIPad))
+    }
+
+    /// Pairing the iPad with another iPhone ends the first iPhone's link at once.
+    func testPairingAnotherIPhoneDropsTheOldLink() async throws {
+        let phone = try pairIPad()
+        let upstream = Locked<UpstreamPhone?>(phone)
+        let identity = self.identity!
+        let client = HotspotClient(clientID: clientID, name: "iPad", identity: { identity }, upstream: { upstream.get() },
+                                   localPort: freePort(), socksPort: socksPort, controlPort: controlPort)
+        self.client = client
+        try client.start()
+        let port = try await waitFor("the iPad listens") { client.listenerPort }
+        let registry = self.registry!
+        let dialer = WirelessDialer(allowedPorts: [socksPort, controlPort]) { registry.linkCredentials() }
+        self.dialer = dialer
+        dialer.dial(.hostPort(host: "127.0.0.1", port: NWEndpoint.Port(rawValue: port)!),
+                    credential: try XCTUnwrap(registry.linkCredentials().first), peerToPeer: false)
+        _ = try await waitFor("online") { client.status.phase == .online ? true : nil }
+
+        upstream.set(UpstreamPhone(phoneID: "another-phone", name: "Other iPhone", token: PairingToken.generate(),
+                                   linkKey: WirelessLink.randomBytes(32)))
+        client.credentialsChanged()
+        XCTAssertEqual(client.status.phase, .waiting)
+        XCTAssertEqual(client.status.phoneName, "Other iPhone")
+        let localPort = client.localPort
+        let closed: Bool = await Task.detached {
+            let c = TestClient(port: localPort)
+            defer { c.close() }
+            c.send([5, 1, 2])
+            return c.read(2, timeout: 3).isEmpty
+        }.value
+        XCTAssertTrue(closed, "no stream goes out through the old iPhone")
+    }
+
 }

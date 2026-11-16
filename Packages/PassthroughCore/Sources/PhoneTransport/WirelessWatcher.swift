@@ -102,6 +102,9 @@ public final class WirelessWatcher: DeviceWatcher {
         publish()
     }
 
+    /// The phones linked now, by phoneID.
+    public var linkedPhoneIDs: [String] { order }
+
     /// Ends a phone's link now (it was forgotten): it would otherwise carry
     /// on until it dropped.
     public func drop(phoneID: String) {

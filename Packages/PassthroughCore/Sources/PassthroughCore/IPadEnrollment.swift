@@ -119,7 +119,11 @@ public enum IPadEnrollment {
     /// The iPhone's side: finds the iPad from `invitation` on a network both
     /// are on (its hotspot), proves the scanned secret, and hands over the
     /// iPad's pairing token and link key. Completes on `queue` once the iPad
-    /// has kept them.
+    /// has kept them. `timeout` bounds finding the iPad; once it's found, the
+    /// exchange has `exchangeTimeout` of its own (so a slow find never cuts
+    /// off an iPad that's already keeping the token).
+    public static let exchangeTimeout: TimeInterval = 15
+
     public static func enroll(_ invitation: Invitation, phoneID: String, phoneName: String, token: String, linkKey: Data,
                               timeout: TimeInterval = 20, queue: DispatchQueue = .main,
                               completion: @escaping @Sendable (Result<Void, EnrollmentError>) -> Void) {
@@ -135,6 +139,7 @@ public enum IPadEnrollment {
                 if case .bonjour(let txt) = $0.metadata { return txt[txtKey] == invitation.tag } else { return false }
             }), state.claimDial() else { return }
             browser.cancel()
+            work.asyncAfter(deadline: .now() + exchangeTimeout) { state.finish(.failure(.failed("the iPad didn't answer in time"))) }
             let connection = NWConnection(to: result.endpoint, using: WirelessLink.pinnedClientParameters(pin: invitation.certSHA256, peerToPeer: false))
             let stream = ConnectionStream(connection, queue: work)
             state.stream = stream
@@ -157,7 +162,7 @@ public enum IPadEnrollment {
             }
         }
         browser.start(queue: work)
-        work.asyncAfter(deadline: .now() + timeout) { state.finish(.failure(.notFound)) }
+        work.asyncAfter(deadline: .now() + timeout) { if !state.hasDialed { state.finish(.failure(.notFound)) } }
     }
 
     /// One enrollment attempt's state: finishes once.
@@ -173,6 +178,7 @@ public enum IPadEnrollment {
             self.queue = queue; self.completion = completion
         }
         func claimDial() -> Bool { lock.withLock { defer { dialed = true }; return !dialed } }
+        var hasDialed: Bool { lock.withLock { dialed } }
         func finish(_ result: Result<Void, EnrollmentError>) {
             guard lock.withLock({ defer { done = true }; return !done }) else { return }
             browser?.cancel()

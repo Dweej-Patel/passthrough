@@ -91,7 +91,7 @@ final class HotspotModel: ObservableObject {
         Task {
             if on {
                 do {
-                    try await controller.configureClient(name: ThisDevice.name)
+                    try await controller.configureClient(name: ThisDevice.displayName)
                     try controller.start()
                 } catch {
                     startError = error.localizedDescription
@@ -104,8 +104,8 @@ final class HotspotModel: ObservableObject {
 
     /// Stores a new iPhone (paired here, or introduced by a Mac) and has a
     /// running tunnel use it.
-    func adopt(_ phone: UpstreamPhone) {
-        store.save(phone)
+    /// A new iPhone, already saved to `store` (by the pairing listener).
+    func adopted(_ phone: UpstreamPhone) {
         upstream = phone
         notify_post(PairingRegistry.changedNotification)
     }

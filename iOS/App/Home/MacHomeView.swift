@@ -134,9 +134,18 @@ struct MacHomeView: View {
             }
             if paired {
                 GridRow {
-                    macSwitches.environment(\.surfaceFill, .top)
+                    switchesCard(wide: true).environment(\.surfaceFill, .top)
                     ScreenCard(macName: macName, enabled: shell.reach == .ready) { router.showScreen = true }
                         .environment(\.surfaceFill, .center)
+                }
+            } else if let note = links.note {
+                // No Mac switches to sit under: the note from an opened link gets a row of its own.
+                GridRow {
+                    PTSurface(padding: 6) {
+                        SwitchNote(problem: .init(note, warning: true, fix: ("OK", { links.note = nil })))
+                            .padding(.horizontal, 10).padding(.vertical, 10)
+                    }
+                    .gridCellColumns(2)
                 }
             }
             if let hotspot = model.hotspot {
@@ -149,31 +158,6 @@ struct MacHomeView: View {
             if shell.reach == .ready { GridRow { shells.gridCellColumns(2) } }
             GridRow { Color.clear.frame(height: 0).id("end").gridCellColumns(2) }
         }
-    }
-
-    /// The Mac's own switches, without this device's Internet row (iPad: that has its own card).
-    private var macSwitches: some View {
-        PTSurface(padding: 6) {
-            VStack(alignment: .leading, spacing: 0) {
-                awakeRow
-                Divider().padding(.leading, 58)
-                vpnRow
-                if state?.locked != nil {
-                    Divider().padding(.leading, 58)
-                    lockRow
-                }
-                if let reason = controlBlock { SwitchNote(problem: reason).padding(.horizontal, 10).padding(.bottom, 10) }
-                if let reason = reachBlock { SwitchNote(problem: reason).padding(.horizontal, 10).padding(.bottom, 10) }
-                if let note = links.note {
-                    SwitchNote(problem: .init(note, warning: true, fix: ("OK", { links.note = nil })))
-                        .padding(.horizontal, 10).padding(.bottom, 10)
-                }
-            }
-        }
-        .sensoryFeedback(.selection, trigger: state?.awake)
-        .sensoryFeedback(.selection, trigger: state?.vpn)
-        .sensoryFeedback(.selection, trigger: state?.locked)
-        .animation(.easeOut(duration: 0.25), value: shell.controlMisses)
     }
 
     private func runAfterSwitcher() {
@@ -226,18 +210,24 @@ struct MacHomeView: View {
     private var state: MacState? { shell.macState }
     private var runningShells: Int { shell.visibleSessions.filter(\.running).count }
 
+    private var switches: some View { switchesCard(wide: false) }
+
     /// Internet first (this phone's own, always there), then what's on the
     /// Mac. A reason shared by several switches shows once, right under them.
-    private var switches: some View {
+    /// `wide` (iPad): only the Mac's switches; this device's Internet and the
+    /// screen have cards of their own beside it.
+    private func switchesCard(wide: Bool) -> some View {
         PTSurface(padding: 6) {
             VStack(alignment: .leading, spacing: 0) {
-                if let hotspot = model.hotspot {
-                    HotspotRow(hotspot: hotspot) { showPhonePairing = true }
-                } else {
-                    internetRow
+                if !wide {
+                    if let hotspot = model.hotspot {
+                        HotspotRow(hotspot: hotspot) { showPhonePairing = true }
+                    } else {
+                        internetRow
+                    }
                 }
                 if paired {
-                    Divider().padding(.leading, 58)
+                    if !wide { Divider().padding(.leading, 58) }
                     awakeRow
                     Divider().padding(.leading, 58)
                     vpnRow
@@ -246,8 +236,10 @@ struct MacHomeView: View {
                         lockRow
                     }
                     if let reason = controlBlock { SwitchNote(problem: reason).padding(.horizontal, 10).padding(.bottom, 10) }
-                    Divider().padding(.leading, 58)
-                    screenRow
+                    if !wide {
+                        Divider().padding(.leading, 58)
+                        screenRow
+                    }
                     if let reason = reachBlock { SwitchNote(problem: reason).padding(.horizontal, 10).padding(.bottom, 10) }
                 }
                 if let note = links.note {
@@ -279,7 +271,7 @@ struct MacHomeView: View {
     }
 
     /// iPads using this iPhone's internet right now (over its hotspot).
-    private var connectedIPads: Int { model.stats.macs.filter { $0.kind == .ipad }.count }
+    private var connectedIPads: Int { model.stats.connectedIPads.count }
 
     private var internetStatus: String {
         switch model.state {

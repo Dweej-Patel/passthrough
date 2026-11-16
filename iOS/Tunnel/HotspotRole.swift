@@ -13,8 +13,18 @@ import HevSocks5Tunnel
 @MainActor
 final class HotspotRole {
     private var client: HotspotClient?
-    private var engine: Thread?
+    /// tun2socks, and what it was started with (it signs every stream with
+    /// the token's password, so a new token restarts it).
+    private var engine: Engine?
+    private var tunFD: Int32 = -1
+    private var clientID = ""
     private let mtu = 1500
+
+    private struct Engine {
+        let thread: Thread
+        let exited: DispatchSemaphore
+        let token: String
+    }
 
     /// The settings to apply before `start`.
     nonisolated static func settings(ipv6: Bool) -> NEPacketTunnelNetworkSettings {
@@ -45,18 +55,44 @@ final class HotspotRole {
         guard fd >= 0 else {
             throw NSError(domain: "Passthrough", code: 11, userInfo: [NSLocalizedDescriptionKey: "The tunnel's interface wasn't found."])
         }
+        tunFD = fd
+        self.clientID = clientID
+        startEngine(token: phone.token)
+        ptLog(.info, "Internet through \(phone.name): waiting for it to dial in")
+    }
+
+    private func startEngine(token: String) {
+        guard let client else { return }
         let config = Self.engineConfig(mtu: mtu, port: client.localPort, username: clientID,
-                                       password: ControlAuth.socksPassword(token: phone.token))
-        let engine = Thread {
+                                       password: ControlAuth.socksPassword(token: token))
+        let fd = tunFD
+        let exited = DispatchSemaphore(value: 0)
+        let thread = Thread {
             let bytes = Array(config.utf8)
             let result = bytes.withUnsafeBufferPointer { hev_socks5_tunnel_main_from_str($0.baseAddress, UInt32($0.count), fd) }
             ptLog(result == 0 ? .info : .error, "tun2socks stopped (\(result))")
+            exited.signal()
         }
-        engine.name = "tun2socks"
-        engine.stackSize = 4 << 20
-        engine.start()
-        self.engine = engine
-        ptLog(.info, "Internet through \(phone.name): waiting for it to dial in")
+        thread.name = "tun2socks"
+        thread.stackSize = 4 << 20
+        thread.start()
+        engine = Engine(thread: thread, exited: exited, token: token)
+    }
+
+    /// Stops tun2socks and waits for it to finish (it keeps global state, so a
+    /// new one may start only after). The tunnel's descriptor stays open: hev
+    /// closes only descriptors it opened itself.
+    private func stopEngine() async {
+        guard let engine else { return }
+        self.engine = nil
+        hev_socks5_tunnel_quit()
+        let exited = engine.exited
+        await withCheckedContinuation { continuation in
+            DispatchQueue.global().async {
+                _ = exited.wait(timeout: .now() + 5)
+                continuation.resume()
+            }
+        }
     }
 
     func stop() {
@@ -76,7 +112,17 @@ final class HotspotRole {
     }
 
     /// The iPhone was re-paired or forgotten in the app (another process).
-    func credentialsChanged() { client?.credentialsChanged() }
+    /// A new token means new SOCKS credentials, so tun2socks restarts with them.
+    func credentialsChanged() {
+        client?.credentialsChanged()
+        guard let engine, let phone = UpstreamPhoneStore.shared().load(), phone.token != engine.token else { return }
+        ptLog(.info, "Internet through \(phone.name): new pairing, restarting tun2socks")
+        Task {
+            await stopEngine()
+            guard client != nil, self.engine == nil else { return }
+            startEngine(token: phone.token)
+        }
+    }
 
     /// hev's settings, kept small for the extension's memory limit. The
     /// credentials are generated (UUID, base64url), so quoting is safe.
