@@ -115,6 +115,9 @@ public struct ControlEnvelope: Codable, Equatable, Sendable {
     public static let linked = "linked"
     public static let shellGrant = "shellGrant"
     public static let shellGranted = "shellGranted"
+    /// The phone's user turned Passthrough off: it stops right after.
+    /// A link that only dropped sends nothing (and resumes if it can).
+    public static let goodbye = "goodbye"
 
     public func encodedLine() throws -> Data {
         var data = try JSONEncoder().encode(self)

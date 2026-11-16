@@ -33,7 +33,6 @@ public final class HotspotClient {
     private var control: ControlClient?
     private var controlDevice: PhoneDevice?
     private var retry: Task<Void, Never>?
-    private var watch: Task<Void, Never>?
 
     /// `identity`: this iPad's TLS identity (the iPhone pins its certificate).
     /// `upstream` must be safe to call from any thread (the listener asks for the link key).
@@ -67,17 +66,11 @@ public final class HotspotClient {
         self.forwarder = forwarder
         watcher.onDevicesChange = { [weak self] devices in self?.linked(devices.first) }
         watcher.start()
-        watch = Task { [weak self] in
-            while !Task.isCancelled {
-                try? await Task.sleep(for: .seconds(1))
-                self?.checkSuspension()
-            }
-        }
+
         ptLog(.info, "hotspot: waiting for \(upstream()?.name ?? "the iPhone") to dial in")
     }
 
     public func stop() {
-        watch?.cancel(); watch = nil
         retry?.cancel(); retry = nil
         control?.close(); control = nil
         controlDevice = nil
@@ -92,20 +85,6 @@ public final class HotspotClient {
     /// The iPhone was forgotten or re-paired: drop its link so it proves itself again.
     public func credentialsChanged() {
         if let phone = upstream() { watcher.drop(phoneID: phone.phoneID) } else { linked(nil) }
-    }
-
-    /// A dropped link is held for a while to resume (`Mux.suspendTimeout`):
-    /// new streams already fail meanwhile, and the status says so at once
-    /// instead of when the hold runs out.
-    private func checkSuspension() {
-        guard let link = current.device?.link as? MuxLink else { return }
-        if status.phase == .online, link.mux.isSuspended {
-            ptLog(.info, "hotspot: \(status.phoneName ?? "the iPhone") dropped; waiting for it to come back")
-            status.phase = .reconnecting
-        } else if status.phase == .reconnecting, !link.mux.isSuspended, !link.mux.isClosed, control != nil {
-            ptLog(.info, "hotspot: \(status.phoneName ?? "the iPhone") is back")
-            status.phase = .online
-        }
     }
 
     /// Bytes this iPad sent through the iPhone, for the status.
@@ -186,6 +165,13 @@ public final class HotspotClient {
                 guard let self, !Task.isCancelled, let device = self.current.device, device.id == self.controlDevice?.id else { return }
                 self.openControl(device)
             }
+        case .goodbye:
+            // Turned off on purpose: say so now. (A link that merely dropped is
+            // held for a while to resume, and says nothing until then.)
+            let name = status.phoneName ?? upstream()?.name ?? "the iPhone"
+            ptLog(.info, "hotspot: Passthrough was turned off on \(name)")
+            status = HotspotStatus(phase: .waiting, phoneName: status.phoneName ?? upstream()?.name, rx: counters.rx, tx: counters.tx,
+                                   message: "Passthrough was turned off on \(name).")
         case .paired, .pairingFailed, .linked, .shellGranted:
             break
         }

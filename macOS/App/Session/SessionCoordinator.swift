@@ -761,6 +761,8 @@ final class SessionCoordinator: ObservableObject {
                                        label: phoneStatus?.deviceName ?? pending.device.kindName,
                                        pairingSlot: pending.device.pairingSlot, network: network, passphrase: passphrase))
             ptLog(.info, "Linked \(phoneStatus?.deviceName ?? phoneKindName) for the wireless link")
+        case .goodbye:
+            ptLog(.info, "The \(device.kindName) turned Passthrough off")
         case .shellGranted(let phoneID, let grantID):
             guard let pending = pendingShellGrant else { return }
             // An answer to an earlier grant (e.g. one that timed out) says

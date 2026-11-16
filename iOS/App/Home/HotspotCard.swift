@@ -65,7 +65,8 @@ struct HotspotRow: View {
             let what = hotspot.onPhoneHotspot
                 ? "Open Passthrough on \(phone) and keep it on."
                 : "Join \(phone)'s Personal Hotspot in Settings \u{25B8} Wi-Fi."
-            return .init("Offline on purpose: nothing leaves this iPad over the hotspot until \(phone) carries it. \(what)",
+            let why = hotspot.status?.message.map { "\($0) " } ?? ""
+            return .init("\(why)Offline on purpose: nothing leaves this iPad over the hotspot until \(phone) carries it. \(what)",
                          warning: true, fix: ("Use hotspot data instead", { hotspot.setOn(false) }))
         case .refused(let message):
             return .init(message, warning: true, fix: ("Pair again", pair))

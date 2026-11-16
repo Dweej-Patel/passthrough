@@ -76,6 +76,9 @@ final class InProcessHost: ProxyHost {
     }
 
     func stop() async {
+        // Turned off here: tell the Macs and iPads first, and give it a moment to go out.
+        service?.sayGoodbye()
+        try? await Task.sleep(for: .milliseconds(300))
         service?.stop()
         service = nil
         UIApplication.shared.isIdleTimerDisabled = false

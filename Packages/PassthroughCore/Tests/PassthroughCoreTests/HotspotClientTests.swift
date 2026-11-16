@@ -111,15 +111,14 @@ final class HotspotClientTests: XCTestCase {
         XCTAssertGreaterThanOrEqual(client.counters.tx, Int64(payload.count))
     }
 
-    /// The phone turning Passthrough off shows on the iPad at once, not when
-    /// the link's two-minute hold for a resume runs out.
-    func testThePhoneGoingAwayShowsRightAway() async throws {
+    /// Passthrough turned off on the phone shows on the iPad at once (a link
+    /// that merely drops is held for a resume instead).
+    func testTurningPassthroughOffOnThePhoneShowsAtOnce() async throws {
         let client = try await connect(try pairIPad())
         _ = try await waitFor("online") { client.status.phase == .online ? true : nil }
-        let started = Date()
-        dialer?.stop()
-        _ = try await waitFor("waiting", timeout: 8) { client.status.phase == .reconnecting || client.status.phase == .waiting ? true : nil }
-        XCTAssertLessThan(Date().timeIntervalSince(started), 8)
+        control.sayGoodbye()
+        let waiting = try await waitFor("waiting", timeout: 3) { client.status.phase == .waiting ? client.status : nil }
+        XCTAssertEqual(waiting.message, "Passthrough was turned off on Test iPhone.")
     }
 
     func testAPairingThePhoneNoLongerHasIsRefused() async throws {

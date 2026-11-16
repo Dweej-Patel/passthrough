@@ -95,6 +95,15 @@ public final class ControlServer: @unchecked Sendable {
         }
     }
 
+    /// Tells every authenticated client this phone is being turned off on
+    /// purpose, before it stops (so an iPad can say so at once rather than
+    /// wait out the link's hold for a resume).
+    public func sayGoodbye() {
+        queue.sync {
+            for peer in peers.values where peer.mac != nil { peer.send(ControlEnvelope(t: ControlEnvelope.goodbye)) }
+        }
+    }
+
     public var connectedMacs: [ConnectedMac] {
         queue.sync { authenticatedMacs() }
     }
@@ -320,6 +329,8 @@ private final class Peer: @unchecked Sendable {
     private var cancelled = false
     /// Set once the Mac proved its pairing, or paired with the code.
     private(set) var mac: ConnectedMac?
+
+    func send(_ message: ControlEnvelope) { channel.send(message) }
     var hello: Hello?
     let openedAt = Date()
     private(set) var lastHeard = Date()

@@ -146,6 +146,9 @@ public final class PassthroughService: @unchecked Sendable {
     }
 
     public var connectedMacs: [ConnectedMac] { control?.connectedMacs ?? [] }
+
+    /// Turned off by the user: tell the clients first (`ControlEnvelope.goodbye`).
+    public func sayGoodbye() { control?.sayGoodbye() }
     /// Macs linked over the air right now.
     public var wirelessMacTags: [String] { dialer?.connectedMacTags ?? [] }
     /// What carries the wireless link(s): "Hotspot", "Peer-to-peer", "USB" or "Wi-Fi network".

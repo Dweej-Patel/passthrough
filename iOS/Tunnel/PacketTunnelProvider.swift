@@ -94,6 +94,16 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         ptLog(.info, "Background host stopping (\(reason.rawValue))")
         if let pairingsToken { notify_cancel(pairingsToken) }
         pairingsToken = nil
+        // Turned off by the user: tell the Macs and iPads first, and give it a moment to go out.
+        if let service, reason == .userInitiated {
+            service.sayGoodbye()
+            DispatchQueue.global().asyncAfter(deadline: .now() + 0.3) {
+                service.stop()
+                completionHandler()
+            }
+            self.service = nil
+            return
+        }
         service?.stop()
         service = nil
         if let hotspot {
