@@ -130,8 +130,10 @@ public struct LinkCredential: Codable, Equatable, Sendable {
     public var certSHA256: String
     public var linkKey: Data
     public var phoneID: String
-    public init(macTag: String, certSHA256: String, linkKey: Data, phoneID: String) {
-        self.macTag = macTag; self.certSHA256 = certSHA256; self.linkKey = linkKey; self.phoneID = phoneID
+    /// An iPad's: dialed over a shared network (the hotspot), never peer-to-peer.
+    public var hotspotOnly: Bool?
+    public init(macTag: String, certSHA256: String, linkKey: Data, phoneID: String, hotspotOnly: Bool? = nil) {
+        self.macTag = macTag; self.certSHA256 = certSHA256; self.linkKey = linkKey; self.phoneID = phoneID; self.hotspotOnly = hotspotOnly
     }
 }
 
@@ -209,7 +211,9 @@ public final class WirelessDialer: @unchecked Sendable {
     private func found(_ results: Set<NWBrowser.Result>) {
         guard running else { return }
         self.results = results
-        let known = Set(credentials().map(\.macTag))
+        let linked = credentials()
+        let known = Set(linked.map(\.macTag))
+        let hotspotOnly = Set(linked.filter { $0.hotspotOnly == true }.map(\.macTag))
         for (tag, link) in links where !known.contains(tag) {
             link.stop()
             links[tag] = nil
@@ -219,7 +223,7 @@ public final class WirelessDialer: @unchecked Sendable {
         for result in results {
             guard case .bonjour(let txt) = result.metadata, let tag = txt["m"], known.contains(tag) else { continue }
             inView.insert(tag)
-            link(for: tag, peerToPeer: peerToPeer) { [weak self] in self?.credential(for: tag) }.reach(result.endpoint)
+            link(for: tag, peerToPeer: peerToPeer && !hotspotOnly.contains(tag)) { [weak self] in self?.credential(for: tag) }.reach(result.endpoint)
         }
         for (tag, link) in links where !inView.contains(tag) { link.outOfView() }
     }

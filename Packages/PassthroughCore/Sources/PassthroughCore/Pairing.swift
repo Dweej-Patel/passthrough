@@ -46,10 +46,19 @@ public struct ShellGrant: Codable, Equatable, Sendable {
     }
 }
 
-/// A Mac that has been granted access to this iPhone's proxy.
+/// What kind of device a client is. Absent in records from before iPads (a Mac).
+public enum ClientKind: String, Codable, Sendable {
+    case mac
+    /// An iPad using this iPhone's internet over its Personal Hotspot.
+    case ipad
+}
+
+/// A Mac (or an iPad) that has been granted access to this iPhone's proxy.
 public struct PairedClient: Codable, Identifiable, Equatable, Sendable {
     public var id: String
     public var name: String
+    /// Nil: a Mac (records from before iPads).
+    public var kind: ClientKind?
     public var tokenHash: String
     public var pairedAt: Date
     public var lastSeen: Date?
@@ -58,9 +67,11 @@ public struct PairedClient: Codable, Identifiable, Equatable, Sendable {
     /// How to reach this Mac's shell listener, once it granted a shell key over the cable.
     public var shell: ShellGrant?
 
-    public init(id: String, name: String, tokenHash: String, pairedAt: Date, lastSeen: Date? = nil) {
-        self.id = id; self.name = name; self.tokenHash = tokenHash; self.pairedAt = pairedAt; self.lastSeen = lastSeen
+    public init(id: String, name: String, kind: ClientKind? = nil, tokenHash: String, pairedAt: Date, lastSeen: Date? = nil) {
+        self.id = id; self.name = name; self.kind = kind; self.tokenHash = tokenHash; self.pairedAt = pairedAt; self.lastSeen = lastSeen
     }
+
+    public var isIPad: Bool { kind == .ipad }
 }
 
 /// Stores paired Macs and the short-lived pairing code. Backed by the App Group
@@ -202,14 +213,36 @@ public final class PairingRegistry: @unchecked Sendable {
 
     private static let pendingShellAccount = "shell.pending."
 
-    /// Everything the wireless dialer needs, for every linked Mac.
+    /// Everything the wireless dialer needs, for every linked Mac and iPad.
     public func linkCredentials() -> [LinkCredential] {
         let id = phoneID
         return clients.compactMap { client in
             guard let cert = client.linkCertificate, let key = secrets.read("link." + client.id) else { return nil }
-            return LinkCredential(macTag: WirelessLink.macTag(clientID: client.id), certSHA256: cert, linkKey: key, phoneID: id)
+            return LinkCredential(macTag: WirelessLink.macTag(clientID: client.id), certSHA256: cert, linkKey: key, phoneID: id,
+                                  hotspotOnly: client.isIPad ? true : nil)
         }
     }
+
+    /// Pairs and links a client in one step, where something it already trusts
+    /// vouches for it instead of a code: an iPad, introduced by a Mac paired with
+    /// both, or scanned from its screen. Issues its pairing token and returns
+    /// it (to be handed over on that trusted path, never stored here in the
+    /// clear). Replaces an earlier pairing of the same client. Nil if its link
+    /// key could not be stored.
+    public func addClient(id clientID: String, name: String, kind: ClientKind, certificateSHA256: String, linkKey: Data) -> String? {
+        let token = PairingToken.generate()
+        lock.lock(); defer { lock.unlock() }
+        guard secrets.write(linkKey, account: "link." + clientID) else { return nil }
+        var list = loadClients().filter { $0.id != clientID }
+        var client = PairedClient(id: clientID, name: name, kind: kind, tokenHash: PairingToken.hash(token), pairedAt: Date())
+        client.linkCertificate = certificateSHA256
+        list.append(client)
+        save(list)
+        return token
+    }
+
+    /// Whether any paired client is an iPad (the phone then dials over its hotspot).
+    public var hasIPads: Bool { clients.contains(where: \.isIPad) }
 
     public var clients: [PairedClient] {
         lock.lock(); defer { lock.unlock() }

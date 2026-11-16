@@ -23,8 +23,10 @@ public struct ConnectedMac: Identifiable, Sendable, Equatable, Codable {
     public let since: Date
     /// Over the wireless link rather than the cable; nil when the Mac didn't say.
     public let wireless: Bool?
-    public init(id: String, name: String, since: Date, wireless: Bool? = nil) {
-        self.id = id; self.name = name; self.since = since; self.wireless = wireless
+    /// A Mac or an iPad; nil for a Mac.
+    public let kind: ClientKind?
+    public init(id: String, name: String, since: Date, wireless: Bool? = nil, kind: ClientKind? = nil) {
+        self.id = id; self.name = name; self.since = since; self.wireless = wireless; self.kind = kind
     }
 }
 
@@ -36,6 +38,9 @@ public struct ConnectedMac: Identifiable, Sendable, Equatable, Codable {
 public final class ControlServer: @unchecked Sendable {
     public let port: UInt16
     private let registry: PairingRegistry
+
+    /// A Mac or an iPad, as paired.
+    func clientKind(_ id: String) -> ClientKind? { registry.clients.first { $0.id == id }?.kind }
     private let counter: ByteCounter
     private let statusProvider: @Sendable () -> DeviceStatus
     private let socksPort: UInt16
@@ -357,7 +362,8 @@ private final class Peer: @unchecked Sendable {
 
     func authenticate(id: String, name: String) {
         if mac == nil {
-            mac = ConnectedMac(id: id, name: name, since: Date(), wireless: via.map { $0 == "wireless" })
+            mac = ConnectedMac(id: id, name: name, since: Date(), wireless: via.map { $0 == "wireless" },
+                               kind: server.clientKind(id))
             ptLog(.info, "\(name) connected")
             server.clientsChanged()
         }
