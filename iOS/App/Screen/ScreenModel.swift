@@ -309,8 +309,8 @@ final class ScreenModel: ObservableObject {
             case let .text(text) where !text.isEmpty: copied(text)
             case .text: copyFailed("Nothing was copied. Select something on \(macName) first.")
             case .nothing: copyFailed("Nothing was copied. Select something on \(macName) first.")
-            case .tooLong: copyFailed("That's too long to copy to this iPhone.")
-            case .notText: copyFailed("Only text can be copied to this iPhone.")
+            case .tooLong: copyFailed("That's too long to copy to this \(ThisDevice.name).")
+            case .notText: copyFailed("Only text can be copied to this \(ThisDevice.name).")
             }
         case let .curtained(hidden):
             hideTimeout?.cancel()

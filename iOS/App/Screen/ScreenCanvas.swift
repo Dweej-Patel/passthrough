@@ -19,7 +19,7 @@ enum ScreenTouchMode: String, CaseIterable {
 /// swipes move between desktops (left and right) or open Mission Control
 /// (up) and the app's windows (down), as on a Mac's trackpad. It is also the
 /// keyboard's text input while the keyboard is up.
-final class ScreenCanvasView: UIView, UIScrollViewDelegate, UIKeyInput, UIGestureRecognizerDelegate {
+final class ScreenCanvasView: UIView, UIScrollViewDelegate, UIKeyInput, UIGestureRecognizerDelegate, UIPointerInteractionDelegate {
     var onPointer: ((CGPoint, RFBClient.Buttons) -> Void)?
     var onClick: ((CGPoint, RFBClient.Buttons) -> Void)?
     /// Two fingers moved by a delta (screen pixels) with the pointer at a point; then the
@@ -94,16 +94,100 @@ final class ScreenCanvasView: UIView, UIScrollViewDelegate, UIKeyInput, UIGestur
         let hold = UILongPressGestureRecognizer(target: self, action: #selector(held(_:)))
         hold.minimumPressDuration = 0.35
         move.require(toFail: hold)
-        for recognizer in [tap, twoFingerTap, move, wheel, hold] { addGestureRecognizer(recognizer) }
+        // Fingers only: a trackpad or mouse (an iPad's) is a real pointer, below.
+        let fingers = [NSNumber(value: UITouch.TouchType.direct.rawValue)]
+        scroll.panGestureRecognizer.allowedTouchTypes = fingers
+        for recognizer in [tap, twoFingerTap, move, wheel, hold] {
+            recognizer.allowedTouchTypes = fingers
+            addGestureRecognizer(recognizer)
+        }
         for direction: UISwipeGestureRecognizer.Direction in [.left, .right, .up, .down] {
             let swipe = UISwipeGestureRecognizer(target: self, action: #selector(swiped(_:)))
             swipe.numberOfTouchesRequired = 3
             swipe.direction = direction
+            swipe.allowedTouchTypes = fingers
             addGestureRecognizer(swipe)
         }
+        addPointerRecognizers()
         self.move = move
         self.wheel = wheel
         applyMode()
+    }
+
+    // MARK: Trackpad and mouse
+
+    /// A connected trackpad or mouse drives the Mac's pointer directly, whatever
+    /// the touch mode: moving it moves the Mac's, clicks click there, the
+    /// secondary button right-clicks, and two-finger scrolling scrolls. The
+    /// iPad's own pointer hides over the screen, so there's one pointer.
+    private func addPointerRecognizers() {
+        let pointer = [NSNumber(value: UITouch.TouchType.indirectPointer.rawValue)]
+        let hover = UIHoverGestureRecognizer(target: self, action: #selector(hovered(_:)))
+        let click = UITapGestureRecognizer(target: self, action: #selector(pointerClicked(_:)))
+        click.allowedTouchTypes = pointer
+        click.buttonMaskRequired = .primary
+        let rightClick = UITapGestureRecognizer(target: self, action: #selector(pointerRightClicked(_:)))
+        rightClick.allowedTouchTypes = pointer
+        rightClick.buttonMaskRequired = .secondary
+        let drag = UIPanGestureRecognizer(target: self, action: #selector(pointerDragged(_:)))
+        drag.allowedTouchTypes = pointer
+        drag.allowedScrollTypesMask = []
+        let scrolling = UIPanGestureRecognizer(target: self, action: #selector(pointerScrolled(_:)))
+        scrolling.allowedTouchTypes = []
+        scrolling.allowedScrollTypesMask = .all
+        for recognizer in [hover, click, rightClick, drag, scrolling] { addGestureRecognizer(recognizer) }
+        addInteraction(UIPointerInteraction(delegate: self))
+    }
+
+    func pointerInteraction(_ interaction: UIPointerInteraction, styleFor region: UIPointerRegion) -> UIPointerStyle? {
+        screenSize == .zero ? nil : .hidden()
+    }
+
+    private func pointTo(_ location: CGPoint) {
+        guard screenSize.width > 0 else { return }
+        cursorPoint = screenPoint(location)
+        updateCursor()
+    }
+
+    @objc private func hovered(_ recognizer: UIHoverGestureRecognizer) {
+        guard recognizer.state == .began || recognizer.state == .changed else { return }
+        pointTo(recognizer.location(in: self))
+        onPointer?(cursorPoint, [])
+    }
+
+    @objc private func pointerClicked(_ recognizer: UITapGestureRecognizer) {
+        pointTo(recognizer.location(in: self))
+        onClick?(cursorPoint, .left)
+    }
+
+    @objc private func pointerRightClicked(_ recognizer: UITapGestureRecognizer) {
+        pointTo(recognizer.location(in: self))
+        onClick?(cursorPoint, .right)
+    }
+
+    /// The button held while moving: a drag on the Mac.
+    @objc private func pointerDragged(_ recognizer: UIPanGestureRecognizer) {
+        pointTo(recognizer.location(in: self))
+        switch recognizer.state {
+        case .began, .changed: onPointer?(cursorPoint, .left)
+        case .ended, .cancelled, .failed: onPointer?(cursorPoint, [])
+        default: break
+        }
+    }
+
+    @objc private func pointerScrolled(_ recognizer: UIPanGestureRecognizer) {
+        switch recognizer.state {
+        case .changed:
+            guard content.frame.width > 0 else { return }
+            let translation = recognizer.translation(in: self)
+            recognizer.setTranslation(.zero, in: self)
+            let pixelsPerPoint = screenSize.width / content.frame.width
+            onScroll?(cursorPoint, CGPoint(x: translation.x * pixelsPerPoint, y: translation.y * pixelsPerPoint), 16 * pixelsPerPoint)
+        case .ended, .cancelled, .failed:
+            onScrollEnded?()
+        default:
+            break
+        }
     }
 
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
@@ -514,7 +598,7 @@ final class ScreenKeyRow: UIInputView {
                     self?.update()
                 }, for: .touchUpInside)
             case .copy:
-                button.accessibilityLabel = "Copy from the Mac to this iPhone"
+                button.accessibilityLabel = "Copy from the Mac to this \(ThisDevice.name)"
                 button.addAction(UIAction { [weak self] _ in self?.canvas?.onCopy?() }, for: .touchUpInside)
             case .paste:
                 button.accessibilityLabel = "Paste on the Mac"

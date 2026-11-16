@@ -70,7 +70,7 @@ private struct CaptureCover: ViewModifier {
             PTColor.background.ignoresSafeArea()
             VStack(spacing: 18) {
                 AppIconView().frame(width: 96, height: 96).accessibilityHidden(true)
-                Text("Hidden while this iPhone's screen is recorded or shared.")
+                Text("Hidden while this \(ThisDevice.name)'s screen is recorded or shared.")
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
                     .multilineTextAlignment(.center)

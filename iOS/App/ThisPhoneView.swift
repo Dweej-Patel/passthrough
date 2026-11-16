@@ -24,7 +24,7 @@ struct ThisPhoneView: View {
             .padding(.bottom, 24)
         }
         .background(PTColor.background)
-        .navigationTitle("This iPhone")
+        .navigationTitle("This \(ThisDevice.name)")
         .toolbar {
             ToolbarItem(placement: .topBarTrailing) {
                 Button { showSettings = true } label: { Image(systemName: "gearshape") }
@@ -34,7 +34,7 @@ struct ThisPhoneView: View {
     }
 
     private var footer: some View {
-        Text("Traffic between the Mac and this iPhone travels only over the USB cable. The Mac's connections are opened by this phone's own network stack.")
+        Text("Traffic between the Mac and this \(ThisDevice.name) travels only over the USB cable. The Mac's connections are opened by this phone's own network stack.")
             .font(.caption)
             .foregroundStyle(.secondary)
             .multilineTextAlignment(.center)
@@ -104,7 +104,7 @@ struct HeroCard: View {
                         Text(message).font(.caption).foregroundStyle(PTColor.problem).multilineTextAlignment(.center)
                     }
                     if model.sharingWiFiInsteadOfCellular {
-                        Label("This iPhone is on Wi-Fi, so your Mac uses its Wi-Fi, not cellular. Turn off Wi-Fi to share cellular.", systemImage: "wifi")
+                        Label("This \(ThisDevice.name) is on Wi-Fi, so your Mac uses its Wi-Fi, not cellular. Turn off Wi-Fi to share cellular.", systemImage: "wifi")
                             .font(.caption).foregroundStyle(PTColor.attentionText).multilineTextAlignment(.center)
                     }
                     HStack(spacing: 8) {
@@ -130,12 +130,12 @@ struct HeroCard: View {
 
     private var statusLine: String {
         switch model.state {
-        case .stopped: return "Off. Tap to share this iPhone's internet with your Mac"
+        case .stopped: return "Off. Tap to share this \(ThisDevice.name)'s internet with your Mac"
         case .starting: return "Turning on…"
         case .stopping: return "Turning off…"
         case .failed: return "Couldn't turn on"
         case .running:
-            if let mac = model.stats.macs.first { return "\(mac.name) is online through this iPhone" }
+            if let mac = model.stats.macs.first { return "\(mac.name) is online through this \(ThisDevice.name)" }
             return "Sharing. Plug in your Mac and connect from its menu bar."
         }
     }
@@ -174,7 +174,7 @@ struct PowerButton: View {
         .buttonStyle(.plain)
         .disabled(busy)
         .simultaneousGesture(DragGesture(minimumDistance: 0).onChanged { _ in pressed = true }.onEnded { _ in pressed = false })
-        .accessibilityLabel(isOn ? "Stop sharing this iPhone's internet" : "Share this iPhone's internet")
+        .accessibilityLabel(isOn ? "Stop sharing this \(ThisDevice.name)'s internet" : "Share this \(ThisDevice.name)'s internet")
         .sensoryFeedback(.impact(weight: .medium), trigger: isOn)
     }
 }

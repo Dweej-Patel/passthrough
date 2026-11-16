@@ -45,7 +45,7 @@ struct RemoteShellCard: View {
     @ViewBuilder private var content: some View {
         switch shell.reach {
         case .noAccess:
-            Text("Open your Mac's shell right from this iPhone. To set it up:")
+            Text("Open your Mac's shell right from this \(ThisDevice.name). To set it up:")
                 .font(.subheadline).foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
             ShellSetupSteps(paired: !model.pairedClients.isEmpty)
@@ -257,12 +257,12 @@ struct ShellSetupSteps: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
-            step(1, done: paired, title: "Pair this iPhone with your Mac",
-                 detail: paired ? "Done." : "On the Mac tab, tap This iPhone, then Pair.")
+            step(1, done: paired, title: "Pair this \(ThisDevice.name) with your Mac",
+                 detail: paired ? "Done." : "On the Mac tab, tap This \(ThisDevice.name), then Pair.")
             step(2, done: false, title: "Turn on Remote shell on your Mac",
                  detail: "On the Mac, open Passthrough's Settings, go to Remote Shell and turn on \u{201C}Allow remote shell from paired phones\u{201D}.")
             step(3, done: false, title: "Connect over USB once",
-                 detail: "With sharing on, plug this iPhone into the Mac. Its shells then show up on the Mac and Shells tabs by themselves.")
+                 detail: "With sharing on, plug this \(ThisDevice.name) into the Mac. Its shells then show up on the Mac and Shells tabs by themselves.")
         }
     }
 

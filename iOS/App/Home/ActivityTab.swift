@@ -45,7 +45,7 @@ struct ActivityTab: View {
         } else if shell.reach == .ready || shell.timelineLoading {
             ProgressView().frame(maxWidth: .infinity, minHeight: 120)
         } else {
-            notice("Your Mac's timeline shows up here once this iPhone can reach it.", symbol: "clock")
+            notice("Your Mac's timeline shows up here once this \(ThisDevice.name) can reach it.", symbol: "clock")
         }
     }
 

@@ -20,7 +20,7 @@ struct MacHeroCard: View {
                             .contentTransition(.opacity)
                         if let detail { Text(detail).font(.subheadline).foregroundStyle(.secondary).contentTransition(.opacity) }
                         if online, shell.reach == .ready {
-                            Label("Online through this iPhone", systemImage: "cable.connector")
+                            Label("Online through this \(ThisDevice.name)", systemImage: "cable.connector")
                                 .font(.caption.weight(.semibold))
                                 .foregroundStyle(PTColor.tintText)
                         }
@@ -43,7 +43,7 @@ struct MacHeroCard: View {
         case .ready: return awake ? "Staying awake" : "Reachable"
         case .connecting: return shell.isRedialing ? "Reconnecting…" : "Connecting…"
         case .unreachable: return "Can't reach it"
-        case .noAccess: return online ? "Online through this iPhone" : "Paired"
+        case .noAccess: return online ? "Online through this \(ThisDevice.name)" : "Paired"
         // Not "needs you": that's a shell waiting on a question.
         case .locked: return "Unlock to continue"
         case .needsPasscode: return "Needs a passcode"
@@ -81,7 +81,7 @@ struct MacHeroCard: View {
             BatteryLine(state: state, battery: battery, awake: awake)
         }
         if !paired {
-            Text("Then it's online through this iPhone whenever they're connected, and you can reach its shell from anywhere.")
+            Text("Then it's online through this \(ThisDevice.name) whenever they're connected, and you can reach its shell from anywhere.")
                 .font(.subheadline).foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
             Button { showPairing = true } label: { Label("Pair your Mac", systemImage: "laptopcomputer.and.iphone") }

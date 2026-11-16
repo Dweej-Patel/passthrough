@@ -96,7 +96,7 @@ final class AppLock: ObservableObject {
                 open(with: ctx)
             } else {
                 Self.log.error("Lock policy unavailable: \(error?.localizedDescription ?? "unknown", privacy: .public)")
-                failure = "This iPhone can't check it's you right now. Try again in a moment."
+                failure = "This \(ThisDevice.name) can't check it's you right now. Try again in a moment."
             }
             return
         }

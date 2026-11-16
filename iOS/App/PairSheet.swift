@@ -27,7 +27,7 @@ struct PairSheet: View {
                 if model.state != .running {
                     PTCard {
                         VStack(alignment: .leading, spacing: 10) {
-                            Label("This iPhone's internet sharing is off, so the Mac can't reach it to pair.", systemImage: "exclamationmark.triangle.fill")
+                            Label("This \(ThisDevice.name)'s internet sharing is off, so the Mac can't reach it to pair.", systemImage: "exclamationmark.triangle.fill")
                                 .font(.footnote).foregroundStyle(PTTheme.warning)
                                 .fixedSize(horizontal: false, vertical: true)
                             Button(model.state == .starting ? "Turning on…" : "Turn on sharing") { model.start() }

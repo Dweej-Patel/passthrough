@@ -1,10 +1,15 @@
 import UIKit
 
-/// The app is portrait-only except while a view (the Mac's screen) asks for
-/// more: the Info.plist lists landscape so that view can turn, and this
-/// delegate narrows every other moment back to portrait.
+/// On iPhone the app is portrait-only except while a view (the Mac's screen)
+/// asks for more: the Info.plist lists landscape so that view can turn, and
+/// this delegate narrows every other moment back to portrait. On iPad every
+/// orientation is always allowed (Split View and Stage Manager need it).
 final class AppOrientation: NSObject, UIApplicationDelegate {
-    @MainActor static var allowed = UIInterfaceOrientationMask.portrait {
+    /// What the app allows when no view asks for more.
+    @MainActor static let standard: UIInterfaceOrientationMask =
+        UIDevice.current.userInterfaceIdiom == .pad ? .all : .portrait
+
+    @MainActor static var allowed = standard {
         didSet { apply() }
     }
 
@@ -35,7 +40,7 @@ final class AppOrientation: NSObject, UIApplicationDelegate {
                 top?.setNeedsUpdateOfSupportedInterfaceOrientations()
                 window.rootViewController?.setNeedsUpdateOfSupportedInterfaceOrientations()
             }
-            if allowed == .portrait {
+            if allowed == .portrait, standard == .portrait {
                 scene.requestGeometryUpdate(.iOS(interfaceOrientations: .portrait))
             }
         }

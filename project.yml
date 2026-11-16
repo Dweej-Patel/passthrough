@@ -62,8 +62,10 @@ targets:
         PassthroughID: $(PASSTHROUGH_ID)
         CFBundleDisplayName: Passthrough
         UILaunchScreen: {}
-        # Landscape is for the Mac's screen only: AppOrientation keeps the rest portrait.
+        # iPhone: landscape is for the Mac's screen only (AppOrientation keeps the rest portrait).
+        # iPad: every orientation, as Split View and Stage Manager need.
         UISupportedInterfaceOrientations: [UIInterfaceOrientationPortrait, UIInterfaceOrientationLandscapeLeft, UIInterfaceOrientationLandscapeRight]
+        UISupportedInterfaceOrientations~ipad: [UIInterfaceOrientationPortrait, UIInterfaceOrientationPortraitUpsideDown, UIInterfaceOrientationLandscapeLeft, UIInterfaceOrientationLandscapeRight]
         UIUserInterfaceStyle: Automatic
         ITSAppUsesNonExemptEncryption: false
         UIApplicationSceneManifest:
@@ -93,7 +95,7 @@ targets:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: $(PASSTHROUGH_ID).ios
         PRODUCT_NAME: Passthrough
-        TARGETED_DEVICE_FAMILY: "1"
+        TARGETED_DEVICE_FAMILY: "1,2"
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME: AccentColor
         INFOPLIST_KEY_UILaunchScreen_Generation: YES
@@ -157,7 +159,7 @@ targets:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: $(PASSTHROUGH_ID).ios.widgets
         PRODUCT_NAME: PassthroughWidgets
-        TARGETED_DEVICE_FAMILY: "1"
+        TARGETED_DEVICE_FAMILY: "1,2"
 
   # Opens the sealed notices Macs send through Apple's push service
   # (PushBox) and shows what they say. Its app group holds only those keys.
@@ -186,7 +188,7 @@ targets:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: $(PASSTHROUGH_ID).ios.notifications
         PRODUCT_NAME: PassthroughNotifications
-        TARGETED_DEVICE_FAMILY: "1"
+        TARGETED_DEVICE_FAMILY: "1,2"
 
   # ───────────────────────── macOS ─────────────────────────
   PassthroughMac:
