@@ -29,7 +29,8 @@ struct ProgramStatus {
     /// By `id`; the root under "".
     private(set) var records: [String: Record] = [:]
 
-    static let states: Set<String> = ["idle", "working", "done", "blocked", "error", "clear"]
+    static let clear = "clear"
+    static let states: Set<String> = [ShellStatus.idle, ShellStatus.working, ShellStatus.done, ShellStatus.blocked, ShellStatus.error, clear]
     static let kinds: Set<String> = ["permission", "question", "auth"]
     static let maxSequence = 4096
     static let maxRecords = 256
@@ -66,17 +67,20 @@ struct ProgramStatus {
         return outcome
     }
 
-    /// The program in front went away without clearing what it was doing
-    /// (killed, crashed): it is no longer working or blocked. Done, error and
-    /// idle stay, as the spec has them, until replaced or cleared.
-    mutating func dropUnfinished() -> Bool {
-        let before = records.count
-        records = records.filter { $0.value.state != "working" && $0.value.state != "blocked" }
-        return records.count != before
+    /// The program that reported went away without clearing its records
+    /// (killed, crashed, or it just never clears them): nothing it said
+    /// describes the session any more.
+    mutating func forgetAll() -> Bool {
+        guard !records.isEmpty else { return false }
+        records.removeAll()
+        return true
     }
 
-    /// Whether any record says the program is working or waiting on someone.
-    var hasUnfinished: Bool { records.values.contains { $0.state == "working" || $0.state == "blocked" } }
+    var isEmpty: Bool { records.isEmpty }
+
+    private static func isUnfinished(_ record: Record) -> Bool {
+        record.state == ShellStatus.working || record.state == ShellStatus.blocked
+    }
 
     /// What the session as a whole is doing. Blocked anywhere is blocked
     /// (the root's question first); otherwise working while the root or any
@@ -84,13 +88,13 @@ struct ProgramStatus {
     var summary: (state: String, kind: String?, message: String?, agents: Int)? {
         guard !records.isEmpty else { return nil }
         let root = records[""]
-        let agents = records.filter { !$0.key.isEmpty && ($0.value.state == "working" || $0.value.state == "blocked") }
-        if root?.state == "blocked" { return ("blocked", root?.kind, root?.message, agents.count) }
-        if let (_, agent) = agents.sorted(by: { $0.key < $1.key }).first(where: { $0.value.state == "blocked" }) {
+        let agents = records.filter { !$0.key.isEmpty && Self.isUnfinished($0.value) }
+        if root?.state == ShellStatus.blocked { return (ShellStatus.blocked, root?.kind, root?.message, agents.count) }
+        if let (_, agent) = agents.sorted(by: { $0.key < $1.key }).first(where: { $0.value.state == ShellStatus.blocked }) {
             let message = [agent.title, agent.message].compactMap { $0 }.joined(separator: ": ")
-            return ("blocked", agent.kind, message.isEmpty ? nil : message, agents.count)
+            return (ShellStatus.blocked, agent.kind, message.isEmpty ? nil : message, agents.count)
         }
-        if root?.state == "working" || !agents.isEmpty { return ("working", nil, root?.message, agents.count) }
+        if root?.state == ShellStatus.working || !agents.isEmpty { return (ShellStatus.working, nil, root?.message, agents.count) }
         guard let root else { return nil }
         return (root.state, nil, root.message, 0)
     }
@@ -154,13 +158,13 @@ struct ProgramStatus {
         guard let state = fields["state"], Self.states.contains(state) else { return false }
         let id = fields["id"] ?? ""
         guard id.isEmpty || Self.isValidID(id) else { return false }
-        if state == "clear" {
+        if state == Self.clear {
             let before = records
             if id.isEmpty { records.removeAll() } else { records = records.filter { $0.key != id && !$0.key.hasPrefix(id + "/") } }
             return records != before
         }
         var record = Record(state: state)
-        if state == "blocked", let kind = fields["kind"], Self.kinds.contains(kind) { record.kind = kind }
+        if state == ShellStatus.blocked, let kind = fields["kind"], Self.kinds.contains(kind) { record.kind = kind }
         if let value = fields["msg"] {
             guard let message = Self.text(value, limit: Self.maxMessageBytes) else { return false }
             record.message = message

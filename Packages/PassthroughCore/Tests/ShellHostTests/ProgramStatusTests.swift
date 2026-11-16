@@ -95,9 +95,9 @@ final class ProgramStatusTests: XCTestCase {
         XCTAssertNil(status.summary)
         _ = status.scan(report("state=blocked:kind=question"))
         _ = status.scan(report("state=done:id=x"))
-        XCTAssertTrue(status.dropUnfinished())
-        XCTAssertEqual(summary(status), "none", "only an agent's record is left, and the session has no root")
-        XCTAssertFalse(status.hasUnfinished)
+        XCTAssertTrue(status.forgetAll())
+        XCTAssertTrue(status.isEmpty)
+        XCTAssertFalse(status.forgetAll())
     }
 
     func testOtherTerminalsAnswersToTheQueryAreDropped() {
@@ -111,6 +111,10 @@ final class ProgramStatusTests: XCTestCase {
     final class Client: ShellAttachment, @unchecked Sendable {
         private let lock = NSLock()
         private var data = Data()
+        /// A phone that is attached says whether its terminal is on screen.
+        let looking: Bool
+        init(looking: Bool = true) { self.looking = looking }
+        var isLooking: Bool { looking }
         var text: String { lock.lock(); defer { lock.unlock() }; return String(decoding: data, as: UTF8.self) }
         func shellOutput(_ data: Data, session: String) { lock.lock(); self.data.append(data); lock.unlock() }
         func shellEnded(session: String, exitStatus: Int32) {}
@@ -176,6 +180,33 @@ final class ProgramStatusTests: XCTestCase {
         wait("gone with the program") { info(id).map { $0.status == nil && $0.waiting == nil } ?? false }
     }
 
+    /// Stopped (^Z), a program is still there: what it said stands for when it comes back.
+    func testAStoppedProgramKeepsItsStatus() throws {
+        let id = try manager.open(phoneLabel: "iPhone", cols: 80, rows: 24)
+        let phone = Client()
+        try manager.attach(id, client: phone, cols: 80, rows: 24)
+        run(["state=blocked:kind=permission:msg=\(b64("approve Bash: ls"))"], in: id)
+        wait("blocked") { info(id)?.status?.state == "blocked" }
+        manager.input(id, Data([0x1A]))
+        wait("the shell says it stopped") { phone.text.lowercased().contains("stopped") || phone.text.lowercased().contains("suspended") }
+        Thread.sleep(forTimeInterval: 0.5)
+        XCTAssertEqual(info(id)?.status?.state, "blocked")
+        XCTAssertEqual(info(id)?.waiting, "approve Bash: ls")
+    }
+
+    /// A program gone without clearing a finished status leaves the shell as
+    /// it was: its own prompts are noticed again.
+    func testAfterTheProgramIsGoneTheShellsQuestionsAreNoticedAgain() throws {
+        let id = try manager.open(phoneLabel: "iPhone", cols: 80, rows: 24)
+        try manager.attach(id, client: Client(), cols: 80, rows: 24)
+        run(["state=done"], in: id)
+        wait("done") { info(id)?.status?.state == "done" }
+        manager.input(id, Data([0x03]))
+        wait("forgotten") { info(id)?.status == nil }
+        manager.input(id, Data("printf 'Overwrite it? [y/N] '; read x\n".utf8))
+        wait("the shell's question") { info(id)?.waiting == "Overwrite it? [y/N]" }
+    }
+
     /// A program the shell `exec`ed is the shell itself, in front all along: what it says stands.
     func testAProgramTheShellBecameKeepsItsStatus() throws {
         let id = try manager.open(phoneLabel: "iPhone", cols: 80, rows: 24)
@@ -184,6 +215,19 @@ final class ProgramStatusTests: XCTestCase {
         wait("working") { info(id)?.status?.state == "working" }
         Thread.sleep(forTimeInterval: 1.5)   // past its next output
         XCTAssertEqual(info(id)?.status?.state, "working")
+    }
+
+    /// A phone stays attached to the last session it showed: only while its
+    /// terminal is on screen is a result seen.
+    func testDoneIsSeenOnlyWhileAPhoneLooks() throws {
+        let id = try manager.open(phoneLabel: "iPhone", cols: 80, rows: 24)
+        let phone = Client(looking: false)
+        try manager.attach(id, client: phone, cols: 80, rows: 24)
+        run(["state=working", "state=done"], in: id)
+        wait("done") { info(id)?.status?.state == "done" }
+        XCTAssertEqual(info(id)?.status?.seen, false, "attached, but on another screen")
+        manager.lookedAt(client: phone)
+        wait("seen once it looks") { info(id)?.status?.seen == true }
     }
 
     func testDoneIsSeenOnceSomeoneHasTheSessionOpen() throws {

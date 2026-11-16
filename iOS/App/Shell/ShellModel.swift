@@ -549,6 +549,16 @@ final class ShellModel: ObservableObject {
         client?.resize(cols: cols, rows: rows)
     }
 
+    /// The terminal screen is up: what the attached session shows is being
+    /// looked at, so a result it reports (Claude Code's "done") is seen.
+    /// Said again on each connection.
+    private(set) var viewing = false
+    func setViewing(_ on: Bool) {
+        guard on != viewing else { return }
+        viewing = on
+        client?.setViewing(on)
+    }
+
     /// Ends a running session. A finished one is removed instead (`remove`):
     /// its tab closes and it's hidden on this phone, since the Mac would refuse to close it again.
     func close(_ id: String) {
@@ -696,6 +706,7 @@ final class ShellModel: ObservableObject {
                 streamStarting.send((active, true))
                 client?.attach(active, cols: size.cols, rows: size.rows)
             }
+            if viewing { client?.setViewing(true) }
         case let .macInfo(info):
             apply(info)
         case let .macState(state):

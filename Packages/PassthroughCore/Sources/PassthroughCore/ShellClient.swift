@@ -372,6 +372,13 @@ public final class ShellClient: @unchecked Sendable {
 
     /// Asks the Mac to turn Keep awake on or off. The new state comes back as
     /// `.macState`, or `.failed` says why not.
+    /// Whether this phone's terminal is on screen for the attached session (`ShellEnvelope.viewing`).
+    public func setViewing(_ on: Bool) {
+        var m = ShellEnvelope(t: ShellEnvelope.viewing)
+        m.on = on
+        command(m)
+    }
+
     public func setAwake(_ on: Bool) {
         var m = ShellEnvelope(t: ShellEnvelope.setAwake)
         m.on = on

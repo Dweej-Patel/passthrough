@@ -189,7 +189,11 @@ struct TerminalScreen: View {
             // Typing into a terminal no one can see would be blind.
             if covered { _ = controller.driver.view.resignFirstResponder() }
         }
-        .onAppear { controller.start(intent) }
+        .onAppear {
+            controller.start(intent)
+            shell.setViewing(true)
+        }
+        .onDisappear { shell.setViewing(false) }
     }
 
     // MARK: Tabs

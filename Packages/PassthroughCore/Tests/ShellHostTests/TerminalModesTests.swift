@@ -2,6 +2,7 @@
 import Foundation
 import PassthroughCore
 import XCTest
+@testable import PassthroughCore
 @testable import ShellHost
 
 /// A replay that starts partway through a session turns on the modes the
@@ -74,6 +75,17 @@ final class TerminalModesTests: XCTestCase {
 
     func testSoftResetTurnsTheKeypadModeOff() {
         XCTAssertEqual(restoring("\u{1b}[?66h\u{1b}[!p"), "")
+    }
+
+    /// A Mac terminal window that stops showing a session turns off every
+    /// mode a replay could have turned on in it.
+    func testAMacWindowLeavingUndoesEveryModeAReplayRestores() {
+        var on = "\u{1b}[>5u\u{1b}[?1049h\u{1b}[>3u\u{1b}=\u{1b}[>4;2m\u{1b}[?1003h\u{1b}[?1006h"
+        for (mode, initial) in TerminalModes.switches { on += "\u{1b}[?\(mode)\(initial ? "l" : "h")" }
+        for (tracking, encoding) in [(9, 1005), (1000, 1015), (1001, 1016), (1002, 1006)] {
+            let left = modes(on + "\u{1b}[?\(tracking)h\u{1b}[?\(encoding)h").scanned(LocalTerminalClient.restoreTerminal)
+            XCTAssertEqual(String(decoding: left.restoring, as: UTF8.self), "", "\(tracking)/\(encoding)")
+        }
     }
 
     // MARK: Replays
@@ -170,7 +182,12 @@ final class TerminalModesTests: XCTestCase {
         try checkRedraw(shared: true)
     }
 
-    private func checkRedraw(shared: Bool) throws {
+    /// Two attaches close together: the terminal ends at its real size, not a row short.
+    func testRedrawsCloseTogetherLeaveTheRealSize() throws {
+        try checkRedraw(shared: false, again: true)
+    }
+
+    private func checkRedraw(shared: Bool, again: Bool = false) throws {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("TerminalModesTests-\(UUID().uuidString)", isDirectory: true)
         defer { try? FileManager.default.removeItem(at: directory) }
@@ -196,7 +213,12 @@ final class TerminalModesTests: XCTestCase {
 
         let second = Client()
         try manager.attach(id, client: second, cols: shared ? 120 : 80, rows: shared ? 40 : 24, shared: shared)
+        if again { try manager.attach(id, client: Client(), cols: 120, rows: 40, shared: true) }
         wait("it redraws at one row fewer, then back") { second.text.contains("size 23 80") && second.text.contains("size 24 80") }
+        if again {
+            Thread.sleep(forTimeInterval: ShellSessionManager.redrawPause * 3)
+            XCTAssertTrue(second.text.hasSuffix("size 24 80\r\n"), String(second.text.suffix(80)))
+        }
         XCTAssertTrue(second.text.hasPrefix("\u{1b}[?1049h"), "the replay starts on the alternate screen")
         let shorter = try XCTUnwrap(second.text.range(of: "size 23 80"))
         XCTAssertNotNil(second.text.range(of: "size 24 80", range: shorter.upperBound..<second.text.endIndex))

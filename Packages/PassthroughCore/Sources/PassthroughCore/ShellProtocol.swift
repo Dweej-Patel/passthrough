@@ -106,6 +106,11 @@ public struct ShellEnvelope: Codable, Equatable, Sendable {
     /// A phone asking the Mac to lock its screen (no fields). The Mac stays
     /// awake and everything keeps running; `macState` follows with `locked`.
     public static let lock = "lock"
+    /// A phone saying whether its terminal is on screen for the session it
+    /// has attached (`on`): attached is not the same as looking (a phone
+    /// stays attached to the last session it showed), and a result that
+    /// arrives while it looks is seen.
+    public static let viewing = "viewing"
     /// A phone asking what happened on the Mac since a time (`since`); answered `eventList`.
     public static let events = "events"
     public static let eventList = "eventList"

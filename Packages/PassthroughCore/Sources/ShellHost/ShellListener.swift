@@ -640,6 +640,9 @@ final class ShellConnection: ShellAttachment, @unchecked Sendable {
     private var closed = false
     /// `!closed`, for work running off the queue.
     private let isOpen = Locked(true)
+    /// The phone says its terminal is on screen (`ShellEnvelope.viewing`).
+    private let looking = Locked(false)
+    var isLooking: Bool { looking.get() }
     /// Lines received but not yet handled: they wait while a request is
     /// handled off the queue (`busy`), so replies keep the requests' order.
     private var inbox: [Data] = []
@@ -805,6 +808,10 @@ final class ShellConnection: ShellAttachment, @unchecked Sendable {
             // already on): answer anyway, once the change has had its moment,
             // so the phone always hears back.
             queue.asyncAfter(deadline: .now() + Self.controlAnswerDelay) { [weak self] in self?.sendMacState() }
+        case ShellEnvelope.viewing:
+            guard let on = message.on else { return fail(.badRequest) }
+            looking.set(on)
+            if on { manager.lookedAt(client: self) }
         case ShellEnvelope.lock:
             guard let gate else { return fail(.badRequest) }
             if let refused = gate.control(phoneID, label, .lock) { return fail(refused) }
