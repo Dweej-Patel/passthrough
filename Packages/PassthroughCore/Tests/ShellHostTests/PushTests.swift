@@ -300,6 +300,29 @@ final class PushTests: XCTestCase {
         XCTAssertEqual(recorder.states, ["working", "done", "none"])
     }
 
+    /// A program seen working that says done and exits, its last report and
+    /// the prompt read together, is forgotten too.
+    func testAProgramSeenWorkingThatEndsWithThePromptIsForgotten() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("PushTests-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let manager = ShellSessionManager(transcripts: try TranscriptStore(directory: directory), command: { ("/bin/sh", []) },
+                                          environment: { ["PATH": "/usr/bin:/bin", "TERM": "xterm-256color", "PS1": "$ "] },
+                                          directory: URL(fileURLWithPath: "/tmp"), endedRetention: 600, quietBeforeAsking: 0.2)
+        defer { manager.closeAll() }
+        let recorder = Recorder()
+        manager.onStatusChange = { recorder.add($0, $1) }
+        let id = try manager.open(phoneLabel: "iPhone", cols: 80, rows: 24)
+        manager.input(id, Data("sh -c \"printf '\\033]7501;state=working\\007'; sleep 0.4; printf '\\033]7501;state=done\\007'\"\n".utf8))
+        let deadline = Date().addingTimeInterval(10)
+        while !(recorder.states.contains("done") && recorder.states.last == "none"), Date() < deadline {
+            Thread.sleep(forTimeInterval: 0.02)
+        }
+        // Read late, each report may be cleared as soon as it counts: working and
+        // done still arrive, in order, and nothing is left.
+        XCTAssertEqual(recorder.states.filter { $0 != "none" }, ["working", "done"])
+        XCTAssertEqual(recorder.states.last, "none")
+    }
+
     /// A program the shell `exec`ed runs in the shell's own process: what it
     /// reports lasts while it runs, though the shell's group is in front.
     func testAProgramTheShellExecedKeepsItsStatus() throws {

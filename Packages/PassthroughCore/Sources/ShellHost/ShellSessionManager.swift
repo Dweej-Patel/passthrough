@@ -119,9 +119,9 @@ public final class ShellSessionManager: @unchecked Sendable {
         /// The foreground job (process group) when the program first reported:
         /// once that group is gone, so is everything it said.
         var statusOwner: pid_t?
-        /// What the session's first process (the shell) runs, as of its first
-        /// output: if it runs something else later, the shell `exec`ed it.
-        var shellPath: String?
+        /// The arguments the session's shell started with (the program first):
+        /// once they differ, the shell `exec`ed another program.
+        var shellArguments: [String] = []
         /// A `redraw` is under way.
         var redrawing = false
         /// Looked for a question since the last output.
@@ -293,6 +293,7 @@ public final class ShellSessionManager: @unchecked Sendable {
             throw error
         }
         let session = Session(id: id, startedAt: now, openedBy: phoneID, origin: origin, theme: theme?.sanitized, process: process, writer: writer, size: size)
+        session.shellArguments = [executable] + arguments
         // Weak: the session owns the process, so a strong capture would be a cycle that leaks every session.
         process.onOutput = { [weak self, weak session] data in
             self?.queue.async { if let session { self?.received(data, session: session) } }
@@ -583,7 +584,6 @@ public final class ShellSessionManager: @unchecked Sendable {
         session.outputCount += data.count
         session.writer.append(data, at: now)
         session.lastOutputAt = now
-        if session.shellPath == nil { session.shellPath = Self.executablePath(session.process.pid) }
         if session.pendingTitle != nil { adoptEchoedTitle(session) }
         readStatus(data, session: session, at: now)
         noteOutput(data, session: session)
@@ -630,23 +630,28 @@ public final class ShellSessionManager: @unchecked Sendable {
         // is in front (the shell's prompt is output too) and the reporting
         // job's process group is gone, nothing it said holds any more. A job
         // that is only stopped (^Z) or in the background keeps its status for
-        // when it comes back. One ioctl per chunk, only while there are records;
-        // not "the shell is in front", as a program the shell `exec`ed is the shell.
+        // when it comes back. One ioctl per chunk, only while there are records.
+        // The shell's own group alone doesn't mean the shell is in front: a
+        // program the shell `exec`ed runs in it (`shellIsInFront`).
+        //
+        // The reporter may be gone by the time its output is read, with its
+        // last reports and the prompt in one chunk: those reports still count,
+        // in turn, and then it is over.
         if !session.programStatus.isEmpty {
             let group = session.process.foregroundGroup
             if session.statusOwner == nil {
-                if let group, group == session.process.pid, let shell = session.shellPath,
-                   Self.executablePath(group) == shell {
-                    // The shell itself is in front again: the job that reported
-                    // ended before its output was read (done, then gone at once).
-                    // What it said still counts, in turn, and then it is over.
+                if shellIsInFront(session, group: group) {
                     if session.programStatus.forgetAll() { summaries.append(nil) }
                 } else {
                     session.statusOwner = group
                 }
-            } else if let owner = session.statusOwner, let group, group != owner, !changed, !Self.groupExists(owner),
-                      session.programStatus.forgetAll() {
-                summaries.append(nil)
+            } else if let owner = session.statusOwner, let group, group != owner, !Self.groupExists(owner) {
+                if !changed || shellIsInFront(session, group: group) {
+                    if session.programStatus.forgetAll() { summaries.append(nil) }
+                } else {
+                    // Another program in front reported: what is said now is its.
+                    session.statusOwner = group
+                }
             }
         }
         if session.programStatus.isEmpty { session.statusOwner = nil }
@@ -698,11 +703,34 @@ public final class ShellSessionManager: @unchecked Sendable {
         kill(-group, 0) == 0 || errno == EPERM
     }
 
-    /// The program `pid` runs, or nil once it is gone.
-    private static func executablePath(_ pid: pid_t) -> String? {
-        var buffer = [CChar](repeating: 0, count: Int(MAXPATHLEN) * 4)   // PROC_PIDPATHINFO_MAXSIZE
-        let length = proc_pidpath(pid, &buffer, UInt32(buffer.count))
-        return length > 0 ? String(cString: buffer) : nil
+    /// The shell itself is in front: its own group, with the arguments it
+    /// started with (a program it `exec`ed has its own; macOS's /bin/sh
+    /// becomes bash but keeps them).
+    private func shellIsInFront(_ session: Session, group: pid_t?) -> Bool {
+        guard let group, group == session.process.pid else { return false }
+        return Self.arguments(of: group) == session.shellArguments
+    }
+
+    /// The arguments `pid` runs with, the program first (KERN_PROCARGS2), or
+    /// nil once it is gone.
+    private static func arguments(of pid: pid_t) -> [String]? {
+        var mib: [Int32] = [CTL_KERN, KERN_PROCARGS2, pid]
+        var size = 0
+        guard sysctl(&mib, 3, nil, &size, nil, 0) == 0, size > MemoryLayout<Int32>.size else { return nil }
+        var buffer = [UInt8](repeating: 0, count: size)
+        guard sysctl(&mib, 3, &buffer, &size, nil, 0) == 0, size > MemoryLayout<Int32>.size else { return nil }
+        let count = buffer.withUnsafeBytes { Int($0.loadUnaligned(as: Int32.self)) }
+        var index = MemoryLayout<Int32>.size
+        while index < size, buffer[index] != 0 { index += 1 }   // the executable's path
+        while index < size, buffer[index] == 0 { index += 1 }   // and its padding
+        var arguments: [String] = []
+        while arguments.count < count, index < size {
+            let start = index
+            while index < size, buffer[index] != 0 { index += 1 }
+            arguments.append(String(decoding: buffer[start..<index], as: UTF8.self))
+            index += 1
+        }
+        return arguments
     }
 
     private static func oneLine(_ text: String, limit: Int) -> String {
