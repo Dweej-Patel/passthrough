@@ -132,15 +132,16 @@ final class ScreenCanvasView: UIView, UIScrollViewDelegate, UIKeyInput, UIGestur
             addGestureRecognizer(recognizer)
             fingerRecognizers.append(recognizer)
         }
-        for direction: UISwipeGestureRecognizer.Direction in [.left, .right, .up, .down] {
-            let swipe = UISwipeGestureRecognizer(target: self, action: #selector(swiped(_:)))
-            swipe.numberOfTouchesRequired = 3
-            swipe.direction = direction
-            swipe.allowedTouchTypes = fingers
-            swipe.delegate = self
-            addGestureRecognizer(swipe)
-            fingerRecognizers.append(swipe)
-        }
+        // Three fingers moving, not the system's swipe recognizer: that one wants a fast,
+        // straight flick, and took a try or two.
+        let spaces = UIPanGestureRecognizer(target: self, action: #selector(swiped(_:)))
+        spaces.minimumNumberOfTouches = 3
+        spaces.maximumNumberOfTouches = 3
+        spaces.allowedTouchTypes = fingers
+        spaces.delegate = self
+        addGestureRecognizer(spaces)
+        fingerRecognizers.append(spaces)
+        self.spaces = spaces
         // Pinch and rotate for the Mac, together, as a trackpad does them; and the view's zoom, then.
         let macPinch = UIPinchGestureRecognizer(target: self, action: #selector(pinched(_:)))
         let macRotate = UIRotationGestureRecognizer(target: self, action: #selector(rotated(_:)))
@@ -660,6 +661,9 @@ final class ScreenCanvasView: UIView, UIScrollViewDelegate, UIKeyInput, UIGestur
                            shouldRecognizeSimultaneouslyWith other: UIGestureRecognizer) -> Bool {
         // A pinch and a rotation go together, as on a trackpad.
         if (recognizer === macPinch && other === macRotate) || (recognizer === macRotate && other === macPinch) { return true }
+        // The three-finger swipe may begin though two of its fingers already started something
+        // (it then ends that, `stopTwoFingerGestures`): otherwise whichever began first shut it out.
+        if recognizer === spaces || other === spaces { return true }
         return recognizer === pen || other === pen
     }
 
@@ -668,6 +672,9 @@ final class ScreenCanvasView: UIView, UIScrollViewDelegate, UIKeyInput, UIGestur
     /// used to start the scroll and lose the zoom: when the fingers have come apart or
     /// together by more than their middle has travelled, it is a pinch, and the scroll stands down.
     override func gestureRecognizerShouldBegin(_ recognizer: UIGestureRecognizer) -> Bool {
+        // With a third finger down it's a three-finger swipe: the two-finger gestures don't start.
+        if recognizer === wheel || recognizer === macPinch || recognizer === macRotate, recognizer.numberOfTouches >= 3 { return false }
+        if recognizer === wheel || recognizer === macPinch || recognizer === macRotate, (spaces?.numberOfTouches ?? 0) >= 3 { return false }
         guard recognizer === wheel else { return super.gestureRecognizerShouldBegin(recognizer) }
         let down = touchStarts.filter { $0.touch.phase != .ended && $0.touch.phase != .cancelled }
         guard down.count == 2 else { return true }
@@ -855,14 +862,46 @@ final class ScreenCanvasView: UIView, UIScrollViewDelegate, UIKeyInput, UIGestur
         scroll.zoom(to: CGRect(x: point.x - size.width / 2, y: point.y - size.height / 2, width: size.width, height: size.height), animated: true)
     }
 
-    /// Three fingers, as on the Mac: swiping left brings in the desktop on the right.
-    @objc private func swiped(_ recognizer: UISwipeGestureRecognizer) {
-        switch recognizer.direction {
-        case .left: onSpace?(.nextDesktop)
-        case .right: onSpace?(.previousDesktop)
-        case .up: onSpace?(.missionControl)
-        case .down: onSpace?(.appWindows)
-        default: break
+    private weak var spaces: UIPanGestureRecognizer?
+    /// This three-finger swipe has done its thing: one action a swipe, however far it goes on.
+    private var spaceSwiped = false
+    /// How far three fingers travel (points) before it's a swipe.
+    private static let spaceSwipeDistance: CGFloat = 36
+
+    /// Three fingers, as on the Mac: swiping left brings in the desktop on the right, up
+    /// Mission Control, down the app's windows. It acts once the fingers have gone far
+    /// enough one way, whatever their speed.
+    @objc private func swiped(_ recognizer: UIPanGestureRecognizer) {
+        switch recognizer.state {
+        case .began:
+            spaceSwiped = false
+            // Two of the three fingers may have started a scroll, a pinch or a rotation: those end here.
+            stopTwoFingerGestures()
+            fallthrough
+        case .changed:
+            guard !spaceSwiped else { return }
+            let moved = recognizer.translation(in: self)
+            guard max(abs(moved.x), abs(moved.y)) >= Self.spaceSwipeDistance else { return }
+            spaceSwiped = true
+            UIImpactFeedbackGenerator(style: .light).impactOccurred()
+            if abs(moved.x) > abs(moved.y) {
+                onSpace?(moved.x < 0 ? .nextDesktop : .previousDesktop)
+            } else {
+                onSpace?(moved.y < 0 ? .missionControl : .appWindows)
+            }
+        default:
+            break
+        }
+    }
+
+    /// Cancels a two-finger gesture under way (toggling a recognizer off cancels it): the
+    /// Mac's scroll, pinch and rotation, and this view's own pinch to zoom.
+    private func stopTwoFingerGestures() {
+        stopMomentum()
+        for recognizer in [wheel, macPinch, macRotate, scroll.pinchGestureRecognizer] as [UIGestureRecognizer?] {
+            guard let recognizer, recognizer.isEnabled else { continue }
+            recognizer.isEnabled = false
+            recognizer.isEnabled = true
         }
     }
 
