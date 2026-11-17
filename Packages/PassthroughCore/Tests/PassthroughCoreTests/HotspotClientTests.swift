@@ -154,17 +154,39 @@ final class HotspotClientTests: XCTestCase {
                                    localPort: freePort(), socksPort: socksPort, controlPort: controlPort)
         self.client = client
         try client.start()
-        let localPort = client.localPort
-        let closedQuickly: Bool = await Task.detached {
-            let c = TestClient(port: localPort)
-            defer { c.close() }
-            c.send([5, 1, 2])
-            let start = Date()
-            let reply = c.read(2, timeout: 3)
-            return reply.isEmpty && Date().timeIntervalSince(start) < 2
-        }.value
+        let closedQuickly = await Self.closesWithoutAnswer(port: client.localPort, within: 2)
         XCTAssertTrue(closedQuickly, "the guard: nothing waits for a link that isn't there")
         XCTAssertEqual(client.status.phase, .waiting)
+    }
+
+    /// A SOCKS greeting to `port` gets no answer and the connection ends
+    /// within `within` seconds. It may end before it's even ready (the
+    /// forwarder closes it at once), so either way counts; only waiting doesn't.
+    static func closesWithoutAnswer(port: UInt16, within: TimeInterval) async -> Bool {
+        await withCheckedContinuation { continuation in
+            let queue = DispatchQueue(label: "test.guard")
+            let connection = NWConnection(host: .ipv4(.loopback), port: NWEndpoint.Port(rawValue: port)!, using: .tcp)
+            let done = Locked(false)
+            let start = Date()
+            let finish: @Sendable (Bool) -> Void = { closed in
+                guard !done.exchange(true) else { return }
+                connection.cancel()
+                continuation.resume(returning: closed && Date().timeIntervalSince(start) < within)
+            }
+            connection.stateUpdateHandler = { state in
+                switch state {
+                case .ready:
+                    connection.send(content: Data([5, 1, 2]), completion: .contentProcessed { _ in })
+                    connection.receive(minimumIncompleteLength: 2, maximumLength: 2) { data, _, _, _ in
+                        finish(data?.isEmpty ?? true)   // an answer means it waited for a link
+                    }
+                case .failed, .cancelled: finish(true)
+                default: break
+                }
+            }
+            connection.start(queue: queue)
+            queue.asyncAfter(deadline: .now() + within + 1) { finish(false) }
+        }
     }
 
     /// Pairing an iPad again only replaces its pairing once the iPad has taken
@@ -213,13 +235,7 @@ final class HotspotClientTests: XCTestCase {
         XCTAssertTrue(client.credentialsChanged())
         XCTAssertEqual(client.status.phase, .waiting)
         XCTAssertEqual(client.status.phoneName, "Other iPhone")
-        let localPort = client.localPort
-        let closed: Bool = await Task.detached {
-            let c = TestClient(port: localPort)
-            defer { c.close() }
-            c.send([5, 1, 2])
-            return c.read(2, timeout: 3).isEmpty
-        }.value
+        let closed = await Self.closesWithoutAnswer(port: client.localPort, within: 3)
         XCTAssertTrue(closed, "no stream goes out through the old iPhone")
     }
 
