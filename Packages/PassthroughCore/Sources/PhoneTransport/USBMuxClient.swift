@@ -40,7 +40,7 @@ public enum USBMux {
             case .result(let code):
                 switch code {
                 case 2: return "iPhone not found on USB"
-                case 3: return "The iPhone refused the connection. Is Passthrough running on the phone?"
+                case 3: return "The iPhone or iPad refused the connection. Is Passthrough open on it?"
                 case 6: return "usbmuxd version mismatch"
                 default: return "usbmuxd error \(code)"
                 }

@@ -34,6 +34,9 @@ struct MenuPanelView: View {
             ScrollView {
                 VStack(spacing: 12) {
                     if session.phase == .pairingRequired { PairingCard() }
+                    if session.pairingIPadID == nil, let iPad = session.unpairedIPad, session.device?.id != iPad.id || session.phase != .pairingRequired {
+                        UnpairedIPadRow()
+                    }
                     Switches()
                     PhoneHereSection()
                     Details()
@@ -771,6 +774,33 @@ struct TopAppsPanel: View {
 }
 
 /// Six-box code entry for the first connection.
+/// An iPad on the cable that isn't paired: the Mac is busy with the phone (it
+/// holds one control channel), so pairing the iPad is something to ask for.
+struct UnpairedIPadRow: View {
+    @EnvironmentObject private var session: SessionCoordinator
+
+    var body: some View {
+        PTSurface(padding: 12) {
+            HStack(spacing: 10) {
+                Image(systemName: "ipad").font(.system(size: 18, weight: .medium)).foregroundStyle(PTColor.tintText)
+                    .frame(width: 28)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("An iPad is plugged in").font(.subheadline.weight(.semibold))
+                    Text(session.remoteShellEnabled
+                         ? "Pair it to use it as this Mac's remote. \(session.phase.isConnected ? "Internet through the phone pauses for a moment." : "")"
+                         : "Turn on Remote shell in Settings to pair it as this Mac's remote.")
+                        .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                }
+                Spacer(minLength: 6)
+                if session.remoteShellEnabled {
+                    Button("Pair iPad") { session.pairIPad() }.buttonStyle(PTPillButtonStyle())
+                }
+            }
+        }
+        .accessibilityElement(children: .combine)
+    }
+}
+
 struct PairingCard: View {
     @EnvironmentObject private var session: SessionCoordinator
     @State private var code = ""
@@ -801,7 +831,8 @@ struct PairingCard: View {
                 } else if let error = session.pairingError {
                     Text(error).font(.caption).foregroundStyle(PTColor.problem).multilineTextAlignment(.center)
                 }
-                Button("Cancel") { session.disconnect() }.buttonStyle(.plain).font(.caption).foregroundStyle(.secondary)
+                Button("Cancel") { session.pairingIPadID != nil ? session.cancelPairingIPad() : session.disconnect() }
+                    .buttonStyle(.plain).font(.caption).foregroundStyle(.secondary)
             }
         }
         .onAppear { focused = true; code = "" }

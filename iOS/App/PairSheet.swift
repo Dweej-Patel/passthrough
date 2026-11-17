@@ -6,8 +6,6 @@ import PassthroughUI
 struct PairSheet: View {
     @EnvironmentObject private var model: AppModel
     @Environment(\.dismiss) private var dismiss
-    @State private var now = Date()
-    private let clock = Timer.publish(every: 1, on: .main, in: .common).autoconnect()
 
     var body: some View {
         ZStack {
@@ -39,12 +37,17 @@ struct PairSheet: View {
                 }
                 if let code = model.pairingCode {
                     PairingCodeTiles(code: code.code, size: 50)
-                    VStack(spacing: 6) {
-                        ProgressView(value: remaining(code.expiry), total: PassthroughProtocol.pairingCodeLifetime)
-                            .tint(PTTheme.accentEnd)
-                            .frame(width: 220)
-                        Text("Expires in \(ByteFormat.duration(remaining(code.expiry)))")
-                            .font(PTTheme.mono(13)).foregroundStyle(.secondary)
+                    // Counted by the clock: a timer kept on this view was made anew
+                    // each time the screen behind redrew (every second on an iPad)
+                    // and so never fired, leaving the countdown at 5:00.
+                    TimelineView(.periodic(from: .now, by: 1)) { context in
+                        VStack(spacing: 6) {
+                            ProgressView(value: remaining(code.expiry, now: context.date), total: PassthroughProtocol.pairingCodeLifetime)
+                                .tint(PTTheme.accentEnd)
+                                .frame(width: 220)
+                            Text("Expires in \(ByteFormat.duration(remaining(code.expiry, now: context.date)))")
+                                .font(PTTheme.mono(13)).foregroundStyle(.secondary)
+                        }
                     }
                 } else {
                     if model.pairingCodeWithdrawn {
@@ -69,7 +72,6 @@ struct PairSheet: View {
         .presentationDetents([.large])
         .presentationDragIndicator(.hidden)
         .onAppear { if model.pairingCode == nil { model.beginPairing() } }
-        .onReceive(clock) { now = $0 }
         .onChange(of: model.pairedClients.count) { old, new in
             if new > old { dismiss() }
         }
@@ -78,7 +80,7 @@ struct PairSheet: View {
     /// Why the code on screen went away early. Same words as the Android app's.
     static let withdrawnDetail = "Too many wrong codes were entered, so it no longer works. If that wasn't you, something on this phone or the Mac tried to guess it. Generate a new code to pair."
 
-    private func remaining(_ expiry: Date) -> TimeInterval {
+    private func remaining(_ expiry: Date, now: Date) -> TimeInterval {
         max(0, expiry.timeIntervalSince(now))
     }
 }

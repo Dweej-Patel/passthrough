@@ -215,8 +215,8 @@ final class HotspotModel: ObservableObject {
             await controller.updateClientRules()
         }
         if let data = await controller.message(HotspotTunnel.statusMessage),
-           let status = try? JSONDecoder().decode(HotspotStatus.self, from: data) {
-            self.status = status
+           let status = try? JSONDecoder().decode(HotspotStatus.self, from: data), status != self.status {
+            self.status = status   // only on a change: every assignment redraws the screens watching it
         }
     }
 

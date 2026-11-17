@@ -32,6 +32,12 @@ final class SessionCoordinator: ObservableObject {
     @Published private(set) var androidWatch = WatchStatus()
     @Published private(set) var meter = TrafficMeter()
     @Published private(set) var phoneStatus: DeviceStatus?
+    /// An iPad on the cable that isn't paired with this Mac (the panel offers to pair it).
+    @Published private(set) var unpairedIPad: PhoneDevice?
+    /// The user asked to pair `unpairedIPad`: the Mac holds one control channel
+    /// at a time, and a phone that routes always gets it, so it's lent to the
+    /// iPad until the iPad is paired and has its shell key.
+    @Published private(set) var pairingIPadID: String?
     @Published private(set) var phoneActiveConnections = 0
     @Published private(set) var connectedSince: Date?
     @Published private(set) var tunnelInterface: String?
@@ -364,6 +370,8 @@ final class SessionCoordinator: ObservableObject {
     static let identityLabel = "\(PassthroughProtocol.identifier).wireless-identity"
 
     private func devicesChanged(_ change: DeviceDirectory.Change) {
+        defer { refreshUnpairedIPad() }
+        if case .detached(let gone) = change, gone.id == pairingIPadID { releaseIPad(because: "the iPad was unplugged") }
         switch change {
         case .attached(let d):
             retryAttempts = 0
@@ -378,9 +386,70 @@ final class SessionCoordinator: ObservableObject {
         }
     }
 
+    // MARK: Pairing an iPad
+
+    private var pairingIPadTimeout: Task<Void, Never>?
+    private var reconnectAfterIPad = false
+
+    private func refreshUnpairedIPad() {
+        let found = directory.devices.first { $0.kind == .iPad && $0.medium == .usb && PairingSlots.lookup(for: $0, in: tokens) == nil }
+        if found?.id != unpairedIPad?.id { unpairedIPad = found }
+    }
+
+    /// Lends the control channel to the unpaired iPad on the cable. Internet
+    /// through the phone pauses meanwhile and comes back after.
+    func pairIPad() {
+        guard let iPad = unpairedIPad, remoteShellEnabled, pairingIPadID == nil else { return }
+        reconnectAfterIPad = wantsConnection || phase.isConnected || phase.isBusy
+        wantsConnection = false
+        retryTask?.cancel()
+        retrying = false
+        pairingIPadID = iPad.id
+        ptLog(.info, "Pairing the iPad: it has the control channel until it's paired")
+        pairingIPadTimeout?.cancel()
+        pairingIPadTimeout = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(180))
+            guard !Task.isCancelled else { return }
+            self?.releaseIPad(because: "no pairing within 3 minutes")
+        }
+        reconsiderDevice()
+        // Try the iPad now (it may already be the device, waiting between retries).
+        shellControlRetryAt = .distantPast
+        ensureShellControl()
+    }
+
+    func cancelPairingIPad() { releaseIPad(because: "cancelled") }
+
+    /// Back to the phone, reconnecting if the Mac was online through it.
+    private func releaseIPad(because reason: String) {
+        guard pairingIPadID != nil else { return }
+        pairingIPadID = nil
+        pairingIPadTimeout?.cancel()
+        pairingIPadTimeout = nil
+        ptLog(.info, "Pairing the iPad: done (\(reason))")
+        if phase == .pairingRequired { phase = device == nil ? .noDevice : .deviceFound }
+        let reconnect = reconnectAfterIPad
+        reconnectAfterIPad = false
+        reconsiderDevice()
+        if reconnect, device?.routes == true, !phase.isConnected, !phase.isBusy { connect() }
+    }
+
+    /// The iPad just paired: give it a moment for its shell key, then hand back.
+    private func iPadPaired(_ device: PhoneDevice) {
+        refreshUnpairedIPad()
+        guard device.id == pairingIPadID else { return }
+        pairingIPadTimeout?.cancel()
+        pairingIPadTimeout = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(10))
+            guard !Task.isCancelled else { return }
+            self?.releaseIPad(because: "paired")
+        }
+    }
+
     /// The phone to use: the current one while it stays attached and allowed,
     /// else the first allowed one, the cable first when both are possible.
     private func preferredDevice() -> PhoneDevice? {
+        if let lent = pairingIPadID, let iPad = directory.devices.first(where: { $0.id == lent }) { return iPad }
         let allowed = directory.devices.filter { connectionMode.allows($0) }
         // A phone that can carry the Mac's internet before an iPad, which only
         // ever pairs (as a remote: shell, screen, switches).
@@ -391,8 +460,12 @@ final class SessionCoordinator: ObservableObject {
     private func reconsiderDevice() {
         let best = preferredDevice()
         let currentStillFine = device.map { d in directory.devices.contains { $0.id == d.id } && connectionMode.allows(d) } ?? false
-        // Keep a working link unless the cable just became available in Automatic.
-        if currentStillFine, !(device?.medium == .wireless && best?.medium == .usb) { return }
+        // Keep a working link unless the cable just became available in Automatic,
+        // the iPad being paired needs the channel, or the current device is an
+        // iPad (which never routes) and a phone that can is here.
+        let lendingChanges = pairingIPadID != nil && best?.id != device?.id
+        let phoneOverIPad = device?.routes == false && best?.routes == true
+        if currentStillFine, !lendingChanges, !phoneOverIPad, !(device?.medium == .wireless && best?.medium == .usb) { return }
         guard best?.id != device?.id else { return }
         if device != nil { teardown(to: best == nil ? .noDevice : .deviceFound, keepControl: false) }
         device = best
@@ -738,6 +811,7 @@ final class SessionCoordinator: ObservableObject {
             controlState = .paired
             shellGrants.paired(deviceID: device.id)
             ptLog(.info, "Paired with \(phoneStatus?.deviceName ?? phoneKindName)")
+            if device.kind == .iPad { iPadPaired(device) }
             sendLink()
             sendShellGrant()
             if tunnelUsesControl {
@@ -781,6 +855,10 @@ final class SessionCoordinator: ObservableObject {
             }
             shell.record(ShellPhone(phoneID: phoneID, label: phoneStatus?.deviceName ?? pending.device.kindName,
                                     pairingSlot: pending.device.pairingSlot, key: pending.key, grantedAt: Date()))
+            // The iPad being paired has its key: the phone can have the channel back.
+            if pending.device.id == pairingIPadID {
+                DispatchQueue.main.async { [weak self] in self?.releaseIPad(because: "paired, with its shell key") }
+            }
             // What grants carry may have changed while this one was in flight.
             sendShellGrant()
         case .pairingFailed(let failure):
@@ -825,7 +903,10 @@ final class SessionCoordinator: ObservableObject {
             }
             if !forTunnel {
                 // Only open for the shell: try again later, backing off while the phone keeps refusing.
-                let retry = shellControlBackoff.failed()
+                // An unpaired iPad is waiting for someone to show its code: look
+                // again every few seconds rather than backing off to minutes.
+                let retry = device.kind == .iPad && PairingSlots.lookup(for: device, in: tokens) == nil
+                    ? (delay: 5.0, log: shellControlBackoff.failures == 0) : shellControlBackoff.failed()
                 if retry.log { ptLog(.warning, "shell: control channel to the \(phoneKindName) closed: \(why); retrying in the background") }
                 shellControlRetryAt = Date().addingTimeInterval(retry.delay)
                 if phase == .pairingRequired { phase = .error("Lost the \(phoneKindName) while pairing: \(why)") }
