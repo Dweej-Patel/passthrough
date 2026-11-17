@@ -305,6 +305,10 @@ final class ShellSessionManagerTests: XCTestCase {
     /// don't end up in the title.
     func testEscapesAndClearedLinesStayOutOfTheTitle() throws {
         let id = try manager.open(phoneLabel: "Pixel", cols: 80, rows: 24)
+        // Type only once the shell is at its prompt: keys (ctrl-C among them)
+        // sent while it's still starting can be lost on a slow machine, and
+        // then no title is ever set (seen on CI).
+        wait("prompt") { String(decoding: (try? store.output(of: id)) ?? Data(), as: UTF8.self).contains("$ ") }
         manager.input(id, Data("\u{1B}[A\u{1B}[1;5D\u{1B}OB".utf8))
         manager.input(id, Data("junk\u{15}".utf8))
         manager.input(id, Data("more\u{03}".utf8))

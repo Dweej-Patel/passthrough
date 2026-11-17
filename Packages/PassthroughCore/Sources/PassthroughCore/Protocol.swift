@@ -70,6 +70,8 @@ public struct ControlEnvelope: Codable, Equatable, Sendable {
     public var hosting: String?
     /// Whether the phone's current network routes IPv6. Absent from older phones.
     public var ipv6: Bool?
+    /// status, from an iPad: the iPhone it gets its internet from. Absent otherwise.
+    public var internetFrom: String?
     public var activeConnections: Int?
     public var rxBytes: Int64?
     public var txBytes: Int64?
@@ -115,6 +117,9 @@ public struct ControlEnvelope: Codable, Equatable, Sendable {
     public static let linked = "linked"
     public static let shellGrant = "shellGrant"
     public static let shellGranted = "shellGranted"
+    /// The phone's user turned Passthrough off: it stops right after.
+    /// A link that only dropped sends nothing (and resumes if it can).
+    public static let goodbye = "goodbye"
 
     public func encodedLine() throws -> Data {
         var data = try JSONEncoder().encode(self)
@@ -164,6 +169,11 @@ public struct ProviderStats: Codable, Sendable, Equatable {
     public func isWireless(_ mac: ConnectedMac) -> Bool {
         mac.wireless ?? wirelessMacTags?.contains(WirelessLink.macTag(clientID: mac.id)) ?? false
     }
+
+    /// The Macs among the connected clients (`macs` also lists iPads).
+    public var connectedMacs: [ConnectedMac] { macs.filter { $0.kind != .ipad } }
+    /// The iPads using this phone's internet over its hotspot.
+    public var connectedIPads: [ConnectedMac] { macs.filter { $0.kind == .ipad } }
 }
 
 /// Keys the iOS app and extension share through the App Group defaults.
@@ -179,6 +189,8 @@ extension PassthroughProtocol {
 
 public enum SharedKeys {
     public static let deviceName = "device.name"
+    /// iPad: the name of the iPhone it gets its internet from, for its Macs.
+    public static let internetFrom = "device.internetFrom"
     public static let radio = "device.radio"
     public static let carrier = "device.carrier"
     public static let battery = "device.battery"

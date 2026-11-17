@@ -34,6 +34,9 @@ struct MenuPanelView: View {
             ScrollView {
                 VStack(spacing: 12) {
                     if session.phase == .pairingRequired { PairingCard() }
+                    if session.pairingIPadID == nil, let iPad = session.unpairedIPad, session.device?.id != iPad.id || session.phase != .pairingRequired {
+                        UnpairedIPadRow()
+                    }
                     Switches()
                     PhoneHereSection()
                     Details()
@@ -60,7 +63,7 @@ struct MenuPanelView: View {
 
     private var header: some View {
         HStack(spacing: 10) {
-            Image(systemName: session.device?.kind == .android ? "smartphone" : "iphone.gen3")
+            Image(systemName: session.device?.kind == .android ? "smartphone" : session.device?.kind == .iPad ? "ipad" : "iphone.gen3")
                 .font(.system(size: 16, weight: .semibold))
                 .foregroundStyle(session.phase.isConnected ? PTColor.onTint : Color.secondary)
                 .frame(width: 34, height: 34)
@@ -95,7 +98,12 @@ struct MenuPanelView: View {
             return parts.joined(separator: " · ")
         case .connecting(let step): return step
         case .pairingRequired: return "Type the code shown on the \(session.phoneKindName)"
-        default: return vpnOn ? "VPN on, over this Mac's own network" : "This Mac is on its own network"
+        default:
+            // An iPad never carries the Mac's internet; say which iPhone it uses.
+            if session.device?.kind == .iPad, let from = session.phoneStatus?.internetFrom {
+                return "\(phoneName) gets its internet from \(from)"
+            }
+            return vpnOn ? "VPN on, over this Mac's own network" : "This Mac is on its own network"
         }
     }
 
@@ -681,7 +689,7 @@ struct FlowCard: View {
         let viaWiFi = vpnLayer.isWanted && !session.phase.isConnected && !session.phase.isBusy
         let localName = vpnLayer.status.underlay.map { $0 == "iPhone" ? "Wi-Fi" : $0 } ?? "Wi-Fi"
         return FlowMapState(perspective: .mac, macName: session.macName, phoneName: session.phoneStatus?.deviceName ?? session.phoneKindName,
-                            phoneIcon: session.device?.kind == .android ? "smartphone" : "iphone.gen3",
+                            phoneIcon: session.device?.kind == .android ? "smartphone" : session.device?.kind == .iPad ? "ipad" : "iphone.gen3",
                             linkUp: session.phase.isConnected || (viaWiFi && vpnLayer.status.isConnected),
                             busy: session.phase.isBusy || (viaWiFi && vpnLayer.status.isBusy),
                             radio: viaWiFi ? nil : session.phoneStatus?.radio,
@@ -766,6 +774,33 @@ struct TopAppsPanel: View {
 }
 
 /// Six-box code entry for the first connection.
+/// An iPad on the cable that isn't paired: the Mac is busy with the phone (it
+/// holds one control channel), so pairing the iPad is something to ask for.
+struct UnpairedIPadRow: View {
+    @EnvironmentObject private var session: SessionCoordinator
+
+    var body: some View {
+        PTSurface(padding: 12) {
+            HStack(spacing: 10) {
+                Image(systemName: "ipad").font(.system(size: 18, weight: .medium)).foregroundStyle(PTColor.tintText)
+                    .frame(width: 28)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("An iPad is plugged in").font(.subheadline.weight(.semibold))
+                    Text(session.remoteShellEnabled
+                         ? "Pair it to use it as this Mac's remote. \(session.phase.isConnected ? "Internet through the phone pauses for a moment." : "")"
+                         : "Turn on Remote shell in Settings to pair it as this Mac's remote.")
+                        .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                }
+                Spacer(minLength: 6)
+                if session.remoteShellEnabled {
+                    Button("Pair iPad") { session.pairIPad() }.buttonStyle(PTPillButtonStyle())
+                }
+            }
+        }
+        .accessibilityElement(children: .combine)
+    }
+}
+
 struct PairingCard: View {
     @EnvironmentObject private var session: SessionCoordinator
     @State private var code = ""
@@ -796,7 +831,8 @@ struct PairingCard: View {
                 } else if let error = session.pairingError {
                     Text(error).font(.caption).foregroundStyle(PTColor.problem).multilineTextAlignment(.center)
                 }
-                Button("Cancel") { session.disconnect() }.buttonStyle(.plain).font(.caption).foregroundStyle(.secondary)
+                Button("Cancel") { session.pairingIPadID != nil ? session.cancelPairingIPad() : session.disconnect() }
+                    .buttonStyle(.plain).font(.caption).foregroundStyle(.secondary)
             }
         }
         .onAppear { focused = true; code = "" }

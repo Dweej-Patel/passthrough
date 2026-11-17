@@ -19,7 +19,8 @@ enum ScreenTouchMode: String, CaseIterable {
 /// swipes move between desktops (left and right) or open Mission Control
 /// (up) and the app's windows (down), as on a Mac's trackpad. It is also the
 /// keyboard's text input while the keyboard is up.
-final class ScreenCanvasView: UIView, UIScrollViewDelegate, UIKeyInput, UIGestureRecognizerDelegate {
+final class ScreenCanvasView: UIView, UIScrollViewDelegate, UIKeyInput, UIGestureRecognizerDelegate, UIPointerInteractionDelegate,
+                              UIPencilInteractionDelegate {
     var onPointer: ((CGPoint, RFBClient.Buttons) -> Void)?
     var onClick: ((CGPoint, RFBClient.Buttons) -> Void)?
     /// Two fingers moved by a delta (screen pixels) with the pointer at a point; then the
@@ -90,20 +91,245 @@ final class ScreenCanvasView: UIView, UIScrollViewDelegate, UIKeyInput, UIGestur
         let wheel = UIPanGestureRecognizer(target: self, action: #selector(wheeled(_:)))
         wheel.minimumNumberOfTouches = 2
         wheel.maximumNumberOfTouches = 2
-        wheel.delegate = self
         let hold = UILongPressGestureRecognizer(target: self, action: #selector(held(_:)))
         hold.minimumPressDuration = 0.35
         move.require(toFail: hold)
-        for recognizer in [tap, twoFingerTap, move, wheel, hold] { addGestureRecognizer(recognizer) }
+        // Fingers only: a trackpad or mouse (an iPad's) is a real pointer, below.
+        let fingers = [NSNumber(value: UITouch.TouchType.direct.rawValue)]
+        scroll.panGestureRecognizer.allowedTouchTypes = fingers
+        for recognizer in [tap, twoFingerTap, move, wheel, hold] {
+            recognizer.allowedTouchTypes = fingers
+            recognizer.delegate = self   // palm rejection while the Pencil is in use (`shouldReceive`)
+            addGestureRecognizer(recognizer)
+            fingerRecognizers.append(recognizer)
+        }
         for direction: UISwipeGestureRecognizer.Direction in [.left, .right, .up, .down] {
             let swipe = UISwipeGestureRecognizer(target: self, action: #selector(swiped(_:)))
             swipe.numberOfTouchesRequired = 3
             swipe.direction = direction
+            swipe.allowedTouchTypes = fingers
+            swipe.delegate = self
             addGestureRecognizer(swipe)
+            fingerRecognizers.append(swipe)
         }
+        addPointerRecognizers()
         self.move = move
         self.wheel = wheel
         applyMode()
+    }
+
+    // MARK: Trackpad and mouse
+
+    /// A connected trackpad or mouse drives the Mac's pointer directly, whatever
+    /// the touch mode: moving it moves the Mac's, clicks click there, the
+    /// secondary button right-clicks, and two-finger scrolling scrolls. The
+    /// iPad's own pointer hides over the screen, so there's one pointer.
+    private func addPointerRecognizers() {
+        let pointer = [NSNumber(value: UITouch.TouchType.indirectPointer.rawValue)]
+        let hover = UIHoverGestureRecognizer(target: self, action: #selector(hovered(_:)))
+        let click = UITapGestureRecognizer(target: self, action: #selector(pointerClicked(_:)))
+        click.allowedTouchTypes = pointer
+        click.buttonMaskRequired = .primary
+        let rightClick = UITapGestureRecognizer(target: self, action: #selector(pointerRightClicked(_:)))
+        rightClick.allowedTouchTypes = pointer
+        rightClick.buttonMaskRequired = .secondary
+        let drag = UIPanGestureRecognizer(target: self, action: #selector(pointerDragged(_:)))
+        drag.allowedTouchTypes = pointer
+        drag.allowedScrollTypesMask = []
+        let scrolling = UIPanGestureRecognizer(target: self, action: #selector(pointerScrolled(_:)))
+        scrolling.allowedTouchTypes = []
+        scrolling.allowedScrollTypesMask = .all
+        for recognizer in [hover, click, rightClick, drag, scrolling] { addGestureRecognizer(recognizer) }
+        addInteraction(UIPointerInteraction(delegate: self))
+        addPencil()
+    }
+
+    // MARK: Apple Pencil
+
+    /// Apple Pencil is a pen on the Mac's screen, whatever the touch mode: the
+    /// tip presses the button where it touches, moving drags, lifting lets go
+    /// (a tap is a click; a stroke selects, drags a window or draws). Hovering
+    /// moves the pointer (the hover recognizer above, on iPads that sense it).
+    /// Double-tap on the Pencil, or squeeze, right-clicks where it last touched.
+    /// While the Pencil is in use the hand holding it is ignored (palm
+    /// rejection); fingers pan and zoom again once it's lifted.
+    private func addPencil() {
+        let pen = UILongPressGestureRecognizer(target: self, action: #selector(penned(_:)))
+        pen.minimumPressDuration = 0
+        pen.allowableMovement = .greatestFiniteMagnitude
+        pen.allowedTouchTypes = [NSNumber(value: UITouch.TouchType.pencil.rawValue)]
+        pen.delegate = self
+        addGestureRecognizer(pen)
+        self.pen = pen
+        let pencil = UIPencilInteraction()
+        pencil.delegate = self
+        addInteraction(pencil)
+    }
+
+    private weak var pen: UILongPressGestureRecognizer?
+    private var fingerRecognizers: [UIGestureRecognizer] = []
+    /// The Pencil is touching, hovering, or was a moment ago: fingers then are
+    /// the hand holding it, not gestures. Times are the monotonic uptime.
+    private var penDown = false
+    private var penLastSeen: TimeInterval = 0
+    private static var uptime: TimeInterval { ProcessInfo.processInfo.systemUptime }
+    private var penInUse: Bool { penDown || Self.uptime - penLastSeen < 0.5 }
+    /// A finger's press-and-hold has the Mac's button down (`held`).
+    private var fingerPressing = false
+    /// Where the tip came down (in this view, for the slop; in the Mac's pixels,
+    /// for the release), and whether it has moved far enough to be a drag: a
+    /// tip always wobbles a little, and every wobble with the button down would
+    /// be a drag on the Mac (a selection, not a click).
+    private var penStart = CGPoint.zero
+    private var penStartOnScreen = CGPoint.zero
+    private var penDragging = false
+    private static let penSlop: CGFloat = 4
+    /// Where the Pencil last touched, in the Mac's pixels: the right-click goes there.
+    private var penLastOnScreen: CGPoint?
+
+    @objc private func penned(_ recognizer: UILongPressGestureRecognizer) {
+        switch recognizer.state {
+        case .began:
+            guard screenSize.width > 0 else { return }
+            penDown = true
+            // A hand already resting on the screen: end its gestures, and let go
+            // of a button its hold pressed, or the Pencil would drag from there.
+            // The view's own pan and pinch wait until the Pencil is done.
+            stopFingerGestures()
+            holdScrolling(true)
+            if fingerPressing {
+                fingerPressing = false
+                onPointer?(cursorPoint, [])
+            }
+            // Move to the tip first, then press: the press starts where the tip
+            // is, not where the Mac's pointer was.
+            penStart = recognizer.location(in: self)
+            penDragging = false
+            pointTo(penStart)
+            penStartOnScreen = cursorPoint
+            penLastOnScreen = cursorPoint
+            onPointer?(cursorPoint, [])
+            onPointer?(cursorPoint, .left)
+        case .changed:
+            guard penDown else { return }
+            let location = recognizer.location(in: self)
+            if !penDragging {
+                // Still a tap: the button stays down where the tip came down.
+                guard hypot(location.x - penStart.x, location.y - penStart.y) >= Self.penSlop else { return }
+                penDragging = true
+            }
+            pointTo(location)
+            penLastOnScreen = cursorPoint
+            onPointer?(cursorPoint, .left)
+        case .ended, .cancelled, .failed:
+            guard penDown else { return }
+            // A tap lets go where it pressed (the Mac's pixel, even if the view
+            // moved meanwhile); a drag where the tip lifted.
+            if penDragging, screenSize.width > 0 { pointTo(recognizer.location(in: self)) } else { cursorPoint = penStartOnScreen; updateCursor() }
+            penLastOnScreen = cursorPoint
+            onPointer?(cursorPoint, [])
+            penDragging = false
+            penDown = false
+            penLastSeen = Self.uptime
+            // Panning and zooming come back once the hand has had a moment to lift.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
+                guard let self, !self.penInUse else { return }
+                self.holdScrolling(false)
+            }
+        default: break
+        }
+    }
+
+    /// Cancels finger gestures under way, including ones still deciding on a
+    /// resting palm (toggling a recognizer off cancels it). Only those that
+    /// are on: the touch mode keeps some off on purpose.
+    private func stopFingerGestures() {
+        for recognizer in fingerRecognizers where recognizer.isEnabled
+            && (recognizer.state == .began || recognizer.state == .changed || recognizer.state == .possible) {
+            recognizer.isEnabled = false
+            recognizer.isEnabled = true
+        }
+    }
+
+    /// The view's own pan and pinch (the scroll view's, out of `shouldReceive`'s
+    /// reach) are off while the Pencil is in use, then back as the mode wants them.
+    private func holdScrolling(_ hold: Bool) {
+        scroll.panGestureRecognizer.isEnabled = !hold && mode == .direct
+        scroll.pinchGestureRecognizer?.isEnabled = !hold
+    }
+
+    func pencilInteraction(_ interaction: UIPencilInteraction, didReceiveTap tap: UIPencilInteraction.Tap) {
+        guard UIPencilInteraction.preferredTapAction != .ignore else { return }
+        pencilRightClick()
+    }
+
+    func pencilInteraction(_ interaction: UIPencilInteraction, didReceiveSqueeze squeeze: UIPencilInteraction.Squeeze) {
+        guard squeeze.phase == .ended, UIPencilInteraction.preferredSqueezeAction != .ignore else { return }
+        pencilRightClick()
+    }
+
+    /// Not while the tip is down: a right-click would let go of the stroke.
+    private func pencilRightClick() {
+        guard screenSize.width > 0, !penDown else { return }
+        let point = penLastOnScreen ?? cursorPoint
+        cursorPoint = point
+        updateCursor()
+        onClick?(point, .right)
+    }
+
+    func pointerInteraction(_ interaction: UIPointerInteraction, styleFor region: UIPointerRegion) -> UIPointerStyle? {
+        screenSize == .zero ? nil : .hidden()
+    }
+
+    private func pointTo(_ location: CGPoint) {
+        guard screenSize.width > 0 else { return }
+        cursorPoint = screenPoint(location)
+        updateCursor()
+    }
+
+    @objc private func hovered(_ recognizer: UIHoverGestureRecognizer) {
+        guard recognizer.state == .began || recognizer.state == .changed else { return }
+        // A Pencil hovering (it has a height; a pointer doesn't): the hand is
+        // about to rest, so fingers count as the palm from now.
+        if recognizer.zOffset > 0 { penLastSeen = Self.uptime }
+        guard !penDown else { return }
+        pointTo(recognizer.location(in: self))
+        onPointer?(cursorPoint, [])
+    }
+
+    @objc private func pointerClicked(_ recognizer: UITapGestureRecognizer) {
+        pointTo(recognizer.location(in: self))
+        onClick?(cursorPoint, .left)
+    }
+
+    @objc private func pointerRightClicked(_ recognizer: UITapGestureRecognizer) {
+        pointTo(recognizer.location(in: self))
+        onClick?(cursorPoint, .right)
+    }
+
+    /// The button held while moving: a drag on the Mac.
+    @objc private func pointerDragged(_ recognizer: UIPanGestureRecognizer) {
+        pointTo(recognizer.location(in: self))
+        switch recognizer.state {
+        case .began, .changed: onPointer?(cursorPoint, .left)
+        case .ended, .cancelled, .failed: onPointer?(cursorPoint, [])
+        default: break
+        }
+    }
+
+    @objc private func pointerScrolled(_ recognizer: UIPanGestureRecognizer) {
+        switch recognizer.state {
+        case .changed:
+            guard content.frame.width > 0 else { return }
+            let translation = recognizer.translation(in: self)
+            recognizer.setTranslation(.zero, in: self)
+            let pixelsPerPoint = screenSize.width / content.frame.width
+            onScroll?(cursorPoint, CGPoint(x: translation.x * pixelsPerPoint, y: translation.y * pixelsPerPoint), 16 * pixelsPerPoint)
+        case .ended, .cancelled, .failed:
+            onScrollEnded?()
+        default:
+            break
+        }
     }
 
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
@@ -120,7 +346,8 @@ final class ScreenCanvasView: UIView, UIScrollViewDelegate, UIKeyInput, UIGestur
 
     private func applyMode() {
         // Trackpad: one finger moves the pointer, and a zoomed view follows it.
-        scroll.panGestureRecognizer.isEnabled = mode == .direct
+        // (Not while the Pencil holds scrolling off.)
+        scroll.panGestureRecognizer.isEnabled = mode == .direct && !penInUse
         move?.isEnabled = mode == .trackpad
         cursor.isHidden = mode == .direct || screenSize == .zero
         updateCursor()
@@ -304,6 +531,7 @@ final class ScreenCanvasView: UIView, UIScrollViewDelegate, UIKeyInput, UIGestur
             UIImpactFeedbackGenerator(style: .medium).impactOccurred()
             if mode == .direct { cursorPoint = screenPoint(location) }
             lastDragLocation = location
+            fingerPressing = true
             onPointer?(cursorPoint, .left)
             updateCursor()
         case .changed:
@@ -316,7 +544,9 @@ final class ScreenCanvasView: UIView, UIScrollViewDelegate, UIKeyInput, UIGestur
             }
             lastDragLocation = location
         case .ended, .cancelled, .failed:
-            onPointer?(cursorPoint, [])
+            // The Pencil may have let go of this press already.
+            if fingerPressing { onPointer?(cursorPoint, []) }
+            fingerPressing = false
         default:
             break
         }
@@ -326,11 +556,20 @@ final class ScreenCanvasView: UIView, UIScrollViewDelegate, UIKeyInput, UIGestur
 
     /// Remembers where each finger came down, for `gestureRecognizerShouldBegin`.
     func gestureRecognizer(_ recognizer: UIGestureRecognizer, shouldReceive touch: UITouch) -> Bool {
+        // Palm rejection: while the Pencil is in use, a finger is the hand holding
+        // it. (Only then: judging a touch by its size rejected ordinary fingers.)
+        if recognizer !== pen, touch.type == .direct, penInUse { return false }
         if recognizer === wheel {
             touchStarts.removeAll { $0.touch === touch || $0.touch.phase == .ended || $0.touch.phase == .cancelled }
             touchStarts.append((touch, touch.location(in: self)))
         }
         return true
+    }
+
+    /// The Pencil works beside fingers (a resting palm or a pan doesn't stop it).
+    func gestureRecognizer(_ recognizer: UIGestureRecognizer,
+                           shouldRecognizeSimultaneouslyWith other: UIGestureRecognizer) -> Bool {
+        recognizer === pen || other === pen
     }
 
     /// Two fingers scroll the Mac or pinch to zoom, and whichever is recognized first
@@ -514,7 +753,7 @@ final class ScreenKeyRow: UIInputView {
                     self?.update()
                 }, for: .touchUpInside)
             case .copy:
-                button.accessibilityLabel = "Copy from the Mac to this iPhone"
+                button.accessibilityLabel = "Copy from the Mac to this \(ThisDevice.name)"
                 button.addAction(UIAction { [weak self] _ in self?.canvas?.onCopy?() }, for: .touchUpInside)
             case .paste:
                 button.accessibilityLabel = "Paste on the Mac"

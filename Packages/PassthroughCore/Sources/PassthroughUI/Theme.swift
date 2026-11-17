@@ -126,14 +126,28 @@ public struct PTPill: View {
 public struct PTStatusDot: View {
     let color: Color
     let live: Bool
-    @State private var pulse = false
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     public init(color: Color, live: Bool) { self.color = color; self.live = live }
     public var body: some View {
-        ZStack {
-            Circle().fill(color.opacity(0.35)).frame(width: 16, height: 16)
-                .scaleEffect(live && pulse ? 1.5 : 1).opacity(live && pulse ? 0 : 1)
-            Circle().fill(color).frame(width: 8, height: 8)
+        // Clock-driven (see `StatusRing`): a repeating animation started on
+        // appear can carry the dot's position with it. 20 fps; still when not
+        // live or under Reduce Motion.
+        let moving = live && !reduceMotion
+        TimelineView(.animation(minimumInterval: 1.0 / 20, paused: !moving)) { context in
+            let wave = moving ? PTPulse.wave(context.date, period: 1.4) : 0
+            ZStack {
+                Circle().fill(color.opacity(0.35)).frame(width: 16, height: 16)
+                    .scaleEffect(1 + 0.5 * wave).opacity(1 - wave)
+                Circle().fill(color).frame(width: 8, height: 8)
+            }
         }
-        .onAppear { withAnimation(.easeOut(duration: 1.4).repeatForever(autoreverses: false)) { pulse = true } }
+    }
+}
+
+/// A halo's pulse: 0 to 1 over `period` seconds, eased out, then again.
+public enum PTPulse {
+    public static func wave(_ date: Date, period: TimeInterval) -> Double {
+        let t = (date.timeIntervalSinceReferenceDate / period).truncatingRemainder(dividingBy: 1)
+        return 1 - (1 - t) * (1 - t)
     }
 }

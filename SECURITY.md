@@ -1,7 +1,7 @@
 # Security policy
 
 Passthrough runs a root helper on the Mac and a network extension on the
-iPhone, so security reports are taken seriously.
+iPhone and iPad, so security reports are taken seriously.
 
 ## Reporting a vulnerability
 
@@ -74,6 +74,47 @@ be given to anyone else (they could push to the team's apps until the key is
 revoked). Anything that lets content out unsealed, sends a
 phone notices it did not ask for, or reaches a phone's pairing or shell
 secrets from the notification extension is a vulnerability.
+
+An iPad's *Internet through iPhone* is in scope. Its pairing with an iPhone
+has no cable, so the camera stands in for it: the QR code the iPad shows
+carries its certificate fingerprint and a one-time 32-byte secret, works once,
+and expires after five minutes, and the iPhone adds it only after Face ID or
+the passcode. The iPhone dials the iPad's pairing listener with TLS pinned to
+that certificate, so only that iPad reads the token and link key it sends,
+and proves the secret against the iPad's fresh challenge (HMAC-SHA256); the
+iPad keeps them only then, and the iPhone stores the iPad only once the iPad
+has kept them. A code naming a client the iPhone has paired as a Mac is
+refused, so a scanned code can never replace a Mac's pairing. Accepted limit:
+whoever photographs the code within its five minutes and reaches the iPad's
+listener before the user's iPhone does can pair the iPad with a device of
+their own, which could then carry the iPad's traffic when it links (seeing
+where it connects and anything not encrypted end to end). The user's iPhone is
+then told the code was already used, and the iPad shows the name of the
+iPhone it paired with; **Pair again** replaces it. They cannot pair a device
+of their own with the user's iPhone this way, since the iPhone's TLS reaches
+only the iPad in the code. The iPad's listener takes at most four connections
+at a time and stops after five wrong proofs.
+
+Once paired, the iPad's link is the wireless link with the roles as for a Mac
+(TLS 1.3 pinned to the iPad's certificate, the link-key challenge, the same
+pre-proof limits), with two rules of its own: the iPhone links an iPad only
+over its Personal Hotspot interface, checked before it sends any proof, never
+over a Wi-Fi network both share and never peer-to-peer. The iPhone treats an
+iPad's streams as a Mac's: private, link-local, loopback and multicast
+destinations are refused (DNS to a private address is answered from the
+iPhone's own resolver). On the iPad the tunnel takes every route
+(`includeAllNetworks`, nothing excluded), so while the iPhone is linked, or
+while it waits for it on a known hotspot, nothing leaves the iPad except
+through the iPhone, and with no link streams fail at once rather than go out
+as hotspot data. On Wi-Fi it can only guess is a hotspot (iOS counts it as
+costly), it waits a minute for the iPhone to link and then steps aside, as it
+does at once on any other network.
+Its SOCKS forwarder listens on the iPad's loopback only, and every stream
+through it still needs the password derived from the iPad's token. Anything
+that sends the iPad's traffic out over the hotspot while it is linked or
+waiting on a known hotspot, links an iPad over anything but the iPhone's
+hotspot, or lets an iPad reach the iPhone's private networks is a
+vulnerability.
 
 The Mac app reads its secrets only from the data-protection keychain, never
 the legacy file keychain, where any process running as the user could plant

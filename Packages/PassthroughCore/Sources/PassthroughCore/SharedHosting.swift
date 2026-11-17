@@ -41,7 +41,8 @@ extension PassthroughService {
             DeviceStatus(deviceName: defaults.string(forKey: SharedKeys.deviceName) ?? "iPhone",
                          radio: defaults.string(forKey: SharedKeys.radio),
                          battery: defaults.object(forKey: SharedKeys.battery) as? Double,
-                         hosting: hosting)
+                         hosting: hosting,
+                         internetFrom: defaults.string(forKey: SharedKeys.internetFrom))
         }
         service.onEgressChange = { egress in defaults.set(egress.rawValue, forKey: SharedKeys.egress) }
         defaults.set(Egress.cellular.rawValue, forKey: SharedKeys.egress)

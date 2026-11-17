@@ -39,6 +39,8 @@ public final class ControlClient: @unchecked Sendable {
         /// The phone stored a shell grant. `grantID` echoes the grant it
         /// answers; nil from phones that predate it.
         case shellGranted(phoneID: String, grantID: String?)
+        /// The phone's user turned Passthrough off; the phone stops right after.
+        case goodbye
         case disconnected(Error?)
     }
 
@@ -222,9 +224,13 @@ public final class ControlClient: @unchecked Sendable {
             if authenticated, let phoneID = m.phoneID, !phoneID.isEmpty, phoneID.count <= 64 {
                 handler(.shellGranted(phoneID: phoneID, grantID: m.grantID))
             }
+        case ControlEnvelope.goodbye:
+            guard authenticated else { return }
+            handler(.goodbye)
         case ControlEnvelope.status:
             guard authenticated else { return }
-            let status = DeviceStatus(deviceName: m.deviceName ?? device.kindName, radio: m.radio, carrier: m.carrier, battery: m.battery, hosting: m.hosting ?? "", ipv6: m.ipv6)
+            let status = DeviceStatus(deviceName: m.deviceName ?? device.kindName, radio: m.radio, carrier: m.carrier, battery: m.battery, hosting: m.hosting ?? "", ipv6: m.ipv6,
+                                      internetFrom: m.internetFrom)
             handler(.status(status, rx: m.rxBytes ?? 0, tx: m.txBytes ?? 0, active: m.activeConnections ?? 0))
         default: break
         }

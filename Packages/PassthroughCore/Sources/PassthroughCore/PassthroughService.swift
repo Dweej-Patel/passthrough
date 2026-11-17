@@ -67,22 +67,48 @@ public final class PassthroughService: @unchecked Sendable {
         control.onClientsChanged = { [weak self] macs in self?.onClientsChanged?(macs) }
         try socks.start()
         do { try control.start() } catch { socks.stop(); throw error }
-        self.socks = socks
-        self.control = control
-        if options.wireless {
-            let registry = self.registry
-            let dialer = WirelessDialer(allowedPorts: [options.socksPort, options.controlPort], peerToPeer: options.peerToPeer) { registry.linkCredentials() }
-            dialer.start()
-            // A Mac linked over the cable, or forgotten in the app (another
-            // process): dial it now, or end its link now.
-            var token: Int32 = 0
-            if notify_register_dispatch(PairingRegistry.changedNotification, &token, .global(qos: .utility), { [weak dialer] _ in dialer?.refresh() }) == NOTIFY_STATUS_OK {
-                pairingsToken = token
-            }
-            self.dialer = dialer
+        dialerLock.withLock {
+            self.socks = socks
+            self.control = control
+            running = true
         }
+        // A Mac linked over the cable, an iPad added, or either forgotten in the
+        // app (another process): dial it now, or end its link now.
+        var token: Int32 = 0
+        if notify_register_dispatch(PairingRegistry.changedNotification, &token, .global(qos: .utility), { [weak self] _ in
+            self?.startDialerIfNeeded()
+            self?.dialerRefresh()
+        }) == NOTIFY_STATUS_OK {
+            pairingsToken = token
+        }
+        startDialerIfNeeded()
         startedAt = Date()
         watchMemory()
+    }
+
+    /// Guards `dialer` and `running`: the pairings notification starts the
+    /// dialer on another queue, and must never start one after `stop`.
+    private let dialerLock = NSLock()
+    private var running = false
+
+    /// Dials linked Macs when the wireless link is on, and iPads always: an
+    /// iPad's only way to this iPhone is over its hotspot, and pairing one is
+    /// the user asking for that. With the wireless link off, only iPads are dialed.
+    private func startDialerIfNeeded() {
+        dialerLock.lock(); defer { dialerLock.unlock() }
+        guard running, dialer == nil, options.wireless || registry.hasIPads else { return }
+        let registry = self.registry
+        let wireless = options.wireless
+        let dialer = WirelessDialer(allowedPorts: [options.socksPort, options.controlPort], peerToPeer: options.peerToPeer) {
+            registry.linkCredentials().filter { wireless || $0.hotspotOnly == true }
+        }
+        dialer.start()
+        self.dialer = dialer
+    }
+
+    private func dialerRefresh() {
+        dialerLock.lock(); let dialer = self.dialer; dialerLock.unlock()
+        dialer?.refresh()
     }
 
     /// The iOS extension is killed at 50 MB. Log the footprint while it is
@@ -114,16 +140,21 @@ public final class PassthroughService: @unchecked Sendable {
         memoryTimer = nil
         if let pairingsToken { notify_cancel(pairingsToken) }
         pairingsToken = nil
+        let (dialer, control, socks) = dialerLock.withLock {
+            running = false
+            defer { self.dialer = nil; self.control = nil; self.socks = nil }
+            return (self.dialer, self.control, self.socks)
+        }
         dialer?.stop()
-        dialer = nil
         control?.stop()
         socks?.stop()
-        control = nil
-        socks = nil
         startedAt = nil
     }
 
     public var connectedMacs: [ConnectedMac] { control?.connectedMacs ?? [] }
+
+    /// Turned off by the user: tell the clients first (`ControlEnvelope.goodbye`).
+    public func sayGoodbye() { control?.sayGoodbye() }
     /// Macs linked over the air right now.
     public var wirelessMacTags: [String] { dialer?.connectedMacTags ?? [] }
     /// What carries the wireless link(s): "Hotspot", "Peer-to-peer", "USB" or "Wi-Fi network".

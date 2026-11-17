@@ -78,10 +78,7 @@ public enum ControlAuth {
     /// The SOCKS5 password, HMAC(K, socksLabel), as unpadded URL-safe base64:
     /// the same shape as a token, so it fits where the token used to go.
     public static func socksPassword(key: SymmetricKey) -> String {
-        Data(HMAC<SHA256>.authenticationCode(for: Data(socksLabel.utf8), using: key)).base64EncodedString()
-            .replacingOccurrences(of: "+", with: "-")
-            .replacingOccurrences(of: "/", with: "_")
-            .replacingOccurrences(of: "=", with: "")
+        Data(HMAC<SHA256>.authenticationCode(for: Data(socksLabel.utf8), using: key)).base64URL
     }
 
     public static func socksPassword(token: String) -> String { socksPassword(key: key(token: token)) }

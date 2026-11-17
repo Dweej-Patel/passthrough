@@ -39,10 +39,21 @@ public struct ADBLink: PhoneLink {
 /// A phone the Mac can reach, and the link to reach it.
 public struct PhoneDevice: Identifiable, Hashable, Sendable {
     public enum Kind: Sendable {
-        case iPhone, android
-        /// "iPhone" or "Android phone", for UI copy.
-        public var name: String { self == .android ? "Android phone" : "iPhone" }
+        /// An iPad pairs with the Mac as its remote (shell, screen, switches)
+        /// but never carries the Mac's internet: it gets its own from an iPhone.
+        case iPhone, android, iPad
+        /// "iPhone", "Android phone" or "iPad", for UI copy.
+        public var name: String {
+            switch self {
+            case .iPhone: "iPhone"
+            case .android: "Android phone"
+            case .iPad: "iPad"
+            }
+        }
     }
+
+    /// usbmuxd's ProductID for an iPad (an iPhone's is 0x12A8).
+    public static let iPadProductID = 0x12AB
 
     /// The keychain slot every iPhone shared before each got its own. Still
     /// read for an iPhone whose own slot is empty, until it proves the token
@@ -77,6 +88,16 @@ public struct PhoneDevice: Identifiable, Hashable, Sendable {
         PhoneDevice(id: "usbmux:\(deviceID)", kind: .iPhone, label: String(udid.prefix(8)) + "…",
                     pairingSlot: "token.iphone." + slotSafe(udid), link: USBMuxLink(deviceID: deviceID))
     }
+
+    /// An iPhone or an iPad on the cable, as usbmuxd reports it.
+    public static func usbmux(deviceID: Int, udid: String, productID: Int) -> PhoneDevice {
+        guard productID == iPadProductID else { return iPhone(deviceID: deviceID, udid: udid) }
+        return PhoneDevice(id: "usbmux:\(deviceID)", kind: .iPad, label: String(udid.prefix(8)) + "…",
+                           pairingSlot: "token.ipad." + slotSafe(udid), link: USBMuxLink(deviceID: deviceID))
+    }
+
+    /// Can carry the Mac's internet (an iPad can't: it's a remote only).
+    public var routes: Bool { kind != .iPad }
 
     public static func android(serial: String, model: String?) -> PhoneDevice {
         PhoneDevice(id: "adb:\(serial)", kind: .android, label: model ?? serial,

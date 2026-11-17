@@ -30,26 +30,30 @@ public struct MacIdentity {
     /// the data-protection keychain; tests use the login keychain.
     /// Only a missing identity is replaced: a new one changes the fingerprint
     /// every linked phone pins, so any other keychain error is thrown instead.
-    public static func loadOrCreate(label: String, dataProtection: Bool = true) throws -> MacIdentity {
+    /// `accessGroup`: shared between an iOS app and its extension (the App
+    /// Group), so the app can show the fingerprint the extension serves with.
+    public static func loadOrCreate(label: String, dataProtection: Bool = true, accessGroup: String? = nil) throws -> MacIdentity {
         do {
-            return try load(label: label, dataProtection: dataProtection)
+            return try load(label: label, dataProtection: dataProtection, accessGroup: accessGroup)
         } catch IdentityError.keychain(errSecItemNotFound, _) {
-            delete(label: label, dataProtection: dataProtection)   // a key left without its certificate
-            return try create(label: label, dataProtection: dataProtection)
+            delete(label: label, dataProtection: dataProtection, accessGroup: accessGroup)   // a key left without its certificate
+            return try create(label: label, dataProtection: dataProtection, accessGroup: accessGroup)
         }
     }
 
-    public static func delete(label: String, dataProtection: Bool = true) {
+    public static func delete(label: String, dataProtection: Bool = true, accessGroup: String? = nil) {
         for cls in [kSecClassKey, kSecClassCertificate] {
             var query: [CFString: Any] = [kSecClass: cls, kSecAttrLabel: label]
             if dataProtection { query[kSecUseDataProtectionKeychain] = true }
+            if let accessGroup { query[kSecAttrAccessGroup] = accessGroup }
             SecItemDelete(query as CFDictionary)
         }
     }
 
-    private static func load(label: String, dataProtection: Bool) throws -> MacIdentity {
+    private static func load(label: String, dataProtection: Bool, accessGroup: String?) throws -> MacIdentity {
         var query: [CFString: Any] = [kSecClass: kSecClassIdentity, kSecAttrLabel: label, kSecReturnRef: true]
         if dataProtection { query[kSecUseDataProtectionKeychain] = true }
+        if let accessGroup { query[kSecAttrAccessGroup] = accessGroup }
         var item: CFTypeRef?
         let status = SecItemCopyMatching(query as CFDictionary, &item)
         guard status == errSecSuccess, let item else { throw IdentityError.keychain(status, "lookup") }
@@ -60,9 +64,10 @@ public struct MacIdentity {
         return MacIdentity(identity: identity, certificate: SecCertificateCopyData(cert) as Data)
     }
 
-    private static func create(label: String, dataProtection: Bool) throws -> MacIdentity {
+    private static func create(label: String, dataProtection: Bool, accessGroup: String?) throws -> MacIdentity {
         var keyAttributes: [CFString: Any] = [kSecAttrIsPermanent: true, kSecAttrLabel: label]
         if dataProtection { keyAttributes[kSecAttrAccessible] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly }
+        if let accessGroup { keyAttributes[kSecAttrAccessGroup] = accessGroup }
         var attributes: [CFString: Any] = [
             kSecAttrKeyType: kSecAttrKeyTypeECSECPrimeRandom,
             kSecAttrKeySizeInBits: 256,
@@ -85,9 +90,10 @@ public struct MacIdentity {
         }
         var add: [CFString: Any] = [kSecClass: kSecClassCertificate, kSecValueRef: cert, kSecAttrLabel: label]
         if dataProtection { add[kSecUseDataProtectionKeychain] = true }
+        if let accessGroup { add[kSecAttrAccessGroup] = accessGroup }
         let status = SecItemAdd(add as CFDictionary, nil)
         guard status == errSecSuccess || status == errSecDuplicateItem else { throw IdentityError.keychain(status, "certificate add") }
-        return try load(label: label, dataProtection: dataProtection)
+        return try load(label: label, dataProtection: dataProtection, accessGroup: accessGroup)
     }
 }
 

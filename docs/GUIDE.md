@@ -2,7 +2,7 @@
 
 Everything in detail: how each part works, setup, security, recovery and troubleshooting. The short version is the [README](../README.md).
 
-Internet for your Mac over a USB cable, served by your phone's own network stack. Works with an **iPhone** or an **Android phone**. By default the cable is the only link between the two devices; an optional [wireless link](#wireless-link) (iPhone for now) carries the same traffic when it is unplugged.
+Internet for your Mac over a USB cable, served by your phone's own network stack. Works with an **iPhone** or an **Android phone**. By default the cable is the only link between the two devices; an optional [wireless link](#wireless-link) (iPhone for now) carries the same traffic when it is unplugged. An **iPad** can get its internet the same way from an iPhone, over the iPhone's Personal Hotspot, and pairs with the Mac as its remote ([iPad](#ipad)).
 
 ```
 ┌──────────── Mac ─────────────┐  USB or wireless   ┌──────────── Phone ─────────────┐
@@ -15,7 +15,7 @@ Internet for your Mac over a USB cable, served by your phone's own network stack
 
 | | iPhone | Android |
 |---|---|---|
-| Phone app | SwiftUI, iOS 17.5+ | Kotlin + Jetpack Compose, Android 8.0+ |
+| Phone app | SwiftUI, iOS 17.5+ (the same app runs on iPad) | Kotlin + Jetpack Compose, Android 8.0+ |
 | Keeps serving with the screen off | Packet tunnel extension | Foreground service |
 | USB link from the Mac | usbmuxd (built into macOS) | adb (`brew install android-platform-tools`) |
 | Phone setup | Trust this Mac | Turn on USB debugging, allow this Mac |
@@ -29,6 +29,7 @@ What else it does, built on the same pairing:
 * **[Remote shell](#remote-shell):** a real terminal on your Mac from the phone, over the local network, Tailscale, or from anywhere through a built-in encrypted connection. Sessions survive disconnects and are recorded.
 * **[Screen](#screen):** see and control the Mac's screen from the iPhone, as smooth hardware-encoded video.
 * **[Flow map](#flow-map) and [top apps](#top-apps):** where the traffic goes, live.
+* **[iPad](#ipad):** *Internet through iPhone* puts an iPad online through the iPhone's own connection while it is on the iPhone's Personal Hotspot, without spending hotspot data; on the Mac's cable it is a remote for the shell and the screen.
 
 ## How it works
 
@@ -52,6 +53,8 @@ Because the phone opens every connection with its own stack, the carrier sees th
 * NordVPN profiles are accepted only if their certificate authority is Nord's (pinned by hash) and they pin the exact server that was requested.
 * A pairing code takes ten wrong guesses in all, over every connection, and is then withdrawn (the phone says why; show a new one to pair), so guessing wins with odds of at most 1 in 100,000 per code you show, and nothing that guesses can lock your right code out; each connection may send three wrong codes before the phone closes it. The Mac only takes a token that answers its own code; tokens are validated for format before use; the control channel is capped at eight peers. The Mac and phone apps must run the same protocol version: each refuses the other with a note saying which one to update.
 * The wireless link is set up over the cable: the Mac hands the phone its certificate fingerprint and a per-phone link key. The phone dials out (it still never listens), accepts only TLS 1.3 with that certificate, and proves the key by answering a fresh challenge (HMAC-SHA256); the Mac accepts only phones linked this way. The key sits in the Keychain on both sides (this device only). Anyone on the same network can reach the Mac's listener, so before proving the key a connection gets at most two handshake slots per address and a 128 KB first message. Forgetting a Mac on the phone ends its wireless link at once.
+* An iPad pairs with its iPhone by a QR code instead of the cable: the camera is the trusted path. The code holds the iPad's certificate fingerprint and a one-time 32-byte secret, works once and for five minutes, and pairing it needs Face ID or the passcode on the iPhone. The iPhone dials the iPad with TLS pinned to that certificate and proves the secret against a fresh challenge; only then does the iPad keep the token and link key it is given, and only once the iPad has kept them does the iPhone store the iPad. A code can never replace a Mac's pairing. Someone who photographs the code and reaches the iPad before your iPhone does could pair with it instead (your iPhone is then told the code was already used); the iPad shows which iPhone it paired with. Details in [iPad](#ipad) and [SECURITY.md](../SECURITY.md).
+* The iPhone links an iPad over its Personal Hotspot only, never over a Wi-Fi network both share and never peer-to-peer, with the same TLS 1.3 pin, link-key challenge and pre-proof limits as a Mac's link. While *Internet through iPhone* holds the iPad's routes, nothing leaves the iPad except through the iPhone: with the link down it is offline on purpose, not on hotspot data. The iPhone refuses private and loopback destinations for an iPad as it does for a Mac.
 * Remote shell is off by default. While it is off the Mac has no shell listener at all. Turning it on starts a TLS 1.3 listener on port 7893 that accepts peers only from private or Tailscale address ranges (RFC 1918, link-local, loopback, IPv6 ULA, 100.64.0.0/10 and `fd7a:115c:a1e0::/48`; the last two only while the Mac itself is on such a network through a tunnel interface, and only for connections that arrive on it, as 100.64.0.0/10 is also carrier NAT space). Unless you turn off *Reach this Mac from anywhere (built-in)*, the Mac also runs a built-in [iroh](https://www.iroh.computer) endpoint that is reachable from the internet by design: anyone who can reach its UDP port directly (the same LAN, or public IPv6) or who knows its endpoint id and comes through a relay can start a handshake, which the limits below bound and the shell-key proof gates; see [Reaching the Mac](#remote-shell) and [SECURITY.md](../SECURITY.md) for what gates it. With that option off, a Mac with a public address takes no shell connections from the internet.
 * A phone gets shell access only over the cable, while the setting is on: the Mac hands it a per-phone 256-bit key and its certificate fingerprint on the control channel. On the local and Tailscale path the phone pins that certificate (TLS 1.3); on the built-in path the transport is iroh's QUIC (TLS 1.3, the Mac authenticated by its endpoint id), with no further TLS inside. Either way the phone proves the key with an HMAC-SHA256 challenge before anything it sends is read; before that, there are at most 16 unproven connections in total, 2 per remote address (a public IPv4 address counts by its /24, IPv6 by its /64 except link-local addresses, which count one by one) on direct paths and 8 arriving through relays, each with 10 seconds from when it arrives and a hard 4096-byte limit on its handshake lines; 4 of the 16 are kept for addresses that proved a key in the last 30 days, so a crowd of strangers can't lock your phones out. Revoking a phone in the Mac's settings, or **Forget pairing**, deletes its key, drops its live connection and ends the sessions it opened at once (sessions your other phones opened keep running). Each phone has its own pairing on the Mac, so **Forget pairing** revokes only the attached phone. iPhones paired before that shared one old pairing: it counts as an iPhone's, and moves to it, only once that iPhone proves it holds it; until then that iPhone shows as not paired and forgetting it leaves the old pairing alone (it may be another iPhone's). With no iPhone attached, **Forget pairing** clears the old shared pairing.
 * On the phone the key sits in a user-presence Keychain item (iPhone, this device only) or a Keystore key bound to a strong biometric or the device credential (Android). Until the app is next unlocked, a newly granted key waits sealed to a key only the unlocked app can use (see *Key storage* below), never in the clear. The whole phone app is behind Face ID / Touch ID / fingerprint / face with passcode fallback and relocks after 60 seconds in the background; a phone with no passcode cannot use Remote shell (an Android phone without a screen lock cannot hold a shell key at all). Someone who has your passcode and your unlocked phone can still open a shell: revoke the phone on the Mac, or remove it from your tailnet.
@@ -87,6 +90,40 @@ Off by default. Set **Connect over** to **Wireless only** or **Automatic** in th
 * A dropped link resumes: both sides keep the session's connections for up to two minutes while the phone redials, so apps see a pause rather than errors. Traffic is the same SOCKS5 and control streams as over the cable, multiplexed over one TLS connection (see [protocol/README.md](../protocol/README.md)).
 * Android's wireless link (a Wi-Fi Direct group the phone hosts) is not built yet.
 
+## iPad
+
+The same app runs on iPad. An iPad does two things with it: it gets its internet from your iPhone, and it is a remote for your Mac. It never carries a Mac's internet.
+
+### Internet through iPhone
+
+The iPad joins the iPhone's **Personal Hotspot**, but its traffic does not go out as hotspot data: it leaves from the iPhone's own network stack through Passthrough, as a Mac's does over the cable. The switch is **Internet through iPhone**, on the iPad's Mac tab and its *iPad* tab.
+
+* **How it carries traffic.** The iPad's tunnel extension takes every route (`includeAllNetworks`, with nothing excluded: not the local network, not Apple's push service) and runs tun2socks (hev-socks5-tunnel, as the Mac's helper does) to a SOCKS forwarder on the iPad's loopback. The iPhone dials the iPad over its hotspot, and the forwarder sends each stream over that link to the iPhone's SOCKS5 server, with DNS answered by the iPhone's own resolver. The link is the Mac's wireless link with the roles as they are there: the iPad listens and the iPhone dials, TLS 1.3 pinned to the iPad's certificate, a link-key challenge both ways, streams kept for two minutes across a drop.
+* **Offline on purpose.** While the switch is on and the iPhone isn't carrying the iPad, nothing leaves the iPad over the hotspot. The row says "On — waiting for \<iPhone\>" and why, and **Use hotspot data instead** turns the switch off so the iPad uses the hotspot like any device. A link that drops is held for two minutes to resume, so apps see a pause; turning Passthrough off on the iPhone tells the iPad at once ("Passthrough was turned off on \<iPhone\>.").
+* **Hotspot only.** The iPhone links an iPad over its Personal Hotspot and nothing else: never over a Wi-Fi network both devices are on, never peer-to-peer. It dials paired iPads whenever Passthrough is on, whether or not its own *Wireless link* setting is on. Personal Hotspot has to stay on for the iPad to find the iPhone.
+* **When it runs.** The tunnel only holds the routes on the iPhone's hotspot; anywhere else it would only cut the iPad off. With the switch on, iOS starts it by itself on Wi-Fi whose DNS server marks it as the hotspot: `172.20.10.1` on an IPv4 hotspot, or the DNS servers and routers the iPad learned from the hotspot after its first working link there (an IPv6-only hotspot gives no `172.20.10.x`; its DNS server is the iPhone's link-local address). Elsewhere iOS leaves it alone. Turned on away from the hotspot, the row reads "On — starts when this iPad joins \<iPhone\>'s hotspot".
+* **Known and maybe.** A hotspot the iPad has learned, or an IPv4 one, is *known*. Wi-Fi that iOS only counts as costly, as it does any hotspot (an Android phone's too), is a *maybe*. Turning the switch on starts the tunnel on either; on a maybe it gives the iPhone a minute to dial in, which is how that hotspot becomes known. iOS's own starts, and the app's (it starts the tunnel when iOS hasn't, five seconds after the iPad is on a known hotspot), need known.
+* **Stepping aside.** When the iPhone isn't linked and the iPad is off any known hotspot (Wi-Fi down, your home Wi-Fi, or a maybe after its minute), the tunnel stops within seconds and the iPad uses its network as usual; on the hotspot, iOS starts it again. A dropped link that is only held for a resume doesn't count as linked, so walking off the hotspot gives the Wi-Fi back in seconds.
+* **What is learned.** Only a working link teaches the iPad a hotspot (the iPhone links over its hotspot alone, so a link is proof): the routers of the network the link came up on, read at that moment, and its DNS servers if the iPad is still on the network the tunnel started on. At most six addresses, never the ones every network of a kind shares (an IPv6-only network's `192.0.0.0/29`, IPv4 link-local) or the tunnel's own. On Wi-Fi that iOS doesn't count as costly (an iPhone's hotspot always is), the app forgets anything learned that matches it. Forgetting the iPhone, or pairing another, forgets them all.
+* **The iPhone side.** The Internet row says who it is sharing with ("Sharing with the Mac and an iPad"), and the *iPhone* tab lists them under **Sharing with**: Macs over USB or the wireless link, iPads over the hotspot. The iPhone treats an iPad's traffic as a Mac's: private and loopback destinations are refused, and it counts in the iPhone's data used.
+
+### Pairing an iPad with its iPhone
+
+There is no cable between them, so the iPad shows a QR code and the iPhone scans it.
+
+1. Join the iPhone's Personal Hotspot on the iPad (Settings ▸ Wi-Fi): the iPhone reaches the iPad there.
+2. On the iPad, tap **Pair with iPhone** under *Internet through iPhone* (or **Pair** in the *iPad* tab's iPhone card). **Pair with your iPhone** shows the code.
+3. On the iPhone, go to the *iPhone* tab, then **Pair ▸ Scan an iPad's code** in *Paired devices*, point the camera at the code, and tap **Add iPad** (Face ID or the passcode).
+4. The iPad says *Paired with \<iPhone\>*. Turn Passthrough on on the iPhone if it is off (the iPhone offers to), then **Internet through iPhone** on the iPad.
+
+The code works once, for five minutes, and a new one replaces it while the sheet stays open. If Internet through iPhone is on, it pauses while the code shows (its tunnel would hold the connection the iPhone makes to the iPad) and turns back on when the sheet closes. The iPhone keeps the iPad under *Paired devices* (**Forget this iPad**), the iPad keeps one iPhone (**Pair again**, **Forget this iPhone**). An iPad the iPhone no longer knows says so, with **Pair again**.
+
+### The iPad as the Mac's remote
+
+Plug the iPad into the Mac and pair it as you would a phone: **Pair ▸ Pair a Mac** in the *iPad* tab's *Paired Macs* shows the code to type on the Mac. With only the iPad attached, the Mac finds it within a few seconds of the code showing (it looks again every 5 seconds while the iPad isn't paired) and asks for the code. The Mac talks to one device at a time, and a phone that can route comes first, so with an iPhone attached too (over the cable or wirelessly) the panel shows **An iPad is plugged in** with **Pair iPad**: tapping it hands the Mac's connection to the iPad until it is paired and has its shell key (three minutes at most), then back to the iPhone, reconnecting if the Mac was online through it. Remote shell must be on. The Mac gives it Remote shell and Screen the same way, and its switches (Keep awake, VPN, lock) work from the iPad. The iPad serves its pairing and shell key only while its app is open (its extension is Internet through iPhone), so keep it open while pairing. The Mac never routes through an iPad and never links one wirelessly: a phone that can route comes first whenever one is attached, auto-connect skips an iPad, and connecting with only an iPad attached asks you to plug in the iPhone. The Mac's panel says which iPhone the iPad gets its internet from ("\<iPad\> gets its internet from \<iPhone\>"), *Settings ▸ Remote Shell ▸ Phones with access* lists it with an iPad icon under the name it goes by now, and the iPad's Mac tab shows all three devices.
+
+On iPad the screen view fills the display under a floating bar (*Trackpad* / *Direct*, keyboard, copy and paste, *Desktops*), in every orientation. A trackpad or mouse drives the Mac's pointer directly (hover, click, secondary click, drag, scroll), and a hardware keyboard types into the Mac as soon as the screen is live. Apple Pencil is a pen on the Mac's screen in either mode: the tip clicks where it touches and drags as it moves (select text, move windows, draw), double-tap on the Pencil (or squeeze, on Apple Pencil Pro) right-clicks where it last touched, unless that gesture is set to do nothing in Settings ▸ Apple Pencil, and on iPads that sense hover, hovering moves the Mac's pointer. While the Pencil is touching, hovering or just lifted, the hand holding it is ignored (palm rejection); fingers pan and zoom again a moment after it lifts.
+
 ## Keep Mac awake
 
 A toggle in the menu panel (and Settings ▸ General) keeps the Mac from sleeping so long sessions survive when you step away — a download, a remote/Claude session, or the tunnel itself. It has two layers:
@@ -108,7 +145,7 @@ Caution: the heat and battery limits are a safety net, not a licence. A closed, 
 
 ## Your Mac from the phone, and the timeline
 
-The phone apps open on the Mac: how it's reached, its battery and how long Keep awake has left, shells waiting on a question, and three switches: **Internet through this phone** (this phone's own sharing, with pairing and data used one tap in), **Keep Mac awake** and **VPN**. The menu panel on the Mac has the same switches. A switch that can't turn on (the phone isn't plugged in or isn't running Passthrough, the Mac can't be reached or doesn't let this phone change it, no VPN is set up, the battery or heat limit) stays off and says why under it, with a fix where there is one.
+The phone apps open on the Mac: how it's reached, its battery and how long Keep awake has left, shells waiting on a question, and three switches: **Internet through this phone** (this phone's own sharing; its pairing and data used are in the iPhone's *iPhone* tab, and one tap in on Android), **Keep Mac awake** and **VPN**. The menu panel on the Mac has the same switches. A switch that can't turn on (the phone isn't plugged in or isn't running Passthrough, the Mac can't be reached or doesn't let this phone change it, no VPN is set up, the battery or heat limit) stays off and says why under it, with a fix where there is one.
 
 * **Changing the Mac from a phone** goes over the remote shell connection (`macState`, `setAwake`, `setVPN`, `lock`; protocol/README.md). Each phone has an *Awake & VPN* switch in Settings ▸ Remote Shell, on unless you turn it off: a phone with shell access can already run commands as you. Turning things on never asks; turning the VPN off is in-app only, asks for Face ID, a fingerprint or the screen lock first, and leaves a notice on the Mac, grown out of the notch or as a capsule under the menu bar on screens without one, until someone dismisses it or the VPN is turned back on; later notices never replace it. The battery and heat limits still apply whoever asks. The same switch lets a phone **lock the Mac's screen** (`lock`): the Mac page on the iPhone and on Android shows whether the screen is locked, with a *Lock* button, and the iPhone's screen view has *Lock* in its Desktops menu too. It is only the lock, as the Apple menu's Lock Screen: the Mac stays awake, and shells, downloads and the passthrough carry on. There is no unlocking from a phone; that takes the Mac's password.
 * **Needs you**: the Mac marks a shell that went quiet on a question near the bottom of its screen (a line ending in `?`, a `[y/N]` choice, a password prompt). The phone shows it as a card that opens the terminal at that session; the Mac panel lists it too. It's a heuristic and only ever a nudge.
@@ -216,7 +253,7 @@ Open TCP 80 and 443 (Let's Encrypt and the relay protocol) and UDP 7842 (QUIC ad
 
 ## Screen
 
-See and control your Mac's screen from the iPhone (Android: not yet). It rides Remote shell: with Remote shell on and the phone granted, turn on that phone's **Screen** switch in Settings ▸ General ▸ Remote shell, then tap *See and control the screen* on the phone's Remote shell card. It reaches the Mac the same ways the shell does (local network, Tailscale, or the built-in connection from anywhere). While a phone is watching, the Mac's menu panel says so, with **Stop**.
+See and control your Mac's screen from the iPhone or iPad (Android: not yet). It rides Remote shell: with Remote shell on and the phone granted, turn on that phone's **Screen** switch in Settings ▸ General ▸ Remote shell, then tap *See and control the screen* on the phone's Remote shell card. It reaches the Mac the same ways the shell does (local network, Tailscale, or the built-in connection from anywhere). While a phone is watching, the Mac's menu panel says so, with **Stop**.
 
 **How the Mac serves it.** Two ways; the phone picks for itself.
 
@@ -231,6 +268,7 @@ See and control your Mac's screen from the iPhone (Android: not yet). It rides R
 * The keyboard button brings up the keyboard with a row of esc, tab, ⌃ ⌥ ⌘ (held for the next key), arrows, copy and paste. A hardware keyboard's shortcuts go through as they are.
 * **Copy and paste.** The clipboard menu in the top bar (and the key row) has *Copy from <Mac>* and *Paste on <Mac>*. Copy presses ⌘C on the Mac and puts what that copied on the iPhone's clipboard, for this iPhone only and for two minutes, with *Copied from <Mac>*; select the text first (press and hold, then drag). Only a change to the Mac's clipboard in the second after that ⌘C comes back: if nothing was selected the phone says so, and whatever was already on the Mac's clipboard stays there. Text only, up to 64 KB. Paste puts the iPhone's clipboard on the Mac's and presses ⌘V; on Passthrough's own stream the Mac marks it so clipboard managers (Raycast, Maccy, Paste…) leave it out of their history. Nothing is copied either way unless you tap Copy or Paste.
 * Turn the phone and the screen view goes landscape, with its controls in a column at the side; the rest of the app stays portrait.
+* On iPad the screen fills the display under one floating bar, in any orientation, and a trackpad, mouse or hardware keyboard goes straight to the Mac ([The iPad as the Mac's remote](#the-ipad-as-the-macs-remote)).
 
 The wire protocol for both ways is in [protocol/README.md](../protocol/README.md#screen) ("Screen" and "Screen video").
 
@@ -268,24 +306,26 @@ Diagnostics: `PASSTHROUGH_NO_AUTOCONNECT=1` launches the app without taking over
 ```
 protocol/                  Wire protocol spec and fixtures.json, read by both the Swift and Kotlin tests
 Packages/PassthroughCore   Swift package:
-  PassthroughCore            SOCKS5 server, control channel, pairing, stats, wireless dialer and multiplexer (the phone side)
-  PhoneTransport             phone links (usbmuxd, adb, wireless), device watchers, local forwarder, control client (the Mac side)
+  PassthroughCore            SOCKS5 server, control channel, pairing (and the iPad's QR pairing), stats, wireless dialer and multiplexer (the phone side)
+  PhoneTransport             phone links (usbmuxd, adb, wireless), device watchers, local forwarder, control client (the Mac side, and the iPad's: HotspotClient, its pairing listener)
   PassthroughUI              shared SwiftUI design layer
   VPNConfig                  OpenVPN allowlist, WireGuard .conf parser, NordVPN pinning (linked by the root helper)
   ShellHost                  Mac: login shells on a PTY, the shell listener (TLS and iroh), access keys, transcripts, the screen hand-over
   IrohTransport              iroh endpoints and streams (the built-in connection), for the Mac and iPhone apps only
-  ScreenClient               iPhone: the screen stream's client (H.264 to sample buffers) and the Screen Sharing (RFB) viewer
+  ScreenClient               iPhone and iPad: the screen stream's client (H.264 to sample buffers) and the Screen Sharing (RFB) viewer
   ScreenHost                 Mac: screen capture, the H.264 encoder, input events, and the flow control between them
   CPTY, CZlib, CResolv       small C shims (PTY spawn, zlib, resolver)
-iOS/App                    SwiftUI iPhone app
-iOS/Tunnel                 Packet tunnel extension hosting the servers
+  CUtun                      finds the iPad tunnel extension's utun descriptor, for its tun2socks
+iOS/App                    SwiftUI iPhone and iPad app
+iOS/Tunnel                 Packet tunnel extension: hosts the servers on an iPhone; on an iPad, Internet through iPhone (HotspotRole, tun2socks)
 iOS/Widgets                Widget extension: the Keep awake Live Activity, the Home Screen widget, Control Center buttons
 iOS/Shared                 Shared by the app and the widget extension: passthrough:// links, the Mac snapshot, the Live Activity's data
 macOS/App                  SwiftUI menu bar app: Session/, VPN/, Power/, Views/
 macOS/Helper               Root helper: utun + tun2socks + routes + DNS
 macOS/Shared               XPC protocol shared by app and helper
 android/                   Kotlin + Jetpack Compose Android app (same protocol, own tests)
-Vendor/HevSocks5Tunnel     Prebuilt tun2socks engine (arm64) + headers
+Spikes/LinkProbe           Spike that found which way an iPhone and an iPad can link on the hotspot (see its README)
+Vendor/HevSocks5Tunnel     Prebuilt tun2socks engine (arm64): macOS library and iOS xcframework, + headers
 Vendor/hev-socks5-tunnel   Engine source (MIT), rebuilt with scripts/build-hev.sh
 Vendor/VPNEngines          Prebuilt wireguard-go + openvpn (arm64) for the VPN layer, plus licences
 project.yml                XcodeGen spec that produces Passthrough.xcodeproj
@@ -332,6 +372,12 @@ The Mac app runs unsandboxed (it needs the usbmuxd and adb sockets) with hardene
 2. Run the `Passthrough` scheme on a real device and tap the power button. iOS asks once to add the VPN configuration.
 3. Plug the iPhone into the Mac, trust the Mac if prompted, and flip the switch in the menu bar. The first time, it asks for the code shown by *Pair* on the phone.
 
+### iPad
+
+1. Run the same `Passthrough` scheme on the iPad (the app is universal). Turning on **Internet through iPhone** the first time asks for the local network and to add the VPN configuration; allow both. The iPhone asks for the camera the first time it scans an iPad's code.
+2. Pair it with the iPhone by its QR code and turn the switch on ([Pairing an iPad with its iPhone](#pairing-an-ipad-with-its-iphone)). Update the iPhone and the iPad together.
+3. To use it as the Mac's remote, plug it into the Mac with its app open and type the code it shows ([The iPad as the Mac's remote](#the-ipad-as-the-macs-remote)).
+
 ### Android
 
 1. On the Mac: `brew install android-platform-tools`.
@@ -348,7 +394,7 @@ The Mac app runs unsandboxed (it needs the usbmuxd and adb sockets) with hardene
 * The kill switch blocks with reject routes one step more specific (/3) than the VPN's /2 routes, added fresh so the kernel really rejects (it ignores `-reject` on `route change`): blocked connections fail at once instead of hanging, and turning it on or off never leaves a moment without a route. A route someone else put at one of those /3 prefixes is replaced (and logged as a TunnelVision-style conflict); lifting the kill switch deletes only its own routes (to loopback). Its pf rules are stateless, so connections open before it engaged are held to them too.
 * The VPN layer has a 60 s connect deadline; an engine that never establishes a session is restarted with backoff, and a fatal failure (rejected credentials, bad profile) stops retrying and shows why; the kill switch stays engaged until you turn the layer off. Endpoint addresses are cached so reconnects under the kill switch need no DNS.
 * The Mac app keeps retrying the USB link (backoff capped at 30 s) for as long as a phone is attached, so starting the proxy on the phone later just works. Routes are removed before the loopback listener closes on disconnect.
-* The phone's tunnel is registered with an on-demand "always connect" rule, so iOS relaunches the extension by itself if it is killed or after a reboot; stopping it from the app clears the rule. New connections tolerate up to 30 s without a viable path (tower handoff, radio waking) before failing, and existing ones simply resume if the path returns in time.
+* The iPhone's tunnel is registered with an on-demand "always connect" rule, so iOS relaunches the extension by itself if it is killed or after a reboot; stopping it from the app clears the rule. (An iPad's *Internet through iPhone* connects on demand only on the iPhone's hotspot; see [When it runs](#internet-through-iphone).) New connections tolerate up to 30 s without a viable path (tower handoff, radio waking) before failing, and existing ones simply resume if the path returns in time.
 * On the phone, "Cellular only" now degrades gracefully: a path monitor tracks whether cellular data is actually usable, and while it isn't (radio asleep after a handoff, brief carrier outage) new connections use whatever network the phone has instead of failing with "network is down"; it switches back the moment cellular is viable, logging both transitions. Private, link-local and multicast destinations (home-LAN probes) are refused immediately rather than waiting on the radio. DNS aimed at a private address is the exception: Tailscale, for one, keeps sending lookups to the last Wi-Fi router the Mac saw, even with the Mac's Wi-Fi off, so the phone forwards those queries to its own network's DNS server (the carrier's, or its Wi-Fi's; 1.1.1.1 if it knows none) instead of letting every lookup fail.
 * On the phone, a UDP peer whose socket fails or never becomes viable is replaced on the next packet; a client that never completes the SOCKS handshake is dropped after 20 s; sessions are capped.
 * The phone reports whether its current network routes IPv6. When it doesn't (plenty of home Wi-Fi, some carriers), the helper turns the tunnel's IPv6 routes into reject routes, so apps fall back to IPv4 immediately instead of hanging on IPv6 connections tun2socks accepts but the phone can never make; they flip back when IPv6 returns. The engine runs in its own process (a verified root-only copy of the helper), ended outright on disconnect: its own shutdown can wait forever for a packet that no longer comes. The kernel frees its sockets and utun; the helper tidies routes and settings. If it somehow outlives that by 2 seconds it is killed, with its stack logged.
@@ -391,6 +437,8 @@ Panel previews: `Passthrough.app/Contents/MacOS/Passthrough --snapshot /tmp/pane
 * **Mac shows online but DNS fails**: check the helper's log with `log stream --predicate 'process == "PassthroughHelper"'`; the DNS servers are configurable in Settings ▸ Network.
 * **iOS "VPN extension is not available"**: the tunnel provisioning profile is missing the Network Extension entitlement, or you are on the simulator. Foreground hosting still works (keep the app open).
 * **The phone's screen view says "Slower…"**: it is on Screen Sharing because the Mac couldn't stream. If it was only for a moment (its display didn't come on in time), the phone switches to the stream by itself. If Screen Recording or Accessibility is missing, grant them in the Mac's Remote shell settings, then reopen Passthrough on the Mac if macOS asks (with passthrough off: quitting drops it); the phone then switches over by itself.
+* **iPad: "On — waiting for \<iPhone\>"**: the iPhone hasn't linked. Check that Passthrough is on on the iPhone, Personal Hotspot is on and the iPad is on it, and the iPad is under the iPhone's *Paired devices*. Until then the iPad is offline on purpose; **Use hotspot data instead** turns Internet through iPhone off. "Didn't let this iPad in" means the iPhone no longer knows it: **Pair again**.
+* **iPad: Internet through iPhone stays off on the hotspot**: an IPv6-only hotspot is only known after the first working link. Turn the switch off and on while on the hotspot; once the iPhone links, iOS starts it there by itself.
 * **Three-finger swipes don't switch desktops**: the Mac's Mission Control shortcuts were changed or turned off (System Settings ▸ Keyboard ▸ Keyboard Shortcuts ▸ Mission Control).
 * Diagnostics logs are in both apps' Settings.
 
@@ -401,7 +449,8 @@ Panel previews: `Passthrough.app/Contents/MacOS/Passthrough --snapshot /tmp/pane
 * SOCKS5 `UDP ASSOCIATE` (the standard UDP mode) is not offered because usbmuxd, adb and the wireless link carry TCP only; the UDP-in-TCP extension covers it.
 * Android needs USB debugging left on while you use Passthrough, which also lets any Mac the phone has authorised run adb commands on it.
 * The Android app has been tested on an Android 15 emulator, not yet across physical phones and manufacturers.
-* Screen is iPhone only for now, and the stream shows the Mac's main display only. While the Mac is locked the stream may not show the login window; Screen Sharing can.
+* Screen is iPhone and iPad only for now, and the stream shows the Mac's main display only. While the Mac is locked the stream may not show the login window; Screen Sharing can.
+* An iPad gets its internet only on the iPhone's Personal Hotspot, never over a Wi-Fi network both share, and needs the iPhone's Passthrough on and the hotspot on. While Internet through iPhone holds the routes, local-network addresses go to the iPhone too, which refuses them, so the iPad reaches its Mac's shell and screen through the built-in connection rather than the local network. That is the main case anyway (the Mac at home, the iPad and iPhone out); at home, turn the switch off or leave the hotspot to reach the Mac directly. Only one iPhone at a time per iPad.
 * The phone's app deliberately does not expose the proxy on Wi-Fi. If you ever want that, it is one flag (`loopbackOnly`), but then do it behind TLS.
 
 ## Contributing

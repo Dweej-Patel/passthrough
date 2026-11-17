@@ -24,6 +24,16 @@ the **Before you rebuild** notes first. The Mac and phone apps update together.
   and Live Activity still show a shell that needs you.
 * The key is now inside `Passthrough.app`: don't give a built app to anyone
   else; let them build their own with their own key.
+* **iPad support: update the iPhone, the iPad and the Mac together.** The
+  iPhone now links an iPad over its Personal Hotspot only, and the iPad learns
+  which network is the hotspot from those links, so an older build on either
+  side gets this wrong (an older iPhone also links over a Wi-Fi network both
+  share). There are no compatibility shims. The Mac needs the new build too,
+  for an iPad on the cable, for `internetFrom` (which iPhone the iPad uses) and
+  for `goodbye`. Both iOS targets now build for iPad (`TARGETED_DEVICE_FAMILY`
+  1,2); run `xcodegen generate` before building. The iPad's tunnel extension
+  links `Vendor/HevSocks5Tunnel/HevSocks5Tunnel.xcframework`, which is checked
+  in (`scripts/build-hev.sh` rebuilds it with the macOS library).
 
 #### Setting up the push key, step by step (for a person or for Claude)
 
@@ -68,3 +78,38 @@ these steps as written and check each one before building.
   long task, through Apple's push service, sealed end to end.
 * A long session's replay restores its terminal modes, so full-screen programs
   reattach on their own screen.
+* iPad: **Internet through iPhone**. On the iPhone's Personal Hotspot, the
+  iPad's traffic leaves from the iPhone's own network stack through
+  Passthrough, not as hotspot data. Its tunnel holds every route and runs
+  tun2socks to the link the iPhone dials in on; with the link down the iPad is
+  offline on purpose, with **Use hotspot data instead**. It runs only on the
+  iPhone's hotspot (known by its DNS server, or learned from a first working
+  link), and steps aside within seconds anywhere else.
+* iPad: pairs with its iPhone by a QR code (one-time, five minutes). On the
+  iPhone: *iPhone* tab › *Paired devices* › **Pair › Scan an iPad's code**,
+  then Face ID.
+* iPad as the Mac's remote: it pairs over the cable and gets the shell and
+  screen like a phone, but the Mac never routes through it. With an iPhone
+  attached too, the Mac's panel offers **Pair iPad** (the Mac talks to one
+  device at a time and the iPhone comes first). The Mac's panel says which
+  iPhone the iPad gets its internet from, and *Phones with access* shows it
+  as an iPad, under the name it goes by now. On iPad, Apple Pencil clicks and
+  drags where it touches on the Mac's screen, and double-tap (or squeeze)
+  right-clicks. On iPad the screen view
+  fills the display under a floating bar, and a trackpad, mouse or hardware
+  keyboard goes straight to the Mac.
+* iPhone: *Sharing with* lists the Macs and iPads using it right now, and
+  *Paired devices* lists both.
+
+### Changed
+
+* *This iPhone* (*This iPad* on an iPad) is its own tab, *iPhone* (*iPad*),
+  replacing the row on the Mac tab.
+* Turning Passthrough off on the iPhone tells its Macs and iPads first
+  (`goodbye`), so an iPad says so at once; a link that only drops is still held
+  two minutes for a resume.
+* iPhone: opening the app no longer resizes a shell in use in a terminal window
+  on the Mac.
+* The pairing code's countdown ticks (it could stay at 5:00), and the power
+  button's ring and the status dots no longer slide left and right; they
+  hold still under Reduce Motion (the spinner still turns).

@@ -10,10 +10,7 @@ public enum PairingToken {
     public static func generate() -> String {
         var bytes = [UInt8](repeating: 0, count: 32)
         _ = SecRandomCopyBytes(kSecRandomDefault, bytes.count, &bytes)
-        return Data(bytes).base64EncodedString()
-            .replacingOccurrences(of: "+", with: "-")
-            .replacingOccurrences(of: "/", with: "_")
-            .replacingOccurrences(of: "=", with: "")
+        return Data(bytes).base64URL
     }
 
     /// Lowercase hex SHA-256, the form the phone stores.
@@ -46,10 +43,19 @@ public struct ShellGrant: Codable, Equatable, Sendable {
     }
 }
 
-/// A Mac that has been granted access to this iPhone's proxy.
+/// What kind of device a client is. Absent in records from before iPads (a Mac).
+public enum ClientKind: String, Codable, Sendable {
+    case mac
+    /// An iPad using this iPhone's internet over its Personal Hotspot.
+    case ipad
+}
+
+/// A Mac (or an iPad) that has been granted access to this iPhone's proxy.
 public struct PairedClient: Codable, Identifiable, Equatable, Sendable {
     public var id: String
     public var name: String
+    /// Nil: a Mac (records from before iPads).
+    public var kind: ClientKind?
     public var tokenHash: String
     public var pairedAt: Date
     public var lastSeen: Date?
@@ -58,9 +64,11 @@ public struct PairedClient: Codable, Identifiable, Equatable, Sendable {
     /// How to reach this Mac's shell listener, once it granted a shell key over the cable.
     public var shell: ShellGrant?
 
-    public init(id: String, name: String, tokenHash: String, pairedAt: Date, lastSeen: Date? = nil) {
-        self.id = id; self.name = name; self.tokenHash = tokenHash; self.pairedAt = pairedAt; self.lastSeen = lastSeen
+    public init(id: String, name: String, kind: ClientKind? = nil, tokenHash: String, pairedAt: Date, lastSeen: Date? = nil) {
+        self.id = id; self.name = name; self.kind = kind; self.tokenHash = tokenHash; self.pairedAt = pairedAt; self.lastSeen = lastSeen
     }
+
+    public var isIPad: Bool { kind == .ipad }
 }
 
 /// Stores paired Macs and the short-lived pairing code. Backed by the App Group
@@ -202,14 +210,66 @@ public final class PairingRegistry: @unchecked Sendable {
 
     private static let pendingShellAccount = "shell.pending."
 
-    /// Everything the wireless dialer needs, for every linked Mac.
+    /// Everything the wireless dialer needs, for every linked Mac and iPad.
     public func linkCredentials() -> [LinkCredential] {
         let id = phoneID
         return clients.compactMap { client in
             guard let cert = client.linkCertificate, let key = secrets.read("link." + client.id) else { return nil }
-            return LinkCredential(macTag: WirelessLink.macTag(clientID: client.id), certSHA256: cert, linkKey: key, phoneID: id)
+            return LinkCredential(macTag: WirelessLink.macTag(clientID: client.id), certSHA256: cert, linkKey: key, phoneID: id,
+                                  hotspotOnly: client.isIPad ? true : nil)
         }
     }
+
+    /// A client about to be paired without a code: its token is issued, but
+    /// nothing is stored until `commit` (after it has taken the token).
+    public struct NewClient: Sendable {
+        public let id: String
+        public let name: String
+        public let kind: ClientKind
+        public let certificateSHA256: String
+        public let linkKey: Data
+        /// Handed over on the trusted path, never stored here in the clear.
+        public let token: String
+    }
+
+    /// Pairs and links a client in one step, where something it already trusts
+    /// vouches for it instead of a code: an iPad, introduced by a Mac paired with
+    /// both, or scanned from its screen. Nil if the ID already belongs to a
+    /// client of another kind (a scanned code never replaces a Mac).
+    /// Nothing changes until `commit`, so an attempt that fails leaves an
+    /// earlier pairing of the same iPad working.
+    public func prepareClient(id clientID: String, name: String, kind: ClientKind, certificateSHA256: String, linkKey: Data) -> NewClient? {
+        lock.lock(); defer { lock.unlock() }
+        if let existing = loadClients().first(where: { $0.id == clientID }), (existing.kind ?? .mac) != kind { return nil }
+        return NewClient(id: clientID, name: name, kind: kind, certificateSHA256: certificateSHA256, linkKey: linkKey,
+                         token: PairingToken.generate())
+    }
+
+    /// Stores a prepared client, replacing an earlier pairing of the same one.
+    /// False if its link key could not be stored, or the ID now belongs to another kind.
+    @discardableResult
+    public func commit(_ new: NewClient) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        var list = loadClients()
+        if let existing = list.first(where: { $0.id == new.id }), (existing.kind ?? .mac) != new.kind { return false }
+        guard secrets.write(new.linkKey, account: "link." + new.id) else { return false }
+        list.removeAll { $0.id == new.id }
+        var client = PairedClient(id: new.id, name: new.name, kind: new.kind, tokenHash: PairingToken.hash(new.token), pairedAt: Date())
+        client.linkCertificate = new.certificateSHA256
+        list.append(client)
+        save(list)
+        return true
+    }
+
+    /// `prepareClient` and `commit` at once; returns the token.
+    public func addClient(id clientID: String, name: String, kind: ClientKind, certificateSHA256: String, linkKey: Data) -> String? {
+        guard let new = prepareClient(id: clientID, name: name, kind: kind, certificateSHA256: certificateSHA256, linkKey: linkKey),
+              commit(new) else { return nil }
+        return new.token
+    }
+
+    /// Whether any paired client is an iPad (the phone then dials over its hotspot).
+    public var hasIPads: Bool { clients.contains(where: \.isIPad) }
 
     public var clients: [PairedClient] {
         lock.lock(); defer { lock.unlock() }

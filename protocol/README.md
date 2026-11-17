@@ -1,6 +1,7 @@
 # Wire protocol
 
-What the Mac and a phone (iPhone or Android) say to each other. The Swift
+What the Mac and a phone (iPhone or Android) say to each other, and an iPad
+and the iPhone it gets its internet from ([iPad](#ipad)). The Swift
 implementation is in `Packages/PassthroughCore`, the Kotlin one in
 `android/app/src/main/java/dev/dpatel/passthrough/core`. Both test suites read
 [`fixtures.json`](fixtures.json); change a message, a port or a pairing rule
@@ -39,12 +40,16 @@ absent (never `null`). Unknown fields are ignored. Protocol version 2.
 | `status` | phone | device facts, `activeConnections`, `rxBytes`, `txBytes`, `timestamp` | To authenticated Macs only: right after `auth` or `paired`, then once a second. The Mac ignores it before. |
 | `shellGrant` | Mac | `shellKey`, `certSHA256`, `shellPort`, `addresses`, `macName`, `irohID`?, `irohRelay`?, `relayToken`?, `grantID`? | Over the cable, on every paired connection while Remote shell is on: gives the phone access to the Mac's remote shell (below). `shellKey` is 32 random bytes, base64; `addresses` are where to dial the Mac. Each grant is a fresh key; the Mac also accepts the key the phone last proved until the phone first proves the new one, since a phone adopts a grant only once its app is unlocked. The optional `irohID` (the Mac's iroh endpoint id: 64 lowercase hex), `irohRelay` (its home relay: an `https` URL, at most 256 characters) and `relayToken` (at most 512 characters; kept in the phone's secret store, never in the grant record) let the phone dial the Mac over iroh (below). If the iroh fields are not valid as a group (a valid `irohID` is required; lengths count UTF-8 bytes), the phone drops all three and still stores the rest of the grant. The optional `grantID` (at most 64 UTF-8 bytes) names this grant for the answer. The Mac keeps one grant per phone in flight; one unanswered within 15 s counts as lost. The Mac then grants again after a wait counted from the end of those 15 s: 15, 30, 60 and 120 s for consecutive lost grants, then every 10 minutes. The next control channel, a new pairing, a change in what grants carry, or an answer starts the waits over. |
 | `shellGranted` | phone | `phoneID`, `grantID`? | The phone stored the grant, its key sealed to the phone app's sealing key (`ShellKeySeal`; the vector is in fixtures.json). A phone whose app has not published a sealing key yet stores nothing and does not answer, so the grant expires and the Mac grants again as above. Echoes the grant's `grantID` when it had a valid one (1 to 64 UTF-8 bytes), so the Mac records the key of the grant answered and ignores a late answer to an earlier one. An answer without `grantID` (from phones that predate it) counts for the grant in flight. |
+| `goodbye` | phone | none | The phone's user turned Passthrough off, and the phone stops right after. Sent to authenticated clients only (Macs and iPads), just before the phone stops: the iPhone's extension stopping at the user's request, or the app's foreground host stopping. A link that only drops sends nothing, and is held to resume as usual. An iPad shows at once that Passthrough was turned off on the iPhone; the Mac logs it. Clients ignore it before `auth`. |
 
 Device facts are `deviceName`, `radio`, `carrier`, `battery` (0 to 1),
-`hosting` (`background` or `foreground`) and `ipv6`: whether the network the
-phone sends traffic out on routes IPv6. When it is `false` the Mac rejects
-IPv6 in its tunnel, so apps fall back to IPv4 at once instead of hanging on
-connections the phone can't make; older phones omit it and nothing changes.
+`hosting` (`background` or `foreground`), `ipv6` and `internetFrom`. `ipv6`
+says whether the network the phone sends traffic out on routes IPv6. When it
+is `false` the Mac rejects IPv6 in its tunnel, so apps fall back to IPv4 at
+once instead of hanging on connections the phone can't make; older phones omit
+it and nothing changes. `internetFrom` comes only from an iPad paired with an
+iPhone for its internet ([iPad](#ipad), below): that iPhone's name, which the
+Mac shows ("<iPad> gets its internet from <iPhone>"). Phones leave it out.
 
 ### Authentication
 
@@ -133,6 +138,11 @@ while the user is still entering a code.
   access granted through it. Until then the token may be another iPhone's:
   the Mac shows that iPhone as not paired, and forgetting its pairing leaves
   the shared slot alone (with no iPhone attached, Forget Pairing clears it).
+  An iPad on the cable (usbmuxd ProductID `0x12AB`; an iPhone's is `0x12A8`)
+  pairs the same way, with the code its app shows, into `token.ipad.<UDID>`.
+  It is the Mac's remote only (shell, screen, `macState`): the Mac sends it no
+  `link`, never routes through it, and prefers a phone that can route whenever
+  one is attached.
 * The token is never sent again. The SOCKS5 password is derived from it (below).
 
 ## SOCKS5 (7890)
@@ -237,6 +247,88 @@ of each stream has 128 KiB of credit: a sender may be at most that far ahead
 of what the receiver reported consumed, and the receiver sends WINDOW after
 each 64 KiB it consumes. Either side pings every 10 s and drops the connection
 after 30 s without any frame; the phone then redials.
+
+## iPad
+
+An iPad can use an iPhone's internet while it is on that iPhone's Personal
+Hotspot, with its traffic leaving from the iPhone's own network stack, not
+the hotspot's data ("Internet through iPhone"). Only iPhones and iPads speak
+this part; Android neither sends nor needs any of it.
+
+### Roles
+
+The iPad takes the Mac's part in the [wireless link](#wireless-link): its
+tunnel extension advertises `_passthrough._tcp` (TXT `m` = the first 16 hex
+digits of SHA-256(the iPad's clientID)), listens with its own self-made
+certificate, and the iPhone dials it. The iPhone dials because the reverse
+never connects: an iOS extension gets no incoming connections from the
+iPad, while the iPhone's extension dialing out works with both devices
+locked. Everything after the dial is the wireless link as above: TLS 1.3
+pinned to the iPad's certificate, `challenge` and `proof` with the link key,
+`fresh` or `resume`, multiplexed streams (the iPad opens them, to 7890 and
+7891 on the iPhone), resuming within 120 s. A control channel over it runs
+`hello` / `welcome` / `auth` with the iPad's clientID and the token the
+iPhone issued it, then `status`; the iPad's tun2socks signs every SOCKS5
+stream with the password derived from that token, as a Mac's does.
+
+On the iPhone the iPad is a `PairedClient` with `kind` `ipad` (records
+without `kind` are Macs). Its `LinkCredential` carries `hotspotOnly: true`:
+
+* It is dialed only over the iPhone's Personal Hotspot interface (`bridge*`
+  or `ap*`), from the Bonjour result's interface and required on the
+  connection, and never over peer-to-peer Wi-Fi. A Wi-Fi network both
+  devices share does not count, and the interface is checked again when the
+  iPad's `challenge` arrives, before the iPhone sends its proof. So a link is
+  proof to the iPad that it is on the iPhone's hotspot.
+* The iPhone dials paired iPads whenever Passthrough is on, whether or not
+  its wireless link setting is on (with it off, only iPads are dialed).
+* The iPhone's `status` and SOCKS5 server are the same as for a Mac:
+  private, link-local and multicast destinations are refused, and DNS to a
+  private address is forwarded to the iPhone's own resolver. The iPad's
+  tunnel tells apps to use `10.255.253.53` for DNS, so its lookups take that
+  path.
+
+### Pairing (QR code)
+
+The iPad shows a QR code; the camera plays the cable's part. The code is a
+URL, `passthrough://pair-ipad?v=1&c=…&n=…&f=…&s=…&e=…`:
+
+| Key | What |
+|-----|------|
+| `v` | `1` |
+| `c` | The iPad's clientID, 1 to 64 characters (random, made once, kept across re-pairing) |
+| `n` | The iPad's name, 1 to 64 characters |
+| `f` | SHA-256 of the iPad's certificate, 64 hex digits |
+| `s` | A one-time secret: 32 random bytes, unpadded URL-safe base64 |
+| `e` | When it expires, Unix seconds: 5 minutes after it was made |
+
+Anything else is not an invitation. While the code shows, the iPad's pairing
+listener advertises `_passthrough._tcp` with TXT `e` (not `m`, so it never
+mixes with the link's listener) = the same tag as `m`, under the instance
+name `<tag>-pair`, over TLS with the same certificate, never peer-to-peer.
+The iPhone, after Face ID or the passcode, browses for it (20 s at most;
+peer-to-peer off), dials it with TLS pinned to `f`, and then has 15 s for
+the exchange, one JSON object per line, each at most 16 KB:
+
+1. iPad: `{"t":"challenge","nonce":"<32 random bytes, base64>"}`.
+2. iPhone: `{"t":"enroll","mac":"<base64>","phoneID":"…","name":"…","token":"…","linkKey":"<32 bytes, base64>"}`,
+   where `mac` = HMAC-SHA256(secret, "passthrough-enroll-v1" ‖ nonce).
+   `token` is a fresh pairing token (`PairingToken`), `linkKey` a fresh link
+   key, `phoneID` the iPhone's (as it answers the link challenge with),
+   `name` the iPhone's name (1 to 64 characters each).
+3. iPad: `{"t":"enrolled"}` once it has stored the iPhone, or
+   `{"t":"error","error":"<why, in words>"}`, then it closes.
+
+The iPad checks the proof in constant time and stores the iPhone (its
+`phoneID`, name, token and link key) only after it holds. A code works once:
+after `enrolled` the listener stops, and so it does at expiry and after 5
+wrong proofs. It takes at most 4 connections at a time, each closed after
+15 s. The iPhone stores the iPad (token hash, link key, the certificate pin
+`f`) only after `enrolled` (`prepareClient`, then `commit`), so a failed
+re-pair leaves an earlier pairing of the same iPad working. A code whose
+clientID belongs to a Mac paired with the iPhone is refused: it can never
+replace a Mac. Pairing another iPhone, or forgetting it, makes the iPad drop
+every link so only the iPhone paired now links again.
 
 ## Remote shell
 

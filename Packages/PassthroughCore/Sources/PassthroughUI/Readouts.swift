@@ -52,8 +52,7 @@ public struct StatusRing: View {
     let mode: Mode
     let size: CGFloat
     let lineWidth: CGFloat
-    @State private var spin = false
-    @State private var breathe = false
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     public init(mode: Mode, size: CGFloat = 180, lineWidth: CGFloat = 10) {
         self.mode = mode; self.size = size; self.lineWidth = lineWidth
@@ -66,26 +65,39 @@ public struct StatusRing: View {
             switch mode {
             case .idle:
                 EmptyView()
+            // Driven by the clock, not a repeating animation started on appear:
+            // one started mid-transition also animates the ring's position,
+            // and it then slides back and forth for as long as it's shown.
+            // Capped like FlowMap (30 fps spinning, 20 live); under Reduce
+            // Motion the live ring holds still (the spinner still turns: it
+            // says something is happening).
             case .busy:
-                Circle()
-                    .trim(from: 0, to: 0.28)
-                    .stroke(PTTheme.accentAngular, style: StrokeStyle(lineWidth: lineWidth, lineCap: .round))
-                    .rotationEffect(.degrees(spin ? 360 : 0))
-                    .animation(.linear(duration: 1.1).repeatForever(autoreverses: false), value: spin)
+                TimelineView(.animation(minimumInterval: 1.0 / 30)) { context in
+                    Circle()
+                        .trim(from: 0, to: 0.28)
+                        .stroke(PTTheme.accentAngular, style: StrokeStyle(lineWidth: lineWidth, lineCap: .round))
+                        .rotationEffect(.degrees(Self.turn(context.date, period: 1.1) * 360))
+                }
             case .live:
-                Circle()
-                    .stroke(PTTheme.accentAngular, style: StrokeStyle(lineWidth: lineWidth, lineCap: .round))
-                    .rotationEffect(.degrees(spin ? 360 : 0))
-                    .animation(.linear(duration: 6).repeatForever(autoreverses: false), value: spin)
-                    .shadow(color: PTTheme.accentStart.opacity(breathe ? 0.55 : 0.25), radius: breathe ? 26 : 14)
-                    .animation(.easeInOut(duration: 2.2).repeatForever(autoreverses: true), value: breathe)
+                TimelineView(.animation(minimumInterval: 1.0 / 20, paused: reduceMotion)) { context in
+                    // Breathes in and out over 4.4 s (2.2 s each way, eased).
+                    let breath = (1 - cos(Self.turn(context.date, period: 4.4) * 2 * .pi)) / 2
+                    Circle()
+                        .stroke(PTTheme.accentAngular, style: StrokeStyle(lineWidth: lineWidth, lineCap: .round))
+                        .rotationEffect(.degrees(Self.turn(context.date, period: 6) * 360))
+                        .shadow(color: PTTheme.accentStart.opacity(0.25 + 0.3 * breath), radius: 14 + 12 * breath)
+                }
             case .error:
                 Circle()
                     .stroke(PTTheme.danger.opacity(0.8), style: StrokeStyle(lineWidth: lineWidth, lineCap: .round))
             }
         }
         .frame(width: size, height: size)
-        .onAppear { spin = true; breathe = true }
+    }
+
+    /// How far through a cycle of `period` seconds `date` is, 0 to 1.
+    static func turn(_ date: Date, period: TimeInterval) -> Double {
+        (date.timeIntervalSinceReferenceDate / period).truncatingRemainder(dividingBy: 1)
     }
 }
 

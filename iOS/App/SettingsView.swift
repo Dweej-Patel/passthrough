@@ -15,14 +15,14 @@ struct SettingsView: View {
             Form {
                 Section {
                     LabeledContent("Name") {
-                        TextField("iPhone", text: $model.deviceName)
+                        TextField(ThisDevice.name, text: $model.deviceName)
                             .multilineTextAlignment(.trailing)
                             .submitLabel(.done)
                     }
                 } header: {
-                    Text("This iPhone")
+                    Text("This \(ThisDevice.name)")
                 } footer: {
-                    Text("Shown on your Mac.")
+                    Text(ThisDevice.isPad ? "Shown on your Mac and iPhone." : "Shown on your Mac and iPads.")
                 }
                 Section {
                     Picker("Hosting", selection: Binding(get: { model.hosting }, set: { model.hosting = $0 })) {
@@ -44,7 +44,7 @@ struct SettingsView: View {
                 } header: {
                     Text("Network")
                 } footer: {
-                    Text("Cellular only: your Mac uses this iPhone's cellular data. While the iPhone is on Wi-Fi it shares the Wi-Fi instead, because iOS lets cellular sleep then. Off: your Mac uses whatever this iPhone is using.")
+                    Text("Cellular only: your Mac uses this \(ThisDevice.name)'s cellular data. While the iPhone is on Wi-Fi it shares the Wi-Fi instead, because iOS lets cellular sleep then. Off: your Mac uses whatever this \(ThisDevice.name) is using.")
                 }
                 Section {
                     Toggle("Wireless link", isOn: $model.wireless)
@@ -58,7 +58,7 @@ struct SettingsView: View {
                 } header: {
                     Text("Wireless")
                 } footer: {
-                    Text("Reach linked Macs without the cable. Best: join this iPhone's Personal Hotspot from the Mac's Wi-Fi menu. It stays up while the iPhone is locked, and your Mac's traffic still goes through Passthrough.\n\nPeer-to-peer Wi-Fi needs no hotspot, but iOS pauses it for minutes at a time while the iPhone is locked.\n\nA Mac links the first time it connects over USB. The link is encrypted and only a paired Mac can use it.")
+                    Text("Reach linked Macs without the cable. Best: join this \(ThisDevice.name)'s Personal Hotspot from the Mac's Wi-Fi menu. It stays up while the iPhone is locked, and your Mac's traffic still goes through Passthrough.\n\nPeer-to-peer Wi-Fi needs no hotspot, but iOS pauses it for minutes at a time while the iPhone is locked.\n\nA Mac links the first time it connects over USB. The link is encrypted and only a paired Mac can use it.")
                 }
                 RemoteShellSettings(shell: model.shell)
                 AppLockSettings()
@@ -143,9 +143,9 @@ private struct RemoteShellSettings: View {
             Text("Remote shell")
         } footer: {
             if shellMacs.isEmpty {
-                Text("Open your Mac's shell from this iPhone. Every session is recorded on the Mac.")
+                Text("Open your Mac's shell from this \(ThisDevice.name). Every session is recorded on the Mac.")
             } else {
-                Text("Every session is recorded on your Mac. To take access away, turn Remote shell off on the Mac, or forget the Mac on this iPhone.")
+                Text("Every session is recorded on your Mac. To take access away, turn Remote shell off on the Mac, or forget the Mac on this \(ThisDevice.name).")
             }
         }
         if !shellMacs.isEmpty {
@@ -162,7 +162,7 @@ private struct RemoteShellSettings: View {
             } header: {
                 Text("Mac address (optional)")
             } footer: {
-                Text("Only needed when this iPhone can't find your Mac by itself, for example over Tailscale. Enter its Tailscale name or IP address. Leave blank to use the addresses your Mac shares.")
+                Text("Only needed when this \(ThisDevice.name) can't find your Mac by itself, for example over Tailscale. Enter its Tailscale name or IP address. Leave blank to use the addresses your Mac shares.")
             }
         }
     }
@@ -192,7 +192,7 @@ private struct NotificationSettings: View {
         } header: {
             Text("Notifications")
         } footer: {
-            Text("When Claude Code or another program asks you something, or finishes a long task while you aren't looking. Your Mac sends them through Apple's push service, sealed so only this iPhone can read them. Each Mac starts sending once the app has connected to it.")
+            Text("When Claude Code or another program asks you something, or finishes a long task while you aren't looking. Your Mac sends them through Apple's push service, sealed so only this \(ThisDevice.name) can read them. Each Mac starts sending once the app has connected to it.")
         }
     }
 
@@ -211,7 +211,7 @@ private struct CaptureProtectionSettings: View {
         } header: {
             Text("Privacy")
         } footer: {
-            Text("Covers the terminal, session history and your Mac's screen while this iPhone's screen is recorded, mirrored or shared. iOS doesn't let apps block screenshots, so take care with those.")
+            Text("Covers the terminal, session history and your Mac's screen while this \(ThisDevice.name)'s screen is recorded, mirrored or shared. iOS doesn't let apps block screenshots, so take care with those.")
         }
     }
 }

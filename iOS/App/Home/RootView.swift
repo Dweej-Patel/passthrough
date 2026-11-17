@@ -9,8 +9,6 @@ final class ShellRouter: ObservableObject {
     @Published var terminal: TerminalIntent?
     @Published var showHistory = false
     @Published var showScreen = false
-    /// The Mac tab's "This iPhone" screen is pushed.
-    @Published var showThisPhone = false
 
     /// True when something was showing (its dismissal is then still under way).
     @discardableResult
@@ -23,9 +21,10 @@ final class ShellRouter: ObservableObject {
     }
 }
 
-enum RootTab: Hashable { case mac, shells, activity }
+enum RootTab: Hashable { case mac, shells, activity, device }
 
-/// The app's sections: the Mac (with this iPhone's own sharing one tap in), its shells, what happened.
+/// The app's sections: the Mac, its shells, what happened, and this device
+/// (an iPhone's sharing and paired devices; an iPad's iPhone and Macs).
 struct RootView: View {
     @EnvironmentObject private var model: AppModel
     @EnvironmentObject private var lock: AppLock
@@ -50,6 +49,11 @@ struct RootView: View {
             ActivityTab(shell: model.shell)
                 .tabItem { Label("Activity", systemImage: "clock") }
                 .tag(RootTab.activity)
+            NavigationStack {
+                ThisPhoneView(showPairing: $showPairing, showSettings: $showSettings)
+            }
+            .tabItem { Label(ThisDevice.name, systemImage: ThisDevice.symbol) }
+            .tag(RootTab.device)
         }
         .environmentObject(router)
         .fullScreenCover(item: $router.terminal, onDismiss: presentationDismissed) { intent in
@@ -99,10 +103,8 @@ struct RootView: View {
             if env["PASSTHROUGH_AUTOSTART"] == "1" { model.start() }
             if env["PASSTHROUGH_SHOW_PAIRING"] == "1" { DispatchQueue.main.asyncAfter(deadline: .now() + 1) { showPairing = true } }
             if env["PASSTHROUGH_SHOW_SETTINGS"] == "1" { DispatchQueue.main.asyncAfter(deadline: .now() + 1) { showSettings = true } }
-            // "phone": the Mac tab with This iPhone pushed, where the iPhone tab's content now lives.
             if let start = env["PASSTHROUGH_TAB"] {
-                tab = ["shells": .shells, "activity": .activity][start] ?? .mac
-                if start == "phone" { router.showThisPhone = true }
+                tab = ["shells": .shells, "activity": .activity, "phone": .device][start] ?? .mac
             }
             if env["PASSTHROUGH_START_ACTIVITY"] == "1" {
                 DispatchQueue.main.asyncAfter(deadline: .now() + 2) { MacActivityController.shared.keepAwakeAsked(seen(reachable: true)) }
@@ -129,7 +131,6 @@ extension RootView {
         case .mac:
             selectLinked(link)
             tab = .mac
-            router.showThisPhone = false
             links.done()
         case .session(let id, _):
             // Just unlocked, the shell may not have rebuilt its Macs yet (the app's own unlock
@@ -140,7 +141,6 @@ extension RootView {
             // Nor on a paired Mac without a usable shell credential (internet only, or its key is gone).
             guard selectLinked(link), shell.selectedMac != nil else {
                 tab = .mac
-                router.showThisPhone = false
                 return links.done()
             }
             // Presented once what was showing for the Mac left is gone (`presentationDismissed`).

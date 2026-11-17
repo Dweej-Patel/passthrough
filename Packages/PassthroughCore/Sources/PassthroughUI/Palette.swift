@@ -77,8 +77,15 @@ private extension NSColor {
 }
 #endif
 
+/// Cards in a row that share a height (the iPad's two columns) fill it: set
+/// to where their content sits in the taller space.
+public extension EnvironmentValues {
+    @Entry var surfaceFill: Alignment? = nil
+}
+
 /// A solid content card. Glass is kept for floating controls (tab bar, sheets).
 public struct PTSurface<Content: View>: View {
+    @Environment(\.surfaceFill) private var surfaceFill
     private let content: Content
     private let padding: CGFloat
     private let fill: Color
@@ -91,6 +98,7 @@ public struct PTSurface<Content: View>: View {
     }
     public var body: some View {
         content
+            .frame(maxHeight: surfaceFill == nil ? nil : .infinity, alignment: surfaceFill ?? .center)
             .padding(padding)
             .background(fill, in: RoundedRectangle(cornerRadius: 24, style: .continuous))
             .overlay(RoundedRectangle(cornerRadius: 24, style: .continuous).strokeBorder(stroke, lineWidth: 1))

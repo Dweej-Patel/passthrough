@@ -8,6 +8,7 @@ struct MacHomeView: View {
     @EnvironmentObject private var model: AppModel
     @EnvironmentObject private var router: ShellRouter
     @Environment(\.dynamicTypeSize) private var typeSize
+    @Environment(\.horizontalSizeClass) private var widthClass
     @ObservedObject var shell: ShellModel
     @Binding var tab: RootTab
     @Binding var showPairing: Bool
@@ -19,6 +20,8 @@ struct MacHomeView: View {
     @State private var confirmVPNOff = false
     /// The switch last changed here, so a refusal without a switch named lands under it.
     @State private var lastTouched: MacSwitch?
+    /// iPad: pairing with the iPhone whose internet it uses.
+    @State private var showPhonePairing = false
     @ObservedObject private var links = PendingLinks.shared
 
     /// The Mac on screen: the shell's selection, else the first paired Mac.
@@ -31,17 +34,10 @@ struct MacHomeView: View {
         NavigationStack {
             ScrollViewReader { scroller in
                 ScrollView {
-                    VStack(spacing: 14) {
-                        MacHeroCard(shell: shell, paired: paired, online: onlineThroughPhone,
-                                    lastSeen: model.pairedClients.first { $0.id == macID }?.lastSeen, showPairing: $showPairing)
-                        if shell.reach == .ready { needsYou }
-                        switches
-                        thisPhoneRow
-                        if shell.reach == .noAccess, !model.pairedClients.isEmpty { setupCard }
-                        if shell.reach == .ready { shells }
-                        Color.clear.frame(height: 0).id("end")
+                    Group {
+                        if wide { wideLayout } else { narrowLayout }
                     }
-                    .padding(.horizontal, 16)
+                    .padding(.horizontal, wide ? 32 : 16)
                     .padding(.top, 4)
                     .padding(.bottom, 24)
                     .animation(.easeOut(duration: 0.3), value: shell.reach)
@@ -71,9 +67,6 @@ struct MacHomeView: View {
                     }
                 }
             }
-            .navigationDestination(isPresented: $router.showThisPhone) {
-                ThisPhoneView(showPairing: $showPairing, showSettings: $showSettings)
-            }
         }
         .confirmationDialog("Let \(macName) sleep?", isPresented: $confirmSleep, titleVisibility: .visible) {
             Button("Let it sleep") { shell.control(.awake(false)) }
@@ -82,6 +75,9 @@ struct MacHomeView: View {
         }
         .sheet(isPresented: $showSwitcher, onDismiss: runAfterSwitcher) {
             MacSwitcherSheet(shell: shell, then: $afterSwitcher)
+        }
+        .sheet(isPresented: $showPhonePairing) {
+            if let hotspot = model.hotspot { PairWithPhoneSheet(hotspot: hotspot) }
         }
         .sheet(isPresented: $confirmVPNOff) {
             VPNOffSheet(macName: macName, killSwitch: state?.killSwitch == true) { shell.control(.vpn(false)) }
@@ -96,6 +92,72 @@ struct MacHomeView: View {
             }
         }
         #endif
+    }
+
+    // MARK: Layouts
+
+    /// A full-width iPad (not a narrow Split View or Slide Over): two columns.
+    private var wide: Bool { widthClass == .regular }
+
+    private var hero: some View {
+        MacHeroCard(shell: shell, paired: paired, online: onlineThroughPhone,
+                    lastSeen: model.pairedClients.first { $0.id == macID }?.lastSeen, showPairing: $showPairing)
+    }
+
+    /// iPhone, and iPad in a narrow window: one column.
+    private var narrowLayout: some View {
+        VStack(spacing: 14) {
+            hero
+            if shell.reach == .ready { needsYou }
+            switches
+            if shell.reach == .noAccess, !model.pairedClients.isEmpty { setupCard }
+            if shell.reach == .ready { shells }
+            Color.clear.frame(height: 0).id("end")
+        }
+    }
+
+    /// iPad: rows of two cards that share a height, so both columns line up.
+    /// This device's own card sits beside the Mac, and the screen gets a card of its own.
+    private var wideLayout: some View {
+        Grid(horizontalSpacing: 20, verticalSpacing: 16) {
+            if let hotspot = model.hotspot {
+                GridRow {
+                    hero.environment(\.surfaceFill, .center)
+                    PTSurface(padding: 6) { HotspotRow(hotspot: hotspot) { showPhonePairing = true } }
+                        .environment(\.surfaceFill, .center)
+                }
+            } else {
+                GridRow { hero.gridCellColumns(2) }
+            }
+            if shell.reach == .ready, shell.visibleSessions.contains(where: \.isAsking) {
+                GridRow { VStack(spacing: 10) { needsYou }.gridCellColumns(2) }
+            }
+            if paired {
+                GridRow {
+                    switchesCard(wide: true).environment(\.surfaceFill, .top)
+                    ScreenCard(macName: macName, enabled: shell.reach == .ready) { router.showScreen = true }
+                        .environment(\.surfaceFill, .center)
+                }
+            } else if let note = links.note {
+                // No Mac switches to sit under: the note from an opened link gets a row of its own.
+                GridRow {
+                    PTSurface(padding: 6) {
+                        SwitchNote(problem: .init(note, warning: true, fix: ("OK", { links.note = nil })))
+                            .padding(.horizontal, 10).padding(.vertical, 10)
+                    }
+                    .gridCellColumns(2)
+                }
+            }
+            if let hotspot = model.hotspot {
+                GridRow {
+                    DevicesStrip(hotspot: hotspot, macName: paired ? macName : nil, macOnline: state?.internet == true)
+                        .gridCellColumns(2)
+                }
+            }
+            if shell.reach == .noAccess, paired { GridRow { setupCard.gridCellColumns(2) } }
+            if shell.reach == .ready { GridRow { shells.gridCellColumns(2) } }
+            GridRow { Color.clear.frame(height: 0).id("end").gridCellColumns(2) }
+        }
     }
 
     private func runAfterSwitcher() {
@@ -148,14 +210,24 @@ struct MacHomeView: View {
     private var state: MacState? { shell.macState }
     private var runningShells: Int { shell.visibleSessions.filter(\.running).count }
 
+    private var switches: some View { switchesCard(wide: false) }
+
     /// Internet first (this phone's own, always there), then what's on the
     /// Mac. A reason shared by several switches shows once, right under them.
-    private var switches: some View {
+    /// `wide` (iPad): only the Mac's switches; this device's Internet and the
+    /// screen have cards of their own beside it.
+    private func switchesCard(wide: Bool) -> some View {
         PTSurface(padding: 6) {
             VStack(alignment: .leading, spacing: 0) {
-                internetRow
+                if !wide {
+                    if let hotspot = model.hotspot {
+                        HotspotRow(hotspot: hotspot) { showPhonePairing = true }
+                    } else {
+                        internetRow
+                    }
+                }
                 if paired {
-                    Divider().padding(.leading, 58)
+                    if !wide { Divider().padding(.leading, 58) }
                     awakeRow
                     Divider().padding(.leading, 58)
                     vpnRow
@@ -164,8 +236,10 @@ struct MacHomeView: View {
                         lockRow
                     }
                     if let reason = controlBlock { SwitchNote(problem: reason).padding(.horizontal, 10).padding(.bottom, 10) }
-                    Divider().padding(.leading, 58)
-                    screenRow
+                    if !wide {
+                        Divider().padding(.leading, 58)
+                        screenRow
+                    }
                     if let reason = reachBlock { SwitchNote(problem: reason).padding(.horizontal, 10).padding(.bottom, 10) }
                 }
                 if let note = links.note {
@@ -189,16 +263,24 @@ struct MacHomeView: View {
     }
 
     private var internetRow: some View {
-        SwitchRow(title: "Internet through this iPhone", symbol: "wifi",
+        SwitchRow(title: "Internet through this \(ThisDevice.name)", symbol: "wifi",
                   status: internetStatus, isOn: model.state.isActive,
                   pending: model.state == .starting || model.state == .stopping,
                   problem: internetProblem) { on in on ? model.start() : model.stop() }
-            .accessibilityHint(model.state.isActive ? "Stops sharing this iPhone's internet with the Mac" : "Shares this iPhone's internet with the Mac")
+            .accessibilityHint(model.state.isActive ? "Stops sharing this \(ThisDevice.name)'s internet with the Mac" : "Shares this \(ThisDevice.name)'s internet with the Mac")
     }
+
+    /// iPads using this iPhone's internet right now (over its hotspot).
+    private var connectedIPads: Int { model.stats.connectedIPads.count }
 
     private var internetStatus: String {
         switch model.state {
-        case .running: macOnline ? "Mac online through this iPhone" : "Sharing \u{2014} waiting for the Mac"
+        case .running:
+            switch (macOnline, connectedIPads) {
+            case (_, 0): macOnline ? "Mac online through this \(ThisDevice.name)" : "Sharing \u{2014} waiting for the Mac"
+            case (true, let n): "Sharing with the Mac and \(n == 1 ? "an iPad" : "\(n) iPads")"
+            case (false, let n): "Sharing with \(n == 1 ? "an iPad" : "\(n) iPads")"
+            }
         case .starting: "Turning on\u{2026}"
         case .stopping: "Turning off\u{2026}"
         case .failed: "Off \u{2014} couldn't turn on"
@@ -211,16 +293,16 @@ struct MacHomeView: View {
         case .failed(let message):
             return .init(message, warning: true, fix: ("Try again", { model.start() }))
         case .stopped where !paired:
-            return .init("Turn this on, then pair your Mac. Its traffic goes through this iPhone over the cable.")
+            return .init("Turn this on, then pair your Mac. Its traffic goes through this \(ThisDevice.name) over the cable.")
         case .running:
             if model.pairedClients.isEmpty {
                 return .init("Now pair your Mac: plug in the cable and enter a code in Passthrough on the Mac.", fix: ("Pair", { showPairing = true }))
             }
             if model.sharingWiFiInsteadOfCellular {
-                return .init("This iPhone is on Wi-Fi, so the Mac gets Wi-Fi, not cellular. Turn off Wi-Fi to share cellular.")
+                return .init("This \(ThisDevice.name) is on Wi-Fi, so the Mac gets Wi-Fi, not cellular. Turn off Wi-Fi to share cellular.")
             }
             if !macOnline {
-                return .init("Plug the Mac into this iPhone, then connect from Passthrough in the Mac's menu bar.")
+                return .init("Plug the Mac into this \(ThisDevice.name), then connect from Passthrough in the Mac's menu bar.")
             }
             return nil
         default:
@@ -443,7 +525,7 @@ struct MacHomeView: View {
         case .unreachable:
             return .init("Can't reach \(macName) right now, so these can't change. They show how it was when it was last heard from.", warning: true)
         case .noAccess:
-            return .init("To change these from this iPhone, set up Remote shell on the Mac. The steps are below.")
+            return .init("To change these from this \(ThisDevice.name), set up Remote shell on the Mac. The steps are below.")
         case .locked, .needsPasscode, .keyUnavailable:
             return .init(shell.reachMessage ?? "Unlock Passthrough to change these.", warning: true)
         }
@@ -456,33 +538,9 @@ struct MacHomeView: View {
             return .init("Update Passthrough on \(macName) to change Keep awake and the VPN from here.")
         }
         guard state.control == true else {
-            return .init("This iPhone isn't allowed to change Keep awake and the VPN, or lock the screen. To allow it, on the Mac open Passthrough's Settings, go to Remote Shell and turn on Awake & VPN for this iPhone.")
+            return .init("This \(ThisDevice.name) isn't allowed to change Keep awake and the VPN, or lock the screen. To allow it, on the Mac open Passthrough's Settings, go to Remote Shell and turn on Awake & VPN for this \(ThisDevice.name).")
         }
         return nil
-    }
-
-    // MARK: This iPhone
-
-    private var thisPhoneRow: some View {
-        Button { router.showThisPhone = true } label: {
-            HStack(spacing: 12) {
-                SwitchIcon(symbol: "iphone", on: false, warning: false)
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("This iPhone").font(.body.weight(.semibold))
-                    Text(!paired ? "Pair a Mac, data used, connection details" : "Paired Macs, data used, connection details")
-                        .font(.subheadline).foregroundStyle(.secondary)
-                }
-                Spacer(minLength: 8)
-                Image(systemName: "chevron.right").font(.subheadline.weight(.semibold)).foregroundStyle(.tertiary)
-            }
-            .padding(16)
-            .frame(minHeight: 60)
-            .background(PTColor.surface, in: RoundedRectangle(cornerRadius: 24, style: .continuous))
-            .overlay(RoundedRectangle(cornerRadius: 24, style: .continuous).strokeBorder(PTColor.hairline))
-            .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-        .accessibilityHint("Opens this iPhone's sharing, pairing and data use")
     }
 
     // MARK: Shells
@@ -557,7 +615,7 @@ struct MacHomeView: View {
         PTSurface {
             VStack(alignment: .leading, spacing: 14) {
                 Text("Reach it from anywhere").font(.headline)
-                Text("Open its shell and see its screen from this iPhone, even away from home.")
+                Text("Open its shell and see its screen from this \(ThisDevice.name), even away from home.")
                     .font(.subheadline).foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
                 ShellSetupSteps(paired: true)
@@ -679,5 +737,50 @@ struct SwitchIcon: View {
             .frame(width: 36, height: 36)
             .background(warning ? PTColor.attention : on ? PTColor.tint : Color.primary.opacity(0.08), in: Circle())
             .accessibilityHidden(true)
+    }
+}
+
+// MARK: - Screen card (iPad)
+
+/// The Mac's screen as a card of its own on iPad, where there's room to make
+/// it as easy to find as the switches.
+struct ScreenCard: View {
+    let macName: String
+    let enabled: Bool
+    let open: () -> Void
+
+    var body: some View {
+        PTSurface(padding: 14) {
+            HStack(spacing: 18) {
+                Button(action: open) {
+                    ZStack {
+                        RoundedRectangle(cornerRadius: 14, style: .continuous)
+                            .fill(LinearGradient(colors: [Color(red: 0.07, green: 0.23, blue: 0.2), Color(red: 0.05, green: 0.11, blue: 0.16)],
+                                                 startPoint: .topLeading, endPoint: .bottomTrailing))
+                        Image(systemName: "macbook")
+                            .font(.system(size: 54, weight: .light))
+                            .foregroundStyle(PTColor.tint.opacity(0.8))
+                    }
+                    .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous).strokeBorder(PTColor.hairline))
+                    .aspectRatio(16 / 10, contentMode: .fit)
+                    .frame(maxWidth: 260)
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Control \(macName)'s screen")
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("Screen").font(.body.weight(.semibold))
+                    Text("See and control the Mac. Touch, a trackpad and a keyboard all work.")
+                        .font(.subheadline).foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Button(action: open) { Label("Control", systemImage: "cursorarrow") }
+                        .buttonStyle(PTProminentButtonStyle())
+                        .padding(.top, 4)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .frame(maxHeight: .infinity)
+        }
+        .disabled(!enabled)
+        .opacity(enabled ? 1 : 0.55)
     }
 }

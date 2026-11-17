@@ -11,8 +11,12 @@ public struct DeviceStatus: Sendable, Equatable {
     public var hosting: String
     /// Whether the network the phone sends Mac traffic out on routes IPv6; nil when unknown.
     public var ipv6: Bool?
-    public init(deviceName: String, radio: String? = nil, carrier: String? = nil, battery: Double? = nil, hosting: String, ipv6: Bool? = nil) {
+    /// An iPad: the iPhone it gets its internet from (Internet through iPhone), if paired.
+    public var internetFrom: String?
+    public init(deviceName: String, radio: String? = nil, carrier: String? = nil, battery: Double? = nil, hosting: String, ipv6: Bool? = nil,
+                internetFrom: String? = nil) {
         self.deviceName = deviceName; self.radio = radio; self.carrier = carrier; self.battery = battery; self.hosting = hosting; self.ipv6 = ipv6
+        self.internetFrom = internetFrom
     }
 }
 
@@ -23,8 +27,10 @@ public struct ConnectedMac: Identifiable, Sendable, Equatable, Codable {
     public let since: Date
     /// Over the wireless link rather than the cable; nil when the Mac didn't say.
     public let wireless: Bool?
-    public init(id: String, name: String, since: Date, wireless: Bool? = nil) {
-        self.id = id; self.name = name; self.since = since; self.wireless = wireless
+    /// A Mac or an iPad; nil for a Mac.
+    public let kind: ClientKind?
+    public init(id: String, name: String, since: Date, wireless: Bool? = nil, kind: ClientKind? = nil) {
+        self.id = id; self.name = name; self.since = since; self.wireless = wireless; self.kind = kind
     }
 }
 
@@ -36,6 +42,9 @@ public struct ConnectedMac: Identifiable, Sendable, Equatable, Codable {
 public final class ControlServer: @unchecked Sendable {
     public let port: UInt16
     private let registry: PairingRegistry
+
+    /// A Mac or an iPad, as paired.
+    func clientKind(_ id: String) -> ClientKind? { registry.clients.first { $0.id == id }?.kind }
     private let counter: ByteCounter
     private let statusProvider: @Sendable () -> DeviceStatus
     private let socksPort: UInt16
@@ -87,6 +96,15 @@ public final class ControlServer: @unchecked Sendable {
             peers.values.forEach { $0.cancel() }
             peers.removeAll()
             onClientsChanged?([])
+        }
+    }
+
+    /// Tells every authenticated client this phone is being turned off on
+    /// purpose, before it stops (so an iPad can say so at once rather than
+    /// wait out the link's hold for a resume).
+    public func sayGoodbye() {
+        queue.sync {
+            for peer in peers.values where peer.mac != nil { peer.send(ControlEnvelope(t: ControlEnvelope.goodbye)) }
         }
     }
 
@@ -292,6 +310,7 @@ public final class ControlServer: @unchecked Sendable {
         m.battery = status.battery
         m.hosting = status.hosting
         m.ipv6 = status.ipv6
+        m.internetFrom = status.internetFrom
         m.activeConnections = snap.active
         m.rxBytes = snap.rx
         m.txBytes = snap.tx
@@ -315,6 +334,8 @@ private final class Peer: @unchecked Sendable {
     private var cancelled = false
     /// Set once the Mac proved its pairing, or paired with the code.
     private(set) var mac: ConnectedMac?
+
+    func send(_ message: ControlEnvelope) { channel.send(message) }
     var hello: Hello?
     let openedAt = Date()
     private(set) var lastHeard = Date()
@@ -357,7 +378,8 @@ private final class Peer: @unchecked Sendable {
 
     func authenticate(id: String, name: String) {
         if mac == nil {
-            mac = ConnectedMac(id: id, name: name, since: Date(), wireless: via.map { $0 == "wireless" })
+            mac = ConnectedMac(id: id, name: name, since: Date(), wireless: via.map { $0 == "wireless" },
+                               kind: server.clientKind(id))
             ptLog(.info, "\(name) connected")
             server.clientsChanged()
         }

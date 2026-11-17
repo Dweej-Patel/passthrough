@@ -3,7 +3,11 @@
 Third-party components distributed with this repository keep their own licences:
 
 * Vendor/HevSocks5Tunnel — hev-socks5-tunnel (MIT), lwIP (BSD-3-Clause),
-  hev-task-system (MIT), libyaml (MIT). See Vendor/HevSocks5Tunnel/LICENSES.md.
+  hev-task-system (MIT), libyaml (MIT). Built by scripts/build-hev.sh from
+  Vendor/hev-socks5-tunnel into two static libraries: lib/libhev-socks5-tunnel.a,
+  linked into the Mac's root helper, and HevSocks5Tunnel.xcframework (iOS device
+  and simulator), linked into the iOS tunnel extension, which uses it on iPad for
+  Internet through iPhone. See Vendor/HevSocks5Tunnel/LICENSES.md.
 * Vendor/VPNEngines/bin/wireguard-go — MIT. See Vendor/VPNEngines/licenses/WIREGUARD-GO-LICENSE.
 * Vendor/VPNEngines/bin/openvpn — GPL-2.0 with the OpenSSL linking exception.
   See Vendor/VPNEngines/licenses/OPENVPN-COPYING. Source is fetched and rebuilt by

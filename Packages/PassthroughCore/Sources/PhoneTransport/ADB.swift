@@ -237,6 +237,7 @@ public enum ADB {
     /// Where platform-tools usually live. A menu bar app does not inherit the
     /// shell's PATH, so look in the usual places explicitly.
     public static func findBinary(environment: [String: String] = ProcessInfo.processInfo.environment) -> String? {
+        #if os(macOS)
         var candidates: [String] = []
         for key in ["ANDROID_HOME", "ANDROID_SDK_ROOT"] {
             if let root = environment[key] { candidates.append("\(root)/platform-tools/adb") }
@@ -250,11 +251,15 @@ public enum ADB {
             "/opt/homebrew/Caskroom/android-platform-tools/latest/platform-tools/adb",
         ]
         return candidates.first { FileManager.default.isExecutableFile(atPath: $0) }
+        #else
+        return nil   // iOS (an iPad's client): no adb.
+        #endif
     }
 
     /// Runs `adb start-server` and waits for it (blocking; call off the main thread).
     @discardableResult
     public static func startServer(binary: String) -> Bool {
+        #if os(macOS)
         let process = Process()
         process.executableURL = URL(fileURLWithPath: binary)
         process.arguments = ["start-server"]
@@ -265,5 +270,8 @@ public enum ADB {
         while process.isRunning, Date() < deadline { Thread.sleep(forTimeInterval: 0.1) }
         if process.isRunning { process.terminate(); return false }
         return process.terminationStatus == 0
+        #else
+        return false
+        #endif
     }
 }

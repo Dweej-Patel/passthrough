@@ -20,7 +20,7 @@ struct MacHeroCard: View {
                             .contentTransition(.opacity)
                         if let detail { Text(detail).font(.subheadline).foregroundStyle(.secondary).contentTransition(.opacity) }
                         if online, shell.reach == .ready {
-                            Label("Online through this iPhone", systemImage: "cable.connector")
+                            Label("Online through this \(ThisDevice.name)", systemImage: "cable.connector")
                                 .font(.caption.weight(.semibold))
                                 .foregroundStyle(PTColor.tintText)
                         }
@@ -43,7 +43,7 @@ struct MacHeroCard: View {
         case .ready: return awake ? "Staying awake" : "Reachable"
         case .connecting: return shell.isRedialing ? "Reconnecting…" : "Connecting…"
         case .unreachable: return "Can't reach it"
-        case .noAccess: return online ? "Online through this iPhone" : "Paired"
+        case .noAccess: return online ? "Online through this \(ThisDevice.name)" : "Paired"
         // Not "needs you": that's a shell waiting on a question.
         case .locked: return "Unlock to continue"
         case .needsPasscode: return "Needs a passcode"
@@ -81,7 +81,7 @@ struct MacHeroCard: View {
             BatteryLine(state: state, battery: battery, awake: awake)
         }
         if !paired {
-            Text("Then it's online through this iPhone whenever they're connected, and you can reach its shell from anywhere.")
+            Text("Then it's online through this \(ThisDevice.name) whenever they're connected, and you can reach its shell from anywhere.")
                 .font(.subheadline).foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
             Button { showPairing = true } label: { Label("Pair your Mac", systemImage: "laptopcomputer.and.iphone") }
@@ -161,18 +161,17 @@ private struct BatteryLine: View {
 /// Motion it stays still, a plain dot.
 struct NeedsYouDot: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    @State private var pulse = false
 
     var body: some View {
-        Circle()
-            .fill(PTColor.attention)
-            .frame(width: 10, height: 10)
-            .background(Circle().fill(PTColor.attention.opacity(0.35)).scaleEffect(pulse ? 2.2 : 1).opacity(pulse ? 0 : 1))
-            .onAppear {
-                guard !reduceMotion else { return }
-                withAnimation(.easeOut(duration: 1.6).repeatForever(autoreverses: false)) { pulse = true }
-            }
-            .accessibilityHidden(true)
+        // Clock-driven, so it can't carry the dot's position (see `StatusRing`).
+        TimelineView(.animation(minimumInterval: 1.0 / 20, paused: reduceMotion)) { context in
+            let wave = reduceMotion ? 0 : PTPulse.wave(context.date, period: 1.6)
+            Circle()
+                .fill(PTColor.attention)
+                .frame(width: 10, height: 10)
+                .background(Circle().fill(PTColor.attention.opacity(0.35)).scaleEffect(1 + 1.2 * wave).opacity(1 - wave))
+        }
+        .accessibilityHidden(true)
     }
 }
 

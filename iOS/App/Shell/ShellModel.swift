@@ -29,7 +29,7 @@ final class ShellModel: ObservableObject {
             case .needsPasscode: "Set a device passcode to use Remote shell."
             case .locked: "Unlock Passthrough to use Remote shell."
             case .keyUnavailable: "Couldn't read the Remote shell key. Plug into the Mac again to renew access."
-            case .noAccess: "Turn on Remote shell in Passthrough on your Mac, then connect this iPhone with the cable once."
+            case .noAccess: "Turn on Remote shell in Passthrough on your Mac, then connect this \(ThisDevice.name) with the cable once."
             case .unreachable: fromAnywhere
                 ? "Can't reach your Mac. Check that Remote shell is on and the Mac is awake."
                 : "Can't reach your Mac. Use the same Wi-Fi, or turn on Tailscale on both devices."
@@ -722,7 +722,11 @@ final class ShellModel: ObservableObject {
                 openWhenReady = false
                 reattachIfRefused = active != nil
                 client?.open(cols: size.cols, rows: size.rows)
-            } else if let active {
+            } else if let active, viewing {
+                // Only while a terminal is on screen: attaching takes the
+                // session over and the Mac sizes it to this phone, so doing
+                // it from the home screen would resize a shell someone is
+                // using on the Mac. The terminal attaches when it opens.
                 reattachIfRefused = false
                 streamStarting.send((active, true))
                 client?.attach(active, cols: size.cols, rows: size.rows)
@@ -1042,12 +1046,12 @@ extension ShellError {
         case .tooManySessions: "Your Mac already has \(RemoteShell.maxSessions) sessions open. End one to start another."
         case .noSuchSession: "That session is no longer open on your Mac."
         case .badRequest: "Your Mac couldn't do that. Try again."
-        case .screenNotAllowed: "This iPhone isn't allowed to see your Mac's screen. Turn on Screen for it in Passthrough's Remote Shell settings on your Mac."
+        case .screenNotAllowed: "This \(ThisDevice.name) isn't allowed to see your Mac's screen. Turn on Screen for it in Passthrough's Remote Shell settings on your Mac."
         // Asked for only after the Mac said it can't stream its screen itself.
         case .screenUnavailable: "Your Mac can't show its screen yet. In Passthrough's Remote Shell settings on your Mac, allow Screen Recording and Accessibility, or turn on Screen Sharing."
         case .screenVideoUnavailable: "Your Mac can't stream its screen itself yet. In Passthrough's Remote Shell settings on your Mac, allow Screen Recording and Accessibility."
         case .tooManyScreens: "Your Mac is already showing its screen as often as it allows (\(RemoteShell.maxScreenViewsPerPhone) views per phone, \(RemoteShell.maxScreenViews) in all). Close one to open another."
-        case .notAllowed: "Your Mac doesn't let this iPhone change Keep awake and the VPN. Turn on Awake & VPN for it in Passthrough's Remote Shell settings on your Mac."
+        case .notAllowed: "Your Mac doesn't let this \(ThisDevice.name) change Keep awake and the VPN. Turn on Awake & VPN for it in Passthrough's Remote Shell settings on your Mac."
         case .vpnNotSetUp: "Your Mac has no VPN set up yet. Add one in Passthrough's VPN settings on the Mac."
         case .notAuthorized: nil
         }

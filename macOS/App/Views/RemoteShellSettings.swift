@@ -314,7 +314,7 @@ private struct PhonesSection: View {
             ForEach(shell.phones, id: \.phoneID) { phone in
                 VStack(alignment: .leading, spacing: 8) {
                     HStack(spacing: 12) {
-                        Image(systemName: "iphone")
+                        Image(systemName: Self.symbol(for: phone))
                             .font(.system(size: 17))
                             .foregroundStyle(.secondary)
                             .frame(width: 22)
@@ -360,6 +360,13 @@ private struct PhonesSection: View {
             Text(title).font(.callout).foregroundStyle(.secondary)
         }
         .fixedSize()
+    }
+
+    /// The device it was granted through, by its pairing slot (`PhoneDevice`).
+    static func symbol(for phone: ShellPhone) -> String {
+        if phone.pairingSlot.hasPrefix("token.ipad.") { return "ipad" }
+        if phone.pairingSlot.hasPrefix("token.android.") { return "smartphone" }
+        return "iphone"
     }
 
     private func detail(for phone: ShellPhone) -> String {

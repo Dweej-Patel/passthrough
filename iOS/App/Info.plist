@@ -38,6 +38,8 @@
 		<string>_passthrough._tcp</string>
 		<string>_passthrough-sh._tcp</string>
 	</array>
+	<key>NSCameraUsageDescription</key>
+	<string>Passthrough scans the code an iPad shows, to let it use this iPhone's internet.</string>
 	<key>NSFaceIDUsageDescription</key>
 	<string>Passthrough uses Face ID to keep your Mac's shell and settings private.</string>
 	<key>NSLocalNetworkUsageDescription</key>
@@ -56,6 +58,13 @@
 	<key>UISupportedInterfaceOrientations</key>
 	<array>
 		<string>UIInterfaceOrientationPortrait</string>
+		<string>UIInterfaceOrientationLandscapeLeft</string>
+		<string>UIInterfaceOrientationLandscapeRight</string>
+	</array>
+	<key>UISupportedInterfaceOrientations~ipad</key>
+	<array>
+		<string>UIInterfaceOrientationPortrait</string>
+		<string>UIInterfaceOrientationPortraitUpsideDown</string>
 		<string>UIInterfaceOrientationLandscapeLeft</string>
 		<string>UIInterfaceOrientationLandscapeRight</string>
 	</array>

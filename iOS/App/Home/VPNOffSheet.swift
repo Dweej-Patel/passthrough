@@ -69,7 +69,7 @@ struct VPNOffSheet: View {
     /// How this phone checks it's you: whatever `deviceOwnerAuthentication` will ask for.
     private static var confirmedBy: String {
         let context = LAContext()
-        guard context.canEvaluatePolicy(.deviceOwnerAuthentication, error: nil) else { return "This iPhone has no passcode, so nothing confirms it." }
+        guard context.canEvaluatePolicy(.deviceOwnerAuthentication, error: nil) else { return "This \(ThisDevice.name) has no passcode, so nothing confirms it." }
         switch context.biometryType {
         case .faceID: return "Face ID confirms it."
         case .touchID: return "Touch ID confirms it."

@@ -6,8 +6,6 @@ import PassthroughUI
 struct PairSheet: View {
     @EnvironmentObject private var model: AppModel
     @Environment(\.dismiss) private var dismiss
-    @State private var now = Date()
-    private let clock = Timer.publish(every: 1, on: .main, in: .common).autoconnect()
 
     var body: some View {
         ZStack {
@@ -15,7 +13,7 @@ struct PairSheet: View {
             VStack(spacing: 26) {
                 Capsule().fill(.secondary.opacity(0.4)).frame(width: 40, height: 5).padding(.top, 10)
                 Spacer(minLength: 0)
-                Image(systemName: "laptopcomputer.and.iphone")
+                Image(systemName: ThisDevice.isPad ? "laptopcomputer.and.ipad" : "laptopcomputer.and.iphone")
                     .font(.system(size: 54, weight: .medium))
                     .foregroundStyle(PTTheme.accent)
                 VStack(spacing: 6) {
@@ -24,10 +22,10 @@ struct PairSheet: View {
                         .font(.subheadline).foregroundStyle(.secondary).multilineTextAlignment(.center)
                         .padding(.horizontal, 24)
                 }
-                if model.state != .running {
+                if model.state != .running, !ThisDevice.isPad {
                     PTCard {
                         VStack(alignment: .leading, spacing: 10) {
-                            Label("This iPhone's internet sharing is off, so the Mac can't reach it to pair.", systemImage: "exclamationmark.triangle.fill")
+                            Label("This \(ThisDevice.name)'s internet sharing is off, so the Mac can't reach it to pair.", systemImage: "exclamationmark.triangle.fill")
                                 .font(.footnote).foregroundStyle(PTTheme.warning)
                                 .fixedSize(horizontal: false, vertical: true)
                             Button(model.state == .starting ? "Turning on…" : "Turn on sharing") { model.start() }
@@ -39,12 +37,17 @@ struct PairSheet: View {
                 }
                 if let code = model.pairingCode {
                     PairingCodeTiles(code: code.code, size: 50)
-                    VStack(spacing: 6) {
-                        ProgressView(value: remaining(code.expiry), total: PassthroughProtocol.pairingCodeLifetime)
-                            .tint(PTTheme.accentEnd)
-                            .frame(width: 220)
-                        Text("Expires in \(ByteFormat.duration(remaining(code.expiry)))")
-                            .font(PTTheme.mono(13)).foregroundStyle(.secondary)
+                    // Counted by the clock: a timer kept on this view was made anew
+                    // each time the screen behind redrew (every second on an iPad)
+                    // and so never fired, leaving the countdown at 5:00.
+                    TimelineView(.periodic(from: .now, by: 1)) { context in
+                        VStack(spacing: 6) {
+                            ProgressView(value: remaining(code.expiry, now: context.date), total: PassthroughProtocol.pairingCodeLifetime)
+                                .tint(PTTheme.accentEnd)
+                                .frame(width: 220)
+                            Text("Expires in \(ByteFormat.duration(remaining(code.expiry, now: context.date)))")
+                                .font(PTTheme.mono(13)).foregroundStyle(.secondary)
+                        }
                     }
                 } else {
                     if model.pairingCodeWithdrawn {
@@ -69,7 +72,6 @@ struct PairSheet: View {
         .presentationDetents([.large])
         .presentationDragIndicator(.hidden)
         .onAppear { if model.pairingCode == nil { model.beginPairing() } }
-        .onReceive(clock) { now = $0 }
         .onChange(of: model.pairedClients.count) { old, new in
             if new > old { dismiss() }
         }
@@ -78,7 +80,7 @@ struct PairSheet: View {
     /// Why the code on screen went away early. Same words as the Android app's.
     static let withdrawnDetail = "Too many wrong codes were entered, so it no longer works. If that wasn't you, something on this phone or the Mac tried to guess it. Generate a new code to pair."
 
-    private func remaining(_ expiry: Date) -> TimeInterval {
+    private func remaining(_ expiry: Date, now: Date) -> TimeInterval {
         max(0, expiry.timeIntervalSince(now))
     }
 }

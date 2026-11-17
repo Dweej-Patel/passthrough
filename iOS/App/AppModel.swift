@@ -23,12 +23,25 @@ final class AppModel: ObservableObject {
     let registry = PairingRegistry(defaults: AppModel.groupDefaults, secrets: KeychainSecrets(accessGroup: PassthroughProtocol.appGroup))
     let log = PassthroughLog.shared
     let shell = ShellModel()
+    /// iPad only: "Internet through iPhone".
+    let hotspot: HotspotModel? = ThisDevice.isPad ? HotspotModel() : nil
     /// Set by the app scene; the shell reads its evaluated context after unlock.
     weak var lock: AppLock?
 
     @Published private(set) var state: ServiceState = .stopped
     @Published private(set) var meter = TrafficMeter()
     @Published private(set) var stats = ProviderStats(rx: 0, tx: 0, active: 0, totalConnections: 0, macs: [], startedAt: nil)
+    /// iPads paired with this iPhone (they use its internet over its hotspot).
+    @Published private(set) var pairedIPads: [PairedClient] = []
+
+    /// Splits the registry: Macs (everything Mac-facing reads `pairedClients`) and iPads.
+    private func reloadClients() {
+        let all = registry.clients
+        pairedClients = all.filter { !$0.isIPad }
+        pairedIPads = all.filter(\.isIPad)
+    }
+
+    /// The Macs paired with this device.
     @Published private(set) var pairedClients: [PairedClient] = [] {
         didSet {
             #if DEBUG
@@ -49,7 +62,7 @@ final class AppModel: ObservableObject {
     @Published var usage = UsageLedger(defaults: AppModel.groupDefaults)
 
     // Settings live in the App Group so the extension sees them.
-    @AppStorage(SharedKeys.deviceName, store: AppModel.groupDefaults) var deviceName = "iPhone"
+    @AppStorage(SharedKeys.deviceName, store: AppModel.groupDefaults) var deviceName = ThisDevice.name
     @AppStorage(SharedKeys.cellularOnly, store: AppModel.groupDefaults) var cellularOnly = true
     @AppStorage(SharedKeys.allowUDP, store: AppModel.groupDefaults) var allowUDP = true
     @AppStorage(SharedKeys.socksPort, store: AppModel.groupDefaults) var socksPort = Int(PassthroughProtocol.defaultSOCKSPort)
@@ -77,7 +90,13 @@ final class AppModel: ObservableObject {
     private var logFileDate: Date?
 
     init() {
-        pairedClients = registry.clients
+        // The name other devices see comes from the App Group (the extension and
+        // the in-app service read it there). With none chosen it fell back to
+        // "iPhone" even on an iPad; store this device's own default.
+        if Self.groupDefaults.string(forKey: SharedKeys.deviceName)?.isEmpty ?? true {
+            Self.groupDefaults.set(ThisDevice.name, forKey: SharedKeys.deviceName)
+        }
+        reloadClients()
         // The servers run in the tunnel extension, a separate process, so the
         // log lives in a shared file both processes append to.
         if let url = PassthroughProtocol.sharedLogURL { log.attachFile(url) }
@@ -89,7 +108,7 @@ final class AppModel: ObservableObject {
                 if self.logEntries.count > 400 { self.logEntries.removeFirst(self.logEntries.count - 400) }
             }
         }
-        registry.onChange = { [weak self] in Task { @MainActor in self?.pairedClients = self?.registry.clients ?? [] } }
+        registry.onChange = { [weak self] in Task { @MainActor in self?.reloadClients() } }
         facts.onChange = { [weak self] in self?.refreshDeviceFacts() }
         refreshDeviceFacts()
         extensionHost.onStateChange = { [weak self] state in
@@ -116,13 +135,22 @@ final class AppModel: ObservableObject {
     // MARK: Lifecycle
 
     private func bootstrap() async {
-        pairedClients = registry.clients
+        await hotspot?.load()
+        reloadClients()
         refreshShell()
         refreshDeviceFacts()
         #if targetEnvironment(simulator)
         extensionAvailable = false
         if hosting == .background { hosting = .foreground }
         #endif
+        // On an iPad the extension is "Internet through iPhone" (`HotspotModel`).
+        // What a Mac reaches over the cable (pairing, the shell key) is served
+        // by the app whenever it's open: an iPad never carries a Mac's internet.
+        if ThisDevice.isPad {
+            extensionAvailable = false
+            if !state.isActive { start() }
+            return
+        }
         guard hosting == .background else { return }
         do {
             try await extensionHost.load()
@@ -145,7 +173,7 @@ final class AppModel: ObservableObject {
         var options = PassthroughService.Options()
         options.socksPort = UInt16(socksPort)
         options.controlPort = UInt16(controlPort)
-        options.cellularOnly = cellularOnly
+        options.cellularOnly = cellularOnly && !ThisDevice.isPad   // an iPad has no cellular to prefer
         options.allowUDP = allowUDP
         options.wireless = wireless
         options.peerToPeer = peerToPeer
@@ -217,14 +245,15 @@ final class AppModel: ObservableObject {
         if let pairingCode, pairingCode.expiry <= Date() { self.pairingCode = nil }
         if pairingCode != nil, registry.codeWasWithdrawn { pairingCode = nil; pairingCodeWithdrawn = true }
         guard state == .running, let fresh = await activeHost.stats() else { return }
-        if stats.macs.count < fresh.macs.count, pairingCode != nil { pairingCode = nil }
+        // A Mac that just paired connects: the code is spent. (An iPad linking says nothing about it.)
+        if stats.connectedMacs.count < fresh.connectedMacs.count, pairingCode != nil { pairingCode = nil }
         stats = fresh
         meter.record(ByteCounter.Snapshot(rx: fresh.rx, tx: fresh.tx, active: fresh.active, totalConnections: fresh.totalConnections))
         if let last = lastUsageSnapshot {
             usage.add(rx: max(0, fresh.rx - last.rx), tx: max(0, fresh.tx - last.tx))
         }
         lastUsageSnapshot = (fresh.rx, fresh.tx)
-        pairedClients = registry.clients
+        reloadClients()
     }
 
     /// Publishes the radio and battery, and hands them to whichever process hosts the service.
@@ -252,16 +281,42 @@ final class AppModel: ObservableObject {
         pairingCodeWithdrawn = false
     }
 
+    /// Adds an iPad from the code it showed: issues its token and link key,
+    /// then hands them to it over this phone's hotspot (`IPadEnrollment`). It's
+    /// paired only once the iPad has taken them; until then an earlier pairing
+    /// of the same iPad keeps working.
+    func addIPad(_ invitation: IPadEnrollment.Invitation) async -> Result<Void, IPadEnrollment.EnrollmentError> {
+        guard let new = registry.prepareClient(id: invitation.clientID, name: invitation.name, kind: .ipad,
+                                               certificateSHA256: invitation.certSHA256, linkKey: WirelessLink.randomBytes(32)) else {
+            return .failure(.refused("that code names a device already paired as a Mac"))
+        }
+        let registry = self.registry
+        var result: Result<Void, IPadEnrollment.EnrollmentError> = await withCheckedContinuation { continuation in
+            IPadEnrollment.enroll(invitation, phoneID: registry.phoneID, phoneName: ThisDevice.displayName, token: new.token, linkKey: new.linkKey) {
+                continuation.resume(returning: $0)
+            }
+        }
+        if case .success = result, !registry.commit(new) {
+            result = .failure(.failed("this iPhone couldn't store the iPad's key. Pair again."))
+        }
+        reloadClients()
+        switch result {
+        case .success: log.log(.info, "Paired \(invitation.name)")
+        case .failure(let error): log.log(.warning, "Pairing \(invitation.name) didn't finish: \(error.localizedDescription)")
+        }
+        return result
+    }
+
     func revoke(_ client: PairedClient) {
         registry.revoke(clientID: client.id)
         shell.forget(macID: client.id)
-        pairedClients = registry.clients
+        reloadClients()
     }
 
     func revokeAll() {
         registry.revokeAll()
         shell.forgetAll()
-        pairedClients = registry.clients
+        reloadClients()
     }
 
     // MARK: Remote shell
@@ -273,9 +328,12 @@ final class AppModel: ObservableObject {
         shell.refresh(lock: lock, registry: registry)
     }
 
-    var connectedMacIDs: Set<String> { Set(stats.macs.map(\.id)) }
+    var connectedMacIDs: Set<String> { Set(stats.connectedMacs.map(\.id)) }
     /// Every Mac this iPhone serves right now is on the wireless link.
-    var servingWirelessly: Bool { !stats.macs.isEmpty && stats.macs.allSatisfy { stats.isWireless($0) } }
+    var servingWirelessly: Bool {
+        let macs = stats.connectedMacs
+        return !macs.isEmpty && macs.allSatisfy { stats.isWireless($0) }
+    }
 
     var sessionDuration: TimeInterval? {
         guard let start = stats.startedAt, state == .running else { return nil }

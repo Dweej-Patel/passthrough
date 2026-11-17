@@ -738,6 +738,14 @@ final class RemoteShellController: ObservableObject {
         refreshPhones()
     }
 
+    /// A phone's status names it differently than when it was granted access
+    /// (renamed, or an iPad that once called itself "iPhone"): show its name now.
+    func relabel(pairingSlot: String, label: String) {
+        guard store.relabel(pairingSlot: pairingSlot, label: label) else { return }
+        ptLog(.info, "shell: a phone with access is now called \(label)")
+        refreshPhones()
+    }
+
     /// The phone's pairing moved to another slot; its access follows (see `ShellAccessStore.move`).
     func movePairing(phoneID: String, fromSlot: String, toSlot: String) {
         guard store.move(phoneID: phoneID, fromSlot: fromSlot, toSlot: toSlot) else { return }

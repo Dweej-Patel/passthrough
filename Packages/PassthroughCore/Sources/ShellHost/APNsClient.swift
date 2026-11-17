@@ -118,9 +118,6 @@ public actor APNsClient {
         return jwt
     }
 
-    static func base64URL(_ data: Data) -> String {
-        data.base64EncodedString().replacingOccurrences(of: "+", with: "-").replacingOccurrences(of: "/", with: "_")
-            .replacingOccurrences(of: "=", with: "")
-    }
+    static func base64URL(_ data: Data) -> String { data.base64URL }
 }
 #endif

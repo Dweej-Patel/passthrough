@@ -2,7 +2,7 @@
 
 <p align="center"><b>Your phone, working for your Mac.</b><br>
 Internet over the cable, a Mac that stays awake while you're gone, its shell from anywhere, and a VPN with a kill switch.<br>
-For iPhone and Android. No accounts, no Passthrough server.</p>
+For iPhone and Android, and an iPad through your iPhone. No accounts, no Passthrough server.</p>
 
 <p align="center">Free and open source. If it saved your day (or your data plan), <a href="https://buymeacoffee.com/dwepat">buy me a coffee</a> ☕</p>
 
@@ -26,7 +26,8 @@ For iPhone and Android. No accounts, no Passthrough server.</p>
 |---|---|
 | **Internet through your phone** | Plug in and the Mac goes online through the phone's own connection: no hotspot, nothing to configure. An optional wireless link carries the same traffic when you unplug. [More](docs/GUIDE.md#how-it-works) |
 | **A Mac that stays awake** | Lid closed is fine. It still sleeps at your battery limit or when it runs hot, and the phone shows how long it has left. [More](docs/GUIDE.md#keep-mac-awake) |
-| **Its shell, from anywhere** | A real terminal on your Mac from the phone: on the same Wi-Fi, over Tailscale, or from anywhere through a built-in end-to-end encrypted connection. Sessions survive disconnects and are recorded, and a session can be open in a terminal window on the Mac and on the phone at once. On iPhone you can also see and control the screen. [More](docs/GUIDE.md#remote-shell) |
+| **Its shell, from anywhere** | A real terminal on your Mac from the phone: on the same Wi-Fi, over Tailscale, or from anywhere through a built-in end-to-end encrypted connection. Sessions survive disconnects and are recorded, and a session can be open in a terminal window on the Mac and on the phone at once. On iPhone and iPad you can also see and control the screen. [More](docs/GUIDE.md#remote-shell) |
+| **An iPad online through your iPhone** | On the iPhone's Personal Hotspot, the iPad's traffic leaves from the iPhone's own connection through Passthrough, not as hotspot data. Pair them by scanning a code the iPad shows. On the Mac's cable the iPad is a remote for the shell and the screen. [More](docs/GUIDE.md#ipad) |
 | **A VPN on top** | WireGuard or OpenVPN (NordVPN built in) with a kill switch, over the phone's connection or any other network. [More](docs/GUIDE.md#vpn-layer) |
 
 ## Your Mac from the phone
@@ -60,7 +61,7 @@ A menu-bar app with the same three switches; one that can't turn on says why and
 
 ## Safe by design
 
-* **Pairing happens over the cable**, with a six-digit code shown on the phone. Keys never travel any other way.
+* **Pairing happens over the cable**, with a six-digit code shown on the phone. Keys never travel any other way, except that an iPad pairs with its iPhone by a one-time QR code the iPhone scans (the camera stands in for the cable).
 * **The phone's shell keys need Face ID** (or the passcode / screen lock) every time the app opens.
 * **Turning protection down asks first.** Turning things on from the phone is one tap; turning the VPN off needs Face ID, works only inside the app, and leaves a notice on the Mac. Each phone's permission to change Keep awake and the VPN can be turned off on the Mac.
 * **The Mac's limits always win**: Keep awake still stops at the battery limit or when it runs hot, whoever asked.

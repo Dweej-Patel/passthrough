@@ -1,3 +1,4 @@
+import GameController
 import SwiftUI
 import PassthroughUI
 import ScreenClient
@@ -16,32 +17,99 @@ struct ScreenView: View {
 
     private var mode: ScreenTouchMode { ScreenTouchMode(rawValue: modeSetting) ?? .trackpad }
     private var landscape: Bool { verticalSize == .compact }
+    /// iPad: the screen fills the display under a floating bar, in every orientation.
+    private var pad: Bool { UIDevice.current.userInterfaceIdiom == .pad }
 
     var body: some View {
         ZStack {
             Color.black.ignoresSafeArea()
-            // One layout that changes shape, so turning the phone keeps the same canvas
-            // (its zoom, and its video display, which a new one would have to wait a keyframe for).
-            let layout = landscape ? AnyLayout(HStackLayout(spacing: 0)) : AnyLayout(VStackLayout(spacing: 0))
-            layout {
-                if !landscape { topBar }
+            if pad {
                 content
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    .ignoresSafeArea(.container, edges: landscape ? .vertical : [])
-                if landscape { sideBar }
+                    .ignoresSafeArea(.container, edges: .all)
+                    .overlay(alignment: .top) { padBar.padding(.top, 8) }
+            } else {
+                phoneLayout
             }
         }
         .preferredColorScheme(.dark)
         .hiddenWhileCaptured { covered in
             if covered { keyboard = false }
         }
-        .persistentSystemOverlays(landscape ? .hidden : .automatic)
+        .persistentSystemOverlays(landscape || pad ? .hidden : .automatic)
         .task { model.begin(shell: shell, context: lock.context) }
-        .onAppear { AppOrientation.allowed = .allButUpsideDown }
+        // A connected keyboard types into the Mac from the start, without the on-screen one.
+        .onChange(of: model.phase == .live) { _, live in if live, GCKeyboard.coalesced != nil { keyboard = true } }
+        .onReceive(NotificationCenter.default.publisher(for: .GCKeyboardDidConnect)) { _ in
+            if model.phase == .live { keyboard = true }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .GCKeyboardDidDisconnect)) { _ in keyboard = false }
+        .onAppear { AppOrientation.allowed = AppOrientation.standard == .all ? .all : .allButUpsideDown }
         .onDisappear {
             model.stop()
-            AppOrientation.allowed = .portrait
+            AppOrientation.allowed = AppOrientation.standard
         }
+    }
+
+    /// iPhone: one layout that changes shape, so turning the phone keeps the same canvas
+    /// (its zoom, and its video display, which a new one would have to wait a keyframe for).
+    @ViewBuilder private var phoneLayout: some View {
+        let layout = landscape ? AnyLayout(HStackLayout(spacing: 0)) : AnyLayout(VStackLayout(spacing: 0))
+        layout {
+            if !landscape { topBar }
+            content
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .ignoresSafeArea(.container, edges: landscape ? .vertical : [])
+            if landscape { sideBar }
+        }
+    }
+
+    /// iPad: one floating glass bar over the screen, its controls labelled
+    /// since there's room. A connected keyboard and trackpad go straight to
+    /// the Mac (`ScreenCanvas`), so the on-screen keyboard is only a fallback.
+    private var padBar: some View {
+        VStack(spacing: 6) {
+            HStack(spacing: 10) {
+                Button { model.stop(); dismiss() } label: {
+                    Image(systemName: "xmark").font(.body.weight(.bold)).frame(width: 44, height: 44).contentShape(Circle())
+                }
+                .accessibilityLabel("Done")
+                if model.phase == .live {
+                    Divider().frame(height: 24)
+                    Picker("Touch", selection: $modeSetting) {
+                        Label("Trackpad", systemImage: "rectangle.and.hand.point.up.left").tag(ScreenTouchMode.trackpad.rawValue)
+                        Label("Direct", systemImage: "hand.point.up.left").tag(ScreenTouchMode.direct.rawValue)
+                    }
+                    .pickerStyle(.segmented)
+                    .fixedSize()
+                    Divider().frame(height: 24)
+                    keyboardButton.frame(width: 44, height: 44)
+                    clipboardMenu.frame(width: 44, height: 44)
+                    desktopsMenu.frame(height: 44)
+                } else {
+                    Text(model.macName).font(.subheadline.weight(.semibold)).padding(.trailing, 12)
+                }
+            }
+            .padding(.horizontal, 6)
+            .background(.ultraThinMaterial, in: Capsule())
+            .overlay(Capsule().strokeBorder(Color.white.opacity(0.14)))
+            .shadow(color: .black.opacity(0.35), radius: 16, y: 8)
+            if model.phase == .live {
+                Text(model.slowReason ?? (model.macHidden ? "Hidden on \(model.macName)'s own display" : padHint))
+                    .font(.caption)
+                    .foregroundStyle(model.slowReason == nil ? Color.secondary : PTTheme.warning)
+                    .padding(.horizontal, 12).padding(.vertical, 5)
+                    .background(.ultraThinMaterial, in: Capsule())
+                    .lineLimit(1)
+            }
+        }
+        .tint(PTTheme.accentEnd)
+    }
+
+    private var padHint: String {
+        mode == .trackpad
+            ? "Drag to move · tap to click · three fingers switch desktops · or use a trackpad"
+            : "Tap to click · hold to drag · pinch to zoom · or use a trackpad"
     }
 
     private var topBar: some View {
@@ -158,7 +226,11 @@ struct ScreenView: View {
                 }
             }
         } label: {
-            Image(systemName: "square.stack.3d.up").sideTarget(landscape)
+            if pad {
+                Label("Desktops", systemImage: "square.stack.3d.up").font(.subheadline.weight(.semibold)).padding(.horizontal, 10)
+            } else {
+                Image(systemName: "square.stack.3d.up").sideTarget(landscape)
+            }
         }
         .accessibilityLabel("Desktops and Mission Control")
     }
@@ -234,7 +306,7 @@ struct ScreenSharingPrompt: View {
             Image(systemName: "rectangle.on.rectangle")
                 .font(.system(size: 40)).foregroundStyle(PTTheme.warning)
             Text("Use Screen Sharing with your Mac login?").font(.title3.weight(.semibold)).multilineTextAlignment(.center)
-            Text("\(macName) can't stream its screen itself right now. Screen Sharing is slower and needs the name and password of your account on \(macName): the one saved on this iPhone, if there is one.")
+            Text("\(macName) can't stream its screen itself right now. Screen Sharing is slower and needs the name and password of your account on \(macName): the one saved on this \(ThisDevice.name), if there is one.")
                 .font(.subheadline).foregroundStyle(.secondary).multilineTextAlignment(.center)
                 .fixedSize(horizontal: false, vertical: true)
             if let reason {
@@ -294,10 +366,10 @@ struct ScreenLoginForm: View {
                         .onSubmit(connect)
                 }
                 .background(Color.white.opacity(0.06), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
-                Toggle("Remember on this iPhone", isOn: $remember)
+                Toggle("Remember on this \(ThisDevice.name)", isOn: $remember)
                     .font(.subheadline)
                     .tint(PTTheme.accentEnd)
-                Text("Kept in this iPhone's Keychain behind Face ID, like your shell keys.")
+                Text("Kept in this \(ThisDevice.name)'s Keychain behind Face ID, like your shell keys.")
                     .font(.caption).foregroundStyle(.secondary)
                 Button(action: connect) {
                     Text("Connect").font(.subheadline.weight(.semibold)).frame(maxWidth: .infinity, minHeight: 34)

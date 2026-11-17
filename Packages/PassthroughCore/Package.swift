@@ -8,6 +8,7 @@ let package = Package(
     products: [
         .library(name: "PassthroughCore", targets: ["PassthroughCore"]),
         .library(name: "PhoneTransport", targets: ["PhoneTransport"]),
+        .library(name: "CUtun", targets: ["CUtun"]),
         .library(name: "PassthroughUI", targets: ["PassthroughUI"]),
         .library(name: "VPNConfig", targets: ["VPNConfig"]),
         .library(name: "HelperLogic", targets: ["HelperLogic"]),
@@ -29,6 +30,8 @@ let package = Package(
         // Starts a shell with its pty as controlling terminal (fork + TIOCSCTTY).
         .target(name: "CPTY"),
         .target(name: "PhoneTransport", dependencies: ["PassthroughCore"]),
+        // The utun descriptor of a packet tunnel extension, for the iPad's tun2socks.
+        .target(name: "CUtun"),
         .target(name: "PassthroughUI", dependencies: ["PassthroughCore"]),
         // VPN profile parsing and pinning. Linked by the root helper, so it
         // depends on Foundation and CryptoKit only.
