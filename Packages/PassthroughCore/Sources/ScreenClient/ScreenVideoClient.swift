@@ -3,6 +3,7 @@ import CoreMedia
 import Foundation
 import ImageIO
 import PassthroughCore
+import VideoToolbox
 
 /// The phone's end of the Mac's own screen stream (protocol/README.md,
 /// "Screen video"), over a stream the remote shell handed over after
@@ -51,12 +52,13 @@ public final class ScreenVideoClient: @unchecked Sendable {
     private let callbackQueue: DispatchQueue
     private let onEvent: (Event) -> Void
     private var layout: Layout
+    private let codecs: ScreenVideoWire.Codecs
 
     // On `queue`.
     private var reader = ScreenVideoWire.Reader()
     private var pending: Data
     private var format: CMVideoFormatDescription?
-    private var parameterSets: (Data, Data)?
+    private var parameterSets: (ScreenVideoWire.Codec, [Data])?
     private var size: (Int, Int)?
     /// `copySelection()` calls not yet answered: the Mac's copies are taken
     /// only as answers, so it can't put things on this phone's clipboard unasked.
@@ -65,12 +67,18 @@ public final class ScreenVideoClient: @unchecked Sendable {
     private var awaitingKeyframe = true
     private var closed = false
 
-    /// `layout`: what to show first; `relayout` changes it.
-    public init(stream: any ByteStream, initialBytes: Data = Data(), layout: Layout, queue: DispatchQueue = .main,
-                onEvent: @escaping (Event) -> Void) {
+    /// What this device decodes in hardware: HEVC where it can, H.264 always.
+    public static var decodableCodecs: ScreenVideoWire.Codecs {
+        VTIsHardwareDecodeSupported(kCMVideoCodecType_HEVC) ? [.h264, .hevc] : .h264
+    }
+
+    /// `layout`: what to show first; `relayout` changes it. `codecs`: what to offer the Mac.
+    public init(stream: any ByteStream, initialBytes: Data = Data(), layout: Layout, codecs: ScreenVideoWire.Codecs = decodableCodecs,
+                queue: DispatchQueue = .main, onEvent: @escaping (Event) -> Void) {
         self.stream = stream
         self.pending = initialBytes
         self.layout = layout
+        self.codecs = codecs
         self.callbackQueue = queue
         self.onEvent = onEvent
     }
@@ -85,7 +93,7 @@ public final class ScreenVideoClient: @unchecked Sendable {
     public func start() {
         queue.async { [self] in
             stream.onTerminated = { [weak self] _ in self?.queue.async { self?.finish(Failure.connectionLost) } }
-            send(.hello(width: layout.width, height: layout.height, fit: layout.fit))
+            send(.hello(width: layout.width, height: layout.height, fit: layout.fit, codecs: codecs))
             let initial = pending
             pending = Data()
             received(initial)
@@ -103,7 +111,7 @@ public final class ScreenVideoClient: @unchecked Sendable {
         queue.async { [self] in
             guard !closed, new != layout else { return }
             layout = new
-            send(.hello(width: new.width, height: new.height, fit: new.fit))
+            send(.hello(width: new.width, height: new.height, fit: new.fit, codecs: codecs))
         }
     }
 
@@ -191,10 +199,10 @@ public final class ScreenVideoClient: @unchecked Sendable {
 
     private func handle(_ message: ScreenVideoWire.Message) throws {
         switch message {
-        case let .format(width, height, sps, pps):
-            if parameterSets.map({ $0.0 != sps || $0.1 != pps }) ?? true {
-                format = try Self.formatDescription(sps: sps, pps: pps)
-                parameterSets = (sps, pps)
+        case let .format(codec, width, height, sets):
+            if parameterSets.map({ $0.0 != codec || $0.1 != sets }) ?? true {
+                format = try Self.formatDescription(codec: codec, parameterSets: sets)
+                parameterSets = (codec, sets)
             }
             if size.map({ $0 != (width, height) }) ?? true {
                 size = (width, height)
@@ -228,21 +236,28 @@ public final class ScreenVideoClient: @unchecked Sendable {
         }
     }
 
-    // MARK: H.264
+    // MARK: H.264 and HEVC
 
-    static func formatDescription(sps: Data, pps: Data) throws -> CMVideoFormatDescription {
+    /// H.264 takes its SPS and PPS; HEVC its VPS, SPS and PPS.
+    static func formatDescription(codec: ScreenVideoWire.Codec, parameterSets sets: [Data]) throws -> CMVideoFormatDescription {
         // Empty parameter sets have no base address to hand over.
-        guard !sps.isEmpty, !pps.isEmpty else { throw Failure.malformed }
-        var format: CMVideoFormatDescription?
-        let status = sps.withUnsafeBytes { spsBytes in
-            pps.withUnsafeBytes { ppsBytes in
-                let pointers = [spsBytes.bindMemory(to: UInt8.self).baseAddress!, ppsBytes.bindMemory(to: UInt8.self).baseAddress!]
-                let sizes = [sps.count, pps.count]
-                return CMVideoFormatDescriptionCreateFromH264ParameterSets(allocator: nil, parameterSetCount: 2,
-                                                                           parameterSetPointers: pointers, parameterSetSizes: sizes,
-                                                                           nalUnitHeaderLength: 4, formatDescriptionOut: &format)
-            }
+        guard sets.count == (codec == .hevc ? 3 : 2), sets.allSatisfy({ !$0.isEmpty }) else { throw Failure.malformed }
+        // Copied out, so every pointer stays valid for the call.
+        let copies = sets.map { set -> UnsafeMutablePointer<UInt8> in
+            let pointer = UnsafeMutablePointer<UInt8>.allocate(capacity: set.count)
+            set.copyBytes(to: pointer, count: set.count)
+            return pointer
         }
+        defer { copies.forEach { $0.deallocate() } }
+        let pointers = copies.map { UnsafePointer($0) }
+        let sizes = sets.map(\.count)
+        var format: CMVideoFormatDescription?
+        let status = codec == .hevc
+            ? CMVideoFormatDescriptionCreateFromHEVCParameterSets(allocator: nil, parameterSetCount: sets.count, parameterSetPointers: pointers,
+                                                                  parameterSetSizes: sizes, nalUnitHeaderLength: 4, extensions: nil,
+                                                                  formatDescriptionOut: &format)
+            : CMVideoFormatDescriptionCreateFromH264ParameterSets(allocator: nil, parameterSetCount: sets.count, parameterSetPointers: pointers,
+                                                                  parameterSetSizes: sizes, nalUnitHeaderLength: 4, formatDescriptionOut: &format)
         guard status == noErr, let format else { throw Failure.malformed }
         return format
     }

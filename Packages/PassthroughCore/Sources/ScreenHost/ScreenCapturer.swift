@@ -8,8 +8,9 @@ import ScreenCaptureKit
 
 /// Which display to capture, at what size.
 enum CaptureSource: Equatable {
-    /// The main display, at its size in points or less: at most `maxSide` pixels on its longer side.
-    case main(maxSide: Int)
+    /// The main display, at its size in points or less: at most `maxSide` pixels on its longer side,
+    /// times `scale` (less on a slow link, `StreamPacer.scale`).
+    case main(maxSide: Int, scale: Double)
     /// That display, at exactly `width`×`height` pixels (one made for the phone, `DeviceDisplay`).
     case display(CGDirectDisplayID, width: Int, height: Int)
 }
@@ -94,9 +95,9 @@ final class ScreenCapturer: NSObject, FrameCapturing, SCStreamOutput, SCStreamDe
         let display: SCDisplay
         let width: Int, height: Int
         switch source {
-        case let .main(maxSide):
+        case let .main(maxSide, slow):
             display = try await self.display(nil)
-            let scale = min(1, Double(max(maxSide, 320)) / Double(max(display.width, display.height)))
+            let scale = min(1, Double(max(maxSide, 320)) / Double(max(display.width, display.height))) * min(max(slow, 0.25), 1)
             // Even sizes: 4:2:0 halves both.
             width = Int(Double(display.width) * scale) & ~1
             height = Int(Double(display.height) * scale) & ~1

@@ -118,8 +118,10 @@ final class FramebufferTests: XCTestCase {
 /// What a server sends the stream client is checked before it is used.
 final class ScreenVideoClientTests: XCTestCase {
     func testEmptyParameterSetsAndFramesAreMalformed() throws {
-        XCTAssertThrowsError(try ScreenVideoClient.formatDescription(sps: Data(), pps: Data([0x68, 0xCE, 0x3C, 0x80])))
-        XCTAssertThrowsError(try ScreenVideoClient.formatDescription(sps: Data([0x67, 0x42]), pps: Data()))
+        XCTAssertThrowsError(try ScreenVideoClient.formatDescription(codec: .h264, parameterSets: [Data(), Data([0x68, 0xCE, 0x3C, 0x80])]))
+        XCTAssertThrowsError(try ScreenVideoClient.formatDescription(codec: .h264, parameterSets: [Data([0x67, 0x42]), Data()]))
+        XCTAssertThrowsError(try ScreenVideoClient.formatDescription(codec: .h264, parameterSets: [Data([0x67, 0x42])]), "H.264 needs two")
+        XCTAssertThrowsError(try ScreenVideoClient.formatDescription(codec: .hevc, parameterSets: [Data([0x40]), Data([0x42])]), "HEVC needs three")
         var format: CMVideoFormatDescription?
         XCTAssertEqual(CMVideoFormatDescriptionCreate(allocator: nil, codecType: kCMVideoCodecType_H264, width: 16, height: 16,
                                                       extensions: nil, formatDescriptionOut: &format), noErr)
@@ -135,7 +137,7 @@ final class ScreenVideoClientTests: XCTestCase {
             if case .closed(let error?) = event, case .malformed? = error as? ScreenVideoClient.Failure { closed.fulfill() }
         }
         client.start()
-        mac.send(ScreenVideoWire.encode(.format(width: 10, height: 10, sps: Data(), pps: Data())), isComplete: false) { _ in }
+        mac.send(ScreenVideoWire.encode(.format(codec: .h264, width: 10, height: 10, parameterSets: [Data(), Data()])), isComplete: false) { _ in }
         wait(for: [closed], timeout: 5)
     }
 

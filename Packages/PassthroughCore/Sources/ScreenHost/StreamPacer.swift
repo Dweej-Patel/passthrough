@@ -11,6 +11,11 @@ import Foundation
 ///   shortest trip allows, it creeps up to `maxBitRate`; once they lag behind
 ///   it (a queue is building somewhere on the way) it is cut, more the worse
 ///   the lag. Keyframes are big and expected to take longer, so they don't count.
+/// - **Size** (`scale`): once the bitrate is too low for the stream's size for
+///   a while, it is captured smaller (each side ¾, then ½), which looks
+///   better than a blurry full size and makes keyframes, the one thing the
+///   bitrate doesn't hold back, smaller in proportion; back up once the
+///   bitrate would do the bigger size justice. `maxBitRate` stays the full size's.
 ///
 /// Times are seconds on any monotonic clock; nothing here reads one.
 struct StreamPacer {
@@ -28,7 +33,23 @@ struct StreamPacer {
     static let growEvery: TimeInterval = 0.5
     static let growStep = 1.08
 
+    /// Each side's share of the full size, largest first.
+    static let scales: [Double] = [1, 0.75, 0.5]
+    /// Smaller when the bitrate is under this share of what the current size takes, for `shrinkAfter`.
+    static let shrinkBelow = 0.35
+    static let shrinkAfter: TimeInterval = 2
+    /// Bigger when it is at least this share of what the next size up takes, for `growAfter`.
+    static let growAbove = 0.7
+    static let growAfter: TimeInterval = 5
+    /// Each change of size is a new capture and a keyframe: not more often than this.
+    static let rescaleGap: TimeInterval = 5
+
     private(set) var maxBitRate: Int
+    /// The share of the full size (each side) to capture at, from `scales`.
+    private(set) var scale = 1.0
+    private var lowSince: TimeInterval?
+    private var highSince: TimeInterval?
+    private var lastRescale = -TimeInterval.infinity
     private(set) var bitRate: Int
     /// The shortest round trip of the last `minRTTSpan`; nil before the first ack.
     private(set) var minRTT: TimeInterval?
@@ -60,6 +81,37 @@ struct StreamPacer {
         let share = Double(bitRate) / Double(maxBitRate)
         maxBitRate = rate
         bitRate = max(Self.minBitRate, min(rate, Int(Double(rate) * share)))
+    }
+
+    /// After an ack: a new `scale` to capture at, when the bitrate has been out
+    /// of step with the size long enough; nil to stay.
+    mutating func rescale(at now: TimeInterval) -> Double? {
+        guard let index = Self.scales.firstIndex(of: scale) else { return nil }
+        func share(_ scale: Double) -> Double { Double(bitRate) / (Double(maxBitRate) * scale * scale) }
+        if index + 1 < Self.scales.count, share(scale) < Self.shrinkBelow {
+            highSince = nil
+            let since = lowSince ?? now
+            lowSince = since
+            guard now - since >= Self.shrinkAfter, now - lastRescale >= Self.rescaleGap else { return nil }
+            return changeScale(to: Self.scales[index + 1], at: now)
+        }
+        lowSince = nil
+        if index > 0, share(Self.scales[index - 1]) >= Self.growAbove {
+            let since = highSince ?? now
+            highSince = since
+            guard now - since >= Self.growAfter, now - lastRescale >= Self.rescaleGap else { return nil }
+            return changeScale(to: Self.scales[index - 1], at: now)
+        }
+        highSince = nil
+        return nil
+    }
+
+    private mutating func changeScale(to new: Double, at now: TimeInterval) -> Double {
+        scale = new
+        lastRescale = now
+        lowSince = nil
+        highSince = nil
+        return new
     }
 
     mutating func sent(_ number: UInt32, keyframe: Bool, at now: TimeInterval) {

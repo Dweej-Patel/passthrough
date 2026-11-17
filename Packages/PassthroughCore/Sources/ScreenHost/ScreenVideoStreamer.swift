@@ -49,6 +49,8 @@ public final class ScreenVideoStreamer: ScreenVideoSource, @unchecked Sendable {
         /// before its curtain comes down: put away or gone without a word, no one
         /// is watching, and the Mac shouldn't stay black for whoever is at it.
         var curtainSilence: TimeInterval = 20
+        /// H.264 even for a phone that decodes HEVC (tests of the H.264 path).
+        var h264Only = false
     }
     /// How long the screen must be still before the last frame is sharpened.
     static let refineDelay: TimeInterval = 0.25
@@ -92,7 +94,13 @@ public final class ScreenVideoStreamer: ScreenVideoSource, @unchecked Sendable {
     private var startingFrame: CVPixelBuffer?
     /// What the phone last asked to see (`hello`), and what was last started for it.
     private var wanted: (width: Int, height: Int, fit: ScreenVideoWire.Fit)?
-    private var applied: (width: Int, height: Int, fit: ScreenVideoWire.Fit)?
+    private var applied: (width: Int, height: Int, fit: ScreenVideoWire.Fit, scale: Double)?
+    /// The share of the full size to capture at: less while the link is slow (`StreamPacer.scale`).
+    private var captureScale = 1.0
+    /// What `applyWanted` would start now.
+    private var target: (width: Int, height: Int, fit: ScreenVideoWire.Fit, scale: Double)? {
+        wanted.map { ($0.width, $0.height, $0.fit, captureScale) }
+    }
     /// A capture is starting (`applyWanted`); another change waits for it.
     private var starting = false
     /// Display changes and new captures, one after another.
@@ -111,6 +119,8 @@ public final class ScreenVideoStreamer: ScreenVideoSource, @unchecked Sendable {
     private var heardAt = ProcessInfo.processInfo.systemUptime
     private var encoder: VideoEncoder?
     private var encoderSettings: (width: Int, height: Int, bitRate: Int)?
+    /// What the phone decodes (its `hello`): HEVC when it can, H.264 otherwise.
+    private var phoneCodecs: ScreenVideoWire.Codecs = .h264
     /// Encodes in a row that came back empty; the encoder is made again once, then the stream ends.
     private var failures = 0
     private var remadeEncoder = false
@@ -194,12 +204,14 @@ public final class ScreenVideoStreamer: ScreenVideoSource, @unchecked Sendable {
 
     private func handle(_ message: ScreenVideoWire.Message) {
         switch message {
-        case let .hello(width, height, fit):
+        case let .hello(width, height, fit, codecs):
+            phoneCodecs = codecs
             show(width: width, height: height, fit: fit)
         case let .ack(number):
             guard number <= sent, number > acked else { return }
             acked = number
             if pacer?.acked(number, at: uptime) == true, let pacer { encoder?.setBitRate(pacer.bitRate) }
+            if let scale = pacer?.rescale(at: uptime) { rescale(to: scale) }
             pump()
         case .keyframeRequest:
             needsKeyframe = true
@@ -356,15 +368,16 @@ public final class ScreenVideoStreamer: ScreenVideoSource, @unchecked Sendable {
     /// already: on a display made in its shape (`device`; the Mac's own if that
     /// can't be made), or the main display fitted inside its size (`mac`).
     private func applyWanted() {
-        guard !stopped, let wanted else { return }
-        if let applied, applied == wanted { return }
+        guard !stopped, let wanted, let target else { return }
+        if let applied, applied == target { return }
         // The Mac's own display at the phone's size: only its longer side matters.
-        if wanted.fit == .mac, let applied, applied.fit == .mac, fit == .mac,
+        if wanted.fit == .mac, let applied, applied.fit == .mac, fit == .mac, applied.scale == captureScale,
            max(applied.width, applied.height) == max(wanted.width, wanted.height) {
-            self.applied = wanted
+            self.applied = target
             return
         }
-        applied = wanted
+        applied = target
+        let scale = captureScale
         starting = true
         captureGeneration += 1
         let generation = captureGeneration
@@ -377,11 +390,12 @@ public final class ScreenVideoStreamer: ScreenVideoSource, @unchecked Sendable {
         displayWork = Task { [weak self] in
             await before?.value
             var fit = wanted.fit
-            var source = CaptureSource.main(maxSide: wanted.width > 0 ? max(wanted.width, wanted.height) : 4096)
+            var source = CaptureSource.main(maxSide: wanted.width > 0 ? max(wanted.width, wanted.height) : 4096, scale: scale)
             if fit == .device, let device {
                 do {
                     let id = try await device.show(width: wanted.width, height: wanted.height)
-                    source = .display(id, width: wanted.width & ~1, height: wanted.height & ~1)
+                    // The display keeps the phone's size; only the capture is smaller on a slow link.
+                    source = .display(id, width: Int(Double(wanted.width) * scale) & ~1, height: Int(Double(wanted.height) * scale) & ~1)
                 } catch {
                     ptLog(.warning, "screen: couldn't make a display for the phone (\(error)); showing the Mac's own")
                     fit = .mac
@@ -399,7 +413,8 @@ public final class ScreenVideoStreamer: ScreenVideoSource, @unchecked Sendable {
                 queue.async { [weak self] in
                     // Gone meanwhile: nobody else will stop what just started.
                     guard let self else { return capture.stop() }
-                    self.captureReady(capture, generation: generation, fit: fit, width: info.width, height: info.height, display: info.display)
+                    self.captureReady(capture, generation: generation, fit: fit, scale: scale, width: info.width, height: info.height,
+                                      display: info.display)
                 }
             } catch {
                 queue.async { [weak self] in
@@ -438,7 +453,8 @@ public final class ScreenVideoStreamer: ScreenVideoSource, @unchecked Sendable {
         finish()
     }
 
-    private func captureReady(_ new: FrameCapturing, generation: Int, fit: ScreenVideoWire.Fit, width: Int, height: Int, display: CGRect) {
+    private func captureReady(_ new: FrameCapturing, generation: Int, fit: ScreenVideoWire.Fit, scale: Double, width: Int, height: Int,
+                              display: CGRect) {
         guard !stopped, generation == captureGeneration else { return new.stop() }
         starting = false
         let old = capture
@@ -446,18 +462,18 @@ public final class ScreenVideoStreamer: ScreenVideoSource, @unchecked Sendable {
         shownGeneration = generation
         self.fit = fit
         displayRect = display
-        // About 4 bits per pixel each second: 1728×1117 gets ~7.7 Mb/s.
-        let maxBitRate = min(max(width * height * 4, 2_000_000), 20_000_000)
+        // About 4 bits per pixel each second at full size: 1728×1117 gets ~7.7 Mb/s.
+        let fullPixels = Double(width * height) / (scale * scale)
+        let maxBitRate = min(max(Int(fullPixels * 4), 2_000_000), 20_000_000)
         if pacer == nil { pacer = StreamPacer(maxBitRate: maxBitRate) } else { pacer?.setMaxBitRate(maxBitRate) }
         let bitRate = pacer?.bitRate ?? maxBitRate
         if encoderSettings.map({ $0.width != width || $0.height != height }) ?? true {
             let settings = (width: width, height: height, bitRate: bitRate)
             encoderSettings = settings
             encoder?.invalidate()
-            do {
-                encoder = try VideoEncoder(width: settings.width, height: settings.height, bitRate: settings.bitRate)
-            } catch {
-                ptLog(.error, "screen: no H.264 encoder: \(error)")
+            encoder = makeEncoder(width: settings.width, height: settings.height, bitRate: settings.bitRate)
+            guard encoder != nil else {
+                ptLog(.error, "screen: no video encoder")
                 old?.stop()
                 return finish()
             }
@@ -466,7 +482,7 @@ public final class ScreenVideoStreamer: ScreenVideoSource, @unchecked Sendable {
         }
         needsKeyframe = true
         if let input = input as? InputInjector { input.display = display } else { input = makeInput(display) }
-        ptLog(.info, "screen: streaming \(width)×\(height)\(fit == .device ? " on a display made for the phone" : "")")
+        ptLog(.info, "screen: streaming \(width)×\(height) \(encoder?.codec == .hevc ? "HEVC" : "H.264")\(fit == .device ? " on a display made for the phone" : "")")
         // The pointer again, in this stream's terms.
         lastCursor = nil
         lastShape = nil
@@ -495,7 +511,7 @@ public final class ScreenVideoStreamer: ScreenVideoSource, @unchecked Sendable {
         startCursor()
         pump()
         // The phone asked for something else meanwhile.
-        if let wanted, let applied, wanted != applied { applyWanted() }
+        if let target, let applied, target != applied { applyWanted() }
     }
 
     /// On `queue` (capture delivers there).
@@ -544,11 +560,11 @@ public final class ScreenVideoStreamer: ScreenVideoSource, @unchecked Sendable {
         if needsKeyframe, waiting == nil { waiting = last }
         guard failures >= 3 else { return }
         guard !remadeEncoder, let settings = encoderSettings,
-              let fresh = try? VideoEncoder(width: settings.width, height: settings.height, bitRate: settings.bitRate) else {
-            ptLog(.error, "screen: the H.264 encoder stopped working")
+              let fresh = makeEncoder(width: settings.width, height: settings.height, bitRate: settings.bitRate) else {
+            ptLog(.error, "screen: the video encoder stopped working")
             return finish()
         }
-        ptLog(.warning, "screen: the H.264 encoder stopped working; made a new one")
+        ptLog(.warning, "screen: the video encoder stopped working; made a new one")
         remadeEncoder = true
         failures = 0
         encoder?.invalidate()
@@ -558,12 +574,30 @@ public final class ScreenVideoStreamer: ScreenVideoSource, @unchecked Sendable {
         if waiting == nil { waiting = last }
     }
 
+    /// The link is too slow for this size, or fast enough for a bigger one: captured at `scale` of the full size.
+    private func rescale(to scale: Double) {
+        guard scale != captureScale else { return }
+        ptLog(.info, "screen: \(scale < captureScale ? "smaller" : "bigger") picture for the link: \(Int(scale * 100))% (\((pacer?.bitRate ?? 0) / 1000) kb/s)")
+        captureScale = scale
+        if !starting { applyWanted() }
+    }
+
+    /// HEVC if the phone decodes it and the Mac's hardware encodes it, else H.264; nil if neither.
+    private func makeEncoder(width: Int, height: Int, bitRate: Int) -> VideoEncoder? {
+        if phoneCodecs.contains(.hevc), !limits.h264Only,
+           let hevc = try? VideoEncoder(codec: .hevc, width: width, height: height, bitRate: bitRate) {
+            return hevc
+        }
+        return try? VideoEncoder(codec: .h264, width: width, height: height, bitRate: bitRate)
+    }
+
     private func send(_ encoded: VideoEncoder.Encoded) {
         guard stream != nil, let encoder else { return }
         if encoded.keyframe {
             needsKeyframe = false
-            if let sps = encoded.sps, let pps = encoded.pps {
-                write(ScreenVideoWire.encode(.format(width: encoder.width, height: encoder.height, sps: sps, pps: pps)), frame: false)
+            if !encoded.parameterSets.isEmpty {
+                write(ScreenVideoWire.encode(.format(codec: encoder.codec, width: encoder.width, height: encoder.height,
+                                                     parameterSets: encoded.parameterSets)), frame: false)
             }
         }
         sent &+= 1

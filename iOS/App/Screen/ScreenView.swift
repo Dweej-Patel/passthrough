@@ -1,5 +1,6 @@
 import GameController
 import SwiftUI
+import PassthroughCore
 import PassthroughUI
 import ScreenClient
 
@@ -208,6 +209,10 @@ struct ScreenView: View {
     /// Mission Control: the same as the canvas's three-finger swipes.
     private var desktopsMenu: some View {
         Menu {
+            // How far the picture travels: a relay is the likeliest reason it lags.
+            if let path = model.connectionPath, let reach = Self.describe(path) {
+                Section { Label(reach.text, systemImage: reach.symbol) }
+            }
             Section("Or swipe with three fingers") {
                 Button { model.perform(.previousDesktop) } label: { Label("Previous desktop", systemImage: "arrow.left.square") }
                 Button { model.perform(.nextDesktop) } label: { Label("Next desktop", systemImage: "arrow.right.square") }
@@ -241,6 +246,15 @@ struct ScreenView: View {
             }
         }
         .accessibilityLabel("Desktops and Mission Control")
+    }
+
+    static func describe(_ path: ShellPath) -> (text: String, symbol: String)? {
+        switch path {
+        case .local: ("Connected over your network or Tailscale", "wifi")
+        case .direct: ("Connected directly", "arrow.left.and.right")
+        case .relay: ("Through a relay (slower)", "arrow.triangle.branch")
+        case .unknown: nil
+        }
     }
 
     @ViewBuilder private var content: some View {

@@ -81,12 +81,22 @@ these steps as written and check each one before building.
   the round trip (it was two, so a phone 100 ms away got about 20 frames a
   second) and lowers its bitrate when frames start arriving late, then raises
   it again.
+* Screen view: HEVC instead of H.264 where the phone decodes it (every
+  supported iPhone and iPad): a little sharper for the same bits.
+* Screen view, slow links: when the bitrate gets too low for the picture's
+  size, the Mac sends a smaller picture (¾, then ½ each side) rather than a
+  blurry full-size one, and the full size again once the link allows it.
+  Keyframes, which are big whatever the bitrate, shrink with it.
+* Screen view: the desktops menu says how you're connected (your network,
+  directly, or through a relay), and the view says so once if it stays on a
+  relay, the likeliest reason for lag.
 * Screen view: the phone draws the Mac's pointer itself, so it moves the
   moment your finger does instead of a round trip later.
 * Screen view: *Screen shape › Fit to this iPhone/iPad* (in the desktops
   menu). The Mac makes a display in the device's shape and resolution, turns
   with it, and mirrors its own displays onto it while you view, so the
-  desktop fills the screen at a readable size. The default is still the
+  desktop fills the screen at a readable size, clear of the Dynamic Island
+  and the view's controls. The default is still the
   Mac's own display, as before. It uses macOS's private virtual-display API
   (as Sidecar and DeskPad do); if that fails the view says so and shows the
   Mac's own display.

@@ -12,11 +12,12 @@ import ScreenClient
 final class ScreenVideoWireTests: XCTestCase {
     func testRoundTripInPieces() throws {
         let messages: [ScreenVideoWire.Message] = [
-            .format(width: 1728, height: 1116, sps: Data([0x67, 1, 2]), pps: Data([0x68, 3])),
+            .format(codec: .h264, width: 1728, height: 1116, parameterSets: [Data([0x67, 1, 2]), Data([0x68, 3])]),
+            .format(codec: .hevc, width: 1206, height: 2622, parameterSets: [Data([0x40, 1]), Data([0x42, 2]), Data([0x44, 3])]),
             .frame(number: 7, keyframe: true, data: Data(repeating: 5, count: 300)),
             .frame(number: 8, keyframe: false, data: Data()),
-            .hello(width: 2868, height: 1320, fit: .mac),
-            .hello(width: 1206, height: 2622, fit: .device),
+            .hello(width: 2868, height: 1320, fit: .mac, codecs: .h264),
+            .hello(width: 1206, height: 2622, fit: .device, codecs: [.h264, .hevc]),
             .fitted(.device),
             .fitted(.mac),
             .cursor(x: 1, y: 65535, visible: true),
@@ -158,6 +159,42 @@ final class StreamPacerTests: XCTestCase {
         XCTAssertEqual(Double(pacer.bitRate) / 16_000_000, share, accuracy: 0.01)
     }
 
+    /// A bitrate too low for the size shrinks the picture after a while, a step
+    /// at a time, not more often than `rescaleGap`; enough again grows it back.
+    func testThePictureShrinksOnASlowLinkAndGrowsBack() {
+        var pacer = StreamPacer(maxBitRate: 8_000_000)
+        var time: TimeInterval = 0, number: UInt32 = 0
+        var changes: [(TimeInterval, Double)] = []
+        func run(for seconds: TimeInterval, rtt: TimeInterval) {
+            let end = time + seconds
+            while time < end {
+                number += 1
+                pacer.sent(number, keyframe: false, at: time)
+                pacer.acked(number, at: time + rtt)
+                if let scale = pacer.rescale(at: time + rtt) { changes.append((time, scale)) }
+                time += 1.0 / 30
+            }
+        }
+        run(for: 3, rtt: 0.05)
+        XCTAssertTrue(changes.isEmpty, "a good link keeps the full size")
+        run(for: 1.5, rtt: 0.6)   // a queue: the bitrate is cut hard
+        XCTAssertLessThan(Double(pacer.bitRate) / 8_000_000, StreamPacer.shrinkBelow)
+        run(for: 1, rtt: 0.6)
+        XCTAssertTrue(changes.isEmpty, "not at once")
+        run(for: 2, rtt: 0.6)
+        XCTAssertEqual(changes.map(\.1), [0.75], "then smaller")
+        run(for: 3, rtt: 0.6)
+        XCTAssertEqual(changes.map(\.1), [0.75], "not again within the gap")
+        run(for: 10, rtt: 0.6)
+        XCTAssertEqual(changes.map(\.1), [0.75, 0.5], "and smaller still, but no further")
+        run(for: 120, rtt: 0.05)   // room again: the bitrate climbs, then the size
+        XCTAssertEqual(changes.map(\.1), [0.75, 0.5, 0.75, 1])
+        XCTAssertEqual(pacer.scale, 1)
+        for (a, b) in zip(changes, changes.dropFirst()) {
+            XCTAssertGreaterThanOrEqual(b.0 - a.0, StreamPacer.rescaleGap - 0.1)
+        }
+    }
+
     /// An ack for a frame never sent (or already acked) changes nothing.
     func testUnknownAcksAreIgnored() {
         var pacer = StreamPacer(maxBitRate: 8_000_000)
@@ -248,6 +285,18 @@ final class ScreenVideoStreamerTests: XCTestCase {
     /// The real hardware encoder, frames from a fake capture: the phone's
     /// client gets decodable H.264, at most two frames ahead of its acks.
     func testFramesAreDecodableAndWaitForAcks() throws {
+        try framesAreDecodable(codecs: .h264, expect: kCMVideoCodecType_H264)
+    }
+
+    /// A phone that decodes HEVC gets HEVC, just as decodable.
+    func testHEVCForAPhoneThatDecodesIt() throws {
+        guard (try? VideoEncoder(codec: .hevc, width: 640, height: 400, bitRate: 2_000_000)) != nil else {
+            throw XCTSkip("no hardware HEVC encoder")
+        }
+        try framesAreDecodable(codecs: [.h264, .hevc], expect: kCMVideoCodecType_HEVC)
+    }
+
+    private func framesAreDecodable(codecs: ScreenVideoWire.Codecs, expect codecType: CMVideoCodecType) throws {
         // Low-latency H.264 needs the hardware encoder, which virtual Macs (CI) lack.
         guard (try? VideoEncoder(width: 640, height: 400, bitRate: 2_000_000)) != nil else {
             throw XCTSkip("no hardware H.264 encoder")
@@ -261,7 +310,8 @@ final class ScreenVideoStreamerTests: XCTestCase {
         streamer.start(stream: mac, initialBytes: Data()) { ended.fulfill() }
 
         let events = Locked<[ScreenVideoClient.Event]>([])
-        let client = ScreenVideoClient(stream: phone, maxSide: 1000, queue: DispatchQueue(label: "test")) { event in
+        let client = ScreenVideoClient(stream: phone, layout: .init(width: 1000, height: 1000, fit: .mac), codecs: codecs,
+                                       queue: DispatchQueue(label: "test")) { event in
             events.set(events.get() + [event])
         }
         client.start()
@@ -282,6 +332,7 @@ final class ScreenVideoStreamerTests: XCTestCase {
 
         let samples = Self.frames(events.get()).map(\.0)
         XCTAssertEqual(Self.frames(events.get()).map(\.1), [1, 2, 3])
+        XCTAssertEqual(samples.first?.formatDescription.map(CMFormatDescriptionGetMediaSubType), codecType)
         XCTAssertEqual(try Self.decode(samples), 3, "every frame decodes")
 
         client.pointer(x: 0.5, y: 1, buttons: .left)
@@ -307,7 +358,7 @@ final class ScreenVideoStreamerTests: XCTestCase {
         let limits = ScreenVideoStreamer.Limits(frames: 2, softBytes: 4 << 20, hardBytes: 1, stallTimeout: 0.5)
         let streamer = ScreenVideoStreamer(capture: { capture }, input: { _ in RecordingInput() }, limits: limits)
         let ended = expectation(description: "dropped")
-        streamer.start(stream: stalled, initialBytes: ScreenVideoWire.encode(.hello(width: 640, height: 640, fit: .mac))) { ended.fulfill() }
+        streamer.start(stream: stalled, initialBytes: ScreenVideoWire.encode(.hello(width: 640, height: 640, fit: .mac, codecs: .h264))) { ended.fulfill() }
         waitUntil("capture started") { capture.maxSide.get() == 640 }
         for shade in 0..<6 {
             capture.push(shade: UInt8(30 * shade))
@@ -325,7 +376,7 @@ final class ScreenVideoStreamerTests: XCTestCase {
         let input = RecordingInput()
         let streamer = ScreenVideoStreamer(capture: { capture }, input: { _ in input })
         let (mac, phone) = MemoryPipe.pair()
-        streamer.start(stream: mac, initialBytes: ScreenVideoWire.encode(.hello(width: 320, height: 320, fit: .mac))) {}
+        streamer.start(stream: mac, initialBytes: ScreenVideoWire.encode(.hello(width: 320, height: 320, fit: .mac, codecs: .h264))) {}
         addTeardownBlock { streamer.stop() }
         waitUntil("capture started") { capture.maxSide.get() == 320 }
         waitUntil("input ready") {
@@ -351,7 +402,7 @@ final class ScreenVideoStreamerTests: XCTestCase {
         limits.copyTimeout = 0.3
         let streamer = ScreenVideoStreamer(capture: { capture }, input: { _ in input }, limits: limits)
         let (mac, phone) = MemoryPipe.pair()
-        streamer.start(stream: mac, initialBytes: ScreenVideoWire.encode(.hello(width: 320, height: 320, fit: .mac))) {}
+        streamer.start(stream: mac, initialBytes: ScreenVideoWire.encode(.hello(width: 320, height: 320, fit: .mac, codecs: .h264))) {}
         addTeardownBlock { streamer.stop() }
         let events = Locked<[ScreenVideoClient.Event]>([])
         let client = ScreenVideoClient(stream: phone, maxSide: 320, queue: DispatchQueue(label: "test")) { event in
@@ -443,7 +494,7 @@ final class ScreenVideoStreamerTests: XCTestCase {
         let streamer = ScreenVideoStreamer(capture: { capture }, input: { _ in RecordingInput() })
         let (mac, phone) = MemoryPipe.pair()
         // Asked before capture is up: it waits for it.
-        streamer.start(stream: mac, initialBytes: ScreenVideoWire.encode(.hello(width: 320, height: 320, fit: .mac))
+        streamer.start(stream: mac, initialBytes: ScreenVideoWire.encode(.hello(width: 320, height: 320, fit: .mac, codecs: .h264))
                        + ScreenVideoWire.encode(.curtain(true))) {}
         addTeardownBlock { streamer.stop() }
         let events = Locked<[ScreenVideoClient.Event]>([])
@@ -472,7 +523,7 @@ final class ScreenVideoStreamerTests: XCTestCase {
         limits.curtainSilence = 0.4
         let streamer = ScreenVideoStreamer(capture: { capture }, input: { _ in RecordingInput() }, limits: limits)
         let (mac, phone) = MemoryPipe.pair()
-        streamer.start(stream: mac, initialBytes: ScreenVideoWire.encode(.hello(width: 320, height: 320, fit: .mac))
+        streamer.start(stream: mac, initialBytes: ScreenVideoWire.encode(.hello(width: 320, height: 320, fit: .mac, codecs: .h264))
                        + ScreenVideoWire.encode(.curtain(true))) {}
         addTeardownBlock { streamer.stop() }
         waitUntil("hidden") { capture.curtains.get() == [true] }
@@ -535,7 +586,7 @@ final class ScreenVideoStreamerTests: XCTestCase {
         client.start()
         func fits() -> [ScreenVideoWire.Fit] { events.get().compactMap { if case let .fitted(fit) = $0 { fit } else { nil } } }
         waitUntil("the Mac's own") { fits() == [.mac] }
-        XCTAssertEqual(capture.sources.get(), [.main(maxSide: 640)])
+        XCTAssertEqual(capture.sources.get(), [.main(maxSide: 640, scale: 1)])
 
         client.relayout(.init(width: 402, height: 874, fit: .device))
         waitUntil("the phone's") { fits() == [.mac, .device] }
@@ -551,7 +602,7 @@ final class ScreenVideoStreamerTests: XCTestCase {
         client.relayout(.init(width: 874, height: 402, fit: .mac))
         waitUntil("the Mac's own again") { fits().last == .mac && fits().count == 4 }
         XCTAssertEqual(display.closes.get(), 1)
-        XCTAssertEqual(capture.sources.get().last, .main(maxSide: 874))
+        XCTAssertEqual(capture.sources.get().last, .main(maxSide: 874, scale: 1))
 
         client.relayout(.init(width: 402, height: 874, fit: .device))
         waitUntil("the phone's again") { fits().count == 5 }
@@ -574,7 +625,7 @@ final class ScreenVideoStreamerTests: XCTestCase {
         client.start()
         waitUntil("answered") { events.get().contains { if case .fitted = $0 { true } else { false } } }
         XCTAssertTrue(events.get().contains { if case .fitted(.mac) = $0 { true } else { false } })
-        XCTAssertEqual(capture.sources.get(), [.main(maxSide: 874)])
+        XCTAssertEqual(capture.sources.get(), [.main(maxSide: 874, scale: 1)])
     }
 
     /// The phone hanging up ends the stream (and so, upstream, the connection).
@@ -583,7 +634,7 @@ final class ScreenVideoStreamerTests: XCTestCase {
         let streamer = ScreenVideoStreamer(capture: { capture }, input: { _ in RecordingInput() })
         let (mac, phone) = MemoryPipe.pair()
         let ended = expectation(description: "ended")
-        streamer.start(stream: mac, initialBytes: ScreenVideoWire.encode(.hello(width: 320, height: 320, fit: .mac))) { ended.fulfill() }
+        streamer.start(stream: mac, initialBytes: ScreenVideoWire.encode(.hello(width: 320, height: 320, fit: .mac, codecs: .h264))) { ended.fulfill() }
         waitUntil("capture started") { capture.maxSide.get() == 320 }
         phone.send(nil, isComplete: true) { _ in }
         wait(for: [ended], timeout: 5)
@@ -654,7 +705,7 @@ private final class FakeCapture: FrameCapturing, @unchecked Sendable {
         deliver.set(frame)
         sources.set(sources.get() + [source])
         switch source {
-        case let .main(maxSide):
+        case let .main(maxSide, _):
             self.maxSide.set(maxSide)
             return (width, height, CGRect(x: 0, y: 0, width: 1440, height: 900))
         case let .display(_, width, height):
