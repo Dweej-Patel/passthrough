@@ -46,6 +46,10 @@ final class ScreenModel: ObservableObject {
     var onMacPointer: ((CGPoint?, Bool) -> Void)?
     /// What the pointer looks like: the image, its size and tip in screen pixels.
     var onPointerShape: ((CGImage, CGSize, CGPoint) -> Void)?
+    /// The last of each, for a canvas made after they came: the Mac says what the pointer
+    /// looks like once, as a view starts, before there is a canvas to draw it.
+    private(set) var pointerShape: (image: CGImage, size: CGSize, hotSpot: CGPoint)?
+    private(set) var macPointer: (point: CGPoint, onScreen: Bool)?
     /// The Mac's screen in pixels.
     @Published private(set) var screenSize = CGSize.zero
     @Published private(set) var macName = "your Mac"
@@ -130,6 +134,12 @@ final class ScreenModel: ObservableObject {
     private var pathTask: Task<Void, Never>?
     /// The relay notice is said once a view.
     private var saidRelay = false
+    /// Drops in a row that were reconnected without asking, and since when this stream has shown the screen.
+    private var reconnects = 0
+    private var liveSince: TimeInterval?
+    static let maxReconnects = 4
+    /// A view that lasted this long was working: the next drop starts the count again.
+    static let steadyAfter: TimeInterval = 15
     /// Another device took the view over, by this name (`movedAway`); the stream ends next.
     private var movedTo: String?
     /// What the upgrade's stream said before its size, for when it takes over.
@@ -181,6 +191,7 @@ final class ScreenModel: ObservableObject {
         slowReason = nil
         saidRelay = false
         observeApp()
+        reconnects = 0
         open(video: true)
         usesHereOnStart = takeOver
     }
@@ -301,6 +312,9 @@ final class ScreenModel: ObservableObject {
         movedTo = nil
         usesHereOnStart = false
         upgradeEarly = []
+        pointerShape = nil
+        macPointer = nil
+        liveSince = nil
         pathTask?.cancel()
         pathTask = nil
         connectionPath = nil
@@ -376,6 +390,7 @@ final class ScreenModel: ObservableObject {
             screenSize = CGSize(width: width, height: height)
             let first = !videoStarted
             videoStarted = true
+            if first { liveSince = ProcessInfo.processInfo.systemUptime }
             phase = .live
             if first, Self.hidesMac { askMacHidden(true, saysIfUnanswered: false) }
         case let .frame(sample, number):
@@ -415,8 +430,11 @@ final class ScreenModel: ObservableObject {
             // Echoes of this phone's own moves are drawn already (only whether it's on this display
             // counts then); the Mac's own moves (its trackpad) aren't.
             let echo = ProcessInfo.processInfo.systemUptime - lastPointerAt <= 0.4
-            onMacPointer?(echo ? nil : CGPoint(x: x * (screenSize.width - 1), y: y * (screenSize.height - 1)), visible)
+            let point = CGPoint(x: x * (screenSize.width - 1), y: y * (screenSize.height - 1))
+            macPointer = (echo ? macPointer?.point ?? point : point, visible)
+            onMacPointer?(echo ? nil : point, visible)
         case let .cursorShape(image, size, hotSpot):
+            pointerShape = (image, size, hotSpot)
             onPointerShape?(image, size, hotSpot)
         case let .viewers(names):
             otherViewers = names
@@ -441,7 +459,21 @@ final class ScreenModel: ObservableObject {
                 phase = .confirmScreenSharing
                 return
             }
-            phase = .failed("The connection to \(macName) was lost.")
+            // A view that worked and dropped (the network changed, a tunnel, the Mac's stream
+            // ending) comes back by itself; only a few drops in a row ask the user.
+            if let liveSince, ProcessInfo.processInfo.systemUptime - liveSince > Self.steadyAfter { reconnects = 0 }
+            guard reconnects < Self.maxReconnects else {
+                phase = .failed("The connection to \(macName) was lost.")
+                return
+            }
+            reconnects += 1
+            phase = .connecting
+            let attempt = reconnects, gen = generation
+            Task { [weak self] in
+                try? await Task.sleep(for: .milliseconds(300 * attempt))
+                guard let self, gen == self.generation, self.phase == .connecting else { return }
+                self.open(video: true)
+            }
         }
     }
 
@@ -795,7 +827,7 @@ final class ScreenModel: ObservableObject {
     /// strict routers, say). Said once, when it stays on the relay.
     private func watchPath(of stream: any ByteStream, dialer: IrohShellDialer?, startingAt start: ShellPath?) {
         pathTask?.cancel()
-        connectionPath = start
+        if connectionPath != start { connectionPath = start }
         // The local network (or Tailscale): no relay to watch for.
         guard start != .local, let dialer else { return }
         pathTask = Task { [weak self, stream] in
@@ -803,7 +835,7 @@ final class ScreenModel: ObservableObject {
             while !Task.isCancelled {
                 let path = dialer.path(of: stream)
                 guard let self else { return }
-                if path != .unknown { self.connectionPath = path }
+                if path != .unknown, path != self.connectionPath { self.connectionPath = path }
                 relayFor = path == .relay ? relayFor + 1 : 0
                 // Still relayed after a while: not just the first moments before the direct path.
                 if relayFor >= 3, !self.saidRelay, self.phase == .live {

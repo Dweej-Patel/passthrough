@@ -1050,6 +1050,10 @@ struct ScreenCanvas: UIViewRepresentable {
         view.onGesture = { [weak model] gesture, phase, value in model?.gesture(gesture, phase: phase, value: value) }
         model.onMacPointer = { [weak view] point, onScreen in view?.macPointer(at: point, onScreen: onScreen) }
         model.onPointerShape = { [weak view] image, size, hotSpot in view?.setPointerShape(image, size: size, hotSpot: hotSpot) }
+        // What the Mac said before this canvas was made: the pointer's look comes once, as the view starts.
+        view.show(model.image, size: model.screenSize)
+        if let shape = model.pointerShape { view.setPointerShape(shape.image, size: shape.size, hotSpot: shape.hotSpot) }
+        if let pointer = model.macPointer { view.macPointer(at: pointer.point, onScreen: pointer.onScreen) }
         model.onFrame = { [weak view] image in view?.show(image, size: CGSize(width: image.width, height: image.height)) }
         return view
     }

@@ -806,6 +806,70 @@ final class ScreenVideoStreamerTests: XCTestCase {
         }
     }
 
+    /// The encoder skips frames on purpose (no error, no output): after a detailed
+    /// keyframe at a modest bitrate it skips a dozen or more in a row to stay in
+    /// budget. That isn't the encoder dying, and the stream goes on. (Three in a
+    /// row used to count as a dead encoder and end the stream: every view on a slow link.)
+    func testFramesTheEncoderSkipsDontEndTheStream() throws {
+        guard (try? VideoEncoder(width: 1296, height: 836, bitRate: 500_000)) != nil else {
+            throw XCTSkip("no hardware H.264 encoder")
+        }
+        let capture = FakeCapture(width: 1296, height: 836)
+        let streamer = ScreenVideoStreamer(capture: { capture }, input: { _ in RecordingInput() })
+        let (mac, phone) = MemoryPipe.pair()
+        let ended = expectation(description: "ended")
+        ended.isInverted = true
+        streamer.start(stream: mac, initialBytes: Data()) { ended.fulfill() }
+        addTeardownBlock { streamer.stop() }
+        let events = Locked<[ScreenVideoClient.Event]>([])
+        var client: ScreenVideoClient!
+        client = ScreenVideoClient(stream: phone, maxSide: 1296, queue: DispatchQueue(label: "test")) { event in
+            events.set(events.get() + [event])
+            if case let .frame(_, number) = event { client.shown(number) }
+        }
+        client.start()
+        waitUntil("capture started") { capture.maxSide.get() == 1296 }
+        // Detailed pictures (noise), changing every time: the keyframe costs a lot, and
+        // the encoder skips what follows until the budget allows.
+        for seed in 0..<90 {
+            capture.push(noise: UInt32(seed))
+            spin(1.0 / 60)
+        }
+        waitUntil("frames go on after the skipping") { Self.frames(events.get()).count >= 3 }
+        wait(for: [ended], timeout: 0.5)
+    }
+
+    /// A phone that goes while holding the button (mid-drag) or mid-pinch leaves
+    /// nothing held on the Mac: the stream's end lets go of it all.
+    func testTheEndLetsGoOfWhatThePhoneHeld() {
+        let capture = FakeCapture(width: 320, height: 200)
+        let input = RecordingInput()
+        let streamer = ScreenVideoStreamer(capture: { capture }, input: { _ in input })
+        let (mac, phone) = MemoryPipe.pair()
+        let ended = expectation(description: "ended")
+        streamer.start(stream: mac, initialBytes: ScreenVideoWire.encode(.hello(.init(width: 320, height: 320, fit: .mac, codecs: .h264)))) {
+            ended.fulfill()
+        }
+        waitUntil("input ready") {
+            phone.send(ScreenVideoWire.encode(.pointer(x: 10, y: 10, buttons: 1)), isComplete: false) { _ in }
+            spin(0.02)
+            return !input.log.get().isEmpty
+        }
+        XCTAssertFalse(input.log.get().contains("release"))
+        phone.send(nil, isComplete: true) { _ in }   // gone, button still down
+        wait(for: [ended], timeout: 5)
+        XCTAssertEqual(input.log.get().last, "release")
+    }
+
+    /// The injector's events never make macOS ignore the Mac's own keyboard and trackpad.
+    func testTheMacsOwnInputIsNeverHeldBack() throws {
+        let source = try XCTUnwrap(InputInjector(display: CGRect(x: 0, y: 0, width: 100, height: 100)).source)
+        XCTAssertEqual(source.localEventsSuppressionInterval, 0)
+        let everything: CGEventFilterMask = [.permitLocalMouseEvents, .permitLocalKeyboardEvents, .permitSystemDefinedEvents]
+        XCTAssertEqual(source.getLocalEventsFilterDuringSuppressionState(.eventSuppressionStateSuppressionInterval), everything)
+        XCTAssertEqual(source.getLocalEventsFilterDuringSuppressionState(.eventSuppressionStateRemoteMouseDrag), everything)
+    }
+
     /// The phone hanging up ends the stream (and so, upstream, the connection).
     func testThePhoneLeavingEndsIt() {
         let capture = FakeCapture(width: 320, height: 200)
@@ -909,6 +973,36 @@ private final class FakeCapture: FrameCapturing, @unchecked Sendable {
         curtains.set(curtains.get() + [hidden])
         done(hidden && canHide.get())
     }
+
+    /// A frame of noise, different for each `seed`: as costly to encode as a picture gets.
+    func push(noise seed: UInt32) {
+        // A few pictures, made once: filling one takes a while unoptimized.
+        let seed = seed % 4
+        if let made = noises.get()[seed] {
+            guard let queue = queue.get(), let deliver = deliver.get() else { return }
+            return queue.sync { deliver(made, 1) }
+        }
+        var buffer: CVPixelBuffer?
+        let attributes = [kCVPixelBufferIOSurfacePropertiesKey: [:]] as CFDictionary
+        CVPixelBufferCreate(nil, width, height, kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange, attributes, &buffer)
+        guard let buffer else { return }
+        CVPixelBufferLockBaseAddress(buffer, [])
+        var x = seed &* 2_654_435_761 &+ 1
+        for plane in 0..<2 {
+            let base = CVPixelBufferGetBaseAddressOfPlane(buffer, plane)!.assumingMemoryBound(to: UInt8.self)
+            for i in 0..<(CVPixelBufferGetBytesPerRowOfPlane(buffer, plane) * CVPixelBufferGetHeightOfPlane(buffer, plane)) {
+                x = x &* 1_664_525 &+ 1_013_904_223
+                base[i] = UInt8(x >> 24)
+            }
+        }
+        CVPixelBufferUnlockBaseAddress(buffer, [])
+        var all = noises.get()
+        all[seed] = buffer
+        noises.set(all)
+        guard let queue = queue.get(), let deliver = deliver.get() else { return }
+        queue.sync { deliver(buffer, 1) }
+    }
+    private let noises = Locked<[UInt32: CVPixelBuffer]>([:])
 
     /// A frame of one shade; `changed`: how much of the screen it says changed.
     func push(shade: UInt8, changed: Double = 1) {
@@ -1022,6 +1116,7 @@ private final class RecordingInput: InputSink, @unchecked Sendable {
     func gesture(_ gesture: ScreenVideoWire.Gesture, phase: ScreenVideoWire.GesturePhase, value: Double) {
         log.set(log.get() + ["gesture \(gesture) \(phase) \(value)"])
     }
+    func releaseAll() { log.set(log.get() + ["release"]) }
     /// The Mac's clipboard; ⌘C replaces it with `copies` when that is set.
     private let board = Locked<(count: Int, text: String?)>((0, nil))
     private let copy = Locked<String?>(nil)

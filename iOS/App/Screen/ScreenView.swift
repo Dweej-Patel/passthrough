@@ -8,7 +8,11 @@ import ScreenClient
 /// it's needed, then the screen with touch and keyboard controls. It's the
 /// one view that turns to landscape, where its controls move to the side.
 struct ScreenView: View {
-    @ObservedObject var shell: ShellModel
+    /// Not observed: the shell model changes all the time (every session's status), and each
+    /// change redrew this whole view, open menus included, which made them flicker.
+    /// The one thing shown from it, whether the Mac can be locked, is followed below.
+    let shell: ShellModel
+    @State private var canLock = false
     @EnvironmentObject private var lock: AppLock
     @StateObject private var model = ScreenModel()
     @Environment(\.dismiss) private var dismiss
@@ -40,6 +44,7 @@ struct ScreenView: View {
         }
         .persistentSystemOverlays(landscape || pad ? .hidden : .automatic)
         .task { model.begin(shell: shell, context: lock.context) }
+        .onReceive(shell.$macState.map { $0?.locked == false && $0?.control == true }.removeDuplicates()) { canLock = $0 }
         // A connected keyboard types into the Mac from the start, without the on-screen one.
         .onChange(of: model.phase == .live) { _, live in if live, GCKeyboard.coalesced != nil { keyboard = true } }
         .onReceive(NotificationCenter.default.publisher(for: .GCKeyboardDidConnect)) { _ in
@@ -222,7 +227,7 @@ struct ScreenView: View {
             }
             Button { model.perform(.showDesktop) } label: { Label("Show desktop", systemImage: "menubar.dock.rectangle") }
             // Only the lock: the Mac stays awake, and this view stays open on its lock screen.
-            if shell.macState?.locked == false, shell.macState?.control == true {
+            if canLock {
                 Button { shell.control(.lock) } label: { Label("Lock \(model.macName)", systemImage: "lock") }
             }
             // Black on the Mac's own displays while this view goes on showing the screen.

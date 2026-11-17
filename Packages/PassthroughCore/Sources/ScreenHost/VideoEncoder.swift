@@ -18,6 +18,16 @@ final class VideoEncoder {
 
     enum Failure: Error { case create(OSStatus) }
 
+    /// What became of a frame.
+    enum Outcome {
+        case encoded(Encoded)
+        /// The encoder chose to skip it (no error): an unchanged frame, or one over a
+        /// low bitrate's budget. Low-latency mode does this routinely; nothing is wrong.
+        case dropped
+        /// An error: the encoder may have died (it can after sleep).
+        case failed
+    }
+
     let codec: ScreenVideoWire.Codec
     let width: Int
     let height: Int
@@ -71,19 +81,20 @@ final class VideoEncoder {
     }
 
     /// Encodes one frame; `done` gets it (nil if the encoder dropped or failed it), on the encoder's thread.
-    func encode(_ buffer: CVPixelBuffer, at time: CMTime, keyframe: Bool, done: @escaping (Encoded?) -> Void) {
-        guard let session else { return done(nil) }
+    func encode(_ buffer: CVPixelBuffer, at time: CMTime, keyframe: Bool, done: @escaping (Outcome) -> Void) {
+        guard let session else { return done(.failed) }
         // Once: a frame refused up front may or may not also reach the handler.
         let called = Locked(false)
-        let finish: (Encoded?) -> Void = { encoded in if !called.exchange(true) { done(encoded) } }
+        let finish: (Outcome) -> Void = { outcome in if !called.exchange(true) { done(outcome) } }
         let options = keyframe ? [kVTEncodeFrameOptionKey_ForceKeyFrame: kCFBooleanTrue] as CFDictionary : nil
         let codec = self.codec
         let status = VTCompressionSessionEncodeFrame(session, imageBuffer: buffer, presentationTimeStamp: time,
                                                      duration: .invalid, frameProperties: options, infoFlagsOut: nil) { status, _, sample in
-            guard status == noErr, let sample else { return finish(nil) }
-            finish(Self.encoded(sample, codec: codec))
+            guard status == noErr else { return finish(.failed) }
+            guard let sample else { return finish(.dropped) }
+            finish(Self.encoded(sample, codec: codec).map { .encoded($0) } ?? .failed)
         }
-        if status != noErr { finish(nil) }
+        if status != noErr { finish(.failed) }
     }
 
     static func encoded(_ sample: CMSampleBuffer, codec: ScreenVideoWire.Codec) -> Encoded? {

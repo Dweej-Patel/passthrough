@@ -167,6 +167,7 @@ public final class ScreenVideoStreamer: ScreenVideoSource, @unchecked Sendable {
     /// Encodes in a row that came back empty; the encoder is made again once, then the stream ends.
     private var failures = 0
     private var remadeEncoder = false
+    private var keyframeRetryScheduled = false
     private var input: InputSink?
     private var waiting: CVPixelBuffer?
     private var last: CVPixelBuffer?
@@ -608,17 +609,20 @@ public final class ScreenVideoStreamer: ScreenVideoSource, @unchecked Sendable {
         encoding = true
         let keyframe = needsKeyframe
         let count = captureCount
-        encoder.encode(buffer, at: CMClockGetTime(clock), keyframe: keyframe) { [weak self] encoded in
+        encoder.encode(buffer, at: CMClockGetTime(clock), keyframe: keyframe) { [weak self] outcome in
             guard let self else { return }
             self.queue.async {
                 self.encoding = false
                 guard !self.stopped else { return }
                 // The capture changed size meanwhile: this frame is the old encoder's.
                 guard self.encoder === encoder else { return self.pump() }
-                if let encoded {
+                switch outcome {
+                case let .encoded(encoded):
                     self.failures = 0
                     self.send(encoded)
-                } else {
+                case .dropped:
+                    self.encodeDropped()
+                case .failed:
                     self.encodeFailed()
                 }
                 self.scheduleRefine(after: count)
@@ -627,8 +631,21 @@ public final class ScreenVideoStreamer: ScreenVideoSource, @unchecked Sendable {
         }
     }
 
-    /// An encode came back empty: dropped, or the encoder died (it can after sleep). A keyframe the phone
-    /// waits for is tried again; a few empty ones in a row get the encoder made again, once.
+    /// The encoder skipped the frame on purpose. A keyframe the phone waits for is
+    /// tried again a moment later (not at once: it may skip that one too).
+    private func encodeDropped() {
+        guard needsKeyframe, !keyframeRetryScheduled else { return }
+        keyframeRetryScheduled = true
+        queue.asyncAfter(deadline: .now() + 0.05) { [weak self] in
+            guard let self, !self.stopped else { return }
+            self.keyframeRetryScheduled = false
+            if self.needsKeyframe, self.waiting == nil { self.waiting = self.last }
+            self.pump()
+        }
+    }
+
+    /// An encode failed with an error: the encoder may have died (it can after sleep). A keyframe the phone
+    /// waits for is tried again; a few failures in a row get the encoder made again, once.
     private func encodeFailed() {
         failures += 1
         if needsKeyframe, waiting == nil { waiting = last }
@@ -858,6 +875,9 @@ public final class ScreenVideoStreamer: ScreenVideoSource, @unchecked Sendable {
         }
         encoder?.invalidate()
         encoder = nil
+        // A button or gesture the phone still held (it went mid-drag) is let go, or the Mac
+        // would think it's still held: a drag that never ends, and its own input ignored.
+        input?.releaseAll()
         input = nil
         waiting = nil
         last = nil

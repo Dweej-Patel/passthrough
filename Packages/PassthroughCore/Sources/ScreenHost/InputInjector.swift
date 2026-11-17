@@ -13,6 +13,8 @@ protocol InputSink: AnyObject {
     func clipboard(_ text: String)
     /// A trackpad pinch or rotation, at the pointer.
     func gesture(_ gesture: ScreenVideoWire.Gesture, phase: ScreenVideoWire.GesturePhase, value: Double)
+    /// The phone is gone: lets go of every button it holds and ends its gestures.
+    func releaseAll()
     /// How many times the Mac's clipboard has changed (`NSPasteboard.changeCount`).
     var clipboardChangeCount: Int { get }
     /// What's on the Mac's clipboard now. May block: an app that provides
@@ -33,9 +35,23 @@ enum ClipboardContents: Equatable {
 final class InputInjector: InputSink {
     /// The display in global coordinates (points).
     var display: CGRect
-    private let source = CGEventSource(stateID: .hidSystemState)
+    /// Where its events come from. By default macOS ignores the Mac's own keyboard and
+    /// trackpad for 0.25 s after each event from a source like this, and for as long as
+    /// a button it pressed is down: someone at the Mac couldn't type while a phone moved
+    /// the pointer, scrolled or pinched, and not at all after a phone left mid-drag.
+    /// So it holds back nothing of theirs.
+    let source: CGEventSource? = {
+        let source = CGEventSource(stateID: .hidSystemState)
+        source?.localEventsSuppressionInterval = 0
+        let everything: CGEventFilterMask = [.permitLocalMouseEvents, .permitLocalKeyboardEvents, .permitSystemDefinedEvents]
+        source?.setLocalEventsFilterDuringSuppressionState(everything, state: .eventSuppressionStateSuppressionInterval)
+        source?.setLocalEventsFilterDuringSuppressionState(everything, state: .eventSuppressionStateRemoteMouseDrag)
+        return source
+    }()
     private var position: CGPoint
     private var buttons: UInt8 = 0
+    /// Gestures begun and not yet ended.
+    private var gestures: Set<ScreenVideoWire.Gesture> = []
     /// For double and triple clicks: macOS counts them from this field, not from timing.
     private var lastClick: (time: TimeInterval, point: CGPoint, count: Int)?
 
@@ -95,6 +111,11 @@ final class InputInjector: InputSink {
     /// them), which AppKit turns into `magnify(with:)` and `rotate(with:)` for the
     /// window under the pointer. Checked on macOS 27: phases and sums arrive intact.
     func gesture(_ gesture: ScreenVideoWire.Gesture, phase: ScreenVideoWire.GesturePhase, value: Double) {
+        switch phase {
+        case .began: gestures.insert(gesture)
+        case .ended, .cancelled: gestures.remove(gesture)
+        case .changed: break
+        }
         guard let event = CGEvent(source: source) else { return }
         event.setIntegerValueField(Self.eventTypeField, value: 29)   // kCGSEventGesture
         event.setIntegerValueField(Self.gestureTypeField, value: gesture == .magnify ? 8 : 5)   // kIOHIDEventTypeZoom, …Rotation
@@ -104,6 +125,14 @@ final class InputInjector: InputSink {
         event.location = CGEvent(source: nil)?.location ?? position
         event.flags = []
         event.post(tap: .cghidEventTap)
+    }
+
+    func releaseAll() {
+        for gesture in gestures { self.gesture(gesture, phase: .cancelled, value: 0) }
+        if buttons & 0b111 != 0 {
+            pointer(x: UInt16(clamping: Int(((position.x - display.minX) / max(display.width - 1, 1) * 65535).rounded())),
+                    y: UInt16(clamping: Int(((position.y - display.minY) / max(display.height - 1, 1) * 65535).rounded())), buttons: 0)
+        }
     }
 
     private static let eventTypeField = CGEventField(rawValue: 55)!       // kCGSEventTypeField
