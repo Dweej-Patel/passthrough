@@ -72,6 +72,23 @@ public enum ScreenVideoWire {
         case curtain(Bool)
         /// End every other device's view of this Mac (they get `movedAway`): this one is used here now.
         case useHere
+        /// A trackpad pinch or rotation at the pointer, as the Mac's own trackpad
+        /// sends them: `value` is the change since the last one (magnification, or
+        /// degrees counterclockwise), 0 on `began` and `ended`.
+        case gesture(Gesture, phase: GesturePhase, value: Double)
+    }
+
+    public enum Gesture: UInt8, Equatable, Sendable {
+        case magnify = 0
+        case rotate = 1
+    }
+
+    /// As macOS numbers a gesture's phases.
+    public enum GesturePhase: UInt8, Equatable, Sendable {
+        case began = 1
+        case changed = 2
+        case ended = 4
+        case cancelled = 8
     }
 
     /// What a phone asks to see.
@@ -159,7 +176,7 @@ public enum ScreenVideoWire {
     enum Kind: UInt8 {
         case format = 1, frame = 2, copied = 3, curtained = 4, fitted = 5, cursor = 6, cursorShape = 7, viewers = 8, movedAway = 9
         case hello = 16, ack = 17, pointer = 18, scroll = 19, key = 20, text = 21, clipboard = 22, keyframeRequest = 23, copy = 24, curtain = 25
-        case useHere = 26
+        case useHere = 26, gesture = 27
     }
 
     public enum Failure: Error, Equatable { case tooLarge, malformed }
@@ -200,6 +217,11 @@ public enum ScreenVideoWire {
             payload.append(Data(String(name.prefix(64)).utf8))
         case .useHere:
             kind = .useHere
+        case let .gesture(gesture, phase, value):
+            kind = .gesture
+            payload.append(gesture.rawValue); payload.append(phase.rawValue)
+            // Ten-thousandths: plenty for a step of a pinch, and room for a whole turn.
+            payload.append(u32: UInt32(bitPattern: Int32(clamping: Int((value * 10_000).rounded()))))
         case let .fitted(fit):
             kind = .fitted
             payload.append(fit.rawValue)
@@ -349,6 +371,10 @@ public enum ScreenVideoWire {
             return .movedAway(to: String(decoding: p, as: UTF8.self))
         case .useHere:
             return .useHere
+        case .gesture:
+            try need(6)
+            guard let gesture = Gesture(rawValue: p[b]), let phase = GesturePhase(rawValue: p[b + 1]) else { throw Failure.malformed }
+            return .gesture(gesture, phase: phase, value: Double(Int32(bitPattern: p.u32(at: b + 2))) / 10_000)
         case .fitted:
             try need(1)
             return .fitted(Fit(rawValue: p[b]) ?? .mac)

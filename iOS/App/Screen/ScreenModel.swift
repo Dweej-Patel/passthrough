@@ -70,6 +70,13 @@ final class ScreenModel: ObservableObject {
     /// size against the stream's, in percent (80 larger text, 100, 125 more space).
     @Published private(set) var space = ScreenModel.spaceSetting
     static let spaces = [80, 100, 125]
+    /// The user's choice on the Mac's own display: pinch and rotate go to the Mac instead of zooming this view.
+    @Published private(set) var pinchesMacOnItsDisplay = UserDefaults.standard.bool(forKey: ScreenModel.pinchKey)
+    private static let pinchKey = "screenPinchGoesToMac"
+    /// Pinch and rotate go to the app under the fingers on the Mac (its own stream only:
+    /// Screen Sharing has no gestures): always on a display made for this device, where
+    /// the text is already this device's size; on the Mac's own display if the user chose it.
+    var pinchesMac: Bool { video != nil && (fitsDevice || pinchesMacOnItsDisplay) }
     /// The other devices viewing the Mac's screen now (their names), for "Use Here".
     @Published private(set) var otherViewers: [String] = []
     /// "Use Here" was asked for before the stream was up (taking the view back): sent once it is.
@@ -809,6 +816,17 @@ final class ScreenModel: ObservableObject {
         self.space = space
         UserDefaults.standard.set(space, forKey: Self.spaceKey)
         video?.relayout(layout())
+    }
+
+    func setPinchesMacOnItsDisplay(_ on: Bool) {
+        pinchesMacOnItsDisplay = on
+        UserDefaults.standard.set(on, forKey: Self.pinchKey)
+    }
+
+    /// A pinch or rotation for the Mac, at its pointer.
+    func gesture(_ gesture: ScreenVideoWire.Gesture, phase: ScreenVideoWire.GesturePhase, value: Double) {
+        lastPointerAt = ProcessInfo.processInfo.systemUptime
+        video?.gesture(gesture, phase: phase, value: value)
     }
 
     /// This device is used here now: the Mac ends the other devices' views.

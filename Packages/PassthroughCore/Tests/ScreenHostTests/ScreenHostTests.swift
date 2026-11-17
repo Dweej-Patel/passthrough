@@ -23,6 +23,10 @@ final class ScreenVideoWireTests: XCTestCase {
             .viewers(["iPad Pro", "Dweej’s iPhone 👋"]),
             .movedAway(to: "iPad Pro"),
             .useHere,
+            .gesture(.magnify, phase: .began, value: 0),
+            .gesture(.magnify, phase: .changed, value: 0.0125),
+            .gesture(.rotate, phase: .changed, value: -12.5),
+            .gesture(.rotate, phase: .ended, value: 0),
             .fitted(.device),
             .fitted(.mac),
             .cursor(x: 1, y: 65535, visible: true),
@@ -344,8 +348,11 @@ final class ScreenVideoStreamerTests: XCTestCase {
         client.pointer(x: 0.5, y: 1, buttons: .left)
         client.key(RFBKeys.right, modifiers: [.control])
         client.text("hi")
-        waitUntil("input arrived") { input.log.get().count == 3 }
-        XCTAssertEqual(input.log.get(), ["pointer 32768 65535 1", "key \(RFBKeys.right) 8", "text hi"])
+        client.gesture(.magnify, phase: .changed, value: 0.25)
+        client.gesture(.rotate, phase: .ended, value: 0)
+        waitUntil("input arrived") { input.log.get().count == 5 }
+        XCTAssertEqual(input.log.get(), ["pointer 32768 65535 1", "key \(RFBKeys.right) 8", "text hi",
+                                         "gesture magnify changed 0.25", "gesture rotate ended 0.0"])
 
         streamer.stop()
         waitUntil("capture stopped") { capture.stopped.get() }
@@ -943,6 +950,9 @@ private final class RecordingInput: InputSink, @unchecked Sendable {
     }
     func text(_ text: String) { log.set(log.get() + ["text \(text)"]) }
     func clipboard(_ text: String) { log.set(log.get() + ["clipboard \(text)"]) }
+    func gesture(_ gesture: ScreenVideoWire.Gesture, phase: ScreenVideoWire.GesturePhase, value: Double) {
+        log.set(log.get() + ["gesture \(gesture) \(phase) \(value)"])
+    }
     /// The Mac's clipboard; ⌘C replaces it with `copies` when that is set.
     private let board = Locked<(count: Int, text: String?)>((0, nil))
     private let copy = Locked<String?>(nil)

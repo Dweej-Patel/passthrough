@@ -135,6 +135,12 @@ public final class ScreenVideoClient: @unchecked Sendable {
     /// This device is used here now: the Mac ends every other device's view of its screen.
     public func useHere() { send(.useHere) }
 
+    /// A trackpad pinch (`value`: the magnification since the last) or rotation (degrees
+    /// counterclockwise since the last) at the Mac's pointer.
+    public func gesture(_ gesture: ScreenVideoWire.Gesture, phase: ScreenVideoWire.GesturePhase, value: Double) {
+        send(.gesture(gesture, phase: phase, value: value))
+    }
+
     // MARK: Input
 
     /// The pointer at (`x`, `y`), each 0…1 across the screen, with `buttons` held.

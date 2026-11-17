@@ -687,6 +687,16 @@ Phone → Mac:
   has sent nothing for 20 s with frames unacked (put away, or gone without
   a word). It hides the picture only: the Mac's own keyboard and trackpad
   still work. A Mac that predates it skips the message and doesn't answer.
+- `27` gesture: kind u8 (0 magnify, 1 rotate), phase u8 (1 began, 2
+  changed, 4 ended, 8 cancelled, as macOS numbers them), value i32 in
+  ten-thousandths: the change since the last one (magnification as a
+  trackpad gives it, the new size over the last less one; rotation in
+  degrees counterclockwise), 0 on began and ended. The Mac posts it as its
+  own trackpad's gesture (CoreGraphics' undocumented gesture event), which
+  goes to the window under the pointer: the phone moves the pointer under
+  the fingers first in touch mode. The phone sends these on a display made
+  for it, or on the Mac's own if the user chose it; otherwise a pinch zooms
+  the phone's view.
 - `26` use here: no payload. Every other device's stream of this Mac's
   screen gets `movedAway` with this phone's name and ends; a display made
   for a phone that one of them had is free again, and this stream moves to

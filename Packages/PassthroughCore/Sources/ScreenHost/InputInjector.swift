@@ -11,6 +11,8 @@ protocol InputSink: AnyObject {
     func key(keysym: UInt32, modifiers: UInt8)
     func text(_ text: String)
     func clipboard(_ text: String)
+    /// A trackpad pinch or rotation, at the pointer.
+    func gesture(_ gesture: ScreenVideoWire.Gesture, phase: ScreenVideoWire.GesturePhase, value: Double)
     /// How many times the Mac's clipboard has changed (`NSPasteboard.changeCount`).
     var clipboardChangeCount: Int { get }
     /// What's on the Mac's clipboard now. May block: an app that provides
@@ -87,6 +89,27 @@ final class InputInjector: InputSink {
         event.flags = []
         event.post(tap: .cghidEventTap)
     }
+
+    /// A trackpad gesture as macOS's own: there's no public API for these, so
+    /// they're CoreGraphics' undocumented gesture events (as Mac Mouse Fix posts
+    /// them), which AppKit turns into `magnify(with:)` and `rotate(with:)` for the
+    /// window under the pointer. Checked on macOS 27: phases and sums arrive intact.
+    func gesture(_ gesture: ScreenVideoWire.Gesture, phase: ScreenVideoWire.GesturePhase, value: Double) {
+        guard let event = CGEvent(source: source) else { return }
+        event.setIntegerValueField(Self.eventTypeField, value: 29)   // kCGSEventGesture
+        event.setIntegerValueField(Self.gestureTypeField, value: gesture == .magnify ? 8 : 5)   // kIOHIDEventTypeZoom, …Rotation
+        event.setIntegerValueField(Self.gesturePhaseField, value: Int64(phase.rawValue))
+        event.setDoubleValueField(gesture == .magnify ? Self.zoomField : Self.rotationField, value: value)
+        event.location = position
+        event.flags = []
+        event.post(tap: .cghidEventTap)
+    }
+
+    private static let eventTypeField = CGEventField(rawValue: 55)!       // kCGSEventTypeField
+    private static let gestureTypeField = CGEventField(rawValue: 110)!    // kCGEventGestureHIDType
+    private static let zoomField = CGEventField(rawValue: 113)!           // kCGEventGestureZoomValue
+    private static let rotationField = CGEventField(rawValue: 114)!       // kCGEventGestureRotationValue
+    private static let gesturePhaseField = CGEventField(rawValue: 132)!   // kCGEventGesturePhase
 
     func key(keysym: UInt32, modifiers: UInt8) {
         let held = ScreenVideoWire.Modifiers(rawValue: modifiers)

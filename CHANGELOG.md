@@ -90,6 +90,12 @@ these steps as written and check each one before building.
   too, a banner says so; *Use Here* ends the view there (it shows "open on
   …" with its own *Use Here* to take it back) and gives this device the
   display made for it.
+* Screen view: pinch and rotate reach the Mac app under your fingers (Maps,
+  Photos, Preview, Safari's zoom), as from a Mac trackpad. With *Fit to this
+  iPhone/iPad* they always do, and a three-finger double-tap zooms the view;
+  on the Mac's own display pinch still zooms the view unless *Pinch and
+  rotate go to …* is on. It uses an undocumented macOS event (as Mac Mouse
+  Fix does), checked on macOS 27.
 * Screen view: momentum scrolling. A two-finger scroll that ends moving
   carries on and slows like a Mac trackpad's; touching the screen stops it.
 * Screen view: a spinner or streaming text alone, with no one touching the

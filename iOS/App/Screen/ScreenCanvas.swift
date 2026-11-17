@@ -34,6 +34,14 @@ final class ScreenCanvasView: UIView, UIScrollViewDelegate, UIKeyInput, UIGestur
     var onPaste: (() -> Void)?
     var onCopy: (() -> Void)?
     var onSpace: ((ScreenModel.SpaceAction) -> Void)?
+    /// A pinch or rotation for the Mac (`pinchToMac`): magnification or degrees counterclockwise since the last.
+    var onGesture: ((ScreenVideoWire.Gesture, ScreenVideoWire.GesturePhase, Double) -> Void)?
+    /// Pinch and rotate go to the app under the fingers on the Mac, and a three-finger
+    /// double-tap zooms this view instead; otherwise pinching zooms this view.
+    var pinchToMac = false {
+        didSet { if pinchToMac != oldValue { applyMode() } }
+    }
+
     /// This view in pixels, as the device is held now (it turned, the window changed, the bars
     /// moved): a display made for the device takes its shape, clear of the Dynamic Island and the
     /// controls. Not while the keyboard is up, which would reshape the Mac's display with every word typed.
@@ -126,6 +134,21 @@ final class ScreenCanvasView: UIView, UIScrollViewDelegate, UIKeyInput, UIGestur
             addGestureRecognizer(swipe)
             fingerRecognizers.append(swipe)
         }
+        // Pinch and rotate for the Mac, together, as a trackpad does them; and the view's zoom, then.
+        let macPinch = UIPinchGestureRecognizer(target: self, action: #selector(pinched(_:)))
+        let macRotate = UIRotationGestureRecognizer(target: self, action: #selector(rotated(_:)))
+        let zoomTap = UITapGestureRecognizer(target: self, action: #selector(zoomTapped(_:)))
+        zoomTap.numberOfTouchesRequired = 3
+        zoomTap.numberOfTapsRequired = 2
+        for recognizer in [macPinch, macRotate, zoomTap] as [UIGestureRecognizer] {
+            recognizer.allowedTouchTypes = fingers
+            recognizer.delegate = self
+            addGestureRecognizer(recognizer)
+            fingerRecognizers.append(recognizer)
+        }
+        self.macPinch = macPinch
+        self.macRotate = macRotate
+        self.zoomTap = zoomTap
         addPointerRecognizers()
         self.move = move
         self.wheel = wheel
@@ -269,7 +292,7 @@ final class ScreenCanvasView: UIView, UIScrollViewDelegate, UIKeyInput, UIGestur
     /// reach) are off while the Pencil is in use, then back as the mode wants them.
     private func holdScrolling(_ hold: Bool) {
         scroll.panGestureRecognizer.isEnabled = !hold && mode == .direct
-        scroll.pinchGestureRecognizer?.isEnabled = !hold
+        scroll.pinchGestureRecognizer?.isEnabled = !hold && !pinchToMac
     }
 
     func pencilInteraction(_ interaction: UIPencilInteraction, didReceiveTap tap: UIPencilInteraction.Tap) {
@@ -363,6 +386,10 @@ final class ScreenCanvasView: UIView, UIScrollViewDelegate, UIKeyInput, UIGestur
         // Trackpad: one finger moves the pointer, and a zoomed view follows it.
         // (Not while the Pencil holds scrolling off.)
         scroll.panGestureRecognizer.isEnabled = mode == .direct && !penInUse
+        scroll.pinchGestureRecognizer?.isEnabled = !pinchToMac && !penInUse
+        macPinch?.isEnabled = pinchToMac
+        macRotate?.isEnabled = pinchToMac
+        zoomTap?.isEnabled = pinchToMac
         move?.isEnabled = mode == .trackpad
         cursor.isHidden = mode == .direct || screenSize == .zero
         updateCursor()
@@ -621,7 +648,9 @@ final class ScreenCanvasView: UIView, UIScrollViewDelegate, UIKeyInput, UIGestur
     /// The Pencil works beside fingers (a resting palm or a pan doesn't stop it).
     func gestureRecognizer(_ recognizer: UIGestureRecognizer,
                            shouldRecognizeSimultaneouslyWith other: UIGestureRecognizer) -> Bool {
-        recognizer === pen || other === pen
+        // A pinch and a rotation go together, as on a trackpad.
+        if (recognizer === macPinch && other === macRotate) || (recognizer === macRotate && other === macPinch) { return true }
+        return recognizer === pen || other === pen
     }
 
     /// Two fingers scroll the Mac or pinch to zoom, and whichever is recognized first
@@ -720,6 +749,68 @@ final class ScreenCanvasView: UIView, UIScrollViewDelegate, UIKeyInput, UIGestur
     override func willMove(toWindow newWindow: UIWindow?) {
         super.willMove(toWindow: newWindow)
         if newWindow == nil { stopMomentum() }
+    }
+
+    // MARK: Pinch and rotate for the Mac
+
+    private weak var macPinch: UIPinchGestureRecognizer?
+    private weak var macRotate: UIRotationGestureRecognizer?
+    private weak var zoomTap: UITapGestureRecognizer?
+    private var lastPinchScale: CGFloat = 1
+    private var lastRotation: CGFloat = 0
+
+    @objc private func pinched(_ recognizer: UIPinchGestureRecognizer) {
+        switch recognizer.state {
+        case .began:
+            gestureBegins(at: recognizer.location(in: self))
+            lastPinchScale = 1
+            onGesture?(.magnify, .began, 0)
+            fallthrough
+        case .changed:
+            guard lastPinchScale > 0 else { return }
+            // A trackpad's magnification is the step's change: the new size over the last, less one.
+            onGesture?(.magnify, .changed, Double(recognizer.scale / lastPinchScale - 1))
+            lastPinchScale = recognizer.scale
+        case .ended: onGesture?(.magnify, .ended, 0)
+        case .cancelled, .failed: onGesture?(.magnify, .cancelled, 0)
+        default: break
+        }
+    }
+
+    @objc private func rotated(_ recognizer: UIRotationGestureRecognizer) {
+        switch recognizer.state {
+        case .began:
+            gestureBegins(at: recognizer.location(in: self))
+            lastRotation = 0
+            onGesture?(.rotate, .began, 0)
+            fallthrough
+        case .changed:
+            // UIKit turns clockwise in radians; the Mac counterclockwise in degrees.
+            onGesture?(.rotate, .changed, Double(-(recognizer.rotation - lastRotation) * 180 / .pi))
+            lastRotation = recognizer.rotation
+        case .ended: onGesture?(.rotate, .ended, 0)
+        case .cancelled, .failed: onGesture?(.rotate, .cancelled, 0)
+        default: break
+        }
+    }
+
+    /// The Mac sends a gesture to what's under its pointer: in touch mode that's under
+    /// the fingers, so the pointer goes there first; in trackpad mode it stays where it is.
+    private func gestureBegins(at location: CGPoint) {
+        stopMomentum()
+        guard mode == .direct, screenSize.width > 0 else { return }
+        pointTo(location)
+        onPointer?(cursorPoint, [])
+    }
+
+    /// Three fingers, twice: this view zooms in there (2½×), or back out.
+    @objc private func zoomTapped(_ recognizer: UITapGestureRecognizer) {
+        guard screenSize.width > 0 else { return }
+        if scroll.zoomScale > 1.01 { return scroll.setZoomScale(1, animated: true) }
+        let scale = min(2.5, scroll.maximumZoomScale)
+        let point = recognizer.location(in: content)
+        let size = CGSize(width: scroll.bounds.width / scale, height: scroll.bounds.height / scale)
+        scroll.zoom(to: CGRect(x: point.x - size.width / 2, y: point.y - size.height / 2, width: size.width, height: size.height), animated: true)
     }
 
     /// Three fingers, as on the Mac: swiping left brings in the desktop on the right.
@@ -956,6 +1047,7 @@ struct ScreenCanvas: UIViewRepresentable {
         view.onCopy = { [weak model] in model?.copyFromMac() }
         view.onSpace = { [weak model] action in model?.perform(action) }
         view.onViewPixels = { [weak model] size in model?.viewPixelsChanged(size) }
+        view.onGesture = { [weak model] gesture, phase, value in model?.gesture(gesture, phase: phase, value: value) }
         model.onMacPointer = { [weak view] point, onScreen in view?.macPointer(at: point, onScreen: onScreen) }
         model.onPointerShape = { [weak view] image, size, hotSpot in view?.setPointerShape(image, size: size, hotSpot: hotSpot) }
         model.onFrame = { [weak view] image in view?.show(image, size: CGSize(width: image.width, height: image.height)) }
@@ -965,6 +1057,7 @@ struct ScreenCanvas: UIViewRepresentable {
     func updateUIView(_ view: ScreenCanvasView, context: Context) {
         view.show(model.image, size: model.screenSize)
         if view.mode != mode { view.mode = mode }
+        view.pinchToMac = model.pinchesMac
         guard keyboard != view.isFirstResponder else { return }
         // After this update, not inside it: changing the first responder makes SwiftUI read
         // its graph again (focus), and doing that mid-update hung the app in landscape.

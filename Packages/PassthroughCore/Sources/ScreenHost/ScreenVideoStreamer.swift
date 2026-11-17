@@ -274,6 +274,7 @@ public final class ScreenVideoStreamer: ScreenVideoSource, @unchecked Sendable {
         case let .clipboard(text): input?.clipboard(text)
         case .copy: heardInput(); copySelection()
         case .useHere: useHere()
+        case let .gesture(gesture, phase, value): heardInput(); input?.gesture(gesture, phase: phase, value: value)
         case let .curtain(hidden): setCurtain(hidden)
         case .format, .frame, .copied, .curtained, .fitted, .cursor, .cursorShape, .viewers, .movedAway:
             break

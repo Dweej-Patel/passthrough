@@ -110,6 +110,7 @@ struct ScreenView: View {
     private var padHint: String {
         mode == .trackpad
             ? "Drag to move · tap to click · three fingers switch desktops · or use a trackpad"
+            : model.pinchesMac ? "Tap to click · hold to drag · three-finger double-tap to zoom · or use a trackpad"
             : "Tap to click · hold to drag · pinch to zoom · or use a trackpad"
     }
 
@@ -228,6 +229,14 @@ struct ScreenView: View {
             if model.canHideMac {
                 Toggle(isOn: Binding(get: { model.macHidden }, set: { model.setMacHidden($0) })) {
                     Label("Hide \(model.macName)'s display", systemImage: "eye.slash")
+                }
+                // Pinch and rotate: the Mac's on a display made for this device; a choice on its own display.
+                if model.fitsDevice {
+                    Text("Pinch and rotate go to \(model.macName). Three-finger double-tap zooms this view.")
+                } else {
+                    Toggle(isOn: Binding(get: { model.pinchesMacOnItsDisplay }, set: { model.setPinchesMacOnItsDisplay($0) })) {
+                        Label("Pinch and rotate go to \(model.macName)", systemImage: "hand.pinch")
+                    }
                 }
                 // The Mac's own display as it is, or one it makes in this device's shape (which its own mirror meanwhile).
                 Section("Screen shape") {
