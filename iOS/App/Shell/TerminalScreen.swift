@@ -138,12 +138,15 @@ struct PendingPaste: Identifiable {
 struct TerminalScreen: View {
     @ObservedObject var shell: ShellModel
     let intent: TerminalIntent
+    /// How to close it when it isn't in a SwiftUI presentation (it's presented through UIKit).
+    var onClose: (() -> Void)?
     @StateObject private var controller: ShellTerminalController
     @Environment(\.dismiss) private var dismiss
 
-    init(shell: ShellModel, intent: TerminalIntent) {
+    init(shell: ShellModel, intent: TerminalIntent, onClose: (() -> Void)? = nil) {
         self.shell = shell
         self.intent = intent
+        self.onClose = onClose
         _controller = StateObject(wrappedValue: ShellTerminalController(shell: shell))
     }
 
@@ -196,11 +199,15 @@ struct TerminalScreen: View {
         .onDisappear { shell.setViewing(false) }
     }
 
+    private func close() {
+        if let onClose { onClose() } else { dismiss() }
+    }
+
     // MARK: Tabs
 
     private var tabStrip: some View {
         HStack(spacing: 10) {
-            Button { dismiss() } label: {
+            Button { close() } label: {
                 Image(systemName: "chevron.down")
                     .font(.subheadline.weight(.semibold))
                     .foregroundStyle(.secondary)
@@ -343,7 +350,7 @@ struct TerminalScreen: View {
         if let next = shell.openTabs.last {
             if shell.reach == .ready { controller.attach(next) }
         } else {
-            dismiss()
+            close()
         }
     }
 

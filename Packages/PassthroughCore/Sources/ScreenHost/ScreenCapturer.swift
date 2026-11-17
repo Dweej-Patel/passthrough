@@ -18,10 +18,11 @@ enum CaptureSource: Equatable {
 /// Where the streamer gets the screen: `ScreenCapturer`, or frames a test makes.
 /// One capture each: once stopped, it isn't started again.
 protocol FrameCapturing: AnyObject, Sendable {
-    /// Starts delivering frames of `source` on `queue`: only when the screen
-    /// changed. `stopped` runs if capture ends by itself. Returns the frames'
+    /// Starts delivering frames of `source` on `queue`, up to `fps` a second:
+    /// only when the screen changed, each with the share of it that changed
+    /// (0…1). `stopped` runs if capture ends by itself. Returns the frames'
     /// size and the display's place in global coordinates (points), for input.
-    func start(_ source: CaptureSource, queue: DispatchQueue, frame: @escaping (CVPixelBuffer) -> Void,
+    func start(_ source: CaptureSource, fps: Int, queue: DispatchQueue, frame: @escaping (CVPixelBuffer, Double) -> Void,
                stopped: @escaping (Error?) -> Void) async throws -> (width: Int, height: Int, display: CGRect)
     func stop()
     /// Hides what the Mac's displays show to whoever is at the Mac (`hidden`), while
@@ -45,7 +46,7 @@ final class ScreenCapturer: NSObject, FrameCapturing, SCStreamOutput, SCStreamDe
     // Set from the starting task, used and cleared on the streamer's queue.
     private let lock = NSLock()
     private var stream: SCStream?
-    private var onFrame: ((CVPixelBuffer) -> Void)?
+    private var onFrame: ((CVPixelBuffer, Double) -> Void)?
     private var onStopped: ((Error?) -> Void)?
     private var stopped = false
     private var display: SCDisplay?
@@ -59,11 +60,11 @@ final class ScreenCapturer: NSObject, FrameCapturing, SCStreamOutput, SCStreamDe
     private var curtainWork: Task<Void, Never>?
     private let wake = DisplayWake()
 
-    func start(_ source: CaptureSource, queue: DispatchQueue, frame: @escaping (CVPixelBuffer) -> Void,
+    func start(_ source: CaptureSource, fps: Int, queue: DispatchQueue, frame: @escaping (CVPixelBuffer, Double) -> Void,
                stopped: @escaping (Error?) -> Void) async throws -> (width: Int, height: Int, display: CGRect) {
         wake.begin()
         do {
-            return try await capture(source, queue: queue, frame: frame, stopped: stopped)
+            return try await capture(source, fps: fps, queue: queue, frame: frame, stopped: stopped)
         } catch {
             wake.end()
             leaveCurtain()
@@ -90,7 +91,7 @@ final class ScreenCapturer: NSObject, FrameCapturing, SCStreamOutput, SCStreamDe
         }
     }
 
-    private func capture(_ source: CaptureSource, queue: DispatchQueue, frame: @escaping (CVPixelBuffer) -> Void,
+    private func capture(_ source: CaptureSource, fps: Int, queue: DispatchQueue, frame: @escaping (CVPixelBuffer, Double) -> Void,
                          stopped: @escaping (Error?) -> Void) async throws -> (width: Int, height: Int, display: CGRect) {
         let display: SCDisplay
         let width: Int, height: Int
@@ -110,7 +111,7 @@ final class ScreenCapturer: NSObject, FrameCapturing, SCStreamOutput, SCStreamDe
         let configuration = SCStreamConfiguration()
         configuration.width = width
         configuration.height = height
-        configuration.minimumFrameInterval = CMTime(value: 1, timescale: 60)
+        configuration.minimumFrameInterval = CMTime(value: 1, timescale: CMTimeScale(min(max(fps, 15), 120)))
         configuration.pixelFormat = kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange
         configuration.colorMatrix = CGDisplayStream.yCbCrMatrix_ITU_R_709_2
         configuration.queueDepth = 5
@@ -204,16 +205,33 @@ final class ScreenCapturer: NSObject, FrameCapturing, SCStreamOutput, SCStreamDe
               let info = (CMSampleBufferGetSampleAttachmentsArray(sample, createIfNecessary: false) as? [[SCStreamFrameInfo: Any]])?.first,
               let raw = info[.status] as? Int, SCFrameStatus(rawValue: raw) == .complete,
               let buffer = sample.imageBuffer else { return }
-        lock.withLock { onFrame }?(buffer)
+        lock.withLock { onFrame }?(buffer, Self.changedShare(info, buffer))
     }
 
+    /// How much of the frame changed, from its dirty rectangles (in the frame's
+    /// pixels): a spinner or a line of streaming text is a sliver of it. 1 when unknown.
+    static func changedShare(_ info: [SCStreamFrameInfo: Any], _ buffer: CVPixelBuffer) -> Double {
+        guard let rects = info[.dirtyRects] as? [Any] else { return 1 }
+        let area = Double(CVPixelBufferGetWidth(buffer) * CVPixelBufferGetHeight(buffer))
+        guard area > 0 else { return 1 }
+        let changed = rects.reduce(0.0) { sum, value in
+            guard let dictionary = value as? NSDictionary, let rect = CGRect(dictionaryRepresentation: dictionary) else { return sum }
+            return sum + Double(rect.width * rect.height)
+        }
+        return min(1, changed / area)
+    }
+
+    /// Capture ended by itself (its display went away, say). The curtain is
+    /// left only by `stop()`: the owner may be handing over to a new capture,
+    /// which must want the curtain before this one lets go, or the Mac's
+    /// displays would show for a moment, or for good. The dead stream is let
+    /// go of, so the curtain doesn't ask it to leave out windows it can't.
     func stream(_ stream: SCStream, didStopWithError error: Error) {
         let stopped = lock.withLock { () -> ((Error?) -> Void)? in
-            defer { onStopped = nil }
+            defer { onStopped = nil; onFrame = nil; self.stream = nil }
             return onStopped
         }
         wake.end()
-        leaveCurtain()
         stopped?(error)
     }
 }

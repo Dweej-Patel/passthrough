@@ -7,12 +7,23 @@ import ScreenClient
 /// The full-screen view of the selected Mac's screen: the Mac's login when
 /// it's needed, then the screen with touch and keyboard controls. It's the
 /// one view that turns to landscape, where its controls move to the side.
-struct ScreenView: View {
-    @ObservedObject var shell: ShellModel
+struct ScreenView: View, Equatable {
+    /// The same Mac's shell: nothing else comes from outside. Without this the view was
+    /// rebuilt whenever the app's model changed (about every second), open menus included.
+    nonisolated static func == (a: ScreenView, b: ScreenView) -> Bool { a.shell === b.shell }
+
+    /// Not observed: the shell model changes all the time (every session's status), and each
+    /// change redrew this whole view, open menus included, which made them flicker.
+    /// The one thing shown from it, whether the Mac can be locked, is followed below.
+    let shell: ShellModel
+    /// How to close it when it isn't in a SwiftUI presentation (it's presented through UIKit).
+    var onClose: (() -> Void)?
+    @State private var canLock = false
     @EnvironmentObject private var lock: AppLock
     @StateObject private var model = ScreenModel()
     @Environment(\.dismiss) private var dismiss
     @Environment(\.verticalSizeClass) private var verticalSize
+    @Environment(\.displayScale) private var displayScale
     @AppStorage("screenTouchMode") private var modeSetting = ScreenTouchMode.trackpad.rawValue
     @State private var keyboard = false
 
@@ -33,12 +44,18 @@ struct ScreenView: View {
                 phoneLayout
             }
         }
+        // Safe here because the view has its own controller (`ScreenCoverPresenter`): under
+        // SwiftUI's cover this preference and the app root's took turns several times a second.
         .preferredColorScheme(.dark)
         .hiddenWhileCaptured { covered in
             if covered { keyboard = false }
         }
         .persistentSystemOverlays(landscape || pad ? .hidden : .automatic)
+        // iPad: the Mac's screen fills the display, its menu bar where the iPad's status bar
+        // is, which iPadOS draws over it on a blur. The Mac's own clock and battery are there.
+        .statusBarHidden(pad)
         .task { model.begin(shell: shell, context: lock.context) }
+        .onReceive(shell.$macState.map { $0?.locked == false && $0?.control == true }.removeDuplicates()) { canLock = $0 }
         // A connected keyboard types into the Mac from the start, without the on-screen one.
         .onChange(of: model.phase == .live) { _, live in if live, GCKeyboard.coalesced != nil { keyboard = true } }
         .onReceive(NotificationCenter.default.publisher(for: .GCKeyboardDidConnect)) { _ in
@@ -71,7 +88,7 @@ struct ScreenView: View {
     private var padBar: some View {
         VStack(spacing: 6) {
             HStack(spacing: 10) {
-                Button { model.stop(); dismiss() } label: {
+                Button { model.stop(); close() } label: {
                     Image(systemName: "xmark").font(.body.weight(.bold)).frame(width: 44, height: 44).contentShape(Circle())
                 }
                 .accessibilityLabel("Done")
@@ -87,6 +104,7 @@ struct ScreenView: View {
                     keyboardButton.frame(width: 44, height: 44)
                     clipboardMenu.frame(width: 44, height: 44)
                     desktopsMenu.frame(height: 44)
+                    displayMenu.frame(height: 44)
                 } else {
                     Text(model.macName).font(.subheadline.weight(.semibold)).padding(.trailing, 12)
                 }
@@ -110,12 +128,13 @@ struct ScreenView: View {
     private var padHint: String {
         mode == .trackpad
             ? "Drag to move · tap to click · three fingers switch desktops · or use a trackpad"
+            : model.pinchesMac ? "Tap to click · hold to drag · three-finger double-tap to zoom · or use a trackpad"
             : "Tap to click · hold to drag · pinch to zoom · or use a trackpad"
     }
 
     private var topBar: some View {
         HStack(spacing: 12) {
-            Button("Done") { model.stop(); dismiss() }
+            Button("Done") { model.stop(); close() }
                 .font(.body.weight(.semibold))
             Spacer(minLength: 0)
             VStack(spacing: 1) {
@@ -134,6 +153,7 @@ struct ScreenView: View {
             if model.phase == .live {
                 clipboardMenu
                 desktopsMenu
+                displayMenu
                 modeButton
                 keyboardButton
             }
@@ -154,11 +174,12 @@ struct ScreenView: View {
             Spacer(minLength: 0)
             if model.phase == .live {
                 if keyboard {
-                    HStack(spacing: 4) { clipboardMenu; desktopsMenu }
+                    HStack(spacing: 4) { clipboardMenu; desktopsMenu; displayMenu }
                     HStack(spacing: 4) { modeButton; keyboardButton }
                 } else {
                     clipboardMenu
                     desktopsMenu
+                    displayMenu
                     modeButton
                     keyboardButton
                 }
@@ -170,8 +191,12 @@ struct ScreenView: View {
         .padding(.horizontal, 6)
     }
 
+    private func close() {
+        if let onClose { onClose() } else { dismiss() }
+    }
+
     private var doneButton: some View {
-        Button { model.stop(); dismiss() } label: { Image(systemName: "xmark").sideTarget(landscape) }
+        Button { model.stop(); close() } label: { Image(systemName: "xmark").sideTarget(landscape) }
             .font(.body.weight(.semibold))
             .accessibilityLabel("Done")
     }
@@ -196,56 +221,22 @@ struct ScreenView: View {
 
     /// Copy and paste between the Mac and this iPhone, also on the keyboard's key row.
     private var clipboardMenu: some View {
-        Menu {
-            Button { model.copyFromMac() } label: { Label("Copy from \(model.macName)", systemImage: "doc.on.doc") }
-                .disabled(model.copying)
-            Button { model.pastePhoneClipboard() } label: { Label("Paste on \(model.macName)", systemImage: "doc.on.clipboard") }
-        } label: {
-            Image(systemName: "doc.on.clipboard").sideTarget(landscape)
-        }
-        .accessibilityLabel("Copy and paste")
+        ScreenClipboardMenu(model: model, macName: model.macName, copying: model.copying, landscape: landscape).equatable()
     }
 
     /// Mission Control: the same as the canvas's three-finger swipes.
     private var desktopsMenu: some View {
-        Menu {
-            // How far the picture travels: a relay is the likeliest reason it lags.
-            if let path = model.connectionPath, let reach = Self.describe(path) {
-                Section { Label(reach.text, systemImage: reach.symbol) }
-            }
-            Section("Or swipe with three fingers") {
-                Button { model.perform(.previousDesktop) } label: { Label("Previous desktop", systemImage: "arrow.left.square") }
-                Button { model.perform(.nextDesktop) } label: { Label("Next desktop", systemImage: "arrow.right.square") }
-                Button { model.perform(.missionControl) } label: { Label("Mission Control", systemImage: "rectangle.3.group") }
-                Button { model.perform(.appWindows) } label: { Label("App windows", systemImage: "macwindow.on.rectangle") }
-            }
-            Button { model.perform(.showDesktop) } label: { Label("Show desktop", systemImage: "menubar.dock.rectangle") }
-            // Only the lock: the Mac stays awake, and this view stays open on its lock screen.
-            if shell.macState?.locked == false, shell.macState?.control == true {
-                Button { shell.control(.lock) } label: { Label("Lock \(model.macName)", systemImage: "lock") }
-            }
-            // Black on the Mac's own displays while this view goes on showing the screen.
-            if model.canHideMac {
-                Toggle(isOn: Binding(get: { model.macHidden }, set: { model.setMacHidden($0) })) {
-                    Label("Hide \(model.macName)'s display", systemImage: "eye.slash")
-                }
-                // The Mac's own display as it is, or one it makes in this device's shape (which its own mirror meanwhile).
-                Section("Screen shape") {
-                    Picker("Screen shape", selection: Binding(get: { model.fitsDevice }, set: { model.setFitsDevice($0) })) {
-                        Label("\(model.macName)'s display", systemImage: "laptopcomputer").tag(false)
-                        Label("Fit to this \(ThisDevice.name)", systemImage: pad ? "ipad" : "iphone").tag(true)
-                    }
-                    .pickerStyle(.inline)
-                }
-            }
-        } label: {
-            if pad {
-                Label("Desktops", systemImage: "square.stack.3d.up").font(.subheadline.weight(.semibold)).padding(.horizontal, 10)
-            } else {
-                Image(systemName: "square.stack.3d.up").sideTarget(landscape)
-            }
-        }
-        .accessibilityLabel("Desktops and Mission Control")
+        ScreenDesktopsMenu(model: model, shell: shell, macName: model.macName, canLock: canLock, canHideMac: model.canHideMac,
+                           macHidden: model.macHidden, pad: pad, landscape: landscape).equatable()
+    }
+
+    /// How the Mac's screen is shown here: its shape, text size, picture and gestures, and
+    /// how the view reaches the Mac. Each choice is one row opening its options, so the
+    /// menu fits a phone held sideways (a menu taller than the screen doesn't scroll).
+    private var displayMenu: some View {
+        ScreenDisplayMenu(model: model, macName: model.macName, canHideMac: model.canHideMac, path: model.connectionPath,
+                          fitsDevice: model.fitsDevice, space: model.space, quality: model.quality,
+                          pinchesMac: model.pinchesMacOnItsDisplay, pad: pad, landscape: landscape).equatable()
     }
 
     static func describe(_ path: ShellPath) -> (text: String, symbol: String)? {
@@ -277,10 +268,34 @@ struct ScreenView: View {
                     }
                 }
                 .animation(.easeInOut(duration: 0.2), value: model.notice)
+                .overlay(alignment: .top) {
+                    // Also open elsewhere: one tap makes this the one.
+                    if let other = model.otherViewers.first {
+                        UseHereBanner(others: model.otherViewers.count > 1 ? "\(other) and \(model.otherViewers.count - 1) more" : other) {
+                            model.useHere()
+                        }
+                        .padding(.top, pad ? 64 : 10)
+                        .transition(.opacity.combined(with: .move(edge: .top)))
+                    }
+                }
+                .animation(.easeInOut(duration: 0.2), value: model.otherViewers)
         case .connecting:
             VStack(spacing: 12) {
                 ProgressView()
                 Text("Connecting to \(model.macName)…").font(.subheadline).foregroundStyle(.secondary)
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            // The area the screen will fill (as the canvas does: into the bottom edge), so a
+            // display made for this device has that size from the first ask, not a second one.
+            .background {
+                GeometryReader { geometry in
+                    Color.clear
+                        .onAppear { model.viewPixelsChanged(CGSize(width: geometry.size.width * displayScale, height: geometry.size.height * displayScale)) }
+                        .onChange(of: geometry.size) { _, size in
+                            model.viewPixelsChanged(CGSize(width: size.width * displayScale, height: size.height * displayScale))
+                        }
+                }
+                .ignoresSafeArea(.container, edges: .bottom)
             }
         case let .login(error):
             ScreenLoginForm(macName: model.macName, error: error) { login, remember in
@@ -289,7 +304,21 @@ struct ScreenView: View {
         case .confirmScreenSharing:
             ScreenSharingPrompt(macName: model.macName, reason: model.slowReason,
                                 onUse: { model.useScreenSharing(always: $0) },
-                                onCancel: { model.stop(); dismiss() })
+                                onCancel: { model.stop(); close() })
+        case let .movedAway(name):
+            VStack(spacing: 16) {
+                Image(systemName: "arrow.left.arrow.right.square")
+                    .font(.system(size: 40)).foregroundStyle(PTTheme.accentEnd)
+                Text("\(model.macName)'s screen is open on \(name) now.")
+                    .font(.subheadline).multilineTextAlignment(.center).foregroundStyle(.secondary)
+                Button { model.takeBack(shell: shell, context: lock.context) } label: {
+                    Label("Use Here", systemImage: pad ? "ipad" : "iphone").font(.subheadline.weight(.semibold))
+                }
+                .buttonStyle(.borderedProminent)
+                .buttonBorderShape(.capsule)
+                .tint(PTTheme.accentEnd)
+            }
+            .padding(32)
         case let .failed(message):
             VStack(spacing: 16) {
                 Image(systemName: "display.trianglebadge.exclamationmark")
@@ -312,6 +341,178 @@ private extension View {
     /// together; the portrait top bar keeps its tighter row.
     func sideTarget(_ on: Bool) -> some View {
         frame(width: on ? 44 : nil, height: on ? 44 : nil).contentShape(Rectangle())
+    }
+}
+
+// MARK: - Menus
+//
+// Each menu is its own view, equal while what it shows is equal: SwiftUI rebuilds an
+// open menu whenever the view holding it is evaluated again, which showed as the menu
+// flickering under the finger. The models are held only to act on, not observed.
+
+struct ScreenClipboardMenu: View, Equatable {
+    let model: ScreenModel
+    let macName: String
+    let copying: Bool
+    let landscape: Bool
+    nonisolated static func == (a: Self, b: Self) -> Bool {
+        a.macName == b.macName && a.copying == b.copying && a.landscape == b.landscape
+    }
+
+    @ViewBuilder var body: some View {
+        Menu {
+            Button { model.copyFromMac() } label: { Label("Copy from \(macName)", systemImage: "doc.on.doc") }
+                .disabled(copying)
+            Button { model.pastePhoneClipboard() } label: { Label("Paste on \(macName)", systemImage: "doc.on.clipboard") }
+        } label: {
+            Image(systemName: "doc.on.clipboard").sideTarget(landscape)
+        }
+        .accessibilityLabel("Copy and paste")
+    }
+}
+
+struct ScreenDesktopsMenu: View, Equatable {
+    let model: ScreenModel
+    let shell: ShellModel
+    let macName: String
+    let canLock: Bool
+    let canHideMac: Bool
+    let macHidden: Bool
+    let pad: Bool
+    let landscape: Bool
+    nonisolated static func == (a: Self, b: Self) -> Bool {
+        a.macName == b.macName && a.canLock == b.canLock && a.canHideMac == b.canHideMac && a.macHidden == b.macHidden
+            && a.pad == b.pad && a.landscape == b.landscape
+    }
+
+    @ViewBuilder var body: some View {
+        Menu {
+            Section("Or swipe with three fingers") {
+                Button { model.perform(.previousDesktop) } label: { Label("Previous desktop", systemImage: "arrow.left.square") }
+                Button { model.perform(.nextDesktop) } label: { Label("Next desktop", systemImage: "arrow.right.square") }
+                Button { model.perform(.missionControl) } label: { Label("Mission Control", systemImage: "rectangle.3.group") }
+                Button { model.perform(.appWindows) } label: { Label("App windows", systemImage: "macwindow.on.rectangle") }
+            }
+            Button { model.perform(.showDesktop) } label: { Label("Show desktop", systemImage: "menubar.dock.rectangle") }
+            // Only the lock: the Mac stays awake, and this view stays open on its lock screen.
+            if canLock {
+                Button { shell.control(.lock) } label: { Label("Lock \(macName)", systemImage: "lock") }
+            }
+            // Black on the Mac's own displays while this view goes on showing the screen.
+            if canHideMac {
+                Toggle(isOn: Binding(get: { macHidden }, set: { model.setMacHidden($0) })) {
+                    Label("Hide \(macName)'s display", systemImage: "eye.slash")
+                }
+            }
+        } label: {
+            if pad {
+                Label("Desktops", systemImage: "square.stack.3d.up").font(.subheadline.weight(.semibold)).padding(.horizontal, 10)
+            } else {
+                Image(systemName: "square.stack.3d.up").sideTarget(landscape)
+            }
+        }
+        .accessibilityLabel("Desktops and Mission Control")
+    }
+}
+
+struct ScreenDisplayMenu: View, Equatable {
+    let model: ScreenModel
+    let macName: String
+    let canHideMac: Bool
+    let path: ShellPath?
+    let fitsDevice: Bool
+    let space: Int
+    let quality: ScreenVideoWire.Quality
+    let pinchesMac: Bool
+    let pad: Bool
+    let landscape: Bool
+    nonisolated static func == (a: Self, b: Self) -> Bool {
+        a.macName == b.macName && a.canHideMac == b.canHideMac && a.path == b.path && a.fitsDevice == b.fitsDevice && a.space == b.space
+            && a.quality == b.quality && a.pinchesMac == b.pinchesMac && a.pad == b.pad && a.landscape == b.landscape
+    }
+
+    @ViewBuilder var body: some View {
+        if canHideMac || path.flatMap(ScreenView.describe) != nil {
+            Menu {
+                // How far the picture travels: a relay is the likeliest reason it lags.
+                if let path = path, let reach = ScreenView.describe(path) {
+                    Section { Label(reach.text, systemImage: reach.symbol) }
+                }
+                // Only the Mac's own stream has these; Screen Sharing shows the screen as it is.
+                if canHideMac {
+                    // The Mac's own display as it is, or one it makes in this device's shape (which its own mirror meanwhile).
+                    Picker(selection: Binding(get: { fitsDevice }, set: { model.setFitsDevice($0) })) {
+                        Label("\(macName)'s display", systemImage: "laptopcomputer").tag(false)
+                        Label("Fit to this \(ThisDevice.name)", systemImage: pad ? "ipad" : "iphone").tag(true)
+                    } label: {
+                        Label("Screen shape", systemImage: "rectangle.portrait.on.rectangle.portrait")
+                    }
+                    .pickerStyle(.menu)
+                    // Only for a display made for this device: how big the Mac draws things on it.
+                    if fitsDevice {
+                        Picker(selection: Binding(get: { space }, set: { model.setSpace($0) })) {
+                            Label("Larger text", systemImage: "textformat.size.larger").tag(80)
+                            Label("Default", systemImage: "textformat.size").tag(100)
+                            Label("More space", systemImage: "textformat.size.smaller").tag(125)
+                        } label: {
+                            Label("Text size", systemImage: "textformat.size")
+                        }
+                        .pickerStyle(.menu)
+                    }
+                    Picker(selection: Binding(get: { quality }, set: { model.setQuality($0) })) {
+                        Text("Sharp: crisp text, 60 fps").tag(ScreenVideoWire.Quality.sharp)
+                        Text("Smooth: crisp text, \(ScreenModel.topFPS) fps").tag(ScreenVideoWire.Quality.smooth)
+                        Text("Fast: softer text, \(ScreenModel.topFPS) fps").tag(ScreenVideoWire.Quality.fast)
+                    } label: {
+                        Label("Picture", systemImage: "sparkles.tv")
+                    }
+                    .pickerStyle(.menu)
+                    // Pinch and rotate: the Mac's on a display made for this device; a choice on its own display.
+                    if fitsDevice {
+                        Section {
+                            Label("Pinch and rotate go to \(macName). Three-finger double-tap zooms here.", systemImage: "hand.pinch")
+                        }
+                    } else {
+                        Toggle(isOn: Binding(get: { pinchesMac }, set: { model.setPinchesMacOnItsDisplay($0) })) {
+                            Label("Pinch and rotate go to \(macName)", systemImage: "hand.pinch")
+                        }
+                    }
+                }
+            } label: {
+                if pad {
+                    Label("Display", systemImage: "display").font(.subheadline.weight(.semibold)).padding(.horizontal, 10)
+                } else {
+                    Image(systemName: "display").sideTarget(landscape)
+                }
+            }
+            .accessibilityLabel("Display settings")
+        }
+    }
+}
+
+/// "Also open on iPad · Use Here": the Mac's screen is being viewed on another
+/// device too; using it here ends the view there.
+struct UseHereBanner: View {
+    let others: String
+    let onUse: () -> Void
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Text("Also open on \(others)")
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+            Button("Use Here", action: onUse)
+                .font(.caption.weight(.bold))
+                .buttonStyle(.borderedProminent)
+                .buttonBorderShape(.capsule)
+                .controlSize(.mini)
+                .tint(PTTheme.accentEnd)
+        }
+        .padding(.leading, 14).padding(.trailing, 6).padding(.vertical, 6)
+        .background(.regularMaterial, in: Capsule())
+        .accessibilityElement(children: .combine)
+        .accessibilityAction(named: "Use Here", onUse)
     }
 }
 

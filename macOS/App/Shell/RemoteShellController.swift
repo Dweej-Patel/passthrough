@@ -919,8 +919,8 @@ final class RemoteShellController: ObservableObject {
     }
 
     /// For both listeners: the Mac's own H.264 stream when it may capture and post input, else nil (the phone then uses Screen Sharing).
-    private static let screenVideoSource: @Sendable (String) -> (any ScreenVideoSource)? = { _ in
-        ScreenVideoPermissions.isReady ? ScreenVideoStreamer() : nil
+    private static let screenVideoSource: @Sendable (String, String) -> (any ScreenVideoSource)? = { phoneID, label in
+        ScreenVideoPermissions.isReady ? ScreenVideoStreamer(phoneID: phoneID, name: label) : nil
     }
 
     /// For both listeners: in order on the main queue (a stop must not

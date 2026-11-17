@@ -81,6 +81,25 @@ these steps as written and check each one before building.
   the round trip (it was two, so a phone 100 ms away got about 20 frames a
   second) and lowers its bitrate when frames start arriving late, then raises
   it again.
+* Screen view: *Picture* in the desktops menu: *Sharp* (crisp text, 60 fps,
+  as before), *Smooth* (crisp text at 120 fps on ProMotion iPhones and
+  iPads) or *Fast* (120 fps, slightly softer text, keeps moving on a slow
+  link). And with *Fit to this iPhone/iPad*, *Text size*: *Larger text*,
+  *Default* or *More space*.
+* Screen view: *Use Here*. When the Mac's screen is open on another device
+  too, a banner says so; *Use Here* ends the view there (it shows "open on
+  …" with its own *Use Here* to take it back) and gives this device the
+  display made for it.
+* Screen view: pinch and rotate reach the Mac app under your fingers (Maps,
+  Photos, Preview, Safari's zoom), as from a Mac trackpad. With *Fit to this
+  iPhone/iPad* they always do, and a three-finger double-tap zooms the view;
+  on the Mac's own display pinch still zooms the view unless *Pinch and
+  rotate go to …* is on. It uses an undocumented macOS event (as Mac Mouse
+  Fix does), checked on macOS 27.
+* Screen view: momentum scrolling. A two-finger scroll that ends moving
+  carries on and slows like a Mac trackpad's; touching the screen stops it.
+* Screen view: a spinner or streaming text alone, with no one touching the
+  phone, goes at 15 frames a second, back to full speed at the first touch.
 * Screen view: HEVC instead of H.264 where the phone decodes it (every
   supported iPhone and iPad): a little sharper for the same bits.
 * Screen view, slow links: when the bitrate gets too low for the picture's

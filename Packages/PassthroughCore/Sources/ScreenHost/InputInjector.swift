@@ -11,6 +11,10 @@ protocol InputSink: AnyObject {
     func key(keysym: UInt32, modifiers: UInt8)
     func text(_ text: String)
     func clipboard(_ text: String)
+    /// A trackpad pinch or rotation, at the pointer.
+    func gesture(_ gesture: ScreenVideoWire.Gesture, phase: ScreenVideoWire.GesturePhase, value: Double)
+    /// The phone is gone: lets go of every button it holds and ends its gestures.
+    func releaseAll()
     /// How many times the Mac's clipboard has changed (`NSPasteboard.changeCount`).
     var clipboardChangeCount: Int { get }
     /// What's on the Mac's clipboard now. May block: an app that provides
@@ -31,9 +35,28 @@ enum ClipboardContents: Equatable {
 final class InputInjector: InputSink {
     /// The display in global coordinates (points).
     var display: CGRect
-    private let source = CGEventSource(stateID: .hidSystemState)
+    /// Where its events come from. By default macOS ignores the Mac's own keyboard and
+    /// trackpad for 0.25 s after each event from a source like this, and for as long as
+    /// a button it pressed is down: someone at the Mac couldn't type while a phone moved
+    /// the pointer, scrolled or pinched, and not at all after a phone left mid-drag.
+    /// So it holds back nothing of theirs.
+    let source: CGEventSource? = {
+        let source = CGEventSource(stateID: .hidSystemState)
+        source?.localEventsSuppressionInterval = 0
+        let everything: CGEventFilterMask = [.permitLocalMouseEvents, .permitLocalKeyboardEvents, .permitSystemDefinedEvents]
+        source?.setLocalEventsFilterDuringSuppressionState(everything, state: .eventSuppressionStateSuppressionInterval)
+        source?.setLocalEventsFilterDuringSuppressionState(everything, state: .eventSuppressionStateRemoteMouseDrag)
+        return source
+    }()
     private var position: CGPoint
+    /// The number of the press under way (or last); starts somewhere new each time, so it
+    /// doesn't repeat one an earlier stream used.
+    private var eventNumber = Int64.random(in: 10_000...1_000_000)
+    /// Movement not yet reported in an event's deltas.
+    private var travel = CGPoint.zero
     private var buttons: UInt8 = 0
+    /// Gestures begun and not yet ended.
+    private var gestures: Set<ScreenVideoWire.Gesture> = []
     /// For double and triple clicks: macOS counts them from this field, not from timing.
     private var lastClick: (time: TimeInterval, point: CGPoint, count: Int)?
 
@@ -43,8 +66,11 @@ final class InputInjector: InputSink {
     }
 
     func pointer(x: UInt16, y: UInt16, buttons new: UInt8) {
+        let before = position
         position = CGPoint(x: display.minX + CGFloat(x) / 65535 * (display.width - 1),
                            y: display.minY + CGFloat(y) / 65535 * (display.height - 1))
+        travel.x += position.x - before.x
+        travel.y += position.y - before.y
         let changed = (new ^ buttons) & 0b111
         guard changed != 0 else {
             let type: CGEventType = buttons & 1 != 0 ? .leftMouseDragged : buttons & 4 != 0 ? .rightMouseDragged
@@ -78,6 +104,18 @@ final class InputInjector: InputSink {
         // The source's flags would otherwise come along: a ⌃ still held there makes a click a right-click.
         event.flags = []
         if clicks > 0 { event.setIntegerValueField(.mouseEventClickState, value: Int64(clicks)) }
+        // How far it moved since the last event, as a real mouse says: apps that move their own
+        // window (a custom title bar) or track drags by it get nothing from the position alone.
+        let dx = travel.x.rounded(.towardZero), dy = travel.y.rounded(.towardZero)
+        travel.x -= dx
+        travel.y -= dy
+        // Each press has its own number, on it, its drags and its release, as a real mouse's
+        // has. With none (0), a window that once got a press without its release (a phone
+        // gone mid-drag) took every later press for that same one and ignored it.
+        if type == .leftMouseDown || type == .rightMouseDown || type == .otherMouseDown { eventNumber &+= 1 }
+        if type != .mouseMoved { event.setIntegerValueField(.mouseEventNumber, value: eventNumber) }
+        event.setIntegerValueField(.mouseEventDeltaX, value: Int64(dx))
+        event.setIntegerValueField(.mouseEventDeltaY, value: Int64(dy))
         event.post(tap: .cghidEventTap)
     }
 
@@ -87,6 +125,41 @@ final class InputInjector: InputSink {
         event.flags = []
         event.post(tap: .cghidEventTap)
     }
+
+    /// A trackpad gesture as macOS's own: there's no public API for these, so
+    /// they're CoreGraphics' undocumented gesture events (as Mac Mouse Fix posts
+    /// them), which AppKit turns into `magnify(with:)` and `rotate(with:)` for the
+    /// window under the pointer. Checked on macOS 27: phases and sums arrive intact.
+    func gesture(_ gesture: ScreenVideoWire.Gesture, phase: ScreenVideoWire.GesturePhase, value: Double) {
+        switch phase {
+        case .began: gestures.insert(gesture)
+        case .ended, .cancelled: gestures.remove(gesture)
+        case .changed: break
+        }
+        guard let event = CGEvent(source: source) else { return }
+        event.setIntegerValueField(Self.eventTypeField, value: 29)   // kCGSEventGesture
+        event.setIntegerValueField(Self.gestureTypeField, value: gesture == .magnify ? 8 : 5)   // kIOHIDEventTypeZoom, …Rotation
+        event.setIntegerValueField(Self.gesturePhaseField, value: Int64(phase.rawValue))
+        event.setDoubleValueField(gesture == .magnify ? Self.zoomField : Self.rotationField, value: value)
+        // Where the pointer really is: the Mac's own trackpad may have moved it since the phone did.
+        event.location = CGEvent(source: nil)?.location ?? position
+        event.flags = []
+        event.post(tap: .cghidEventTap)
+    }
+
+    func releaseAll() {
+        for gesture in gestures { self.gesture(gesture, phase: .cancelled, value: 0) }
+        if buttons & 0b111 != 0 {
+            pointer(x: UInt16(clamping: Int(((position.x - display.minX) / max(display.width - 1, 1) * 65535).rounded())),
+                    y: UInt16(clamping: Int(((position.y - display.minY) / max(display.height - 1, 1) * 65535).rounded())), buttons: 0)
+        }
+    }
+
+    private static let eventTypeField = CGEventField(rawValue: 55)!       // kCGSEventTypeField
+    private static let gestureTypeField = CGEventField(rawValue: 110)!    // kCGEventGestureHIDType
+    private static let zoomField = CGEventField(rawValue: 113)!           // kCGEventGestureZoomValue
+    private static let rotationField = CGEventField(rawValue: 114)!       // kCGEventGestureRotationValue
+    private static let gesturePhaseField = CGEventField(rawValue: 132)!   // kCGEventGesturePhase
 
     func key(keysym: UInt32, modifiers: UInt8) {
         let held = ScreenVideoWire.Modifiers(rawValue: modifiers)

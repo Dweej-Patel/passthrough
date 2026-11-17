@@ -69,7 +69,7 @@ public final class ShellListener: @unchecked Sendable {
     /// (protocol/README.md, "Screen video"), or nil when it can't: then the
     /// phone is told `screen_video_unavailable`. Asked on the listener's
     /// queue after `screenAllowed`, so it must not block. Unset: never.
-    public var screenVideo: (@Sendable (_ phoneID: String) -> (any ScreenVideoSource)?)? {
+    public var screenVideo: (@Sendable (_ phoneID: String, _ label: String) -> (any ScreenVideoSource)?)? {
         get { gate.screenVideoFactory.get() }
         set { gate.screenVideoFactory.set(newValue) }
     }
@@ -364,7 +364,7 @@ final class ShellGate: @unchecked Sendable {
     let eventHandler = Locked<(@Sendable (String) -> Void)?>(nil)
     let screenAccess = Locked<(@Sendable (String) -> Bool)?>(nil)
     let screenHandler = Locked<(@Sendable (_ phoneID: String, _ label: String, _ viewing: Bool) -> Void)?>(nil)
-    let screenVideoFactory = Locked<(@Sendable (String) -> (any ScreenVideoSource)?)?>(nil)
+    let screenVideoFactory = Locked<(@Sendable (String, String) -> (any ScreenVideoSource)?)?>(nil)
     let screenViews = Locked(ScreenViewLimit())
     /// `ShellListener.screenSharingVerified`.
     let screenSharingCheck = Locked<(@Sendable () async -> Bool)?>(nil)
@@ -872,7 +872,7 @@ final class ShellConnection: ShellAttachment, @unchecked Sendable {
         case ShellEnvelope.screenVideo:
             guard gate?.screenAllowed(phoneID) == true else { return fail(.screenNotAllowed) }
             guard takeScreenView() else { return fail(.tooManyScreens) }
-            guard let source = gate?.screenVideoFactory.get()?(phoneID) else {
+            guard let source = gate?.screenVideoFactory.get()?(phoneID, label) else {
                 releaseScreenView()
                 return fail(.screenVideoUnavailable)
             }

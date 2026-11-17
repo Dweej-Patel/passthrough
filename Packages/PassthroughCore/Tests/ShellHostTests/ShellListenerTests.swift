@@ -1144,7 +1144,7 @@ final class ShellListenerTests: XCTestCase {
     func testScreenVideoUnavailableIsReportedAndTheConnectionCarriesOn() {
         let listener = startListener()
         listener.screenAllowed = { _ in true }
-        listener.screenVideo = { _ in nil }
+        listener.screenVideo = { _, _ in nil }
         let (stream, _) = rawAuthorized(listener)
         stream.send(Data("{\"t\":\"screenVideo\"}\n{\"t\":\"ping\"}\n".utf8), isComplete: false) { _ in }
         let replies = Self.lines(read(stream, "replies") { Self.lines($0).contains { $0.t == "pong" } })
@@ -1160,7 +1160,7 @@ final class ShellListenerTests: XCTestCase {
         listener.screenAllowed = { _ in true }
         let available = Locked(true)
         let sources = Locked<[FakeVideoSource]>([])
-        listener.screenVideo = { _ in
+        listener.screenVideo = { _, _ in
             guard available.get() else { return nil }
             let source = FakeVideoSource()
             sources.set(sources.get() + [source])
@@ -1204,7 +1204,7 @@ final class ShellListenerTests: XCTestCase {
     func testScreenVideoNeedsScreenAccess() {
         let made = Locked(false)
         let listener = startListener()
-        listener.screenVideo = { _ in made.set(true); return FakeVideoSource() }
+        listener.screenVideo = { _, _ in made.set(true); return FakeVideoSource() }
         let (stream, _) = rawAuthorized(listener)
         stream.send(Data("{\"t\":\"screenVideo\"}\n{\"t\":\"ping\"}\n".utf8), isComplete: false) { _ in }
         let replies = Self.lines(read(stream, "replies") { Self.lines($0).contains { $0.t == "pong" } })
@@ -1219,7 +1219,7 @@ final class ShellListenerTests: XCTestCase {
         let viewers = Locked<[Bool]>([])
         let listener = startListener()
         listener.screenAllowed = { _ in true }
-        listener.screenVideo = { phoneID in XCTAssertEqual(phoneID, "phone-1"); return source }
+        listener.screenVideo = { phoneID, _ in XCTAssertEqual(phoneID, "phone-1"); return source }
         listener.onScreenViewer = { _, _, viewing in viewers.set(viewers.get() + [viewing]) }
         let (stream, _) = rawAuthorized(listener)
         stream.send(try ShellEnvelope(t: ShellEnvelope.screenVideo).encodedLine(), isComplete: false) { _ in }

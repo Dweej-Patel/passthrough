@@ -19,10 +19,18 @@ public final class ScreenVideoClient: @unchecked Sendable {
         public var width: Int
         public var height: Int
         public var fit: ScreenVideoWire.Fit
-        public init(width: Int, height: Int, fit: ScreenVideoWire.Fit) {
+        public var fps: Int
+        public var quality: ScreenVideoWire.Quality
+        /// `device` only: the display's size against the stream's, in percent (`ScreenVideoWire.Hello.space`).
+        public var space: Int
+        public init(width: Int, height: Int, fit: ScreenVideoWire.Fit, fps: Int = 60, quality: ScreenVideoWire.Quality = .sharp,
+                    space: Int = 100) {
             self.width = width
             self.height = height
             self.fit = fit
+            self.fps = fps
+            self.quality = quality
+            self.space = space
         }
     }
 
@@ -35,6 +43,10 @@ public final class ScreenVideoClient: @unchecked Sendable {
         case cursor(x: Double, y: Double, visible: Bool)
         /// What the pointer looks like, `size` in stream pixels, its tip at `hotSpot` in them.
         case cursorShape(CGImage, size: CGSize, hotSpot: CGPoint)
+        /// The other devices viewing this Mac's screen now, by name.
+        case viewers([String])
+        /// Another device took this view over; `closed` follows.
+        case movedAway(to: String)
         /// A frame to show, then pass `number` to `shown`.
         case frame(CMSampleBuffer, number: UInt32)
         /// The answer to `copySelection()`.
@@ -93,7 +105,7 @@ public final class ScreenVideoClient: @unchecked Sendable {
     public func start() {
         queue.async { [self] in
             stream.onTerminated = { [weak self] _ in self?.queue.async { self?.finish(Failure.connectionLost) } }
-            send(.hello(width: layout.width, height: layout.height, fit: layout.fit, codecs: codecs))
+            send(.hello(hello(layout)))
             let initial = pending
             pending = Data()
             received(initial)
@@ -111,8 +123,22 @@ public final class ScreenVideoClient: @unchecked Sendable {
         queue.async { [self] in
             guard !closed, new != layout else { return }
             layout = new
-            send(.hello(width: new.width, height: new.height, fit: new.fit, codecs: codecs))
+            send(.hello(hello(new)))
         }
+    }
+
+    private func hello(_ layout: Layout) -> ScreenVideoWire.Hello {
+        .init(width: layout.width, height: layout.height, fit: layout.fit, codecs: codecs, fps: layout.fps, quality: layout.quality,
+              space: layout.space)
+    }
+
+    /// This device is used here now: the Mac ends every other device's view of its screen.
+    public func useHere() { send(.useHere) }
+
+    /// A trackpad pinch (`value`: the magnification since the last) or rotation (degrees
+    /// counterclockwise since the last) at the Mac's pointer.
+    public func gesture(_ gesture: ScreenVideoWire.Gesture, phase: ScreenVideoWire.GesturePhase, value: Double) {
+        send(.gesture(gesture, phase: phase, value: value))
     }
 
     // MARK: Input
@@ -224,6 +250,10 @@ public final class ScreenVideoClient: @unchecked Sendable {
             emit(.curtained(hidden))
         case let .fitted(fit):
             emit(.fitted(fit))
+        case let .viewers(names):
+            emit(.viewers(names))
+        case let .movedAway(name):
+            emit(.movedAway(to: name))
         case let .cursor(x, y, visible):
             emit(.cursor(x: Double(x) / 65535, y: Double(y) / 65535, visible: visible))
         case let .cursorShape(width, height, hotX, hotY, png):

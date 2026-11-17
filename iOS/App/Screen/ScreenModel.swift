@@ -30,6 +30,8 @@ final class ScreenModel: ObservableObject {
         case connecting
         case live
         case failed(String)
+        /// Another device took this view over ("Use Here" there); it can be taken back.
+        case movedAway(to: String)
     }
 
     @Published private(set) var phase = Phase.connecting
@@ -41,9 +43,13 @@ final class ScreenModel: ObservableObject {
     var onVideoFrame: ((CMSampleBuffer) -> Bool)?
     /// The Mac's own stream leaves the pointer out: the canvas draws it, where the
     /// Mac says it is (in screen pixels; or off this display) when this phone isn't moving it.
-    var onMacPointer: ((CGPoint, Bool) -> Void)?
+    var onMacPointer: ((CGPoint?, Bool) -> Void)?
     /// What the pointer looks like: the image, its size and tip in screen pixels.
     var onPointerShape: ((CGImage, CGSize, CGPoint) -> Void)?
+    /// The last of each, for a canvas made after they came: the Mac says what the pointer
+    /// looks like once, as a view starts, before there is a canvas to draw it.
+    private(set) var pointerShape: (image: CGImage, size: CGSize, hotSpot: CGPoint)?
+    private(set) var macPointer: (point: CGPoint, onScreen: Bool)?
     /// The Mac's screen in pixels.
     @Published private(set) var screenSize = CGSize.zero
     @Published private(set) var macName = "your Mac"
@@ -62,6 +68,23 @@ final class ScreenModel: ObservableObject {
     @Published private(set) var fitsDevice = ScreenModel.fitsDeviceSetting
     /// What the Mac's stream shows now: `mac` while `fitsDevice` means the Mac couldn't make one.
     @Published private(set) var fitted: ScreenVideoWire.Fit?
+    /// The user's choice of what matters most on a slow link, kept for the next view.
+    @Published private(set) var quality = ScreenModel.qualitySetting
+    /// The user's choice of text size on a display made for this device: the display's
+    /// size against the stream's, in percent (80 larger text, 100, 125 more space).
+    @Published private(set) var space = ScreenModel.spaceSetting
+    static let spaces = [80, 100, 125]
+    /// The user's choice on the Mac's own display: pinch and rotate go to the Mac instead of zooming this view.
+    @Published private(set) var pinchesMacOnItsDisplay = UserDefaults.standard.bool(forKey: ScreenModel.pinchKey)
+    private static let pinchKey = "screenPinchGoesToMac"
+    /// Pinch and rotate go to the app under the fingers on the Mac (its own stream only:
+    /// Screen Sharing has no gestures): always on a display made for this device, where
+    /// the text is already this device's size; on the Mac's own display if the user chose it.
+    var pinchesMac: Bool { video != nil && (fitsDevice || pinchesMacOnItsDisplay) }
+    /// The other devices viewing the Mac's screen now (their names), for "Use Here".
+    @Published private(set) var otherViewers: [String] = []
+    /// "Use Here" was asked for before the stream was up (taking the view back): sent once it is.
+    private var usesHereOnStart = false
     /// How the view reaches the Mac: the local network, straight over the internet,
     /// or through a relay (farther, so slower). Nil while unknown.
     @Published private(set) var connectionPath: ShellPath?
@@ -92,6 +115,15 @@ final class ScreenModel: ObservableObject {
     /// The user's choice, kept for the next view: a display in this device's shape.
     private static let fitsDeviceKey = "screenFitsDevice"
     private static var fitsDeviceSetting: Bool { UserDefaults.standard.bool(forKey: fitsDeviceKey) }
+    private static let qualityKey = "screenQuality"
+    private static var qualitySetting: ScreenVideoWire.Quality {
+        ScreenVideoWire.Quality(rawValue: UInt8(clamping: UserDefaults.standard.integer(forKey: qualityKey))) ?? .sharp
+    }
+    private static let spaceKey = "screenSpace"
+    private static var spaceSetting: Int {
+        let value = UserDefaults.standard.integer(forKey: spaceKey)
+        return spaces.contains(value) ? value : 100
+    }
     /// The screen view's area in pixels, as the device is held now (the canvas says when it changes).
     private var viewPixels: CGSize?
     private var relayoutTask: Task<Void, Never>?
@@ -102,6 +134,16 @@ final class ScreenModel: ObservableObject {
     private var pathTask: Task<Void, Never>?
     /// The relay notice is said once a view.
     private var saidRelay = false
+    /// Drops in a row that were reconnected without asking, and since when this stream has shown the screen.
+    private var reconnects = 0
+    private var liveSince: TimeInterval?
+    static let maxReconnects = 4
+    /// A view that lasted this long was working: the next drop starts the count again.
+    static let steadyAfter: TimeInterval = 15
+    /// Another device took the view over, by this name (`movedAway`); the stream ends next.
+    private var movedTo: String?
+    /// What the upgrade's stream said before its size, for when it takes over.
+    private var upgradeEarly: [ScreenVideoClient.Event] = []
     /// When this phone last moved the Mac's pointer: for a moment after, where the
     /// Mac says it is is an echo of that, already drawn.
     private var lastPointerAt: TimeInterval = 0
@@ -133,7 +175,8 @@ final class ScreenModel: ObservableObject {
     static let upgradeDelays: [TimeInterval] = [3, 5, 10, 20, 30]
 
     /// Uses the saved login if there is one, else asks for it.
-    func begin(shell: ShellModel, context: LAContext) {
+    /// `takeOver`: "Use Here" from a view another device took: this one ends theirs once it's up.
+    func begin(shell: ShellModel, context: LAContext, takeOver: Bool = false) {
         #if DEBUG
         if let demo = Self.demoState { return applyDemo(demo) }
         #endif
@@ -148,7 +191,9 @@ final class ScreenModel: ObservableObject {
         slowReason = nil
         saidRelay = false
         observeApp()
+        reconnects = 0
         open(video: true)
+        usesHereOnStart = takeOver
     }
 
     private func observeApp() {
@@ -263,6 +308,13 @@ final class ScreenModel: ObservableObject {
     func stop() {
         generation += 1
         fitted = nil
+        otherViewers = []
+        movedTo = nil
+        usesHereOnStart = false
+        upgradeEarly = []
+        pointerShape = nil
+        macPointer = nil
+        liveSince = nil
         pathTask?.cancel()
         pathTask = nil
         connectionPath = nil
@@ -305,6 +357,10 @@ final class ScreenModel: ObservableObject {
             }
             self.video = video
             video.start()
+            if usesHereOnStart {
+                usesHereOnStart = false
+                video.useHere()
+            }
         case .failed(.screenVideoUnavailable, _) where wantsVideo, .failed(.badRequest, _) where wantsVideo:
             fallBackToScreenSharing()
         case let .screen(stream, initialBytes):
@@ -334,6 +390,7 @@ final class ScreenModel: ObservableObject {
             screenSize = CGSize(width: width, height: height)
             let first = !videoStarted
             videoStarted = true
+            if first { liveSince = ProcessInfo.processInfo.systemUptime }
             phase = .live
             if first, Self.hidesMac { askMacHidden(true, saysIfUnanswered: false) }
         case let .frame(sample, number):
@@ -369,12 +426,26 @@ final class ScreenModel: ObservableObject {
                 show("\(macName) couldn't make a display for this \(ThisDevice.name), so this is its own.")
             }
         case let .cursor(x, y, visible):
-            // Echoes of this phone's own moves are drawn already; the Mac's own moves (its trackpad) aren't.
-            guard ProcessInfo.processInfo.systemUptime - lastPointerAt > 0.4, screenSize.width > 0 else { return }
-            onMacPointer?(CGPoint(x: x * (screenSize.width - 1), y: y * (screenSize.height - 1)), visible)
+            guard screenSize.width > 0 else { return }
+            // Echoes of this phone's own moves are drawn already (only whether it's on this display
+            // counts then); the Mac's own moves (its trackpad) aren't.
+            let echo = ProcessInfo.processInfo.systemUptime - lastPointerAt <= 1.5
+            let point = CGPoint(x: x * (screenSize.width - 1), y: y * (screenSize.height - 1))
+            macPointer = (echo ? macPointer?.point ?? point : point, visible)
+            onMacPointer?(echo ? nil : point, visible)
         case let .cursorShape(image, size, hotSpot):
+            pointerShape = (image, size, hotSpot)
             onPointerShape?(image, size, hotSpot)
+        case let .viewers(names):
+            otherViewers = names
+        case let .movedAway(name):
+            movedTo = name
         case .closed:
+            if let movedTo {
+                stop()
+                phase = .movedAway(to: movedTo)
+                return
+            }
             let worked = videoStarted
             stop()
             guard worked else {
@@ -388,7 +459,21 @@ final class ScreenModel: ObservableObject {
                 phase = .confirmScreenSharing
                 return
             }
-            phase = .failed("The connection to \(macName) was lost.")
+            // A view that worked and dropped (the network changed, a tunnel, the Mac's stream
+            // ending) comes back by itself; only a few drops in a row ask the user.
+            if let liveSince, ProcessInfo.processInfo.systemUptime - liveSince > Self.steadyAfter { reconnects = 0 }
+            guard reconnects < Self.maxReconnects else {
+                phase = .failed("The connection to \(macName) was lost.")
+                return
+            }
+            reconnects += 1
+            phase = .connecting
+            let attempt = reconnects, gen = generation
+            Task { [weak self] in
+                try? await Task.sleep(for: .milliseconds(300 * attempt))
+                guard let self, gen == self.generation, self.phase == .connecting else { return }
+                self.open(video: true)
+            }
         }
     }
 
@@ -464,6 +549,7 @@ final class ScreenModel: ObservableObject {
             MainActor.assumeIsolated { self?.handleUpgrade(event, token: token, generation: gen) }
         }) else { return }
         upgrade = (connection.client, connection.dialer, nil)
+        upgradeEarly = []
     }
 
     private func handleUpgrade(_ event: ShellClient.Event, token: Int, generation gen: Int) {
@@ -498,11 +584,25 @@ final class ScreenModel: ObservableObject {
         switch event {
         case .size:
             promote(token)
+            // Said once, before the size: what it shows, the pointer's look, who else views.
+            let early = upgradeEarly
+            upgradeEarly = []
+            early.forEach { handle($0, generation: gen) }
             handle(event, generation: gen)
+        case .fitted, .cursorShape, .viewers:
+            upgradeEarly.append(event)
+        case let .movedAway(name):
+            // Another device took over: this device's whole view goes, Screen Sharing too.
+            movedTo = name
         case .closed:
+            if let movedTo {
+                stop()
+                phase = .movedAway(to: movedTo)
+                return
+            }
             upgradeFailed()
-        case .frame, .copied, .curtained, .fitted, .cursor, .cursorShape:
-            break   // none before the size
+        case .frame, .copied, .curtained, .cursor:
+            break   // the pointer's place goes again after the first format
         }
     }
 
@@ -727,7 +827,7 @@ final class ScreenModel: ObservableObject {
     /// strict routers, say). Said once, when it stays on the relay.
     private func watchPath(of stream: any ByteStream, dialer: IrohShellDialer?, startingAt start: ShellPath?) {
         pathTask?.cancel()
-        connectionPath = start
+        if connectionPath != start { connectionPath = start }
         // The local network (or Tailscale): no relay to watch for.
         guard start != .local, let dialer else { return }
         pathTask = Task { [weak self, stream] in
@@ -735,10 +835,10 @@ final class ScreenModel: ObservableObject {
             while !Task.isCancelled {
                 let path = dialer.path(of: stream)
                 guard let self else { return }
-                if path != .unknown { self.connectionPath = path }
+                if path != .unknown, path != self.connectionPath { self.connectionPath = path }
                 relayFor = path == .relay ? relayFor + 1 : 0
                 // Still relayed after a while: not just the first moments before the direct path.
-                if relayFor == 3, !self.saidRelay, self.phase == .live {
+                if relayFor >= 3, !self.saidRelay, self.phase == .live {
                     self.saidRelay = true
                     self.show("Connected through a relay, so this may lag. It switches to a direct path when it can.")
                 }
@@ -757,10 +857,59 @@ final class ScreenModel: ObservableObject {
         video?.relayout(layout())
     }
 
+    /// This screen's top frame rate, as Smooth and Fast ask for it.
+    static var topFPS: Int { min(120, max(60, UIScreen.main.maximumFramesPerSecond)) }
+
+    /// What matters most when the link can't carry it all; kept for the next view.
+    func setQuality(_ quality: ScreenVideoWire.Quality) {
+        guard quality != self.quality else { return }
+        self.quality = quality
+        UserDefaults.standard.set(Int(quality.rawValue), forKey: Self.qualityKey)
+        video?.relayout(layout())
+    }
+
+    /// Text size on a display made for this device; kept for the next view.
+    func setSpace(_ space: Int) {
+        guard space != self.space, Self.spaces.contains(space) else { return }
+        self.space = space
+        UserDefaults.standard.set(space, forKey: Self.spaceKey)
+        video?.relayout(layout())
+    }
+
+    func setPinchesMacOnItsDisplay(_ on: Bool) {
+        pinchesMacOnItsDisplay = on
+        UserDefaults.standard.set(on, forKey: Self.pinchKey)
+    }
+
+    /// A pinch or rotation for the Mac, at its pointer.
+    func gesture(_ gesture: ScreenVideoWire.Gesture, phase: ScreenVideoWire.GesturePhase, value: Double) {
+        lastPointerAt = ProcessInfo.processInfo.systemUptime
+        video?.gesture(gesture, phase: phase, value: value)
+    }
+
+    /// This device is used here now: the Mac ends the other devices' views.
+    func useHere() {
+        otherViewers = []
+        video?.useHere()
+    }
+
+    /// Back from another device that took the view over: a new view, which takes it back.
+    func takeBack(shell: ShellModel, context: LAContext) {
+        begin(shell: shell, context: context, takeOver: true)
+    }
+
     /// The canvas in pixels, as the device is held now: a display in its shape turns with it.
     func viewPixelsChanged(_ size: CGSize) {
         guard size.width > 0, size.height > 0, size != viewPixels else { return }
-        viewPixels = size
+        // Held the same way, it only ever grows: the view getting smaller is its own bars (the
+        // side bar doubling up, a key row), which isn't worth remaking the Mac's display for.
+        if let held = viewPixels, (size.width > size.height) == (held.width > held.height) {
+            let grown = CGSize(width: max(size.width, held.width), height: max(size.height, held.height))
+            if abs(grown.width - held.width) < held.width * 0.03, abs(grown.height - held.height) < held.height * 0.03 { return }
+            viewPixels = grown
+        } else {
+            viewPixels = size
+        }
         guard fitsDevice else { return }
         // Once the turn has settled: each change remakes the Mac's display.
         relayoutTask?.cancel()
@@ -776,12 +925,15 @@ final class ScreenModel: ObservableObject {
     private func layout() -> ScreenVideoClient.Layout {
         let native = UIScreen.main.nativeBounds.size
         let maxSide = Int(max(native.width, native.height))
-        guard fitsDevice else { return .init(width: maxSide, height: maxSide, fit: .mac) }
+        // Sharp keeps to 60 a second (more bits for each); the others go as fast as this screen does.
+        let fps = quality == .sharp ? 60 : Self.topFPS
+        guard fitsDevice else { return .init(width: maxSide, height: maxSide, fit: .mac, fps: fps, quality: quality) }
         let screen = UIScreen.main
         let pixels = viewPixels ?? CGSize(width: screen.bounds.width * screen.scale, height: screen.bounds.height * screen.scale)
         // Even sides (4:2:0), within what the Mac's encoder takes.
         let fit = min(1, 4096 / max(pixels.width, pixels.height))
-        return .init(width: Int(pixels.width * fit) & ~1, height: Int(pixels.height * fit) & ~1, fit: .device)
+        return .init(width: Int(pixels.width * fit) & ~1, height: Int(pixels.height * fit) & ~1, fit: .device, fps: fps, quality: quality,
+                     space: space)
     }
 
     private static func mask(_ modifiers: [UInt32]) -> ScreenVideoWire.Modifiers {
