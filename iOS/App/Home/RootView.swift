@@ -80,6 +80,9 @@ private struct UIKitCover<ID: Hashable, Content: View>: UIViewControllerRepresen
                 // root out of the window, which SwiftUI reads as it disappearing (its tasks
                 // cancelled, then started again on return). This way it stays as it was.
                 host.modalPresentationStyle = .overFullScreen
+                // Presented over the root, it would otherwise leave the status bar to the root
+                // (shown, in the root's style) whatever the content asks for.
+                host.modalPresentationCapturesStatusBarAppearance = true
                 host.view.backgroundColor = .black
                 presented = host
                 presentedID = wanted.id

@@ -51,6 +51,9 @@ struct ScreenView: View, Equatable {
             if covered { keyboard = false }
         }
         .persistentSystemOverlays(landscape || pad ? .hidden : .automatic)
+        // iPad: the Mac's screen fills the display, its menu bar where the iPad's status bar
+        // is, which iPadOS draws over it on a blur. The Mac's own clock and battery are there.
+        .statusBarHidden(pad)
         .task { model.begin(shell: shell, context: lock.context) }
         .onReceive(shell.$macState.map { $0?.locked == false && $0?.control == true }.removeDuplicates()) { canLock = $0 }
         // A connected keyboard types into the Mac from the start, without the on-screen one.

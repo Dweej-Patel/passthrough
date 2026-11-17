@@ -659,8 +659,10 @@ Phone → Mac:
   acked anyway.
 - `18` pointer: x u16, y u16 (each 0…65535 across the screen), buttons u8
   (1 left, 2 middle, 4 right, as RFB).
-- `19` scroll: dx i16, dy i16 in the Mac's points; positive dy brings
-  earlier content into view.
+- `19` scroll: dx i16, dy i16 in the stream's pixels (what the fingers
+  moved over); the Mac turns them into its points by the captured
+  display's width over the stream's, so content follows the fingers at any
+  stream size. Positive dy brings earlier content into view.
 - `20` key: X keysym u32 (as RFB), modifiers u8 (1 command, 2 shift, 4
   option, 8 control), pressed and released.
 - `21` text: UTF-8, typed as is whatever the Mac's keyboard layout.

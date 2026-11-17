@@ -79,6 +79,13 @@ final class ScreenCanvasView: UIView, UIScrollViewDelegate, UIKeyInput, UIGestur
         scroll.showsHorizontalScrollIndicator = false
         scroll.showsVerticalScrollIndicator = false
         scroll.contentInsetAdjustmentBehavior = .never
+        // No blur where the Mac's screen runs under the device's bars: it's a picture, not a list.
+        if #available(iOS 26.0, *) {
+            scroll.topEdgeEffect.isHidden = true
+            scroll.bottomEdgeEffect.isHidden = true
+            scroll.leftEdgeEffect.isHidden = true
+            scroll.rightEdgeEffect.isHidden = true
+        }
         scroll.panGestureRecognizer.maximumNumberOfTouches = 1
         addSubview(scroll)
         scroll.addSubview(content)

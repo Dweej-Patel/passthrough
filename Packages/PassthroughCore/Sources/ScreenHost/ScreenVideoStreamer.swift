@@ -271,7 +271,7 @@ public final class ScreenVideoStreamer: ScreenVideoSource, @unchecked Sendable {
             if waiting == nil { waiting = last }
             pump()
         case let .pointer(x, y, buttons): heardInput(); input?.pointer(x: x, y: y, buttons: buttons)
-        case let .scroll(dx, dy): heardInput(); input?.scroll(dx: dx, dy: dy)
+        case let .scroll(dx, dy): heardInput(); scroll(dx: dx, dy: dy)
         case let .key(keysym, modifiers): heardInput(); type(.key(keysym: keysym, modifiers: modifiers))
         case let .text(text): heardInput(); type(.text(text))
         case let .clipboard(text): input?.clipboard(text)
@@ -700,6 +700,24 @@ public final class ScreenVideoStreamer: ScreenVideoSource, @unchecked Sendable {
     }
 
     private func heardInput() { inputAt = uptime }
+
+    /// The phone scrolls in the stream's pixels (what its fingers moved over); the Mac scrolls
+    /// in points. They're the same only on the Mac's own display at full size: a display made
+    /// for the phone has two pixels to the point (it scrolled twice as far as the fingers went),
+    /// and a picture shrunk for a slow link has fewer. Fractions are carried over.
+    private func scroll(dx: Int16, dy: Int16) {
+        guard let input else { return }
+        var factor = 1.0
+        if let rect = displayRect, let width = encoderSettings?.width, width > 0, rect.width > 0 { factor = Double(rect.width) / Double(width) }
+        scrollRest.x += Double(dx) * factor
+        scrollRest.y += Double(dy) * factor
+        let x = scrollRest.x.rounded(.towardZero), y = scrollRest.y.rounded(.towardZero)
+        scrollRest.x -= x
+        scrollRest.y -= y
+        guard x != 0 || y != 0 else { return }
+        input.scroll(dx: Int16(clamping: Int(x)), dy: Int16(clamping: Int(y)))
+    }
+    private var scrollRest = CGPoint.zero
 
     private func send(_ encoded: VideoEncoder.Encoded) {
         guard stream != nil, let encoder else { return }

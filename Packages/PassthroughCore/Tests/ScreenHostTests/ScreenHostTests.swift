@@ -870,6 +870,27 @@ final class ScreenVideoStreamerTests: XCTestCase {
         XCTAssertEqual(source.getLocalEventsFilterDuringSuppressionState(.eventSuppressionStateRemoteMouseDrag), everything)
     }
 
+    /// Scrolling comes in the stream's pixels and reaches the Mac in its points: on a display
+    /// made for the phone (two pixels to the point) half as far, fractions carried over.
+    func testScrollingFollowsTheFingersAtAnyStreamSize() {
+        let capture = FakeCapture(width: 640, height: 400)
+        let input = RecordingInput()
+        let streamer = ScreenVideoStreamer(capture: { capture }, input: { _ in input }, display: FakeDisplay())
+        let (mac, phone) = MemoryPipe.pair()
+        streamer.start(stream: mac, initialBytes: Data()) {}
+        addTeardownBlock { streamer.stop() }
+        let events = Locked<[ScreenVideoClient.Event]>([])
+        let client = ScreenVideoClient(stream: phone, layout: .init(width: 1000, height: 800, fit: .device),
+                                       queue: DispatchQueue(label: "test")) { events.set(events.get() + [$0]) }
+        client.start()
+        waitUntil("on the phone's display") { events.get().contains { if case .fitted(.device) = $0 { true } else { false } } }
+        client.scroll(dx: 0, dy: 101)
+        client.scroll(dx: 0, dy: 1)
+        client.scroll(dx: -40, dy: 0)
+        waitUntil("scrolled") { input.log.get().filter { $0.hasPrefix("scroll") }.count == 3 }
+        XCTAssertEqual(input.log.get().filter { $0.hasPrefix("scroll") }, ["scroll 0 50", "scroll 0 1", "scroll -20 0"])
+    }
+
     /// The phone hanging up ends the stream (and so, upstream, the connection).
     func testThePhoneLeavingEndsIt() {
         let capture = FakeCapture(width: 320, height: 200)

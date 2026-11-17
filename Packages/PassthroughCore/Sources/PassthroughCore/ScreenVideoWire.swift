@@ -56,7 +56,8 @@ public enum ScreenVideoWire {
         case ack(number: UInt32)
         /// The pointer at (`x`, `y`), each 0…65535 across the screen, with RFB-numbered `buttons` held.
         case pointer(x: UInt16, y: UInt16, buttons: UInt8)
-        /// Scrolls by (`dx`, `dy`) of the Mac's points at the pointer; positive `dy` brings earlier content into view.
+        /// Scrolls by (`dx`, `dy`) of the stream's pixels at the pointer (the Mac turns them into its
+        /// points, so content follows the fingers at any stream size); positive `dy` brings earlier content into view.
         case scroll(dx: Int16, dy: Int16)
         /// A key, by X keysym, pressed and released with `modifiers` (`Modifiers`) held.
         case key(keysym: UInt32, modifiers: UInt8)
