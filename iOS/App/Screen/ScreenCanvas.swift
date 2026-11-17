@@ -97,7 +97,6 @@ final class ScreenCanvasView: UIView, UIScrollViewDelegate, UIKeyInput, UIGestur
         // Fingers only: a trackpad or mouse (an iPad's) is a real pointer, below.
         let fingers = [NSNumber(value: UITouch.TouchType.direct.rawValue)]
         scroll.panGestureRecognizer.allowedTouchTypes = fingers
-        scroll.pinchGestureRecognizer?.allowedTouchTypes = fingers
         for recognizer in [tap, twoFingerTap, move, wheel, hold] {
             recognizer.allowedTouchTypes = fingers
             recognizer.delegate = self   // palm rejection while the Pencil is in use (`shouldReceive`)
@@ -557,12 +556,9 @@ final class ScreenCanvasView: UIView, UIScrollViewDelegate, UIKeyInput, UIGestur
 
     /// Remembers where each finger came down, for `gestureRecognizerShouldBegin`.
     func gestureRecognizer(_ recognizer: UIGestureRecognizer, shouldReceive touch: UITouch) -> Bool {
-        // Palm rejection: while the Pencil is in use, a finger is the hand
-        // holding it; and on iPad a touch as broad as a palm never is a finger.
-        if recognizer !== pen, touch.type == .direct {
-            if penInUse { return false }
-            if traitCollection.userInterfaceIdiom == .pad, touch.majorRadius >= 30 { return false }
-        }
+        // Palm rejection: while the Pencil is in use, a finger is the hand holding
+        // it. (Only then: judging a touch by its size rejected ordinary fingers.)
+        if recognizer !== pen, touch.type == .direct, penInUse { return false }
         if recognizer === wheel {
             touchStarts.removeAll { $0.touch === touch || $0.touch.phase == .ended || $0.touch.phase == .cancelled }
             touchStarts.append((touch, touch.location(in: self)))
