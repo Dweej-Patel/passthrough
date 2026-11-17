@@ -161,8 +161,7 @@ public enum WirelessLink {
 
     /// This network's DNS servers or routers include a learned hotspot's.
     static func matchesLearned(wifi: WiFiFacts?, dnsServers: [String], markers: Set<String>) -> Bool {
-        let seen = dnsServers.map(bareAddress).filter { $0 != HotspotTunnel.dnsAddress } + (wifi?.gateways ?? [])
-        return seen.contains(where: markers.contains)
+        networkMarkers(wifi: wifi, dnsServers: dnsServers).contains(where: markers.contains)
     }
 
     /// What this network can be learned or unlearned by: its DNS servers and routers.

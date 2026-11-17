@@ -44,8 +44,16 @@ struct PairWithPhoneSheet: View {
                 ToolbarItem(placement: .cancellationAction) { Button(paired == nil ? "Cancel" : "Done") { dismiss() } }
             }
         }
-        .task { await showCodes() }
-        .onDisappear { listener?.stop(); listener = nil }
+        .task {
+            // The tunnel holds this app's own connections too, so the iPhone
+            // couldn't reach the code's listener while it's up: pause it here.
+            await hotspot.pauseForPairing()
+            await showCodes()
+        }
+        .onDisappear {
+            listener?.stop(); listener = nil
+            hotspot.resumeAfterPairing()
+        }
     }
 
     private var scanCard: some View {

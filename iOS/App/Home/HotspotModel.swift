@@ -125,6 +125,29 @@ final class HotspotModel: ObservableObject {
         }
     }
 
+    /// Internet through iPhone was on when the pairing code came up.
+    private var pausedForPairing = false
+
+    /// Stops the tunnel while the pairing code shows (the iPhone dials the
+    /// app's listener, which the tunnel would hold). `resumeAfterPairing` turns
+    /// it back on. Meanwhile the iPad uses the hotspot like any device (a
+    /// pairing takes seconds).
+    func pauseForPairing() async {
+        guard armed || tunnel == .connected || tunnel == .connecting || tunnel == .reasserting else { return }
+        pausedForPairing = true
+        ptLog(.info, "hotspot: pausing Internet through iPhone while the pairing code shows")
+        await controller.stop()
+        armed = false
+    }
+
+    func resumeAfterPairing() {
+        guard pausedForPairing else { return }
+        pausedForPairing = false
+        guard upstream != nil else { return }
+        ptLog(.info, "hotspot: pairing done; turning Internet through iPhone back on")
+        setOn(true)
+    }
+
     /// A new iPhone, already saved to `store` (by the pairing listener). The
     /// hotspots learned belonged to the one before (or were the same iPhone's,
     /// and are learned again on its first link).

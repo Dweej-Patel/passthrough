@@ -26,12 +26,16 @@ final class HotspotRole {
 
     private struct Engine {
         let thread: Thread
-        let exited: DispatchSemaphore
+        /// Set before asking it to quit, so its ending isn't taken for a failure.
+        let quitting: Locked<Bool>
         let token: String
     }
+    /// Called (on the main queue) when the tunnel can't go on as it is: tun2socks
+    /// stopped by itself, or a new pairing needs new SOCKS credentials.
+    private var onEnded: @Sendable (String) -> Void = { _ in }
 
     /// The settings to apply before `start`.
-    nonisolated static func settings(ipv6: Bool) -> NEPacketTunnelNetworkSettings {
+    nonisolated static func settings() -> NEPacketTunnelNetworkSettings {
         let settings = NEPacketTunnelNetworkSettings(tunnelRemoteAddress: "10.255.253.1")
         let ipv4 = NEIPv4Settings(addresses: [HotspotTunnel.ipv4Address], subnetMasks: ["255.255.255.0"])
         ipv4.includedRoutes = [NEIPv4Route.default()]
@@ -44,7 +48,10 @@ final class HotspotRole {
     }
 
     /// `onLinked`: whether the iPhone is linked and has said welcome, on each change.
-    func start(name: String, onLinked: @escaping (Bool) -> Void = { _ in }) throws {
+    /// `onEnded`: the tunnel must end (see `onEnded`); the provider cancels it.
+    func start(name: String, onLinked: @escaping (Bool) -> Void = { _ in },
+               onEnded: @escaping @Sendable (String) -> Void = { _ in }) throws {
+        self.onEnded = onEnded
         let store = UpstreamPhoneStore.shared()
         guard let phone = store.load() else {
             throw NSError(domain: "Passthrough", code: 10, userInfo: [NSLocalizedDescriptionKey: "Pair this iPad with an iPhone first."])
@@ -79,37 +86,27 @@ final class HotspotRole {
         let config = Self.engineConfig(mtu: mtu, port: client.localPort, username: clientID,
                                        password: ControlAuth.socksPassword(token: token))
         let fd = tunFD
-        let exited = DispatchSemaphore(value: 0)
+        let quitting = Locked(false)
+        let onEnded = self.onEnded
         let thread = Thread {
             let bytes = Array(config.utf8)
             let result = bytes.withUnsafeBufferPointer { hev_socks5_tunnel_main_from_str($0.baseAddress, UInt32($0.count), fd) }
             ptLog(result == 0 ? .info : .error, "tun2socks stopped (\(result))")
-            exited.signal()
+            // Stopping by itself (not asked to): every packet would now go
+            // nowhere while the tunnel holds the routes. End the tunnel instead.
+            if !quitting.get() { DispatchQueue.main.async { onEnded("tun2socks stopped (\(result))") } }
         }
         thread.name = "tun2socks"
         thread.stackSize = 4 << 20
         thread.start()
-        engine = Engine(thread: thread, exited: exited, token: token)
-    }
-
-    /// Stops tun2socks and waits for it to finish (it keeps global state, so a
-    /// new one may start only after). The tunnel's descriptor stays open: hev
-    /// closes only descriptors it opened itself.
-    private func stopEngine() async {
-        guard let engine else { return }
-        self.engine = nil
-        hev_socks5_tunnel_quit()
-        let exited = engine.exited
-        await withCheckedContinuation { continuation in
-            DispatchQueue.global().async {
-                _ = exited.wait(timeout: .now() + 5)
-                continuation.resume()
-            }
-        }
+        engine = Engine(thread: thread, quitting: quitting, token: token)
     }
 
     func stop() {
-        if engine != nil { hev_socks5_tunnel_quit() }
+        if let engine {
+            engine.quitting.set(true)
+            hev_socks5_tunnel_quit()
+        }
         engine = nil
         client?.stop()
         client = nil
@@ -125,16 +122,14 @@ final class HotspotRole {
     }
 
     /// The iPhone was re-paired or forgotten in the app (another process).
-    /// A new token means new SOCKS credentials, so tun2socks restarts with them.
+    /// A new token means new SOCKS credentials for tun2socks, which keeps
+    /// global state and can't be swapped in place: the tunnel ends and starts
+    /// again (the app or on-demand brings it back).
     func credentialsChanged() {
-        client?.credentialsChanged()
-        guard let engine, let phone = UpstreamPhoneStore.shared().load(), phone.token != engine.token else { return }
-        ptLog(.info, "Internet through \(phone.name): new pairing, restarting tun2socks")
-        Task {
-            await stopEngine()
-            guard client != nil, self.engine == nil else { return }
-            startEngine(token: phone.token)
-        }
+        guard client?.credentialsChanged() == true, let engine else { return }
+        guard let phone = UpstreamPhoneStore.shared().load() else { return }   // forgotten: streams fail; the app turns it off
+        guard phone.token != engine.token else { return }
+        onEnded("new pairing with \(phone.name)")
     }
 
     /// hev's settings, kept small for the extension's memory limit. The

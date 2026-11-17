@@ -131,6 +131,16 @@ final class HotspotClientTests: XCTestCase {
         _ = try await waitFor("the link no longer live", timeout: 10) { client.hasLiveLink ? nil : true }
     }
 
+    /// The pairings notice also comes when a Mac merely connects (its "last
+    /// seen" is saved): with this iPad's iPhone unchanged, the link stays.
+    func testAPairingsNoticeWithTheSameIPhoneKeepsTheLink() async throws {
+        let client = try await connect(try pairIPad())
+        _ = try await waitFor("online") { client.status.phase == .online ? true : nil }
+        XCTAssertFalse(client.credentialsChanged(), "nothing about the iPhone changed")
+        XCTAssertEqual(client.status.phase, .online)
+        XCTAssertTrue(client.hasLiveLink)
+    }
+
     func testAPairingThePhoneNoLongerHasIsRefused() async throws {
         var phone = try pairIPad()
         phone.token = PairingToken.generate()   // not the token the phone issued
@@ -200,7 +210,7 @@ final class HotspotClientTests: XCTestCase {
 
         upstream.set(UpstreamPhone(phoneID: "another-phone", name: "Other iPhone", token: PairingToken.generate(),
                                    linkKey: WirelessLink.randomBytes(32)))
-        client.credentialsChanged()
+        XCTAssertTrue(client.credentialsChanged())
         XCTAssertEqual(client.status.phase, .waiting)
         XCTAssertEqual(client.status.phoneName, "Other iPhone")
         let localPort = client.localPort

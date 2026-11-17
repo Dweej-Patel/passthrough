@@ -59,6 +59,7 @@ public final class HotspotClient {
     /// Starts listening for the iPhone and serving the loopback SOCKS port.
     public func start() throws {
         guard forwarder == nil else { return }
+        usedCredentials = upstream().map(Credentials.init)
         let device = PhoneDevice(id: "hotspot", kind: .iPhone, medium: .wireless, label: upstream()?.name ?? "iPhone",
                                  pairingSlot: "upstream", link: current)
         let forwarder = LocalForwarder(device: device, remotePort: socksPort, localPort: localPort)
@@ -84,12 +85,26 @@ public final class HotspotClient {
 
     /// The iPhone was forgotten or re-paired (perhaps with another iPhone):
     /// drop every link, so only the iPhone paired now links again, proving
-    /// the new credentials.
-    public func credentialsChanged() {
+    /// the new credentials. The notice also comes for any change to the
+    /// app's other pairings (a Mac connecting records when it was seen), so
+    /// nothing happens unless this iPad's iPhone itself changed. True if it did.
+    @discardableResult
+    public func credentialsChanged() -> Bool {
+        let now = upstream().map(Credentials.init)
+        guard now != usedCredentials else { return false }
+        usedCredentials = now
         watcher.linkedPhoneIDs.forEach(watcher.drop(phoneID:))
         linked(nil)
         status = HotspotStatus(phase: .waiting, phoneName: upstream()?.name, rx: counters.rx, tx: counters.tx)
+        return true
     }
+
+    /// What a link and its control channel prove: the iPhone, its token and link key.
+    private struct Credentials: Equatable {
+        let phoneID: String, token: String, linkKey: Data
+        init(_ phone: UpstreamPhone) { phoneID = phone.phoneID; token = phone.token; linkKey = phone.linkKey }
+    }
+    private var usedCredentials: Credentials?
 
     /// The iPhone's link is up and responding right now (not merely held for
     /// a resume after it stopped responding). Safe from any thread.

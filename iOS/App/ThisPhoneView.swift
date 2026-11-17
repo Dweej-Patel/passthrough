@@ -355,7 +355,9 @@ struct MacsCard: View {
                         .font(.subheadline).foregroundStyle(.secondary)
                 } else {
                     ForEach(model.pairedClients + model.pairedIPads) { client in
-                        let live = model.connectedMacIDs.contains(client.id)
+                        // connectedMacIDs counts Macs only; an iPad is live when it's in the stats' iPads.
+                        let live = client.isIPad ? model.stats.connectedIPads.contains { $0.id == client.id }
+                                                 : model.connectedMacIDs.contains(client.id)
                         HStack(spacing: 12) {
                             PTStatusDot(color: live ? PTColor.tint : .secondary.opacity(0.5), live: live)
                             Image(systemName: client.isIPad ? "ipad" : "laptopcomputer")

@@ -14,6 +14,10 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
     private var hotspotWatch: HotspotPresenceWatch?
     /// The iPhone is linked right now: proof this iPad is on its hotspot.
     private let hotspotLinked = Locked(false)
+    /// iPad: this extension runs Internet through iPhone (set once, at start).
+    private var isHotspotRole = false
+    /// iOS stopped the tunnel: a start still under way must not carry on.
+    private let hotspotStopped = Locked(false)
 
     override init() {
         super.init()
@@ -25,6 +29,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         ptLog(.info, "Extension starting")
         let config = (protocolConfiguration as? NETunnelProviderProtocol)?.providerConfiguration ?? [:]
         if config[HotspotTunnel.roleKey] as? String == HotspotTunnel.clientRole {
+            isHotspotRole = true
             let manual = (options?[HotspotTunnel.manualStartKey] as? NSNumber)?.boolValue ?? false
             startHotspot(name: config[HotspotTunnel.nameKey] as? String ?? "iPad", manual: manual, completionHandler: completionHandler)
             return
@@ -96,27 +101,30 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
             return
         }
         ptLog(.info, "Internet through iPhone: \(manual ? "turned on" : "on a known hotspot"), applying the tunnel (hotspot sign: \(sign); \(network))")
-        setTunnelNetworkSettings(HotspotRole.settings(ipv6: false)) { [weak self] error in
+        let stopped = hotspotStopped
+        setTunnelNetworkSettings(HotspotRole.settings()) { [weak self] error in
             if let error {
                 ptLog(.error, "Tunnel settings rejected: \(error.localizedDescription)")
                 completionHandler(error)
                 return
             }
-            ptLog(.info, "Internet through iPhone: tunnel applied, starting the link")
             Task { @MainActor in
                 guard let self else { return }
+                // iOS stopped it meanwhile: start nothing that nothing would stop.
+                guard !stopped.get() else {
+                    completionHandler(NSError(domain: "Passthrough", code: 13, userInfo: [NSLocalizedDescriptionKey: "Stopped while starting."]))
+                    return
+                }
+                ptLog(.info, "Internet through iPhone: tunnel applied, starting the link")
                 let role = HotspotRole()
                 do {
                     let linked = self.hotspotLinked
                     try role.start(name: name, onLinked: { up in
                         linked.set(up)
-                        // A link worked over this network, and the iPhone links an iPad
-                        // over its hotspot only: remember the network's DNS servers and
-                        // routers, so the on-demand rule (the app applies it) and the
-                        // hotspot check know this hotspot next time.
-                        if up, HotspotTunnel.rememberHotspotDNS(dns + (wifi?.gateways ?? []), in: defaults) {
-                            ptLog(.info, "Internet through iPhone: learned this hotspot (\(network))")
-                        }
+                        if up { Self.learnThisHotspot(dnsAtStart: dns, wifiAtStart: wifi) }
+                    }, onEnded: { [weak self] why in
+                        ptLog(.info, "Internet through iPhone: ending the tunnel (\(why))")
+                        self?.cancelTunnelWithError(nil)
                     })
                     self.hotspot = role
                     self.watchPairings()
@@ -127,6 +135,27 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
                     role.stop()
                     completionHandler(error)
                 }
+            }
+        }
+    }
+
+    /// A link worked, and the iPhone links an iPad over its hotspot only, so
+    /// the network the iPad is on now is that hotspot: remember its routers
+    /// (read now, not at start: the iPad may have changed networks since), and
+    /// the DNS servers read at start if it's still the network it started on
+    /// (with the tunnel up, the resolver's are the tunnel's). Always with a
+    /// router, so the watch (which can only see routers) knows it too.
+    private static func learnThisHotspot(dnsAtStart: [String], wifiAtStart: WirelessLink.WiFiFacts?) {
+        let reader = WiFiPathReader()
+        reader.whenKnown { facts in
+            reader.cancel()
+            guard let facts, facts.up else { return }
+            let routers = facts.gateways.filter { !WirelessLink.isGenericAddress($0) }
+            guard !routers.isEmpty else { return }
+            let sameNetwork = Set(facts.gateways) == Set(wifiAtStart?.gateways ?? [])
+            let defaults = UserDefaults(suiteName: PassthroughProtocol.appGroup) ?? .standard
+            if HotspotTunnel.rememberHotspotDNS(routers + (sameNetwork ? dnsAtStart : []), in: defaults) {
+                ptLog(.info, "Internet through iPhone: learned this hotspot (\(WirelessLink.networkSummary(wifi: facts, dnsServers: sameNetwork ? dnsAtStart : [])))")
             }
         }
     }
@@ -147,7 +176,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         hotspotWatch = watch
     }
 
-    private func stopWatchingTheHotspot() {
+    @MainActor private func stopWatchingTheHotspot() {
         hotspotWatch?.cancel()
         hotspotWatch = nil
     }
@@ -165,7 +194,18 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         ptLog(.info, "Background host stopping (\(reason.rawValue))")
         if let pairingsToken { notify_cancel(pairingsToken) }
         pairingsToken = nil
-        stopWatchingTheHotspot()
+        // iPad: everything of the hotspot role lives on the main actor, and a
+        // start still under way sees `hotspotStopped` and starts nothing.
+        if isHotspotRole {
+            hotspotStopped.set(true)
+            Task { @MainActor in
+                self.stopWatchingTheHotspot()
+                self.hotspot?.stop()
+                self.hotspot = nil
+                completionHandler()
+            }
+            return
+        }
         // Turned off by the user: tell the Macs and iPads first, and give it a moment to go out.
         if let service, reason == .userInitiated {
             service.sayGoodbye()
@@ -178,20 +218,12 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         }
         service?.stop()
         service = nil
-        if let hotspot {
-            Task { @MainActor in
-                hotspot.stop()
-                self.hotspot = nil
-                completionHandler()
-            }
-            return
-        }
         completionHandler()
     }
 
     override func handleAppMessage(_ messageData: Data, completionHandler: ((Data?) -> Void)?) {
-        if let hotspot {
-            Task { @MainActor in completionHandler?(try? JSONEncoder().encode(hotspot.status())) }
+        if isHotspotRole {
+            Task { @MainActor in completionHandler?(self.hotspot.flatMap { try? JSONEncoder().encode($0.status()) }) }
             return
         }
         guard let service else { completionHandler?(nil); return }

@@ -188,16 +188,3 @@ public enum IPadEnrollment {
         }
     }
 }
-
-extension Data {
-    var base64URL: String {
-        base64EncodedString().replacingOccurrences(of: "+", with: "-").replacingOccurrences(of: "/", with: "_")
-            .replacingOccurrences(of: "=", with: "")
-    }
-
-    init?(base64URL: String) {
-        var s = base64URL.replacingOccurrences(of: "-", with: "+").replacingOccurrences(of: "_", with: "/")
-        while s.count % 4 != 0 { s += "=" }
-        self.init(base64Encoded: s)
-    }
-}
