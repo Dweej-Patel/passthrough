@@ -100,14 +100,18 @@ final class ScreenCanvasView: UIView, UIScrollViewDelegate, UIKeyInput, UIGestur
         scroll.panGestureRecognizer.allowedTouchTypes = fingers
         for recognizer in [tap, twoFingerTap, move, wheel, hold] {
             recognizer.allowedTouchTypes = fingers
+            recognizer.delegate = self   // palm rejection while the Pencil is in use (`shouldReceive`)
             addGestureRecognizer(recognizer)
+            fingerRecognizers.append(recognizer)
         }
         for direction: UISwipeGestureRecognizer.Direction in [.left, .right, .up, .down] {
             let swipe = UISwipeGestureRecognizer(target: self, action: #selector(swiped(_:)))
             swipe.numberOfTouchesRequired = 3
             swipe.direction = direction
             swipe.allowedTouchTypes = fingers
+            swipe.delegate = self
             addGestureRecognizer(swipe)
+            fingerRecognizers.append(swipe)
         }
         addPointerRecognizers()
         self.move = move
@@ -163,14 +167,66 @@ final class ScreenCanvasView: UIView, UIScrollViewDelegate, UIKeyInput, UIGestur
     }
 
     private weak var pen: UILongPressGestureRecognizer?
+    private var fingerRecognizers: [UIGestureRecognizer] = []
+    /// The Pencil is touching, or lifted only just now: fingers then are a
+    /// resting hand (palm rejection), not gestures.
+    private var penDown = false
+    private var penLiftedAt = Date.distantPast
+    private var penInUse: Bool { penDown || Date().timeIntervalSince(penLiftedAt) < 0.5 }
+    /// A finger's press-and-hold has the Mac's button down (`held`).
+    private var fingerPressing = false
+    /// Where the tip came down, and whether it has moved far enough to be a
+    /// drag: a tip always wobbles a little, and every wobble with the button
+    /// down would be a drag on the Mac (a selection, not a click).
+    private var penStart = CGPoint.zero
+    private var penDragging = false
+    private static let penSlop: CGFloat = 4
 
     @objc private func penned(_ recognizer: UILongPressGestureRecognizer) {
         guard screenSize.width > 0 else { return }
-        pointTo(recognizer.location(in: self))
         switch recognizer.state {
-        case .began, .changed: onPointer?(cursorPoint, .left)
-        case .ended, .cancelled, .failed: onPointer?(cursorPoint, [])
+        case .began:
+            penDown = true
+            // A hand already resting on the screen: end its gestures, and let go
+            // of a button its hold pressed, or the Pencil would drag from there.
+            stopFingerGestures()
+            if fingerPressing {
+                fingerPressing = false
+                onPointer?(cursorPoint, [])
+            }
+            // Move to the tip first, then press: the press starts where the tip
+            // is, not where the Mac's pointer was.
+            penStart = recognizer.location(in: self)
+            penDragging = false
+            pointTo(penStart)
+            onPointer?(cursorPoint, [])
+            onPointer?(cursorPoint, .left)
+        case .changed:
+            let location = recognizer.location(in: self)
+            if !penDragging {
+                // Still a tap: the button stays down where the tip came down.
+                guard hypot(location.x - penStart.x, location.y - penStart.y) >= Self.penSlop else { return }
+                penDragging = true
+            }
+            pointTo(location)
+            onPointer?(cursorPoint, .left)
+        case .ended, .cancelled, .failed:
+            // A tap lets go where it pressed; a drag where the tip lifted.
+            pointTo(penDragging ? recognizer.location(in: self) : penStart)
+            onPointer?(cursorPoint, [])
+            penDragging = false
+            penDown = false
+            penLiftedAt = Date()
         default: break
+        }
+    }
+
+    /// Cancels finger gestures under way (toggling a recognizer off cancels it).
+    private func stopFingerGestures() {
+        for recognizer in fingerRecognizers + [scroll.panGestureRecognizer] + [scroll.pinchGestureRecognizer].compactMap({ $0 })
+        where recognizer.state == .began || recognizer.state == .changed || recognizer.state == .possible {
+            recognizer.isEnabled = false
+            recognizer.isEnabled = true
         }
     }
 
@@ -438,6 +494,7 @@ final class ScreenCanvasView: UIView, UIScrollViewDelegate, UIKeyInput, UIGestur
             UIImpactFeedbackGenerator(style: .medium).impactOccurred()
             if mode == .direct { cursorPoint = screenPoint(location) }
             lastDragLocation = location
+            fingerPressing = true
             onPointer?(cursorPoint, .left)
             updateCursor()
         case .changed:
@@ -450,7 +507,9 @@ final class ScreenCanvasView: UIView, UIScrollViewDelegate, UIKeyInput, UIGestur
             }
             lastDragLocation = location
         case .ended, .cancelled, .failed:
-            onPointer?(cursorPoint, [])
+            // The Pencil may have let go of this press already.
+            if fingerPressing { onPointer?(cursorPoint, []) }
+            fingerPressing = false
         default:
             break
         }
@@ -460,6 +519,8 @@ final class ScreenCanvasView: UIView, UIScrollViewDelegate, UIKeyInput, UIGestur
 
     /// Remembers where each finger came down, for `gestureRecognizerShouldBegin`.
     func gestureRecognizer(_ recognizer: UIGestureRecognizer, shouldReceive touch: UITouch) -> Bool {
+        // Palm rejection: while the Pencil is in use, a finger is the hand holding it.
+        if recognizer !== pen, touch.type == .direct, penInUse { return false }
         if recognizer === wheel {
             touchStarts.removeAll { $0.touch === touch || $0.touch.phase == .ended || $0.touch.phase == .cancelled }
             touchStarts.append((touch, touch.location(in: self)))
