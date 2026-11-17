@@ -224,6 +224,14 @@ struct ScreenView: View {
                 Toggle(isOn: Binding(get: { model.macHidden }, set: { model.setMacHidden($0) })) {
                     Label("Hide \(model.macName)'s display", systemImage: "eye.slash")
                 }
+                // The Mac's own display as it is, or one it makes in this device's shape (which its own mirror meanwhile).
+                Section("Screen shape") {
+                    Picker("Screen shape", selection: Binding(get: { model.fitsDevice }, set: { model.setFitsDevice($0) })) {
+                        Label("\(model.macName)'s display", systemImage: "laptopcomputer").tag(false)
+                        Label("Fit to this \(ThisDevice.name)", systemImage: pad ? "ipad" : "iphone").tag(true)
+                    }
+                    .pickerStyle(.inline)
+                }
             }
         } label: {
             if pad {

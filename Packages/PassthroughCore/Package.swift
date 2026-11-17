@@ -55,8 +55,10 @@ let package = Package(
         // builds too: unoptimized, a full Retina screen takes ~130 ms, optimized ~1 ms.
         .target(name: "ScreenClient", dependencies: ["PassthroughCore", "CZlib"],
                 swiftSettings: [.unsafeFlags(["-O"], .when(configuration: .debug))]),
+        // Mac-only: CoreGraphics' private virtual displays (a display shaped like the phone).
+        .target(name: "CVirtualDisplay", linkerSettings: [.linkedFramework("CoreGraphics")]),
         // Mac-only: streams the Mac's screen to a phone as H.264 and posts its input.
-        .target(name: "ScreenHost", dependencies: ["PassthroughCore", "ShellHost"]),
+        .target(name: "ScreenHost", dependencies: ["PassthroughCore", "ShellHost", "CVirtualDisplay"]),
         .executableTarget(name: "passthrough-devserver", dependencies: ["PassthroughCore"]),
         // Mac-only: what a terminal window runs to show one of the app's sessions
         // (the app's own copy is built by the Xcode project from the same source).

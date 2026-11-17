@@ -1,5 +1,7 @@
+import CoreGraphics
 import CoreMedia
 import Foundation
+import ImageIO
 import PassthroughCore
 
 /// The phone's end of the Mac's own screen stream (protocol/README.md,
@@ -7,11 +9,31 @@ import PassthroughCore
 /// `screenVideoReady`. It turns frames into sample buffers ready for a
 /// display layer (which decodes in hardware), and sends input. Call `shown`
 /// for every frame once it's on screen: the Mac waits for that before
-/// sending more than a couple, which is what keeps the picture current.
+/// sending more than fit in the round trip, which is what keeps the picture
+/// current. The pointer isn't in the frames: `cursor` and `cursorShape` say
+/// where to draw it.
 public final class ScreenVideoClient: @unchecked Sendable {
+    /// What the phone asks to see (`ScreenVideoWire.Message.hello`).
+    public struct Layout: Equatable, Sendable {
+        public var width: Int
+        public var height: Int
+        public var fit: ScreenVideoWire.Fit
+        public init(width: Int, height: Int, fit: ScreenVideoWire.Fit) {
+            self.width = width
+            self.height = height
+            self.fit = fit
+        }
+    }
+
     public enum Event: @unchecked Sendable {
         /// The stream's size in pixels (first, and again if it changes).
         case size(width: Int, height: Int)
+        /// What the stream shows from now (the answer to each layout).
+        case fitted(ScreenVideoWire.Fit)
+        /// The Mac's pointer at (`x`, `y`), each 0…1 across the stream; or not on it.
+        case cursor(x: Double, y: Double, visible: Bool)
+        /// What the pointer looks like, `size` in stream pixels, its tip at `hotSpot` in them.
+        case cursorShape(CGImage, size: CGSize, hotSpot: CGPoint)
         /// A frame to show, then pass `number` to `shown`.
         case frame(CMSampleBuffer, number: UInt32)
         /// The answer to `copySelection()`.
@@ -28,7 +50,7 @@ public final class ScreenVideoClient: @unchecked Sendable {
     private let queue = DispatchQueue(label: "\(PassthroughProtocol.identifier).screen-video-client")
     private let callbackQueue: DispatchQueue
     private let onEvent: (Event) -> Void
-    private let maxSide: Int
+    private var layout: Layout
 
     // On `queue`.
     private var reader = ScreenVideoWire.Reader()
@@ -43,20 +65,27 @@ public final class ScreenVideoClient: @unchecked Sendable {
     private var awaitingKeyframe = true
     private var closed = false
 
-    /// `maxSide`: the phone's longer side in pixels; the Mac sends no more than that.
-    public init(stream: any ByteStream, initialBytes: Data = Data(), maxSide: Int, queue: DispatchQueue = .main,
+    /// `layout`: what to show first; `relayout` changes it.
+    public init(stream: any ByteStream, initialBytes: Data = Data(), layout: Layout, queue: DispatchQueue = .main,
                 onEvent: @escaping (Event) -> Void) {
         self.stream = stream
         self.pending = initialBytes
-        self.maxSide = maxSide
+        self.layout = layout
         self.callbackQueue = queue
         self.onEvent = onEvent
+    }
+
+    /// The Mac's own display, at most `maxSide` pixels on its longer side.
+    public convenience init(stream: any ByteStream, initialBytes: Data = Data(), maxSide: Int, queue: DispatchQueue = .main,
+                            onEvent: @escaping (Event) -> Void) {
+        self.init(stream: stream, initialBytes: initialBytes, layout: Layout(width: maxSide, height: maxSide, fit: .mac),
+                  queue: queue, onEvent: onEvent)
     }
 
     public func start() {
         queue.async { [self] in
             stream.onTerminated = { [weak self] _ in self?.queue.async { self?.finish(Failure.connectionLost) } }
-            send(.hello(maxWidth: maxSide, maxHeight: maxSide))
+            send(.hello(width: layout.width, height: layout.height, fit: layout.fit))
             let initial = pending
             pending = Data()
             received(initial)
@@ -66,6 +95,16 @@ public final class ScreenVideoClient: @unchecked Sendable {
 
     public func close() {
         queue.async { [self] in finish(nil) }
+    }
+
+    /// Asks for something else to be shown (the phone turned, or the user chose
+    /// another fit); the Mac answers with `fitted`, then a new `size` if it changed.
+    public func relayout(_ new: Layout) {
+        queue.async { [self] in
+            guard !closed, new != layout else { return }
+            layout = new
+            send(.hello(width: new.width, height: new.height, fit: new.fit))
+        }
     }
 
     // MARK: Input
@@ -175,6 +214,15 @@ public final class ScreenVideoClient: @unchecked Sendable {
             emit(.copied(result))
         case let .curtained(hidden):
             emit(.curtained(hidden))
+        case let .fitted(fit):
+            emit(.fitted(fit))
+        case let .cursor(x, y, visible):
+            emit(.cursor(x: Double(x) / 65535, y: Double(y) / 65535, visible: visible))
+        case let .cursorShape(width, height, hotX, hotY, png):
+            // A shape that doesn't decode is skipped: the pointer keeps the last one.
+            guard width > 0, height > 0, let source = CGImageSourceCreateWithData(png as CFData, nil),
+                  let image = CGImageSourceCreateImageAtIndex(source, 0, nil) else { return }
+            emit(.cursorShape(image, size: CGSize(width: width, height: height), hotSpot: CGPoint(x: hotX, y: hotY)))
         default:
             break
         }

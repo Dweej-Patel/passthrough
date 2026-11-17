@@ -34,6 +34,8 @@ final class ScreenCanvasView: UIView, UIScrollViewDelegate, UIKeyInput, UIGestur
     var onPaste: (() -> Void)?
     var onCopy: (() -> Void)?
     var onSpace: ((ScreenModel.SpaceAction) -> Void)?
+    /// The window in pixels, as the device is held now (it turned, or the window changed).
+    var onWindowPixels: ((CGSize) -> Void)?
 
     var mode = ScreenTouchMode.trackpad {
         didSet { applyMode() }
@@ -44,6 +46,12 @@ final class ScreenCanvasView: UIView, UIScrollViewDelegate, UIKeyInput, UIGestur
     private let cursor = UIView()
     /// The Mac's own stream, decoded in hardware; Screen Sharing's frames are `content`'s image instead.
     private let video = AVSampleBufferDisplayLayer()
+    /// The Mac's pointer, drawn here (the stream leaves it out) where this phone's
+    /// touches put it, at once; on the screen, so it zooms with it. Hidden until
+    /// the Mac says what it looks like: Screen Sharing's frames have their own.
+    private let pointer = CALayer()
+    private var pointerShape: (size: CGSize, hotSpot: CGPoint)?
+    private var pointerOnScreen = true
     private var screenSize = CGSize.zero
     /// Where the Mac's pointer is, in screen pixels.
     private var cursorPoint = CGPoint.zero
@@ -68,6 +76,10 @@ final class ScreenCanvasView: UIView, UIScrollViewDelegate, UIKeyInput, UIGestur
         content.layer.minificationFilter = .trilinear
         video.videoGravity = .resize
         content.layer.addSublayer(video)
+        pointer.isHidden = true
+        pointer.contentsGravity = .resize
+        pointer.magnificationFilter = .linear
+        content.layer.addSublayer(pointer)
         foregroundObserver = NotificationCenter.default.addObserver(forName: UIApplication.willEnterForegroundNotification, object: nil, queue: .main) { [weak self] _ in
             MainActor.assumeIsolated {
                 self?.video.sampleBufferRenderer.flush(removingDisplayedImage: false, completionHandler: nil)
@@ -383,6 +395,7 @@ final class ScreenCanvasView: UIView, UIScrollViewDelegate, UIKeyInput, UIGestur
 
     override func layoutSubviews() {
         super.layoutSubviews()
+        if let window { onWindowPixels?(CGSize(width: window.bounds.width * window.screen.scale, height: window.bounds.height * window.screen.scale)) }
         if scroll.frame != bounds {
             let place = zoomedPlace()
             scroll.frame = bounds
@@ -481,6 +494,38 @@ final class ScreenCanvasView: UIView, UIScrollViewDelegate, UIKeyInput, UIGestur
 
     private func updateCursor() {
         cursor.center = viewPoint(cursorPoint)
+        updatePointer()
+    }
+
+    // MARK: The Mac's pointer
+
+    /// The Mac's pointer moved by itself (its own trackpad, an app moving it): drawn there,
+    /// and this phone's moves go on from there.
+    func macPointer(at point: CGPoint, onScreen: Bool) {
+        guard screenSize.width > 0 else { return }
+        pointerOnScreen = onScreen
+        if onScreen {
+            cursorPoint = CGPoint(x: point.x.clamped(0, screenSize.width - 1), y: point.y.clamped(0, screenSize.height - 1))
+        }
+        updateCursor()
+    }
+
+    /// What the Mac's pointer looks like: `size` and its tip `hotSpot` in screen pixels.
+    func setPointerShape(_ image: CGImage, size: CGSize, hotSpot: CGPoint) {
+        pointer.contents = image
+        pointerShape = (size, hotSpot)
+        updatePointer()
+    }
+
+    private func updatePointer() {
+        guard let shape = pointerShape, screenSize.width > 0, content.bounds.width > 0 else { return }
+        let scale = content.bounds.width / screenSize.width
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        pointer.isHidden = !pointerOnScreen
+        pointer.frame = CGRect(x: (cursorPoint.x - shape.hotSpot.x) * scale, y: (cursorPoint.y - shape.hotSpot.y) * scale,
+                               width: shape.size.width * scale, height: shape.size.height * scale)
+        CATransaction.commit()
     }
 
     /// Keeps the pointer in view while zoomed in.
@@ -827,6 +872,9 @@ struct ScreenCanvas: UIViewRepresentable {
         view.onPaste = { [weak model] in model?.pastePhoneClipboard() }
         view.onCopy = { [weak model] in model?.copyFromMac() }
         view.onSpace = { [weak model] action in model?.perform(action) }
+        view.onWindowPixels = { [weak model] size in model?.windowPixelsChanged(size) }
+        model.onMacPointer = { [weak view] point, onScreen in view?.macPointer(at: point, onScreen: onScreen) }
+        model.onPointerShape = { [weak view] image, size, hotSpot in view?.setPointerShape(image, size: size, hotSpot: hotSpot) }
         model.onFrame = { [weak view] image in view?.show(image, size: CGSize(width: image.width, height: image.height)) }
         return view
     }

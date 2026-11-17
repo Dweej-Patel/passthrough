@@ -52,6 +52,15 @@ final class VideoEncoder {
 
     deinit { invalidate() }
 
+    /// Changes the bitrate from the next frame on (the pacer's, as the link allows).
+    func setBitRate(_ bitRate: Int) {
+        guard let session else { return }
+        VTSessionSetProperty(session, key: kVTCompressionPropertyKey_AverageBitRate, value: bitRate as CFNumber)
+        // Bursts no bigger than half a second's worth, so a busy frame doesn't swamp a slow link.
+        let limits = [bitRate / 8 / 2, 0.5] as [Any] as CFArray
+        VTSessionSetProperty(session, key: kVTCompressionPropertyKey_DataRateLimits, value: limits)
+    }
+
     func invalidate() {
         if let session { VTCompressionSessionInvalidate(session) }
         session = nil

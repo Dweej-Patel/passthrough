@@ -39,6 +39,11 @@ final class ScreenModel: ObservableObject {
     var onFrame: ((CGImage) -> Void)?
     /// The canvas's video display; false (or unset) when it couldn't take the frame, and a keyframe is asked for.
     var onVideoFrame: ((CMSampleBuffer) -> Bool)?
+    /// The Mac's own stream leaves the pointer out: the canvas draws it, where the
+    /// Mac says it is (in screen pixels; or off this display) when this phone isn't moving it.
+    var onMacPointer: ((CGPoint, Bool) -> Void)?
+    /// What the pointer looks like: the image, its size and tip in screen pixels.
+    var onPointerShape: ((CGImage, CGSize, CGPoint) -> Void)?
     /// The Mac's screen in pixels.
     @Published private(set) var screenSize = CGSize.zero
     @Published private(set) var macName = "your Mac"
@@ -52,6 +57,11 @@ final class ScreenModel: ObservableObject {
     @Published private(set) var macHidden = false
     /// Only the Mac's own stream can leave the black out of what it sends; Screen Sharing would show it.
     var canHideMac: Bool { video != nil }
+    /// The user's choice: the Mac makes a display in this device's shape and shows that
+    /// (`Fit.device`), or shows its own display as it is (`Fit.mac`, the default).
+    @Published private(set) var fitsDevice = ScreenModel.fitsDeviceSetting
+    /// What the Mac's stream shows now: `mac` while `fitsDevice` means the Mac couldn't make one.
+    @Published private(set) var fitted: ScreenVideoWire.Fit?
 
     private var shell: ShellModel?
     private var context: LAContext?
@@ -76,6 +86,15 @@ final class ScreenModel: ObservableObject {
     private var hideTimeout: Task<Void, Never>?
     /// What the Mac was last asked (`askMacHidden`) and hasn't answered yet.
     private var askedHidden: Bool?
+    /// The user's choice, kept for the next view: a display in this device's shape.
+    private static let fitsDeviceKey = "screenFitsDevice"
+    private static var fitsDeviceSetting: Bool { UserDefaults.standard.bool(forKey: fitsDeviceKey) }
+    /// This device's window in pixels, as it's held now (the canvas says when it turns).
+    private var windowPixels: CGSize?
+    private var relayoutTask: Task<Void, Never>?
+    /// When this phone last moved the Mac's pointer: for a moment after, where the
+    /// Mac says it is is an echo of that, already drawn.
+    private var lastPointerAt: TimeInterval = 0
     /// The user's choice, kept for the next view: hide the Mac's display while viewing.
     private static let hidesMacKey = "screenHidesMacDisplay"
     /// Hidden unless the user turned it off: a view starts private.
@@ -232,6 +251,8 @@ final class ScreenModel: ObservableObject {
     /// Ends the view; the shell sessions are untouched.
     func stop() {
         generation += 1
+        fitted = nil
+        relayoutTask?.cancel()
         rfb?.close()
         rfb = nil
         video?.close()
@@ -262,8 +283,7 @@ final class ScreenModel: ObservableObject {
             client?.requestScreen(video: wantsVideo)
         case let .screen(stream, initialBytes) where wantsVideo:
             client = nil   // it let go of the stream; the dialer stays up for it
-            let native = UIScreen.main.nativeBounds.size
-            let video = ScreenVideoClient(stream: stream, initialBytes: initialBytes, maxSide: Int(max(native.width, native.height))) { [weak self] event in
+            let video = ScreenVideoClient(stream: stream, initialBytes: initialBytes, layout: layout()) { [weak self] event in
                 MainActor.assumeIsolated { self?.handle(event, generation: gen) }
             }
             self.video = video
@@ -324,6 +344,18 @@ final class ScreenModel: ObservableObject {
                 show(hidden ? "\(macName)'s own display is hidden" : "\(macName)'s display is showing again")
             }
             macHidden = hidden
+        case let .fitted(fit):
+            let before = fitted
+            fitted = fit
+            if fit == .mac, fitsDevice, before != .mac {
+                show("\(macName) couldn't make a display for this \(ThisDevice.name), so this is its own.")
+            }
+        case let .cursor(x, y, visible):
+            // Echoes of this phone's own moves are drawn already; the Mac's own moves (its trackpad) aren't.
+            guard ProcessInfo.processInfo.systemUptime - lastPointerAt > 0.4, screenSize.width > 0 else { return }
+            onMacPointer?(CGPoint(x: x * (screenSize.width - 1), y: y * (screenSize.height - 1)), visible)
+        case let .cursorShape(image, size, hotSpot):
+            onPointerShape?(image, size, hotSpot)
         case .closed:
             let worked = videoStarted
             stop()
@@ -426,8 +458,7 @@ final class ScreenModel: ObservableObject {
             upgrade?.client?.requestScreen(video: true)
         case let .screen(stream, initialBytes):
             upgrade?.client = nil   // it let go of the stream; the dialer stays up for it
-            let native = UIScreen.main.nativeBounds.size
-            let video = ScreenVideoClient(stream: stream, initialBytes: initialBytes, maxSide: Int(max(native.width, native.height))) { [weak self] event in
+            let video = ScreenVideoClient(stream: stream, initialBytes: initialBytes, layout: layout()) { [weak self] event in
                 MainActor.assumeIsolated { self?.handleUpgrade(event, token: token, generation: gen) }
             }
             upgrade?.video = video
@@ -450,7 +481,7 @@ final class ScreenModel: ObservableObject {
             handle(event, generation: gen)
         case .closed:
             upgradeFailed()
-        case .frame, .copied, .curtained:
+        case .frame, .copied, .curtained, .fitted, .cursor, .cursorShape:
             break   // none before the size
         }
     }
@@ -496,6 +527,7 @@ final class ScreenModel: ObservableObject {
     /// `point` in screen pixels.
     func pointer(at point: CGPoint, buttons: RFBClient.Buttons) {
         lastPointer = point
+        lastPointerAt = ProcessInfo.processInfo.systemUptime
         if let video, screenSize.width > 0 {
             video.pointer(x: point.x / max(screenSize.width - 1, 1), y: point.y / max(screenSize.height - 1, 1), buttons: buttons)
         } else {
@@ -665,6 +697,43 @@ final class ScreenModel: ObservableObject {
 
     /// The display lost its place (it was in the background, say): ask for a keyframe.
     func videoNeedsKeyframe() { video?.requestKeyframe() }
+
+    // MARK: Screen shape
+
+    /// The user chose: a display in this device's shape, or the Mac's own as it is. Kept for the next view.
+    func setFitsDevice(_ on: Bool) {
+        guard on != fitsDevice else { return }
+        fitsDevice = on
+        UserDefaults.standard.set(on, forKey: Self.fitsDeviceKey)
+        video?.relayout(layout())
+    }
+
+    /// The canvas's window in pixels, as the device is held now: a display in its shape turns with it.
+    func windowPixelsChanged(_ size: CGSize) {
+        guard size.width > 0, size.height > 0, size != windowPixels else { return }
+        windowPixels = size
+        guard fitsDevice else { return }
+        // Once the turn has settled: each change remakes the Mac's display.
+        relayoutTask?.cancel()
+        relayoutTask = Task { [weak self] in
+            try? await Task.sleep(for: .milliseconds(400))
+            guard !Task.isCancelled, let self else { return }
+            self.video?.relayout(self.layout())
+        }
+    }
+
+    /// What to ask the Mac for: its own display at no more than this device's
+    /// pixels, or one made at exactly this window's pixels.
+    private func layout() -> ScreenVideoClient.Layout {
+        let native = UIScreen.main.nativeBounds.size
+        let maxSide = Int(max(native.width, native.height))
+        guard fitsDevice else { return .init(width: maxSide, height: maxSide, fit: .mac) }
+        let screen = UIScreen.main
+        let pixels = windowPixels ?? CGSize(width: screen.bounds.width * screen.scale, height: screen.bounds.height * screen.scale)
+        // Even sides (4:2:0), within what the Mac's encoder takes.
+        let fit = min(1, 4096 / max(pixels.width, pixels.height))
+        return .init(width: Int(pixels.width * fit) & ~1, height: Int(pixels.height * fit) & ~1, fit: .device)
+    }
 
     private static func mask(_ modifiers: [UInt32]) -> ScreenVideoWire.Modifiers {
         modifiers.reduce(into: []) { mask, keysym in
