@@ -128,7 +128,9 @@ struct RootView: View {
     /// that to be gone, since presenting while another cover is still dismissing can fail.
     @State private var linkAwaitsDismiss = false
 
-    var body: some View {
+    /// The tabs by themselves: with them inline, the body grew past what the compiler
+    /// type-checks in time on a slower machine (CI).
+    private var tabs: some View {
         TabView(selection: $tab) {
             MacHomeView(shell: model.shell, tab: $tab, showPairing: $showPairing, showSettings: $showSettings)
                 .tabItem { Label("Mac", systemImage: "laptopcomputer") }
@@ -146,6 +148,11 @@ struct RootView: View {
             .tabItem { Label(ThisDevice.name, systemImage: ThisDevice.symbol) }
             .tag(RootTab.device)
         }
+    }
+
+    /// The tabs with everything presented over them; split from the body for the same reason.
+    private var presented: some View {
+        tabs
         .environmentObject(router)
         .sheet(isPresented: $router.showHistory, onDismiss: presentationDismissed) {
             ShellHistoryView(shell: model.shell)
@@ -159,6 +166,10 @@ struct RootView: View {
         .sheet(isPresented: $showSettings) {
             SettingsView().environmentObject(model).environmentObject(lock)
         }
+    }
+
+    var body: some View {
+        presented
         #if DEBUG
         .task(id: model.shell.reach) { if ScreenModel.demoState != nil, model.shell.reach == .ready { router.showScreen = true } }
         #endif
