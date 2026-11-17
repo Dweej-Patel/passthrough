@@ -89,8 +89,11 @@ these steps as written and check each one before building.
   iPhone: *iPhone* tab › *Paired devices* › **Pair › Scan an iPad's code**,
   then Face ID.
 * iPad as the Mac's remote: it pairs over the cable and gets the shell and
-  screen like a phone, but the Mac never routes through it. The Mac's panel
-  says which iPhone the iPad gets its internet from. On iPad the screen view
+  screen like a phone, but the Mac never routes through it. With an iPhone
+  attached too, the Mac's panel offers **Pair iPad** (the Mac talks to one
+  device at a time and the iPhone comes first). The Mac's panel says which
+  iPhone the iPad gets its internet from, and *Phones with access* shows it
+  as an iPad, under the name it goes by now. On iPad the screen view
   fills the display under a floating bar, and a trackpad, mouse or hardware
   keyboard goes straight to the Mac.
 * iPhone: *Sharing with* lists the Macs and iPads using it right now, and
@@ -105,3 +108,6 @@ these steps as written and check each one before building.
   two minutes for a resume.
 * iPhone: opening the app no longer resizes a shell in use in a terminal window
   on the Mac.
+* The pairing code's countdown ticks (it could stay at 5:00), and the power
+  button's ring and the status dots no longer slide left and right; they
+  hold still under Reduce Motion (the spinner still turns).
