@@ -40,10 +40,12 @@ final class DeviceDisplay: DeviceDisplaying {
     /// One at a time on this Mac: a second phone wanting one gets the Mac's
     /// own display (which, mirroring the first one's, shows that).
     private static var owner: ObjectIdentifier?
+    private static var serial: UInt32 = 0
     /// How long a new display or mode gets to show up in CoreGraphics' lists.
     static let modeWait: TimeInterval = 2
 
     private var display: CGVirtualDisplay?
+    private var size: (Int, Int, Double)?
     private var maxSide = 0
     private var mirrored: Set<CGDirectDisplayID> = []
 
@@ -62,8 +64,13 @@ final class DeviceDisplay: DeviceDisplaying {
         guard width >= 320, height >= 320 else { throw Failure.noMode(width: width, height: height) }
         let me = ObjectIdentifier(self)
         guard Self.owner == nil || Self.owner == me else { throw Failure.inUse }
-        // Turning the phone swaps the sides, which the first display's limits allow; a bigger one is made again.
-        if display != nil, max(width, height) > maxSide { close() }
+        // Asked again for what's showing: nothing to do (and nothing reconfigured).
+        if let display, let size, size == (width, height, refresh), !Self.physicalDisplays(besides: display.displayID).contains(where: { CGDisplayMirrorsDisplay($0) != display.displayID }) {
+            return display.displayID
+        }
+        // Another size is another display: changing a display's modes in place left the Mac's
+        // own screen showing a stale picture, and sometimes didn't offer the new size at all.
+        if display != nil { close() }
         if display == nil {
             guard NSClassFromString("CGVirtualDisplay") != nil else { throw Failure.unavailable }
             let side = max(width, height)
@@ -76,7 +83,9 @@ final class DeviceDisplay: DeviceDisplaying {
             descriptor.sizeInMillimeters = CGSize(width: Double(width) / 220 * 25.4, height: Double(height) / 220 * 25.4)
             descriptor.vendorID = Self.vendor
             descriptor.productID = 0x0001
-            descriptor.serialNum = 1
+            // A new number each time: one just removed lingers a moment under the old one.
+            Self.serial &+= 1
+            descriptor.serialNum = Self.serial
             guard let made = CGVirtualDisplay(descriptor: descriptor) else { throw Failure.unavailable }
             display = made
             maxSide = side
@@ -113,10 +122,15 @@ final class DeviceDisplay: DeviceDisplaying {
         let notMirroring = physical.filter { CGDisplayMirrorsDisplay($0) != id }
         ptLog(.info, "screen: the phone's display is \(mode.width)×\(mode.height) points (\(mode.pixelWidth)×\(mode.pixelHeight) pixels) for \(width)×\(height); \(physical.count - notMirroring.count) of \(physical.count) of the Mac's displays mirror it")
         guard notMirroring.isEmpty else { throw Failure.notMirrored }
+        size = (width, height, refresh)
         return id
     }
 
     static let vendor: UInt32 = 0x5054
+
+    private static func physicalDisplays(besides id: CGDirectDisplayID) -> [CGDirectDisplayID] {
+        onlineDisplays().filter { $0 != id && CGDisplayVendorNumber($0) != vendor }
+    }
 
     /// The mode of `width`×`height` pixels, Retina (half the points) if there is one, at the
     /// refresh rate closest to `refresh`, once CoreGraphics lists it.
@@ -151,6 +165,7 @@ final class DeviceDisplay: DeviceDisplaying {
             }
         }
         self.display = nil   // released: macOS removes it
+        size = nil
         mirrored = []
         maxSide = 0
         if Self.owner == ObjectIdentifier(self) { Self.owner = nil }

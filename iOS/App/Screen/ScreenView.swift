@@ -210,105 +210,22 @@ struct ScreenView: View, Equatable {
 
     /// Copy and paste between the Mac and this iPhone, also on the keyboard's key row.
     private var clipboardMenu: some View {
-        Menu {
-            Button { model.copyFromMac() } label: { Label("Copy from \(model.macName)", systemImage: "doc.on.doc") }
-                .disabled(model.copying)
-            Button { model.pastePhoneClipboard() } label: { Label("Paste on \(model.macName)", systemImage: "doc.on.clipboard") }
-        } label: {
-            Image(systemName: "doc.on.clipboard").sideTarget(landscape)
-        }
-        .accessibilityLabel("Copy and paste")
+        ScreenClipboardMenu(model: model, macName: model.macName, copying: model.copying, landscape: landscape).equatable()
     }
 
     /// Mission Control: the same as the canvas's three-finger swipes.
     private var desktopsMenu: some View {
-        Menu {
-            Section("Or swipe with three fingers") {
-                Button { model.perform(.previousDesktop) } label: { Label("Previous desktop", systemImage: "arrow.left.square") }
-                Button { model.perform(.nextDesktop) } label: { Label("Next desktop", systemImage: "arrow.right.square") }
-                Button { model.perform(.missionControl) } label: { Label("Mission Control", systemImage: "rectangle.3.group") }
-                Button { model.perform(.appWindows) } label: { Label("App windows", systemImage: "macwindow.on.rectangle") }
-            }
-            Button { model.perform(.showDesktop) } label: { Label("Show desktop", systemImage: "menubar.dock.rectangle") }
-            // Only the lock: the Mac stays awake, and this view stays open on its lock screen.
-            if canLock {
-                Button { shell.control(.lock) } label: { Label("Lock \(model.macName)", systemImage: "lock") }
-            }
-            // Black on the Mac's own displays while this view goes on showing the screen.
-            if model.canHideMac {
-                Toggle(isOn: Binding(get: { model.macHidden }, set: { model.setMacHidden($0) })) {
-                    Label("Hide \(model.macName)'s display", systemImage: "eye.slash")
-                }
-            }
-        } label: {
-            if pad {
-                Label("Desktops", systemImage: "square.stack.3d.up").font(.subheadline.weight(.semibold)).padding(.horizontal, 10)
-            } else {
-                Image(systemName: "square.stack.3d.up").sideTarget(landscape)
-            }
-        }
-        .accessibilityLabel("Desktops and Mission Control")
+        ScreenDesktopsMenu(model: model, shell: shell, macName: model.macName, canLock: canLock, canHideMac: model.canHideMac,
+                           macHidden: model.macHidden, pad: pad, landscape: landscape).equatable()
     }
 
     /// How the Mac's screen is shown here: its shape, text size, picture and gestures, and
     /// how the view reaches the Mac. Each choice is one row opening its options, so the
     /// menu fits a phone held sideways (a menu taller than the screen doesn't scroll).
-    @ViewBuilder private var displayMenu: some View {
-        if model.canHideMac || model.connectionPath.flatMap(Self.describe) != nil {
-            Menu {
-                // How far the picture travels: a relay is the likeliest reason it lags.
-                if let path = model.connectionPath, let reach = Self.describe(path) {
-                    Section { Label(reach.text, systemImage: reach.symbol) }
-                }
-                // Only the Mac's own stream has these; Screen Sharing shows the screen as it is.
-                if model.canHideMac {
-                    // The Mac's own display as it is, or one it makes in this device's shape (which its own mirror meanwhile).
-                    Picker(selection: Binding(get: { model.fitsDevice }, set: { model.setFitsDevice($0) })) {
-                        Label("\(model.macName)'s display", systemImage: "laptopcomputer").tag(false)
-                        Label("Fit to this \(ThisDevice.name)", systemImage: pad ? "ipad" : "iphone").tag(true)
-                    } label: {
-                        Label("Screen shape", systemImage: "rectangle.portrait.on.rectangle.portrait")
-                    }
-                    .pickerStyle(.menu)
-                    // Only for a display made for this device: how big the Mac draws things on it.
-                    if model.fitsDevice {
-                        Picker(selection: Binding(get: { model.space }, set: { model.setSpace($0) })) {
-                            Label("Larger text", systemImage: "textformat.size.larger").tag(80)
-                            Label("Default", systemImage: "textformat.size").tag(100)
-                            Label("More space", systemImage: "textformat.size.smaller").tag(125)
-                        } label: {
-                            Label("Text size", systemImage: "textformat.size")
-                        }
-                        .pickerStyle(.menu)
-                    }
-                    Picker(selection: Binding(get: { model.quality }, set: { model.setQuality($0) })) {
-                        Text("Sharp: crisp text, 60 fps").tag(ScreenVideoWire.Quality.sharp)
-                        Text("Smooth: crisp text, \(ScreenModel.topFPS) fps").tag(ScreenVideoWire.Quality.smooth)
-                        Text("Fast: softer text, \(ScreenModel.topFPS) fps").tag(ScreenVideoWire.Quality.fast)
-                    } label: {
-                        Label("Picture", systemImage: "sparkles.tv")
-                    }
-                    .pickerStyle(.menu)
-                    // Pinch and rotate: the Mac's on a display made for this device; a choice on its own display.
-                    if model.fitsDevice {
-                        Section {
-                            Label("Pinch and rotate go to \(model.macName). Three-finger double-tap zooms here.", systemImage: "hand.pinch")
-                        }
-                    } else {
-                        Toggle(isOn: Binding(get: { model.pinchesMacOnItsDisplay }, set: { model.setPinchesMacOnItsDisplay($0) })) {
-                            Label("Pinch and rotate go to \(model.macName)", systemImage: "hand.pinch")
-                        }
-                    }
-                }
-            } label: {
-                if pad {
-                    Label("Display", systemImage: "display").font(.subheadline.weight(.semibold)).padding(.horizontal, 10)
-                } else {
-                    Image(systemName: "display").sideTarget(landscape)
-                }
-            }
-            .accessibilityLabel("Display settings")
-        }
+    private var displayMenu: some View {
+        ScreenDisplayMenu(model: model, macName: model.macName, canHideMac: model.canHideMac, path: model.connectionPath,
+                          fitsDevice: model.fitsDevice, space: model.space, quality: model.quality,
+                          pinchesMac: model.pinchesMacOnItsDisplay, pad: pad, landscape: landscape).equatable()
     }
 
     static func describe(_ path: ShellPath) -> (text: String, symbol: String)? {
@@ -413,6 +330,152 @@ private extension View {
     /// together; the portrait top bar keeps its tighter row.
     func sideTarget(_ on: Bool) -> some View {
         frame(width: on ? 44 : nil, height: on ? 44 : nil).contentShape(Rectangle())
+    }
+}
+
+// MARK: - Menus
+//
+// Each menu is its own view, equal while what it shows is equal: SwiftUI rebuilds an
+// open menu whenever the view holding it is evaluated again, which showed as the menu
+// flickering under the finger. The models are held only to act on, not observed.
+
+struct ScreenClipboardMenu: View, Equatable {
+    let model: ScreenModel
+    let macName: String
+    let copying: Bool
+    let landscape: Bool
+    nonisolated static func == (a: Self, b: Self) -> Bool {
+        a.macName == b.macName && a.copying == b.copying && a.landscape == b.landscape
+    }
+
+    @ViewBuilder var body: some View {
+        Menu {
+            Button { model.copyFromMac() } label: { Label("Copy from \(macName)", systemImage: "doc.on.doc") }
+                .disabled(copying)
+            Button { model.pastePhoneClipboard() } label: { Label("Paste on \(macName)", systemImage: "doc.on.clipboard") }
+        } label: {
+            Image(systemName: "doc.on.clipboard").sideTarget(landscape)
+        }
+        .accessibilityLabel("Copy and paste")
+    }
+}
+
+struct ScreenDesktopsMenu: View, Equatable {
+    let model: ScreenModel
+    let shell: ShellModel
+    let macName: String
+    let canLock: Bool
+    let canHideMac: Bool
+    let macHidden: Bool
+    let pad: Bool
+    let landscape: Bool
+    nonisolated static func == (a: Self, b: Self) -> Bool {
+        a.macName == b.macName && a.canLock == b.canLock && a.canHideMac == b.canHideMac && a.macHidden == b.macHidden
+            && a.pad == b.pad && a.landscape == b.landscape
+    }
+
+    @ViewBuilder var body: some View {
+        Menu {
+            Section("Or swipe with three fingers") {
+                Button { model.perform(.previousDesktop) } label: { Label("Previous desktop", systemImage: "arrow.left.square") }
+                Button { model.perform(.nextDesktop) } label: { Label("Next desktop", systemImage: "arrow.right.square") }
+                Button { model.perform(.missionControl) } label: { Label("Mission Control", systemImage: "rectangle.3.group") }
+                Button { model.perform(.appWindows) } label: { Label("App windows", systemImage: "macwindow.on.rectangle") }
+            }
+            Button { model.perform(.showDesktop) } label: { Label("Show desktop", systemImage: "menubar.dock.rectangle") }
+            // Only the lock: the Mac stays awake, and this view stays open on its lock screen.
+            if canLock {
+                Button { shell.control(.lock) } label: { Label("Lock \(macName)", systemImage: "lock") }
+            }
+            // Black on the Mac's own displays while this view goes on showing the screen.
+            if canHideMac {
+                Toggle(isOn: Binding(get: { macHidden }, set: { model.setMacHidden($0) })) {
+                    Label("Hide \(macName)'s display", systemImage: "eye.slash")
+                }
+            }
+        } label: {
+            if pad {
+                Label("Desktops", systemImage: "square.stack.3d.up").font(.subheadline.weight(.semibold)).padding(.horizontal, 10)
+            } else {
+                Image(systemName: "square.stack.3d.up").sideTarget(landscape)
+            }
+        }
+        .accessibilityLabel("Desktops and Mission Control")
+    }
+}
+
+struct ScreenDisplayMenu: View, Equatable {
+    let model: ScreenModel
+    let macName: String
+    let canHideMac: Bool
+    let path: ShellPath?
+    let fitsDevice: Bool
+    let space: Int
+    let quality: ScreenVideoWire.Quality
+    let pinchesMac: Bool
+    let pad: Bool
+    let landscape: Bool
+    nonisolated static func == (a: Self, b: Self) -> Bool {
+        a.macName == b.macName && a.canHideMac == b.canHideMac && a.path == b.path && a.fitsDevice == b.fitsDevice && a.space == b.space
+            && a.quality == b.quality && a.pinchesMac == b.pinchesMac && a.pad == b.pad && a.landscape == b.landscape
+    }
+
+    @ViewBuilder var body: some View {
+        if canHideMac || path.flatMap(ScreenView.describe) != nil {
+            Menu {
+                // How far the picture travels: a relay is the likeliest reason it lags.
+                if let path = path, let reach = ScreenView.describe(path) {
+                    Section { Label(reach.text, systemImage: reach.symbol) }
+                }
+                // Only the Mac's own stream has these; Screen Sharing shows the screen as it is.
+                if canHideMac {
+                    // The Mac's own display as it is, or one it makes in this device's shape (which its own mirror meanwhile).
+                    Picker(selection: Binding(get: { fitsDevice }, set: { model.setFitsDevice($0) })) {
+                        Label("\(macName)'s display", systemImage: "laptopcomputer").tag(false)
+                        Label("Fit to this \(ThisDevice.name)", systemImage: pad ? "ipad" : "iphone").tag(true)
+                    } label: {
+                        Label("Screen shape", systemImage: "rectangle.portrait.on.rectangle.portrait")
+                    }
+                    .pickerStyle(.menu)
+                    // Only for a display made for this device: how big the Mac draws things on it.
+                    if fitsDevice {
+                        Picker(selection: Binding(get: { space }, set: { model.setSpace($0) })) {
+                            Label("Larger text", systemImage: "textformat.size.larger").tag(80)
+                            Label("Default", systemImage: "textformat.size").tag(100)
+                            Label("More space", systemImage: "textformat.size.smaller").tag(125)
+                        } label: {
+                            Label("Text size", systemImage: "textformat.size")
+                        }
+                        .pickerStyle(.menu)
+                    }
+                    Picker(selection: Binding(get: { quality }, set: { model.setQuality($0) })) {
+                        Text("Sharp: crisp text, 60 fps").tag(ScreenVideoWire.Quality.sharp)
+                        Text("Smooth: crisp text, \(ScreenModel.topFPS) fps").tag(ScreenVideoWire.Quality.smooth)
+                        Text("Fast: softer text, \(ScreenModel.topFPS) fps").tag(ScreenVideoWire.Quality.fast)
+                    } label: {
+                        Label("Picture", systemImage: "sparkles.tv")
+                    }
+                    .pickerStyle(.menu)
+                    // Pinch and rotate: the Mac's on a display made for this device; a choice on its own display.
+                    if fitsDevice {
+                        Section {
+                            Label("Pinch and rotate go to \(macName). Three-finger double-tap zooms here.", systemImage: "hand.pinch")
+                        }
+                    } else {
+                        Toggle(isOn: Binding(get: { pinchesMac }, set: { model.setPinchesMacOnItsDisplay($0) })) {
+                            Label("Pinch and rotate go to \(macName)", systemImage: "hand.pinch")
+                        }
+                    }
+                }
+            } label: {
+                if pad {
+                    Label("Display", systemImage: "display").font(.subheadline.weight(.semibold)).padding(.horizontal, 10)
+                } else {
+                    Image(systemName: "display").sideTarget(landscape)
+                }
+            }
+            .accessibilityLabel("Display settings")
+        }
     }
 }
 

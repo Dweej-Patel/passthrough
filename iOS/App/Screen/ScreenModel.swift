@@ -901,10 +901,15 @@ final class ScreenModel: ObservableObject {
     /// The canvas in pixels, as the device is held now: a display in its shape turns with it.
     func viewPixelsChanged(_ size: CGSize) {
         guard size.width > 0, size.height > 0, size != viewPixels else { return }
-        // A few points' difference (a bar settling) isn't worth remaking the Mac's display for.
-        if let viewPixels, abs(size.width - viewPixels.width) < viewPixels.width * 0.03,
-           abs(size.height - viewPixels.height) < viewPixels.height * 0.03 { return }
-        viewPixels = size
+        // Held the same way, it only ever grows: the view getting smaller is its own bars (the
+        // side bar doubling up, a key row), which isn't worth remaking the Mac's display for.
+        if let held = viewPixels, (size.width > size.height) == (held.width > held.height) {
+            let grown = CGSize(width: max(size.width, held.width), height: max(size.height, held.height))
+            if abs(grown.width - held.width) < held.width * 0.03, abs(grown.height - held.height) < held.height * 0.03 { return }
+            viewPixels = grown
+        } else {
+            viewPixels = size
+        }
         guard fitsDevice else { return }
         // Once the turn has settled: each change remakes the Mac's display.
         relayoutTask?.cancel()

@@ -49,6 +49,8 @@ final class InputInjector: InputSink {
         return source
     }()
     private var position: CGPoint
+    /// Movement not yet reported in an event's deltas.
+    private var travel = CGPoint.zero
     private var buttons: UInt8 = 0
     /// Gestures begun and not yet ended.
     private var gestures: Set<ScreenVideoWire.Gesture> = []
@@ -61,8 +63,11 @@ final class InputInjector: InputSink {
     }
 
     func pointer(x: UInt16, y: UInt16, buttons new: UInt8) {
+        let before = position
         position = CGPoint(x: display.minX + CGFloat(x) / 65535 * (display.width - 1),
                            y: display.minY + CGFloat(y) / 65535 * (display.height - 1))
+        travel.x += position.x - before.x
+        travel.y += position.y - before.y
         let changed = (new ^ buttons) & 0b111
         guard changed != 0 else {
             let type: CGEventType = buttons & 1 != 0 ? .leftMouseDragged : buttons & 4 != 0 ? .rightMouseDragged
@@ -96,6 +101,13 @@ final class InputInjector: InputSink {
         // The source's flags would otherwise come along: a ⌃ still held there makes a click a right-click.
         event.flags = []
         if clicks > 0 { event.setIntegerValueField(.mouseEventClickState, value: Int64(clicks)) }
+        // How far it moved since the last event, as a real mouse says: apps that move their own
+        // window (a custom title bar) or track drags by it get nothing from the position alone.
+        let dx = travel.x.rounded(.towardZero), dy = travel.y.rounded(.towardZero)
+        travel.x -= dx
+        travel.y -= dy
+        event.setIntegerValueField(.mouseEventDeltaX, value: Int64(dx))
+        event.setIntegerValueField(.mouseEventDeltaY, value: Int64(dy))
         event.post(tap: .cghidEventTap)
     }
 
