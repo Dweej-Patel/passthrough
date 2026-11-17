@@ -48,7 +48,7 @@ public final class IrohShellListener: @unchecked Sendable {
     }
 
     /// As `ShellListener.screenVideo`.
-    public var screenVideo: (@Sendable (_ phoneID: String) -> (any ScreenVideoSource)?)? {
+    public var screenVideo: (@Sendable (_ phoneID: String, _ label: String) -> (any ScreenVideoSource)?)? {
         get { gate.screenVideoFactory.get() }
         set { gate.screenVideoFactory.set(newValue) }
     }

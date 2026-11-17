@@ -350,6 +350,7 @@ final class ScreenCanvasView: UIView, UIScrollViewDelegate, UIKeyInput, UIGestur
 
     deinit {
         if let foregroundObserver { NotificationCenter.default.removeObserver(foregroundObserver) }
+        momentumLink?.invalidate()
     }
 
     private weak var move: UIPanGestureRecognizer?
@@ -605,6 +606,8 @@ final class ScreenCanvasView: UIView, UIScrollViewDelegate, UIKeyInput, UIGestur
 
     /// Remembers where each finger came down, for `gestureRecognizerShouldBegin`.
     func gestureRecognizer(_ recognizer: UIGestureRecognizer, shouldReceive touch: UITouch) -> Bool {
+        // A touch on the glass stops a scroll still carrying on (nothing to stop otherwise).
+        stopMomentum()
         // Palm rejection: while the Pencil is in use, a finger is the hand holding
         // it. (Only then: judging a touch by its size rejected ordinary fingers.)
         if recognizer !== pen, touch.type == .direct, penInUse { return false }
@@ -638,6 +641,8 @@ final class ScreenCanvasView: UIView, UIScrollViewDelegate, UIKeyInput, UIGestur
     /// Two fingers: the Mac's scroll, content following the fingers.
     @objc private func wheeled(_ recognizer: UIPanGestureRecognizer) {
         switch recognizer.state {
+        case .began:
+            stopMomentum()
         case .changed:
             guard content.frame.width > 0 else { return }
             let translation = recognizer.translation(in: self)
@@ -646,11 +651,75 @@ final class ScreenCanvasView: UIView, UIScrollViewDelegate, UIKeyInput, UIGestur
             let at = mode == .direct ? screenPoint(recognizer.location(in: self)) : cursorPoint
             // A notch per 16 of the phone's points, as before.
             onScroll?(at, CGPoint(x: translation.x * pixelsPerPoint, y: translation.y * pixelsPerPoint), 16 * pixelsPerPoint)
-        case .ended, .cancelled, .failed:
+            momentumAt = at
+        case .ended:
+            // Let go while moving: it carries on and slows, as on a Mac's trackpad.
+            let velocity = recognizer.velocity(in: self)
+            guard content.frame.width > 0, hypot(velocity.x, velocity.y) >= Self.momentumStartSpeed, let at = momentumAt else {
+                return onScrollEnded?() ?? ()
+            }
+            let pixelsPerPoint = screenSize.width / content.frame.width
+            startMomentum(CGPoint(x: velocity.x * pixelsPerPoint, y: velocity.y * pixelsPerPoint), at: at, pixelsPerPoint: pixelsPerPoint)
+        case .cancelled, .failed:
             onScrollEnded?()
         default:
             break
         }
+    }
+
+    // MARK: Momentum
+
+    /// Where the last two-finger scroll went, for its momentum.
+    private var momentumAt: CGPoint?
+    /// A scroll still carrying on: its speed (screen pixels a second), where, and its notch.
+    private var momentum: (velocity: CGPoint, at: CGPoint, pixelsPerPoint: CGFloat)?
+    private var momentumLink: CADisplayLink?
+    private var momentumTime: CFTimeInterval = 0
+    /// Fingers let go faster than this (points a second) carry on; it stops under `momentumStopSpeed`.
+    private static let momentumStartSpeed: CGFloat = 250
+    private static let momentumStopSpeed: CGFloat = 40
+    /// UIScrollView's normal deceleration: the share of the speed left after each millisecond.
+    private static let momentumDecay = 0.998
+
+    private func startMomentum(_ velocity: CGPoint, at: CGPoint, pixelsPerPoint: CGFloat) {
+        stopMomentum(ended: false)
+        momentum = (velocity, at, pixelsPerPoint)
+        momentumTime = CACurrentMediaTime()
+        let link = CADisplayLink(target: WeakTarget(self), selector: #selector(WeakTarget.tick(_:)))
+        link.preferredFrameRateRange = CAFrameRateRange(minimum: 30, maximum: 120, preferred: 120)
+        link.add(to: .main, forMode: .common)
+        momentumLink = link
+    }
+
+    fileprivate func momentumTick(_ link: CADisplayLink) {
+        guard var current = momentum else { return stopMomentum() }
+        let now = link.timestamp
+        let elapsed = min(max(now - momentumTime, 0), 0.05)
+        momentumTime = now
+        let left = CGFloat(pow(Self.momentumDecay, elapsed * 1000))
+        current.velocity = CGPoint(x: current.velocity.x * left, y: current.velocity.y * left)
+        momentum = current
+        guard hypot(current.velocity.x, current.velocity.y) / current.pixelsPerPoint >= Self.momentumStopSpeed else { return stopMomentum() }
+        onScroll?(current.at, CGPoint(x: current.velocity.x * elapsed, y: current.velocity.y * elapsed), 16 * current.pixelsPerPoint)
+    }
+
+    /// Any touch stops it, as touching a scrolling page does. `ended`: the scroll is over (not a new one starting).
+    private func stopMomentum(ended: Bool = true) {
+        momentumLink?.invalidate()
+        momentumLink = nil
+        guard momentum != nil else { return }
+        momentum = nil
+        if ended { onScrollEnded?() }
+    }
+
+    override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) {
+        stopMomentum()
+        super.touchesBegan(touches, with: event)
+    }
+
+    override func willMove(toWindow newWindow: UIWindow?) {
+        super.willMove(toWindow: newWindow)
+        if newWindow == nil { stopMomentum() }
     }
 
     /// Three fingers, as on the Mac: swiping left brings in the desktop on the right.
@@ -847,6 +916,16 @@ final class ScreenKeyRow: UIInputView {
         case .paste: symbol("doc.on.clipboard")
         }
         return config
+    }
+}
+
+/// A display link's target that doesn't keep the canvas alive.
+private final class WeakTarget: NSObject {
+    weak var canvas: ScreenCanvasView?
+    init(_ canvas: ScreenCanvasView) { self.canvas = canvas }
+    @objc func tick(_ link: CADisplayLink) {
+        guard let canvas else { return link.invalidate() }
+        canvas.momentumTick(link)
     }
 }
 

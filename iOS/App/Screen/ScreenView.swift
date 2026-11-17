@@ -237,6 +237,25 @@ struct ScreenView: View {
                     }
                     .pickerStyle(.inline)
                 }
+                // Only for a display made for this device: how big the Mac draws things on it.
+                if model.fitsDevice {
+                    Section("Text size") {
+                        Picker("Text size", selection: Binding(get: { model.space }, set: { model.setSpace($0) })) {
+                            Label("Larger text", systemImage: "textformat.size.larger").tag(80)
+                            Label("Default", systemImage: "textformat.size").tag(100)
+                            Label("More space", systemImage: "textformat.size.smaller").tag(125)
+                        }
+                        .pickerStyle(.inline)
+                    }
+                }
+                Section("Picture") {
+                    Picker("Picture", selection: Binding(get: { model.quality }, set: { model.setQuality($0) })) {
+                        Text("Sharp: crisp text, 60 fps").tag(ScreenVideoWire.Quality.sharp)
+                        Text("Smooth: crisp text, \(Self.topFPS) fps").tag(ScreenVideoWire.Quality.smooth)
+                        Text("Fast: softer text, \(Self.topFPS) fps").tag(ScreenVideoWire.Quality.fast)
+                    }
+                    .pickerStyle(.inline)
+                }
             }
         } label: {
             if pad {
@@ -247,6 +266,9 @@ struct ScreenView: View {
         }
         .accessibilityLabel("Desktops and Mission Control")
     }
+
+    /// This screen's top frame rate, as Smooth and Fast use it.
+    static var topFPS: Int { min(120, max(60, UIScreen.main.maximumFramesPerSecond)) }
 
     static func describe(_ path: ShellPath) -> (text: String, symbol: String)? {
         switch path {
@@ -277,6 +299,17 @@ struct ScreenView: View {
                     }
                 }
                 .animation(.easeInOut(duration: 0.2), value: model.notice)
+                .overlay(alignment: .top) {
+                    // Also open elsewhere: one tap makes this the one.
+                    if let other = model.otherViewers.first {
+                        UseHereBanner(others: model.otherViewers.count > 1 ? "\(other) and \(model.otherViewers.count - 1) more" : other) {
+                            model.useHere()
+                        }
+                        .padding(.top, pad ? 64 : 10)
+                        .transition(.opacity.combined(with: .move(edge: .top)))
+                    }
+                }
+                .animation(.easeInOut(duration: 0.2), value: model.otherViewers)
         case .connecting:
             VStack(spacing: 12) {
                 ProgressView()
@@ -290,6 +323,20 @@ struct ScreenView: View {
             ScreenSharingPrompt(macName: model.macName, reason: model.slowReason,
                                 onUse: { model.useScreenSharing(always: $0) },
                                 onCancel: { model.stop(); dismiss() })
+        case let .movedAway(name):
+            VStack(spacing: 16) {
+                Image(systemName: "arrow.left.arrow.right.square")
+                    .font(.system(size: 40)).foregroundStyle(PTTheme.accentEnd)
+                Text("\(model.macName)'s screen is open on \(name) now.")
+                    .font(.subheadline).multilineTextAlignment(.center).foregroundStyle(.secondary)
+                Button { model.takeBack(shell: shell, context: lock.context) } label: {
+                    Label("Use Here", systemImage: pad ? "ipad" : "iphone").font(.subheadline.weight(.semibold))
+                }
+                .buttonStyle(.borderedProminent)
+                .buttonBorderShape(.capsule)
+                .tint(PTTheme.accentEnd)
+            }
+            .padding(32)
         case let .failed(message):
             VStack(spacing: 16) {
                 Image(systemName: "display.trianglebadge.exclamationmark")
@@ -312,6 +359,32 @@ private extension View {
     /// together; the portrait top bar keeps its tighter row.
     func sideTarget(_ on: Bool) -> some View {
         frame(width: on ? 44 : nil, height: on ? 44 : nil).contentShape(Rectangle())
+    }
+}
+
+/// "Also open on iPad · Use Here": the Mac's screen is being viewed on another
+/// device too; using it here ends the view there.
+struct UseHereBanner: View {
+    let others: String
+    let onUse: () -> Void
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Text("Also open on \(others)")
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+            Button("Use Here", action: onUse)
+                .font(.caption.weight(.bold))
+                .buttonStyle(.borderedProminent)
+                .buttonBorderShape(.capsule)
+                .controlSize(.mini)
+                .tint(PTTheme.accentEnd)
+        }
+        .padding(.leading, 14).padding(.trailing, 6).padding(.vertical, 6)
+        .background(.regularMaterial, in: Capsule())
+        .accessibilityElement(children: .combine)
+        .accessibilityAction(named: "Use Here", onUse)
     }
 }
 

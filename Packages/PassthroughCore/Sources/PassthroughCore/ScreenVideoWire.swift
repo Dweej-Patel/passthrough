@@ -43,14 +43,14 @@ public enum ScreenVideoWire {
         /// What the pointer looks like: a PNG drawn `width`×`height` stream
         /// pixels, its tip at (`hotX`, `hotY`) in them. Sent when it changes.
         case cursorShape(width: Int, height: Int, hotX: Int, hotY: Int, png: Data)
+        /// The other devices viewing this Mac's screen now, by name; sent when that changes.
+        case viewers([String])
+        /// Another device took this view over (`useHere`): the stream ends after this.
+        case movedAway(to: String)
 
         // Phone → Mac
-        /// What the phone wants to see, first and again whenever that changes
-        /// (it turned, or the user chose another `fit`). `mac`: the Mac's own
-        /// display, fitted inside `width`×`height` pixels. `device`: a display
-        /// of exactly `width`×`height` pixels made for the phone. `codecs`: what
-        /// the phone decodes; the Mac picks one.
-        case hello(width: Int, height: Int, fit: Fit, codecs: Codecs)
+        /// What the phone wants to see (`Hello`), first and again whenever that changes.
+        case hello(Hello)
         /// Frame `number` is on the phone's screen.
         case ack(number: UInt32)
         /// The pointer at (`x`, `y`), each 0…65535 across the screen, with RFB-numbered `buttons` held.
@@ -70,6 +70,47 @@ public enum ScreenVideoWire {
         /// Hide what the Mac's own displays show (black, to anyone at the Mac) while
         /// this stream goes on showing it, or show it again; answered with `curtained`.
         case curtain(Bool)
+        /// End every other device's view of this Mac (they get `movedAway`): this one is used here now.
+        case useHere
+    }
+
+    /// What a phone asks to see.
+    public struct Hello: Equatable, Sendable {
+        /// `mac`: the Mac's own display, fitted inside `width`×`height` pixels.
+        /// `device`: a stream of exactly `width`×`height` pixels of a display made for the phone.
+        public var width: Int
+        public var height: Int
+        public var fit: Fit
+        /// What the phone decodes; the Mac picks one.
+        public var codecs: Codecs
+        /// Frames a second the phone shows at most (60, or 120 on ProMotion).
+        public var fps: Int
+        public var quality: Quality
+        /// `device` only: the display's size against the stream's, in percent.
+        /// 100: one Mac point to two of the phone's pixels. Under: bigger text
+        /// (the picture is scaled up a little); over: more room (scaled down).
+        public var space: Int
+
+        public init(width: Int, height: Int, fit: Fit = .mac, codecs: Codecs = .h264, fps: Int = 60,
+                    quality: Quality = .sharp, space: Int = 100) {
+            self.width = width
+            self.height = height
+            self.fit = fit
+            self.codecs = codecs
+            self.fps = fps
+            self.quality = quality
+            self.space = space
+        }
+    }
+
+    /// What matters most when the link can't carry it all.
+    public enum Quality: UInt8, Equatable, Sendable {
+        /// Crisp text: up to 60 frames a second, the size kept as long as it can be.
+        case sharp = 0
+        /// Crisp text at up to the phone's frame rate (120 on ProMotion).
+        case smooth = 1
+        /// Motion first: the phone's frame rate, a slightly smaller (softer) picture.
+        case fast = 2
     }
 
     /// What a `copy` found. Only what that ⌘C put on the Mac's clipboard is
@@ -116,8 +157,9 @@ public enum ScreenVideoWire {
     }
 
     enum Kind: UInt8 {
-        case format = 1, frame = 2, copied = 3, curtained = 4, fitted = 5, cursor = 6, cursorShape = 7
+        case format = 1, frame = 2, copied = 3, curtained = 4, fitted = 5, cursor = 6, cursorShape = 7, viewers = 8, movedAway = 9
         case hello = 16, ack = 17, pointer = 18, scroll = 19, key = 20, text = 21, clipboard = 22, keyframeRequest = 23, copy = 24, curtain = 25
+        case useHere = 26
     }
 
     public enum Failure: Error, Equatable { case tooLarge, malformed }
@@ -143,9 +185,21 @@ public enum ScreenVideoWire {
             case .tooLong: payload.append(2)
             case .notText: payload.append(3)
             }
-        case let .hello(width, height, fit, codecs):
+        case let .hello(hello):
             kind = .hello
-            payload.append(u16: width); payload.append(u16: height); payload.append(fit.rawValue); payload.append(codecs.rawValue)
+            payload.append(u16: hello.width); payload.append(u16: hello.height); payload.append(hello.fit.rawValue)
+            payload.append(hello.codecs.rawValue); payload.append(UInt8(clamping: hello.fps)); payload.append(hello.quality.rawValue)
+            payload.append(UInt8(clamping: hello.space))
+        case let .viewers(names):
+            kind = .viewers
+            let kept = names.prefix(16).map { Data(String($0.prefix(64)).utf8.prefix(255)) }
+            payload.append(UInt8(kept.count))
+            for name in kept { payload.append(UInt8(name.count)); payload.append(name) }
+        case let .movedAway(name):
+            kind = .movedAway
+            payload.append(Data(String(name.prefix(64)).utf8))
+        case .useHere:
+            kind = .useHere
         case let .fitted(fit):
             kind = .fitted
             payload.append(fit.rawValue)
@@ -275,10 +329,26 @@ public enum ScreenVideoWire {
             try need(5)
             return .frame(number: p.u32(at: b), keyframe: p[b + 4] & 1 != 0, data: p.subdata(in: (b + 5)..<p.endIndex))
         case .hello:
-            try need(6)
-            // A fit added later reads as the Mac's own display; H.264 is always decodable.
-            return .hello(width: Int(p.u16(at: b)), height: Int(p.u16(at: b + 2)), fit: Fit(rawValue: p[b + 4]) ?? .mac,
-                          codecs: Codecs(rawValue: p[b + 5]).union(.h264))
+            try need(9)
+            // A fit or quality added later reads as the first; H.264 is always decodable.
+            return .hello(Hello(width: Int(p.u16(at: b)), height: Int(p.u16(at: b + 2)), fit: Fit(rawValue: p[b + 4]) ?? .mac,
+                                codecs: Codecs(rawValue: p[b + 5]).union(.h264), fps: min(max(Int(p[b + 6]), 15), 120),
+                                quality: Quality(rawValue: p[b + 7]) ?? .sharp, space: min(max(Int(p[b + 8]), 50), 200)))
+        case .viewers:
+            try need(1)
+            var names: [String] = [], offset = 1
+            for _ in 0..<Int(p[b]) {
+                try need(offset + 1)
+                let length = Int(p[b + offset])
+                try need(offset + 1 + length)
+                names.append(String(decoding: p.subdata(in: (b + offset + 1)..<(b + offset + 1 + length)), as: UTF8.self))
+                offset += 1 + length
+            }
+            return .viewers(names)
+        case .movedAway:
+            return .movedAway(to: String(decoding: p, as: UTF8.self))
+        case .useHere:
+            return .useHere
         case .fitted:
             try need(1)
             return .fitted(Fit(rawValue: p[b]) ?? .mac)

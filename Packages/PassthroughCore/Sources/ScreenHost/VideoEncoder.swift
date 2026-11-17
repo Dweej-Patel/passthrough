@@ -23,7 +23,7 @@ final class VideoEncoder {
     let height: Int
     private var session: VTCompressionSession?
 
-    init(codec: ScreenVideoWire.Codec = .h264, width: Int, height: Int, bitRate: Int) throws {
+    init(codec: ScreenVideoWire.Codec = .h264, width: Int, height: Int, bitRate: Int, fps: Int = 60) throws {
         self.codec = codec
         self.width = width
         self.height = height
@@ -41,7 +41,7 @@ final class VideoEncoder {
             kVTCompressionPropertyKey_ProfileLevel: codec == .hevc ? kVTProfileLevel_HEVC_Main_AutoLevel
                 : kVTProfileLevel_H264_ConstrainedHigh_AutoLevel,
             kVTCompressionPropertyKey_AverageBitRate: bitRate,
-            kVTCompressionPropertyKey_ExpectedFrameRate: 60,
+            kVTCompressionPropertyKey_ExpectedFrameRate: fps,
             // Keyframes only when asked (start, or a phone that lost its place): they cost.
             kVTCompressionPropertyKey_MaxKeyFrameIntervalDuration: 3600,
             kVTCompressionPropertyKey_ColorPrimaries: kCVImageBufferColorPrimaries_ITU_R_709_2,

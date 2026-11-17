@@ -1,4 +1,5 @@
 import Foundation
+import PassthroughCore
 
 /// How fast the screen stream may go, learned from the phone's acks (each one
 /// says a frame is on its screen). Two things follow from them:
@@ -20,8 +21,9 @@ import Foundation
 /// Times are seconds on any monotonic clock; nothing here reads one.
 struct StreamPacer {
     static let minWindow = 2
-    static let maxWindow = 16
-    static let frameInterval: TimeInterval = 1.0 / 60
+    static let maxWindow = 24
+    /// The time between frames at the phone's frame rate (`setProfile`).
+    private(set) var frameInterval: TimeInterval = 1.0 / 60
     /// The shortest trip is the minimum over this long, so a path that got slower (direct to relay) is learned again.
     static let minRTTSpan: TimeInterval = 10
     static let minBitRate = 400_000
@@ -33,10 +35,25 @@ struct StreamPacer {
     static let growEvery: TimeInterval = 0.5
     static let growStep = 1.08
 
-    /// Each side's share of the full size, largest first.
-    static let scales: [Double] = [1, 0.75, 0.5]
-    /// Smaller when the bitrate is under this share of what the current size takes, for `shrinkAfter`.
-    static let shrinkBelow = 0.35
+    /// What the phone's quality choice means here.
+    struct Profile: Equatable {
+        /// Each side's share of the full size it may be captured at, largest first.
+        var scales: [Double]
+        /// Smaller when the bitrate is under this share of what the current size takes, for `shrinkAfter`.
+        var shrinkBelow: Double
+
+        static func of(_ quality: ScreenVideoWire.Quality) -> Profile {
+            switch quality {
+            // Text first: the size goes only when the picture would be very blurry.
+            case .sharp: Profile(scales: [1, 0.75, 0.5], shrinkBelow: 0.2)
+            case .smooth: Profile(scales: [1, 0.75, 0.5], shrinkBelow: 0.35)
+            // Motion first: a little smaller from the start, and smaller sooner.
+            case .fast: Profile(scales: [0.75, 0.5], shrinkBelow: 0.5)
+            }
+        }
+    }
+
+    private(set) var profile = Profile.of(.sharp)
     static let shrinkAfter: TimeInterval = 2
     /// Bigger when it is at least this share of what the next size up takes, for `growAfter`.
     static let growAbove = 0.7
@@ -71,8 +88,19 @@ struct StreamPacer {
     /// Frames that may be sent and not yet acked.
     var window: Int {
         guard let minRTT else { return Self.minWindow }
-        let fit = Int((minRTT / Self.frameInterval).rounded(.up)) + 1
+        let fit = Int((minRTT / frameInterval).rounded(.up)) + 1
         return min(max(fit, Self.minWindow), Self.maxWindow)
+    }
+
+    /// The phone's quality choice and frame rate; the scale moves into the profile's if it isn't one of them.
+    mutating func setProfile(_ profile: Profile, fps: Int) {
+        self.profile = profile
+        frameInterval = 1 / Double(min(max(fps, 15), 120))
+        if !profile.scales.contains(scale) {
+            scale = profile.scales.first(where: { $0 <= scale }) ?? profile.scales[0]
+        }
+        lowSince = nil
+        highSince = nil
     }
 
     /// The stream changed size: the same share of the new top bitrate.
@@ -86,21 +114,22 @@ struct StreamPacer {
     /// After an ack: a new `scale` to capture at, when the bitrate has been out
     /// of step with the size long enough; nil to stay.
     mutating func rescale(at now: TimeInterval) -> Double? {
-        guard let index = Self.scales.firstIndex(of: scale) else { return nil }
+        let scales = profile.scales
+        guard let index = scales.firstIndex(of: scale) else { return nil }
         func share(_ scale: Double) -> Double { Double(bitRate) / (Double(maxBitRate) * scale * scale) }
-        if index + 1 < Self.scales.count, share(scale) < Self.shrinkBelow {
+        if index + 1 < scales.count, share(scale) < profile.shrinkBelow {
             highSince = nil
             let since = lowSince ?? now
             lowSince = since
             guard now - since >= Self.shrinkAfter, now - lastRescale >= Self.rescaleGap else { return nil }
-            return changeScale(to: Self.scales[index + 1], at: now)
+            return changeScale(to: scales[index + 1], at: now)
         }
         lowSince = nil
-        if index > 0, share(Self.scales[index - 1]) >= Self.growAbove {
+        if index > 0, share(scales[index - 1]) >= Self.growAbove {
             let since = highSince ?? now
             highSince = since
             guard now - since >= Self.growAfter, now - lastRescale >= Self.rescaleGap else { return nil }
-            return changeScale(to: Self.scales[index - 1], at: now)
+            return changeScale(to: scales[index - 1], at: now)
         }
         highSince = nil
         return nil

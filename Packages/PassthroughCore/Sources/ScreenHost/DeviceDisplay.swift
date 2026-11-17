@@ -7,10 +7,10 @@ import PassthroughCore
 /// A display in the phone's shape, which the stream shows instead of the
 /// Mac's own (`ScreenVideoWire.Fit.device`): `DeviceDisplay`, or a test's.
 protocol DeviceDisplaying: AnyObject, Sendable {
-    /// A display of `width`×`height` pixels that the Mac's own displays
-    /// mirror, made or changed to that size; its id. Throws when it can't,
-    /// and then it is closed.
-    @MainActor func show(width: Int, height: Int) async throws -> CGDirectDisplayID
+    /// A display of `width`×`height` pixels refreshing up to `fps` times a second (60 or 120)
+    /// that the Mac's own displays mirror, made or changed to that; its id. Throws when it
+    /// can't, and then it is closed.
+    @MainActor func show(width: Int, height: Int, fps: Int) async throws -> CGDirectDisplayID
     /// Gone, and the Mac's displays as they were. Idempotent.
     @MainActor func close()
 }
@@ -47,16 +47,16 @@ final class DeviceDisplay: DeviceDisplaying {
 
     nonisolated init() {}
 
-    func show(width: Int, height: Int) async throws -> CGDirectDisplayID {
+    func show(width: Int, height: Int, fps: Int) async throws -> CGDirectDisplayID {
         do {
-            return try await make(width: width & ~1, height: height & ~1)
+            return try await make(width: width & ~1, height: height & ~1, refresh: fps > 60 ? 120 : 60)
         } catch {
             close()
             throw error
         }
     }
 
-    private func make(width: Int, height: Int) async throws -> CGDirectDisplayID {
+    private func make(width: Int, height: Int, refresh: Double) async throws -> CGDirectDisplayID {
         guard width >= 320, height >= 320 else { throw Failure.noMode(width: width, height: height) }
         let me = ObjectIdentifier(self)
         guard Self.owner == nil || Self.owner == me else { throw Failure.inUse }
@@ -89,10 +89,10 @@ final class DeviceDisplay: DeviceDisplaying {
         // these pixels at half the points is chosen below.
         let settings = CGVirtualDisplaySettings()
         settings.hiDPI = 1
-        settings.modes = [CGVirtualDisplayMode(width: UInt(width), height: UInt(height), refreshRate: 60),
-                          CGVirtualDisplayMode(width: UInt(width / 2), height: UInt(height / 2), refreshRate: 60)]
+        settings.modes = [CGVirtualDisplayMode(width: UInt(width), height: UInt(height), refreshRate: refresh),
+                          CGVirtualDisplayMode(width: UInt(width / 2), height: UInt(height / 2), refreshRate: refresh)]
         guard display.apply(settings) else { throw Failure.noMode(width: width, height: height) }
-        let mode = try await self.mode(of: id, width: width, height: height)
+        let mode = try await self.mode(of: id, width: width, height: height, refresh: refresh)
 
         var config: CGDisplayConfigRef?
         let begun = CGBeginDisplayConfiguration(&config)
@@ -106,15 +106,19 @@ final class DeviceDisplay: DeviceDisplaying {
         return id
     }
 
-    /// The mode of `width`×`height` pixels, Retina (half the points) if there is one, once CoreGraphics lists it.
-    private func mode(of id: CGDirectDisplayID, width: Int, height: Int) async throws -> CGDisplayMode {
+    /// The mode of `width`×`height` pixels, Retina (half the points) if there is one, at the
+    /// refresh rate closest to `refresh`, once CoreGraphics lists it.
+    private func mode(of id: CGDirectDisplayID, width: Int, height: Int, refresh: Double) async throws -> CGDisplayMode {
         let options = [kCGDisplayShowDuplicateLowResolutionModes: kCFBooleanTrue] as CFDictionary
         let deadline = Date().addingTimeInterval(Self.modeWait)
         while true {
             let modes = CGDisplayCopyAllDisplayModes(id, options) as? [CGDisplayMode] ?? []
-            let matching = modes.filter { $0.pixelWidth == width && $0.pixelHeight == height }
-            if let retina = matching.first(where: { $0.width * 2 == width }) ?? matching.min(by: { $0.width < $1.width }) {
-                return retina
+            let sized = modes.filter { $0.pixelWidth == width && $0.pixelHeight == height }
+            let retina = sized.filter { $0.width * 2 == width }
+            let matching = retina.isEmpty ? sized : retina
+            // A mode's refresh rate reads 0 when it isn't known.
+            if let best = matching.min(by: { abs(($0.refreshRate == 0 ? 60 : $0.refreshRate) - refresh) < abs(($1.refreshRate == 0 ? 60 : $1.refreshRate) - refresh) }) {
+                return best
             }
             guard Date() < deadline else {
                 ptLog(.warning, "screen: the phone's display offers no \(width)×\(height) mode (\(modes.map { "\($0.pixelWidth)×\($0.pixelHeight)/\($0.width)" }))")

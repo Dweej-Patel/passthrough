@@ -614,11 +614,26 @@ Mac → phone:
   stream pixels: how big to draw it, and where its tip is), then a PNG.
   Sent when the pointer's look changes (looked at 10 times a second), and
   again for each new stream size.
+- `8` viewers: count u8, then each a length u8 and a UTF-8 name: the other
+  devices viewing this Mac's screen now (the names they were paired with;
+  a device with several streams counts once). Sent when the list changes.
+- `9` moved away: UTF-8 name: another device took over (`useHere`); the
+  Mac ends this stream right after it.
 
 Phone → Mac:
 - `16` hello: width u16, height u16, fit u8, codecs u8 (bit 0 H.264, which
   the Mac assumes anyway; bit 1 HEVC, sent when the phone decodes it in
-  hardware: the Mac then uses HEVC if its encoder can). Sent first, and again whenever
+  hardware: the Mac then uses HEVC if its encoder can), fps u8 (the most
+  the phone shows, 15–120: 60, or 120 on ProMotion), quality u8 (0 sharp:
+  60 fps, and the size kept until the bitrate is under 20% of what it
+  takes; 1 smooth: the phone's rate, half again the bitrate above 60 fps;
+  2 fast: the phone's rate, ¾ size from the start and shrinking sooner),
+  space u8 (fit 1 only: the display's size against the stream's in percent,
+  50–200; the phone offers 80 for larger text, 100, 125 for more room).
+  While every frame for a second has changed under 3% of the screen (a
+  spinner, streaming text) and the phone has sent no input for as long,
+  the Mac sends at most 15 frames a second, at full rate again from the
+  phone's next input. Sent first, and again whenever
   what the phone wants changes (it turned, or the user chose another fit);
   the Mac starts anyway after a second without one. Fit 0: the Mac's own
   main display, fitted inside width×height pixels (the phone sends its
@@ -672,6 +687,10 @@ Phone → Mac:
   has sent nothing for 20 s with frames unacked (put away, or gone without
   a word). It hides the picture only: the Mac's own keyboard and trackpad
   still work. A Mac that predates it skips the message and doesn't answer.
+- `26` use here: no payload. Every other device's stream of this Mac's
+  screen gets `movedAway` with this phone's name and ends; a display made
+  for a phone that one of them had is free again, and this stream moves to
+  its own (if it asked for one) a second later.
 
 The Mac marks text a phone puts on its clipboard (`22`) with
 `org.nspasteboard.ConcealedType` and `TransientType`, so clipboard managers
