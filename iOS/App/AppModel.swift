@@ -90,6 +90,12 @@ final class AppModel: ObservableObject {
     private var logFileDate: Date?
 
     init() {
+        // The name other devices see comes from the App Group (the extension and
+        // the in-app service read it there). With none chosen it fell back to
+        // "iPhone" even on an iPad; store this device's own default.
+        if Self.groupDefaults.string(forKey: SharedKeys.deviceName)?.isEmpty ?? true {
+            Self.groupDefaults.set(ThisDevice.name, forKey: SharedKeys.deviceName)
+        }
         reloadClients()
         // The servers run in the tunnel extension, a separate process, so the
         // log lives in a shared file both processes append to.
