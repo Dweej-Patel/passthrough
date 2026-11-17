@@ -93,7 +93,9 @@ these steps as written and check each one before building.
   attached too, the Mac's panel offers **Pair iPad** (the Mac talks to one
   device at a time and the iPhone comes first). The Mac's panel says which
   iPhone the iPad gets its internet from, and *Phones with access* shows it
-  as an iPad, under the name it goes by now. On iPad the screen view
+  as an iPad, under the name it goes by now. On iPad, Apple Pencil clicks and
+  drags where it touches on the Mac's screen, and double-tap (or squeeze)
+  right-clicks. On iPad the screen view
   fills the display under a floating bar, and a trackpad, mouse or hardware
   keyboard goes straight to the Mac.
 * iPhone: *Sharing with* lists the Macs and iPads using it right now, and
