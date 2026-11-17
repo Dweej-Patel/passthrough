@@ -63,7 +63,7 @@ struct RootView: View {
             ShellHistoryView(shell: model.shell)
         }
         .fullScreenCover(isPresented: $router.showScreen, onDismiss: presentationDismissed) {
-            ScreenView(shell: model.shell).environmentObject(lock)
+            ScreenView(shell: model.shell).equatable().environmentObject(lock)
         }
         .sheet(isPresented: $showPairing, onDismiss: { model.endPairing() }) {
             PairSheet().environmentObject(model)

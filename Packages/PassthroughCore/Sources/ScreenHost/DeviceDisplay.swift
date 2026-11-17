@@ -33,6 +33,8 @@ final class DeviceDisplay: DeviceDisplaying {
         /// It made the display but offered no mode of that size.
         case noMode(width: Int, height: Int)
         case configuration(CGError)
+        /// The Mac's own displays wouldn't mirror it: it would show an empty desktop.
+        case notMirrored
     }
 
     /// One at a time on this Mac: a second phone wanting one gets the Mac's
@@ -72,7 +74,7 @@ final class DeviceDisplay: DeviceDisplaying {
             descriptor.maxPixelsHigh = UInt32(side)
             // About a phone's density, so macOS treats it as a Retina display.
             descriptor.sizeInMillimeters = CGSize(width: Double(width) / 220 * 25.4, height: Double(height) / 220 * 25.4)
-            descriptor.vendorID = 0x5054
+            descriptor.vendorID = Self.vendor
             descriptor.productID = 0x0001
             descriptor.serialNum = 1
             guard let made = CGVirtualDisplay(descriptor: descriptor) else { throw Failure.unavailable }
@@ -98,13 +100,23 @@ final class DeviceDisplay: DeviceDisplaying {
         let begun = CGBeginDisplayConfiguration(&config)
         guard begun == .success, let config else { throw Failure.configuration(begun) }
         CGConfigureDisplayWithDisplayMode(config, id, mode, nil)
-        let others = Self.onlineDisplays().filter { $0 != id && !mirrored.contains($0) }
+        // Every other display that isn't mirroring this one now: asked again each time, since
+        // changing the display's modes can end the mirroring. Not other virtual displays of
+        // ours still on their way out.
+        let others = Self.onlineDisplays().filter { $0 != id && CGDisplayMirrorsDisplay($0) != id && CGDisplayVendorNumber($0) != Self.vendor }
         for other in others { CGConfigureDisplayMirrorOfDisplay(config, other, id) }
         let done = CGCompleteDisplayConfiguration(config, .forAppOnly)
         guard done == .success else { throw Failure.configuration(done) }
         mirrored.formUnion(others)
+        // It must really be so: without the mirroring the phone would see an empty desktop beside the Mac's.
+        let physical = Self.onlineDisplays().filter { $0 != id && CGDisplayVendorNumber($0) != Self.vendor }
+        let notMirroring = physical.filter { CGDisplayMirrorsDisplay($0) != id }
+        ptLog(.info, "screen: the phone's display is \(mode.width)×\(mode.height) points (\(mode.pixelWidth)×\(mode.pixelHeight) pixels) for \(width)×\(height); \(physical.count - notMirroring.count) of \(physical.count) of the Mac's displays mirror it")
+        guard notMirroring.isEmpty else { throw Failure.notMirrored }
         return id
     }
+
+    static let vendor: UInt32 = 0x5054
 
     /// The mode of `width`×`height` pixels, Retina (half the points) if there is one, at the
     /// refresh rate closest to `refresh`, once CoreGraphics lists it.

@@ -7,7 +7,11 @@ import ScreenClient
 /// The full-screen view of the selected Mac's screen: the Mac's login when
 /// it's needed, then the screen with touch and keyboard controls. It's the
 /// one view that turns to landscape, where its controls move to the side.
-struct ScreenView: View {
+struct ScreenView: View, Equatable {
+    /// The same Mac's shell: nothing else comes from outside. Without this the view was
+    /// rebuilt whenever the app's model changed (about every second), open menus included.
+    nonisolated static func == (a: ScreenView, b: ScreenView) -> Bool { a.shell === b.shell }
+
     /// Not observed: the shell model changes all the time (every session's status), and each
     /// change redrew this whole view, open menus included, which made them flicker.
     /// The one thing shown from it, whether the Mac can be locked, is followed below.

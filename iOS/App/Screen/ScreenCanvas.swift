@@ -150,6 +150,7 @@ final class ScreenCanvasView: UIView, UIScrollViewDelegate, UIKeyInput, UIGestur
         self.macRotate = macRotate
         self.zoomTap = zoomTap
         addPointerRecognizers()
+        watchKeyboard()
         self.move = move
         self.wheel = wheel
         applyMode()
@@ -374,6 +375,7 @@ final class ScreenCanvasView: UIView, UIScrollViewDelegate, UIKeyInput, UIGestur
     deinit {
         if let foregroundObserver { NotificationCenter.default.removeObserver(foregroundObserver) }
         momentumLink?.invalidate()
+        keyboardObservers.forEach(NotificationCenter.default.removeObserver)
     }
 
     private weak var move: UIPanGestureRecognizer?
@@ -425,7 +427,7 @@ final class ScreenCanvasView: UIView, UIScrollViewDelegate, UIKeyInput, UIGestur
 
     override func layoutSubviews() {
         super.layoutSubviews()
-        if let window, !isFirstResponder, bounds.width > 0, bounds.height > 0 {
+        if let window, !keyboardUp, bounds.width > 0, bounds.height > 0 {
             onViewPixels?(CGSize(width: bounds.width * window.screen.scale, height: bounds.height * window.screen.scale))
         }
         if scroll.frame != bounds {
@@ -536,7 +538,8 @@ final class ScreenCanvasView: UIView, UIScrollViewDelegate, UIKeyInput, UIGestur
     func macPointer(at point: CGPoint?, onScreen: Bool) {
         guard screenSize.width > 0 else { return }
         pointerOnScreen = onScreen
-        if onScreen, let point {
+        let touching = fingerPressing || penDown || Self.uptime - touchedAt < 1.5
+        if onScreen, let point, !touching {
             cursorPoint = CGPoint(x: point.x.clamped(0, screenSize.width - 1), y: point.y.clamped(0, screenSize.height - 1))
         }
         updateCursor()
@@ -743,7 +746,39 @@ final class ScreenCanvasView: UIView, UIScrollViewDelegate, UIKeyInput, UIGestur
 
     override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) {
         stopMomentum()
+        noteTouches(event)
         super.touchesBegan(touches, with: event)
+    }
+
+    override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent?) {
+        noteTouches(event)
+        super.touchesEnded(touches, with: event)
+    }
+
+    override func touchesCancelled(_ touches: Set<UITouch>, with event: UIEvent?) {
+        noteTouches(event)
+        super.touchesCancelled(touches, with: event)
+    }
+
+    /// When a finger was last on the glass: the Mac's word on where its pointer is
+    /// doesn't move this one under a tap or a drag.
+    private var touchedAt: TimeInterval = 0
+    private func noteTouches(_ event: UIEvent?) { touchedAt = Self.uptime }
+
+    /// The on-screen keyboard is up (not just the key row a hardware keyboard shows).
+    private var keyboardUp = false
+    private var keyboardObservers: [NSObjectProtocol] = []
+    private func watchKeyboard() {
+        let nc = NotificationCenter.default
+        keyboardObservers = [
+            nc.addObserver(forName: UIResponder.keyboardWillShowNotification, object: nil, queue: .main) { [weak self] note in
+                let height = (note.userInfo?[UIResponder.keyboardFrameEndUserInfoKey] as? CGRect)?.height ?? 0
+                MainActor.assumeIsolated { self?.keyboardUp = height > 150 }
+            },
+            nc.addObserver(forName: UIResponder.keyboardWillHideNotification, object: nil, queue: .main) { [weak self] _ in
+                MainActor.assumeIsolated { self?.keyboardUp = false; self?.setNeedsLayout() }
+            },
+        ]
     }
 
     override func willMove(toWindow newWindow: UIWindow?) {

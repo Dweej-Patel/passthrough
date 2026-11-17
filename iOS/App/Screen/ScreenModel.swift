@@ -429,7 +429,7 @@ final class ScreenModel: ObservableObject {
             guard screenSize.width > 0 else { return }
             // Echoes of this phone's own moves are drawn already (only whether it's on this display
             // counts then); the Mac's own moves (its trackpad) aren't.
-            let echo = ProcessInfo.processInfo.systemUptime - lastPointerAt <= 0.4
+            let echo = ProcessInfo.processInfo.systemUptime - lastPointerAt <= 1.5
             let point = CGPoint(x: x * (screenSize.width - 1), y: y * (screenSize.height - 1))
             macPointer = (echo ? macPointer?.point ?? point : point, visible)
             onMacPointer?(echo ? nil : point, visible)
@@ -901,6 +901,9 @@ final class ScreenModel: ObservableObject {
     /// The canvas in pixels, as the device is held now: a display in its shape turns with it.
     func viewPixelsChanged(_ size: CGSize) {
         guard size.width > 0, size.height > 0, size != viewPixels else { return }
+        // A few points' difference (a bar settling) isn't worth remaking the Mac's display for.
+        if let viewPixels, abs(size.width - viewPixels.width) < viewPixels.width * 0.03,
+           abs(size.height - viewPixels.height) < viewPixels.height * 0.03 { return }
         viewPixels = size
         guard fitsDevice else { return }
         // Once the turn has settled: each change remakes the Mac's display.

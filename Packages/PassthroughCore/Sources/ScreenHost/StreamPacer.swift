@@ -26,14 +26,14 @@ struct StreamPacer {
     private(set) var frameInterval: TimeInterval = 1.0 / 60
     /// The shortest trip is the minimum over this long, so a path that got slower (direct to relay) is learned again.
     static let minRTTSpan: TimeInterval = 10
-    static let minBitRate = 400_000
+    static let minBitRate = 1_000_000
 
-    /// Lag behind the shortest trip (smoothed) that starts cutting, at least this or a quarter of the trip.
-    static let lagToCut: TimeInterval = 0.04
+    /// Lag behind the shortest trip (smoothed) that starts cutting, at least this or half the trip (a cellular link jitters by tens of ms without being congested).
+    static let lagToCut: TimeInterval = 0.1
     /// Under this lag the link has room: the bitrate may go up.
     static let lagToGrow: TimeInterval = 0.015
     static let growEvery: TimeInterval = 0.5
-    static let growStep = 1.08
+    static let growStep = 1.15
 
     /// What the phone's quality choice means here.
     struct Profile: Equatable {
@@ -44,8 +44,9 @@ struct StreamPacer {
 
         static func of(_ quality: ScreenVideoWire.Quality) -> Profile {
             switch quality {
-            // Text first: the size goes only when the picture would be very blurry.
-            case .sharp: Profile(scales: [1, 0.75, 0.5], shrinkBelow: 0.2)
+            // Text first: the size goes one step only, and only when the picture would be very blurry.
+            // (Each change of size restarts the capture: a freeze, mid-click or mid-drag.)
+            case .sharp: Profile(scales: [1, 0.75], shrinkBelow: 0.15)
             case .smooth: Profile(scales: [1, 0.75, 0.5], shrinkBelow: 0.35)
             // Motion first: a little smaller from the start, and smaller sooner.
             case .fast: Profile(scales: [0.75, 0.5], shrinkBelow: 0.5)
@@ -163,7 +164,7 @@ struct StreamPacer {
         lag = lag * 0.75 + (rtt - minRTT) * 0.25
 
         let before = bitRate
-        if lag > max(Self.lagToCut, minRTT / 4) {
+        if lag > max(Self.lagToCut, minRTT / 2) {
             // Once a round trip: what was sent before the last cut still arrives late.
             if now - lastCut >= max(0.25, smoothedRTT ?? 0) {
                 let cut = lag > 0.25 ? 0.6 : lag > 0.1 ? 0.75 : 0.87
