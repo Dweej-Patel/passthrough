@@ -879,6 +879,7 @@ final class SessionCoordinator: ObservableObject {
             }
         case .status(let status, _, _, let active):
             phoneStatus = status
+            shell.relabel(pairingSlot: device.pairingSlot, label: status.deviceName)
             phoneActiveConnections = active
             syncTunnelIPv6()
             notePhoneNetwork()

@@ -167,6 +167,18 @@ public final class ShellAccessStore: @unchecked Sendable {
         return false
     }
 
+    /// The phone (or iPad) granted through `pairingSlot` now goes by `label`
+    /// (its status says so). Checked in memory first: true only if a stored
+    /// label changed.
+    @discardableResult
+    public func relabel(pairingSlot: String, label: String) -> Bool {
+        guard !label.isEmpty, phones.contains(where: { $0.pairingSlot == pairingSlot && $0.label != label }) else { return false }
+        writeLock.lock(); defer { writeLock.unlock() }
+        guard var list = loadForWrite() else { return false }
+        for index in list.indices where list[index].pairingSlot == pairingSlot { list[index].label = label }
+        return store(list)
+    }
+
     /// From memory: asked for every `macState` and every `setAwake` / `setVPN`.
     public func controlAllowed(forPhone phoneID: String) -> Bool {
         phones.first { $0.phoneID == phoneID }?.controlAllowed ?? false

@@ -20,6 +20,22 @@ final class ShellAccessStoreTests: XCTestCase {
         XCTAssertNil(store.key(forPhone: "nobody"))
     }
 
+    /// A device's status renames its access (an iPad granted while it still
+    /// called itself "iPhone"), keeping its key; same name or empty, nothing changes.
+    func testRelabelFollowsTheDevicesName() {
+        let store = ShellAccessStore(secrets: InMemorySecrets())
+        let key = Data(repeating: 3, count: 32)
+        store.record(phone("ipad", slot: "token.ipad.X", key: key))
+        store.record(phone("phone", slot: "token.iphone.Y"))
+        XCTAssertTrue(store.relabel(pairingSlot: "token.ipad.X", label: "iPad"))
+        XCTAssertEqual(store.phones.first { $0.phoneID == "ipad" }?.label, "iPad")
+        XCTAssertEqual(store.phones.first { $0.phoneID == "phone" }?.label, "iPhone", "only that device")
+        XCTAssertEqual(store.key(forPhone: "ipad"), key)
+        XCTAssertFalse(store.relabel(pairingSlot: "token.ipad.X", label: "iPad"), "already so")
+        XCTAssertFalse(store.relabel(pairingSlot: "token.ipad.X", label: ""))
+        XCTAssertFalse(store.relabel(pairingSlot: "nobody", label: "x"))
+    }
+
     /// Screen access is off by default, set per phone, and survives the phone
     /// being plugged in again (a re-grant renews the key only).
     func testScreenAccess() {
