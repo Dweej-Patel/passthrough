@@ -49,6 +49,9 @@ final class InputInjector: InputSink {
         return source
     }()
     private var position: CGPoint
+    /// The number of the press under way (or last); starts somewhere new each time, so it
+    /// doesn't repeat one an earlier stream used.
+    private var eventNumber = Int64.random(in: 10_000...1_000_000)
     /// Movement not yet reported in an event's deltas.
     private var travel = CGPoint.zero
     private var buttons: UInt8 = 0
@@ -106,6 +109,11 @@ final class InputInjector: InputSink {
         let dx = travel.x.rounded(.towardZero), dy = travel.y.rounded(.towardZero)
         travel.x -= dx
         travel.y -= dy
+        // Each press has its own number, on it, its drags and its release, as a real mouse's
+        // has. With none (0), a window that once got a press without its release (a phone
+        // gone mid-drag) took every later press for that same one and ignored it.
+        if type == .leftMouseDown || type == .rightMouseDown || type == .otherMouseDown { eventNumber &+= 1 }
+        if type != .mouseMoved { event.setIntegerValueField(.mouseEventNumber, value: eventNumber) }
         event.setIntegerValueField(.mouseEventDeltaX, value: Int64(dx))
         event.setIntegerValueField(.mouseEventDeltaY, value: Int64(dy))
         event.post(tap: .cghidEventTap)
