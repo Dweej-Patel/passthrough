@@ -134,8 +134,12 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
     /// Steps aside once this iPad has left the iPhone's hotspot: the iPad
     /// then uses whatever network it's on, and on-demand starts the tunnel
     /// again on the hotspot.
-    private func watchForLeavingTheHotspot() {
-        let watch = HotspotPresenceWatch(isLinked: { [hotspotLinked] in hotspotLinked.get() }) { [weak self] in
+    @MainActor private func watchForLeavingTheHotspot() {
+        // Linked = welcomed by the iPhone and the link responding now: a link
+        // held for a resume (the iPad walked off the hotspot) doesn't keep the
+        // tunnel holding the routes.
+        let live = hotspot?.isLinkLive ?? { false }
+        let watch = HotspotPresenceWatch(isLinked: { [hotspotLinked] in hotspotLinked.get() && live() }) { [weak self] in
             ptLog(.info, "Internet through iPhone: this iPad left the iPhone's hotspot; stepping aside so it uses its network")
             self?.cancelTunnelWithError(nil)
         }

@@ -20,6 +20,9 @@ final class HotspotRole {
     private var tunFD: Int32 = -1
     private var clientID = ""
     private let mtu = 1500
+    /// The iPhone's link is responding right now (safe from any thread). A
+    /// link held for a resume after it stopped responding doesn't count.
+    private(set) var isLinkLive: @Sendable () -> Bool = { false }
 
     private struct Engine {
         let thread: Thread
@@ -59,6 +62,7 @@ final class HotspotRole {
         }
         try client.start()
         self.client = client
+        isLinkLive = { [client] in client.hasLiveLink }
 
         let fd = passthrough_utun_fd()
         guard fd >= 0 else {
@@ -209,8 +213,14 @@ final class HotspotPresenceWatch: @unchecked Sendable {
         let known = HotspotTunnel.knownHotspotDNS(UserDefaults(suiteName: PassthroughProtocol.appGroup) ?? .standard)
         let graceOver = Date().timeIntervalSince(started) >= Self.grace
         // (A hotspot not yet known is looked at again by the 30-second timer once the grace is over.)
-        guard WirelessLink.shouldStepAside(wifi: wifi, knownHotspotDNS: known, linked: isLinked(), graceOver: graceOver) else {
+        let linked = isLinked()
+        guard WirelessLink.shouldStepAside(wifi: wifi, knownHotspotDNS: known, linked: linked, graceOver: graceOver) else {
             misses = 0
+            // Off the hotspot, but the link hasn't noticed yet (it takes a few
+            // seconds to stop responding): look again shortly.
+            if linked, WirelessLink.shouldStepAside(wifi: wifi, knownHotspotDNS: known, linked: false, graceOver: graceOver) {
+                scheduleCheck(after: 3)
+            }
             return
         }
         misses += 1

@@ -28,7 +28,7 @@ public final class HotspotClient {
     private let name: String
     private let upstream: @Sendable () -> UpstreamPhone?
     private let watcher: WirelessWatcher
-    private let current = CurrentLink()
+    nonisolated private let current = CurrentLink()
     private var forwarder: LocalForwarder?
     private var control: ControlClient?
     private var controlDevice: PhoneDevice?
@@ -90,6 +90,10 @@ public final class HotspotClient {
         linked(nil)
         status = HotspotStatus(phase: .waiting, phoneName: upstream()?.name, rx: counters.rx, tx: counters.tx)
     }
+
+    /// The iPhone's link is up and responding right now (not merely held for
+    /// a resume after it stopped responding). Safe from any thread.
+    nonisolated public var hasLiveLink: Bool { current.isLive }
 
     /// Bytes this iPad sent through the iPhone, for the status.
     public var counters: ByteCounter.Snapshot { forwarder?.counter.snapshot() ?? .zero }
@@ -192,6 +196,13 @@ final class CurrentLink: PhoneLink, @unchecked Sendable {
     var device: PhoneDevice? {
         get { lock.withLock { _device } }
         set { lock.withLock { _device = newValue } }
+    }
+
+    /// A link is current and isn't suspended waiting to resume.
+    var isLive: Bool {
+        guard let device else { return false }
+        guard let mux = (device.link as? MuxLink)?.mux else { return true }
+        return !mux.isSuspended && !mux.isClosed
     }
 
     func connect(port: UInt16, queue: DispatchQueue, completion: @escaping @Sendable (Result<ByteStream, Error>) -> Void) {

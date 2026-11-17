@@ -121,6 +121,16 @@ final class HotspotClientTests: XCTestCase {
         XCTAssertEqual(waiting.message, "Passthrough was turned off on Test iPhone.")
     }
 
+    /// The link counts as live only while it responds: once the iPhone's side
+    /// is gone it doesn't, even while the status still says online (held for a resume).
+    func testALinkThatStopsIsNoLongerLive() async throws {
+        let client = try await connect(try pairIPad())
+        _ = try await waitFor("online") { client.status.phase == .online ? true : nil }
+        XCTAssertTrue(client.hasLiveLink)
+        dialer?.stop()
+        _ = try await waitFor("the link no longer live", timeout: 10) { client.hasLiveLink ? nil : true }
+    }
+
     func testAPairingThePhoneNoLongerHasIsRefused() async throws {
         var phone = try pairIPad()
         phone.token = PairingToken.generate()   // not the token the phone issued
