@@ -19,7 +19,8 @@ enum ScreenTouchMode: String, CaseIterable {
 /// swipes move between desktops (left and right) or open Mission Control
 /// (up) and the app's windows (down), as on a Mac's trackpad. It is also the
 /// keyboard's text input while the keyboard is up.
-final class ScreenCanvasView: UIView, UIScrollViewDelegate, UIKeyInput, UIGestureRecognizerDelegate, UIPointerInteractionDelegate {
+final class ScreenCanvasView: UIView, UIScrollViewDelegate, UIKeyInput, UIGestureRecognizerDelegate, UIPointerInteractionDelegate,
+                              UIPencilInteractionDelegate {
     var onPointer: ((CGPoint, RFBClient.Buttons) -> Void)?
     var onClick: ((CGPoint, RFBClient.Buttons) -> Void)?
     /// Two fingers moved by a delta (screen pixels) with the pointer at a point; then the
@@ -137,6 +138,55 @@ final class ScreenCanvasView: UIView, UIScrollViewDelegate, UIKeyInput, UIGestur
         scrolling.allowedScrollTypesMask = .all
         for recognizer in [hover, click, rightClick, drag, scrolling] { addGestureRecognizer(recognizer) }
         addInteraction(UIPointerInteraction(delegate: self))
+        addPencil()
+    }
+
+    // MARK: Apple Pencil
+
+    /// Apple Pencil is a pen on the Mac's screen, whatever the touch mode: the
+    /// tip presses the button where it touches, moving drags, lifting lets go
+    /// (a tap is a click; a stroke selects, drags a window or draws). Hovering
+    /// moves the pointer (the hover recognizer above, on iPads that sense it).
+    /// Double-tap on the Pencil, or squeeze, right-clicks where the tip was.
+    /// Fingers keep panning and zooming meanwhile.
+    private func addPencil() {
+        let pen = UILongPressGestureRecognizer(target: self, action: #selector(penned(_:)))
+        pen.minimumPressDuration = 0
+        pen.allowableMovement = .greatestFiniteMagnitude
+        pen.allowedTouchTypes = [NSNumber(value: UITouch.TouchType.pencil.rawValue)]
+        pen.delegate = self
+        addGestureRecognizer(pen)
+        self.pen = pen
+        let pencil = UIPencilInteraction()
+        pencil.delegate = self
+        addInteraction(pencil)
+    }
+
+    private weak var pen: UILongPressGestureRecognizer?
+
+    @objc private func penned(_ recognizer: UILongPressGestureRecognizer) {
+        guard screenSize.width > 0 else { return }
+        pointTo(recognizer.location(in: self))
+        switch recognizer.state {
+        case .began, .changed: onPointer?(cursorPoint, .left)
+        case .ended, .cancelled, .failed: onPointer?(cursorPoint, [])
+        default: break
+        }
+    }
+
+    func pencilInteraction(_ interaction: UIPencilInteraction, didReceiveTap tap: UIPencilInteraction.Tap) {
+        pencilRightClick()
+    }
+
+    func pencilInteraction(_ interaction: UIPencilInteraction, didReceiveSqueeze squeeze: UIPencilInteraction.Squeeze) {
+        guard squeeze.phase == .ended else { return }
+        pencilRightClick()
+    }
+
+    /// Unless the Pencil's double-tap is set to do nothing (Settings ▸ Apple Pencil).
+    private func pencilRightClick() {
+        guard screenSize.width > 0, UIPencilInteraction.preferredTapAction != .ignore else { return }
+        onClick?(cursorPoint, .right)
     }
 
     func pointerInteraction(_ interaction: UIPointerInteraction, styleFor region: UIPointerRegion) -> UIPointerStyle? {
@@ -415,6 +465,12 @@ final class ScreenCanvasView: UIView, UIScrollViewDelegate, UIKeyInput, UIGestur
             touchStarts.append((touch, touch.location(in: self)))
         }
         return true
+    }
+
+    /// The Pencil works beside fingers (a resting palm or a pan doesn't stop it).
+    func gestureRecognizer(_ recognizer: UIGestureRecognizer,
+                           shouldRecognizeSimultaneouslyWith other: UIGestureRecognizer) -> Bool {
+        recognizer === pen || other === pen
     }
 
     /// Two fingers scroll the Mac or pinch to zoom, and whichever is recognized first
