@@ -1,3 +1,4 @@
+import Combine
 import SwiftUI
 import PassthroughCore
 import PassthroughUI
@@ -23,42 +24,90 @@ final class ShellRouter: ObservableObject {
 
 enum RootTab: Hashable { case mac, shells, activity, device }
 
-/// Presents the Mac's screen over everything through UIKit, not SwiftUI's own cover:
-/// measured, every publish of the app's model (at least one a second: device facts,
-/// the log, traffic while serving) reached a SwiftUI cover as a trait change, and
-/// UIKit redrew every icon and label in it. Open menus flickered like a heartbeat
-/// and lost their scroll place. A controller presented here has no such path in.
-private struct ScreenCoverPresenter: UIViewControllerRepresentable {
-    let shell: ShellModel
-    let lock: AppLock
-    @ObservedObject var router: ShellRouter
+/// A full-screen cover presented through UIKit, not SwiftUI's own: measured, every
+/// publish of the app's model (at least one a second: device facts, the log, traffic
+/// while serving) reached a SwiftUI cover as a trait change, and UIKit redrew every
+/// icon and label in it. Open menus flickered like a heartbeat and lost their scroll
+/// place. A controller presented here has no such path in. Shows `content` while `id()`
+/// isn't nil; another id is another presentation. `onDismiss` runs once it's gone.
+///
+/// It follows `changes` itself (the router's), not this view's updates: once the cover
+/// is up, the view under it is out of the window and SwiftUI stops updating this one,
+/// so a request to close would never be heard.
+private struct UIKitCover<ID: Hashable, Content: View>: UIViewControllerRepresentable {
+    let changes: AnyPublisher<Void, Never>
+    let id: () -> ID?
     let onDismiss: () -> Void
+    @ViewBuilder let content: () -> Content
 
-    final class Coordinator { var presented: UIViewController? }
+    final class Coordinator {
+        var presented: UIViewController?
+        var presentedID: ID?
+        var wanted: (id: ID, make: () -> UIViewController)?
+        var onDismiss: () -> Void = {}
+        weak var anchor: UIViewController?
+        var busy = false
+        var id: () -> ID? = { nil }
+        var make: () -> UIViewController = { UIViewController() }
+        var watching: AnyCancellable?
+
+        /// What's wanted now, then `sync`. On the next turn: a publisher fires before its value changes.
+        func refresh() {
+            DispatchQueue.main.async { [self] in
+                wanted = id().map { ($0, make) }
+                sync()
+            }
+        }
+
+        /// Brings what's presented in line with what's wanted, one transition at a time.
+        func sync() {
+            guard !busy, wanted?.id != presentedID else { return }
+            if let shown = presented {
+                // Gone first (straight to the next one if there is one, without the slide).
+                busy = true
+                presented = nil
+                presentedID = nil
+                let finish = { [self] in
+                    busy = false
+                    onDismiss()
+                    sync()
+                }
+                if shown.presentingViewController != nil { shown.dismiss(animated: wanted == nil, completion: finish) } else { finish() }
+            } else if let wanted, var top = anchor?.view.window?.rootViewController {
+                while let next = top.presentedViewController, !next.isBeingDismissed { top = next }
+                let host = wanted.make()
+                // Over the root, not instead of it: a plain full-screen presentation takes the
+                // root out of the window, which SwiftUI reads as it disappearing (its tasks
+                // cancelled, then started again on return). This way it stays as it was.
+                host.modalPresentationStyle = .overFullScreen
+                host.view.backgroundColor = .black
+                presented = host
+                presentedID = wanted.id
+                busy = true
+                top.present(host, animated: true) { [self] in
+                    busy = false
+                    sync()
+                }
+            }
+        }
+    }
+
     func makeCoordinator() -> Coordinator { Coordinator() }
     func makeUIViewController(context: Context) -> UIViewController { UIViewController() }
 
     func updateUIViewController(_ anchor: UIViewController, context: Context) {
         let coordinator = context.coordinator
-        if router.showScreen, coordinator.presented == nil {
-            let screen = ScreenView(shell: shell, onClose: { [weak router] in router?.showScreen = false })
-                .environmentObject(lock)
-                .tint(PTColor.tintText)
-            let host = UIHostingController(rootView: screen)
-            host.modalPresentationStyle = .fullScreen
-            host.view.backgroundColor = .black
-            coordinator.presented = host
-            // After this update, from whatever is on top (nothing else should be: the router shows one thing at a time).
-            DispatchQueue.main.async {
-                guard coordinator.presented === host, var top = anchor.view.window?.rootViewController else { return }
-                while let next = top.presentedViewController, !next.isBeingDismissed { top = next }
-                top.present(host, animated: true)
-            }
-        } else if !router.showScreen, let host = coordinator.presented {
-            coordinator.presented = nil
-            let done = onDismiss
-            if host.presentingViewController != nil { host.dismiss(animated: true) { done() } } else { done() }
+        coordinator.anchor = anchor
+        coordinator.onDismiss = onDismiss
+        coordinator.id = id
+        let content = self.content
+        // Opaque under whatever the content paints: presented over the root, anything it
+        // leaves clear would show the app behind it.
+        coordinator.make = { UIHostingController(rootView: ZStack { Color.black.ignoresSafeArea(); content() }) }
+        if coordinator.watching == nil {
+            coordinator.watching = changes.sink { [weak coordinator] in coordinator?.refresh() }
         }
+        coordinator.refresh()
     }
 }
 
@@ -95,16 +144,12 @@ struct RootView: View {
             .tag(RootTab.device)
         }
         .environmentObject(router)
-        .fullScreenCover(item: $router.terminal, onDismiss: presentationDismissed) { intent in
-            TerminalScreen(shell: model.shell, intent: intent)
-        }
         .sheet(isPresented: $router.showHistory, onDismiss: presentationDismissed) {
             ShellHistoryView(shell: model.shell)
         }
-        // The Mac's screen, presented through UIKit (`ScreenCoverPresenter` says why).
-        .background {
-            ScreenCoverPresenter(shell: model.shell, lock: lock, router: router, onDismiss: presentationDismissed)
-        }
+        // The terminal and the Mac's screen, presented through UIKit (`UIKitCover` says why).
+        .background { terminalCover }
+        .background { screenCover }
         .sheet(isPresented: $showPairing, onDismiss: { model.endPairing() }) {
             PairSheet().environmentObject(model)
         }
@@ -156,6 +201,26 @@ struct RootView: View {
 
 extension RootView {
     /// Shells waiting on a question: the Mac tab's badge.
+    private var terminalCover: some View {
+        UIKitCover(changes: router.objectWillChange.eraseToAnyPublisher(), id: { [router] in router.terminal?.id },
+                   onDismiss: presentationDismissed) {
+            if let intent = router.terminal {
+                TerminalScreen(shell: model.shell, intent: intent, onClose: { [weak router] in router?.terminal = nil })
+                    .environmentObject(model).environmentObject(lock).environmentObject(router)
+                    .tint(PTColor.tintText)
+            }
+        }
+    }
+
+    private var screenCover: some View {
+        UIKitCover(changes: router.objectWillChange.eraseToAnyPublisher(), id: { [router] in router.showScreen ? true : nil },
+                   onDismiss: presentationDismissed) {
+            ScreenView(shell: model.shell, onClose: { [weak router] in router?.showScreen = false })
+                .environmentObject(model).environmentObject(lock).environmentObject(router)
+                .tint(PTColor.tintText)
+        }
+    }
+
     private var asking: Int { model.shell.visibleSessions.filter(\.isAsking).count }
 
     private func seen(reachable: Bool) -> MacActivityController.Seen {
