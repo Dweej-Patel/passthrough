@@ -6,13 +6,21 @@ import IOKit.pwr_mgt
 import PassthroughCore
 import ScreenCaptureKit
 
+/// Which display to capture, at what size.
+enum CaptureSource: Equatable {
+    /// The main display, at its size in points or less: at most `maxSide` pixels on its longer side.
+    case main(maxSide: Int)
+    /// That display, at exactly `width`×`height` pixels (one made for the phone, `DeviceDisplay`).
+    case display(CGDirectDisplayID, width: Int, height: Int)
+}
+
 /// Where the streamer gets the screen: `ScreenCapturer`, or frames a test makes.
-protocol FrameCapturing: AnyObject {
-    /// Starts delivering frames of at most `maxSide` pixels on their longer
-    /// side, on `queue`: only when the screen changed. `stopped` runs if
-    /// capture ends by itself. Returns the frames' size and the display's
-    /// place in global coordinates (points), for input.
-    func start(maxSide: Int, queue: DispatchQueue, frame: @escaping (CVPixelBuffer) -> Void,
+/// One capture each: once stopped, it isn't started again.
+protocol FrameCapturing: AnyObject, Sendable {
+    /// Starts delivering frames of `source` on `queue`: only when the screen
+    /// changed. `stopped` runs if capture ends by itself. Returns the frames'
+    /// size and the display's place in global coordinates (points), for input.
+    func start(_ source: CaptureSource, queue: DispatchQueue, frame: @escaping (CVPixelBuffer) -> Void,
                stopped: @escaping (Error?) -> Void) async throws -> (width: Int, height: Int, display: CGRect)
     func stop()
     /// Hides what the Mac's displays show to whoever is at the Mac (`hidden`), while
@@ -25,9 +33,9 @@ extension FrameCapturing {
     func setCurtain(_ hidden: Bool, done: @escaping @Sendable (Bool) -> Void) { done(false) }
 }
 
-/// The main display through ScreenCaptureKit, at its size in points (or
-/// smaller), up to 60 frames a second, in the encoder's own 4:2:0 format,
-/// with the pointer drawn in. While it captures, the display is kept on
+/// A display through ScreenCaptureKit, up to 60 frames a second, in the
+/// encoder's own 4:2:0 format, without the pointer (the phone draws it from
+/// what `CursorWatch` sends). While it captures, the display is kept on
 /// (`DisplayWake`): a display that is off has nothing to capture.
 final class ScreenCapturer: NSObject, FrameCapturing, SCStreamOutput, SCStreamDelegate, @unchecked Sendable {
     /// How long a display that was off gets to come on before capture is given up.
@@ -50,11 +58,11 @@ final class ScreenCapturer: NSObject, FrameCapturing, SCStreamOutput, SCStreamDe
     private var curtainWork: Task<Void, Never>?
     private let wake = DisplayWake()
 
-    func start(maxSide: Int, queue: DispatchQueue, frame: @escaping (CVPixelBuffer) -> Void,
+    func start(_ source: CaptureSource, queue: DispatchQueue, frame: @escaping (CVPixelBuffer) -> Void,
                stopped: @escaping (Error?) -> Void) async throws -> (width: Int, height: Int, display: CGRect) {
         wake.begin()
         do {
-            return try await capture(maxSide: maxSide, queue: queue, frame: frame, stopped: stopped)
+            return try await capture(source, queue: queue, frame: frame, stopped: stopped)
         } catch {
             wake.end()
             leaveCurtain()
@@ -64,25 +72,39 @@ final class ScreenCapturer: NSObject, FrameCapturing, SCStreamOutput, SCStreamDe
 
     /// The display to capture, once there is one: while the display is off
     /// (asleep, or the Mac in dark wake with its lid closed) ScreenCaptureKit
-    /// lists none, until `DisplayWake` has brought it on.
-    private func mainDisplay() async throws -> SCDisplay {
+    /// lists none, until `DisplayWake` has brought it on; a display just made
+    /// for the phone takes a moment to be listed too. `id` nil: the main one.
+    private func display(_ id: CGDirectDisplayID?) async throws -> SCDisplay {
         let deadline = Date().addingTimeInterval(Self.displayWait)
         while true {
             let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
-            let main = CGMainDisplayID()
-            if let display = content.displays.first(where: { $0.displayID == main }) ?? content.displays.first { return display }
+            if let id {
+                if let display = content.displays.first(where: { $0.displayID == id }) { return display }
+            } else {
+                let main = CGMainDisplayID()
+                if let display = content.displays.first(where: { $0.displayID == main }) ?? content.displays.first { return display }
+            }
             guard Date() < deadline, !lock.withLock({ self.stopped }) else { throw CocoaError(.featureUnsupported) }
             try await Task.sleep(nanoseconds: 250_000_000)
         }
     }
 
-    private func capture(maxSide: Int, queue: DispatchQueue, frame: @escaping (CVPixelBuffer) -> Void,
+    private func capture(_ source: CaptureSource, queue: DispatchQueue, frame: @escaping (CVPixelBuffer) -> Void,
                          stopped: @escaping (Error?) -> Void) async throws -> (width: Int, height: Int, display: CGRect) {
-        let display = try await mainDisplay()
-        let scale = min(1, Double(max(maxSide, 320)) / Double(max(display.width, display.height)))
-        // Even sizes: 4:2:0 halves both.
-        let width = Int(Double(display.width) * scale) & ~1
-        let height = Int(Double(display.height) * scale) & ~1
+        let display: SCDisplay
+        let width: Int, height: Int
+        switch source {
+        case let .main(maxSide):
+            display = try await self.display(nil)
+            let scale = min(1, Double(max(maxSide, 320)) / Double(max(display.width, display.height)))
+            // Even sizes: 4:2:0 halves both.
+            width = Int(Double(display.width) * scale) & ~1
+            height = Int(Double(display.height) * scale) & ~1
+        case let .display(id, pixelsWide, pixelsHigh):
+            display = try await self.display(id)
+            width = pixelsWide & ~1
+            height = pixelsHigh & ~1
+        }
 
         let configuration = SCStreamConfiguration()
         configuration.width = width
@@ -91,7 +113,7 @@ final class ScreenCapturer: NSObject, FrameCapturing, SCStreamOutput, SCStreamDe
         configuration.pixelFormat = kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange
         configuration.colorMatrix = CGDisplayStream.yCbCrMatrix_ITU_R_709_2
         configuration.queueDepth = 5
-        configuration.showsCursor = true
+        configuration.showsCursor = false
         configuration.capturesAudio = false
 
         lock.withLock { onFrame = frame; onStopped = stopped }

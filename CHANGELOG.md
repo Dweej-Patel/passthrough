@@ -34,6 +34,11 @@ the **Before you rebuild** notes first. The Mac and phone apps update together.
   1,2); run `xcodegen generate` before building. The iPad's tunnel extension
   links `Vendor/HevSocks5Tunnel/HevSocks5Tunnel.xcframework`, which is checked
   in (`scripts/build-hev.sh` rebuilds it with the macOS library).
+* **Screen view: update the Mac and the phone together.** The screen
+  stream's `hello` changed (it now says what to show) and the Mac no longer
+  draws the pointer into the picture: an older phone on a new Mac would show
+  no pointer, and an older Mac doesn't understand the new `hello`. No
+  compatibility shims.
 
 #### Setting up the push key, step by step (for a person or for Claude)
 
@@ -71,6 +76,20 @@ these steps as written and check each one before building.
    shell needs me* on the iPhone, and click *Send Test Notification*.
 
 ### Added
+
+* Screen view, far away: the Mac now keeps as many frames in flight as fit in
+  the round trip (it was two, so a phone 100 ms away got about 20 frames a
+  second) and lowers its bitrate when frames start arriving late, then raises
+  it again.
+* Screen view: the phone draws the Mac's pointer itself, so it moves the
+  moment your finger does instead of a round trip later.
+* Screen view: *Screen shape › Fit to this iPhone/iPad* (in the desktops
+  menu). The Mac makes a display in the device's shape and resolution, turns
+  with it, and mirrors its own displays onto it while you view, so the
+  desktop fills the screen at a readable size. The default is still the
+  Mac's own display, as before. It uses macOS's private virtual-display API
+  (as Sidecar and DeskPad do); if that fails the view says so and shows the
+  Mac's own display.
 
 * Shell status: sessions say what Claude Code is doing (working, needs you,
   done); the widget and Live Activity show a shell that needs you.

@@ -4,7 +4,9 @@ import Foundation
 /// `screenVideoReady` the connection carries messages of one type byte, a
 /// 4-byte big-endian payload length and the payload, both ways. The Mac
 /// sends H.264 (its hardware encoder) and the phone acks each frame it has
-/// shown, which is how the Mac keeps at most a couple of frames in flight.
+/// shown, which is how the Mac paces what it sends to the round trip (as
+/// many frames in flight as fit in it). The pointer isn't in the picture:
+/// the Mac sends where it is and what it looks like, and the phone draws it.
 public enum ScreenVideoWire {
     /// Largest payload either side accepts (a keyframe of a big screen fits easily).
     public static let maxPayload = 16 << 20
@@ -29,10 +31,23 @@ public enum ScreenVideoWire {
         case copied(CopyResult)
         /// The answer to `curtain`: whether the Mac's displays are hidden now.
         case curtained(Bool)
+        /// What the stream after this shows (the answer to every `hello`): the
+        /// Mac's own display, or one shaped like the phone. `mac` when the phone
+        /// asked for `device` means the Mac couldn't make one.
+        case fitted(Fit)
+        /// The Mac's pointer at (`x`, `y`), each 0…65535 across the stream, or
+        /// not on the streamed display (`visible` false). Sent when it moves.
+        case cursor(x: UInt16, y: UInt16, visible: Bool)
+        /// What the pointer looks like: a PNG drawn `width`×`height` stream
+        /// pixels, its tip at (`hotX`, `hotY`) in them. Sent when it changes.
+        case cursorShape(width: Int, height: Int, hotX: Int, hotY: Int, png: Data)
 
         // Phone → Mac
-        /// The phone's largest useful size in pixels; the Mac fits the stream inside it.
-        case hello(maxWidth: Int, maxHeight: Int)
+        /// What the phone wants to see, first and again whenever that changes
+        /// (it turned, or the user chose another `fit`). `mac`: the Mac's own
+        /// display, fitted inside `width`×`height` pixels. `device`: a display
+        /// of exactly `width`×`height` pixels made for the phone.
+        case hello(width: Int, height: Int, fit: Fit)
         /// Frame `number` is on the phone's screen.
         case ack(number: UInt32)
         /// The pointer at (`x`, `y`), each 0…65535 across the screen, with RFB-numbered `buttons` held.
@@ -67,6 +82,14 @@ public enum ScreenVideoWire {
         case notText
     }
 
+    /// Which display the stream shows.
+    public enum Fit: UInt8, Equatable, Sendable {
+        /// The Mac's own (main) display, as it is.
+        case mac = 0
+        /// A display the Mac makes in the phone's shape and size, which its own displays mirror while it lasts.
+        case device = 1
+    }
+
     public struct Modifiers: OptionSet, Sendable {
         public let rawValue: UInt8
         public init(rawValue: UInt8) { self.rawValue = rawValue }
@@ -77,7 +100,7 @@ public enum ScreenVideoWire {
     }
 
     enum Kind: UInt8 {
-        case format = 1, frame = 2, copied = 3, curtained = 4
+        case format = 1, frame = 2, copied = 3, curtained = 4, fitted = 5, cursor = 6, cursorShape = 7
         case hello = 16, ack = 17, pointer = 18, scroll = 19, key = 20, text = 21, clipboard = 22, keyframeRequest = 23, copy = 24, curtain = 25
     }
 
@@ -103,9 +126,19 @@ public enum ScreenVideoWire {
             case .tooLong: payload.append(2)
             case .notText: payload.append(3)
             }
-        case let .hello(maxWidth, maxHeight):
+        case let .hello(width, height, fit):
             kind = .hello
-            payload.append(u16: maxWidth); payload.append(u16: maxHeight)
+            payload.append(u16: width); payload.append(u16: height); payload.append(fit.rawValue)
+        case let .fitted(fit):
+            kind = .fitted
+            payload.append(fit.rawValue)
+        case let .cursor(x, y, visible):
+            kind = .cursor
+            payload.append(u16: Int(x)); payload.append(u16: Int(y)); payload.append(visible ? 1 : 0)
+        case let .cursorShape(width, height, hotX, hotY, png):
+            kind = .cursorShape
+            payload.append(u16: width); payload.append(u16: height); payload.append(u16: hotX); payload.append(u16: hotY)
+            payload.append(png)
         case let .ack(number):
             kind = .ack
             payload.append(u32: number)
@@ -222,8 +255,19 @@ public enum ScreenVideoWire {
             try need(5)
             return .frame(number: p.u32(at: b), keyframe: p[b + 4] & 1 != 0, data: p.subdata(in: (b + 5)..<p.endIndex))
         case .hello:
-            try need(4)
-            return .hello(maxWidth: Int(p.u16(at: b)), maxHeight: Int(p.u16(at: b + 2)))
+            try need(5)
+            // A fit added later reads as the Mac's own display.
+            return .hello(width: Int(p.u16(at: b)), height: Int(p.u16(at: b + 2)), fit: Fit(rawValue: p[b + 4]) ?? .mac)
+        case .fitted:
+            try need(1)
+            return .fitted(Fit(rawValue: p[b]) ?? .mac)
+        case .cursor:
+            try need(5)
+            return .cursor(x: p.u16(at: b), y: p.u16(at: b + 2), visible: p[b + 4] & 1 != 0)
+        case .cursorShape:
+            try need(8)
+            return .cursorShape(width: Int(p.u16(at: b)), height: Int(p.u16(at: b + 2)), hotX: Int(p.u16(at: b + 4)),
+                                hotY: Int(p.u16(at: b + 6)), png: p.subdata(in: (b + 8)..<p.endIndex))
         case .ack:
             try need(4)
             return .ack(number: p.u32(at: b))

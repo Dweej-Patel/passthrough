@@ -2,6 +2,7 @@
 import CoreMedia
 import CoreVideo
 import Foundation
+import ImageIO
 import VideoToolbox
 import XCTest
 import PassthroughCore
@@ -14,7 +15,13 @@ final class ScreenVideoWireTests: XCTestCase {
             .format(width: 1728, height: 1116, sps: Data([0x67, 1, 2]), pps: Data([0x68, 3])),
             .frame(number: 7, keyframe: true, data: Data(repeating: 5, count: 300)),
             .frame(number: 8, keyframe: false, data: Data()),
-            .hello(maxWidth: 2868, maxHeight: 1320),
+            .hello(width: 2868, height: 1320, fit: .mac),
+            .hello(width: 1206, height: 2622, fit: .device),
+            .fitted(.device),
+            .fitted(.mac),
+            .cursor(x: 1, y: 65535, visible: true),
+            .cursor(x: 0, y: 0, visible: false),
+            .cursorShape(width: 17, height: 23, hotX: 4, hotY: 0, png: Data([0x89, 0x50, 0x4E, 0x47])),
             .ack(number: 0xFFFF_FFFE),
             .pointer(x: 65535, y: 0, buttons: 5),
             .scroll(dx: -3, dy: 1200),
@@ -88,6 +95,79 @@ final class ScreenVideoWireTests: XCTestCase {
         let family = "👨‍👩‍👧‍👦"   // one character of 25 bytes
         XCTAssertEqual(ScreenVideoWire.textPieces(family + "x", maxBytes: 10).joined(), family + "x")
         XCTAssertTrue(ScreenVideoWire.textPieces(family, maxBytes: 10).allSatisfy { $0.utf8.count <= 10 })
+    }
+}
+
+final class StreamPacerTests: XCTestCase {
+    /// Before any ack two frames go; after, as many as fit in the shortest trip.
+    func testWindowFitsTheShortestRoundTrip() {
+        var pacer = StreamPacer(maxBitRate: 8_000_000)
+        XCTAssertEqual(pacer.window, 2)
+        pacer.sent(1, keyframe: true, at: 0)
+        pacer.acked(1, at: 0.010)
+        XCTAssertEqual(pacer.window, 2, "nearby: 10 ms is under a frame")
+        pacer = StreamPacer(maxBitRate: 8_000_000)
+        pacer.sent(1, keyframe: false, at: 0)
+        pacer.acked(1, at: 0.100)
+        XCTAssertEqual(pacer.window, 7, "100 ms away: six frames' time, and one")
+        pacer.sent(2, keyframe: false, at: 1)
+        pacer.acked(2, at: 1.400)
+        XCTAssertEqual(pacer.window, 7, "a trip that queued doesn't widen it")
+        pacer.sent(3, keyframe: false, at: 20)
+        pacer.acked(3, at: 21)
+        XCTAssertEqual(pacer.window, StreamPacer.maxWindow, "old trips are forgotten, and it never goes past the cap")
+    }
+
+    /// Acks lagging behind the shortest trip cut the bitrate, once a round trip;
+    /// prompt ones bring it back up slowly, never past the top.
+    func testBitrateFollowsTheLag() {
+        var pacer = StreamPacer(maxBitRate: 8_000_000)
+        var time: TimeInterval = 0, number: UInt32 = 0
+        func frame(rtt: TimeInterval, keyframe: Bool = false) {
+            number += 1
+            pacer.sent(number, keyframe: keyframe, at: time)
+            pacer.acked(number, at: time + rtt)
+            time += 1.0 / 30
+        }
+        for _ in 0..<10 { frame(rtt: 0.05) }
+        XCTAssertEqual(pacer.bitRate, 8_000_000, "steady: nothing to change")
+        for _ in 0..<30 { frame(rtt: 0.4) }
+        let cut = pacer.bitRate
+        XCTAssertLessThan(cut, 3_000_000, "a queue building: cut hard")
+        XCTAssertGreaterThanOrEqual(cut, StreamPacer.minBitRate)
+        for _ in 0..<30 { frame(rtt: 2, keyframe: true) }
+        XCTAssertEqual(pacer.bitRate, cut, "keyframes are slow anyway and don't count")
+        for _ in 0..<600 { frame(rtt: 0.05) }
+        XCTAssertGreaterThan(pacer.bitRate, cut, "room again: back up")
+        XCTAssertLessThanOrEqual(pacer.bitRate, 8_000_000)
+        for _ in 0..<3000 { frame(rtt: 0.05) }
+        XCTAssertEqual(pacer.bitRate, 8_000_000, "up to the top and no further")
+    }
+
+    func testANewSizeKeepsTheShare() {
+        var pacer = StreamPacer(maxBitRate: 8_000_000)
+        var time: TimeInterval = 0
+        for number in UInt32(1)...40 {
+            pacer.sent(number, keyframe: false, at: time)
+            pacer.acked(number, at: time + (number < 5 ? 0.02 : 0.5))
+            time += 0.05
+        }
+        let share = Double(pacer.bitRate) / 8_000_000
+        XCTAssertLessThan(share, 1)
+        pacer.setMaxBitRate(16_000_000)
+        XCTAssertEqual(Double(pacer.bitRate) / 16_000_000, share, accuracy: 0.01)
+    }
+
+    /// An ack for a frame never sent (or already acked) changes nothing.
+    func testUnknownAcksAreIgnored() {
+        var pacer = StreamPacer(maxBitRate: 8_000_000)
+        XCTAssertFalse(pacer.acked(5, at: 1))
+        XCTAssertNil(pacer.minRTT)
+        pacer.sent(1, keyframe: false, at: 0)
+        pacer.sent(2, keyframe: false, at: 0.01)
+        pacer.acked(2, at: 0.05)
+        XCTAssertFalse(pacer.acked(1, at: 0.06), "done with when 2 was acked")
+        XCTAssertEqual(pacer.minRTT ?? 0, 0.04, accuracy: 0.0001)
     }
 }
 
@@ -174,7 +254,7 @@ final class ScreenVideoStreamerTests: XCTestCase {
         }
         let capture = FakeCapture(width: 640, height: 400)
         let input = RecordingInput()
-        let streamer = ScreenVideoStreamer(capture: capture, input: { _ in input })
+        let streamer = ScreenVideoStreamer(capture: { capture }, input: { _ in input })
         let (mac, phone) = MemoryPipe.pair()
         let ended = expectation(description: "ended")
         ended.isInverted = true
@@ -192,7 +272,8 @@ final class ScreenVideoStreamerTests: XCTestCase {
         waitUntil("two frames") { Self.frames(events.get()).count == 2 }
         Thread.sleep(forTimeInterval: 0.5)
         XCTAssertEqual(Self.frames(events.get()).count, 2, "no third frame before an ack")
-        guard case let .size(width, height)? = events.get().first else { return XCTFail("size first") }
+        guard case .fitted(.mac)? = events.get().first else { return XCTFail("what it shows first") }
+        guard case let .size(width, height)? = events.get().dropFirst().first else { return XCTFail("then its size") }
         XCTAssertEqual([width, height], [640, 400])
 
         // Showing the first lets the newest waiting one through (the ones in between are dropped).
@@ -224,9 +305,9 @@ final class ScreenVideoStreamerTests: XCTestCase {
         let capture = FakeCapture(width: 640, height: 400)
         let stalled = StalledStream()
         let limits = ScreenVideoStreamer.Limits(frames: 2, softBytes: 4 << 20, hardBytes: 1, stallTimeout: 0.5)
-        let streamer = ScreenVideoStreamer(capture: capture, input: { _ in RecordingInput() }, limits: limits)
+        let streamer = ScreenVideoStreamer(capture: { capture }, input: { _ in RecordingInput() }, limits: limits)
         let ended = expectation(description: "dropped")
-        streamer.start(stream: stalled, initialBytes: ScreenVideoWire.encode(.hello(maxWidth: 640, maxHeight: 640))) { ended.fulfill() }
+        streamer.start(stream: stalled, initialBytes: ScreenVideoWire.encode(.hello(width: 640, height: 640, fit: .mac))) { ended.fulfill() }
         waitUntil("capture started") { capture.maxSide.get() == 640 }
         for shade in 0..<6 {
             capture.push(shade: UInt8(30 * shade))
@@ -242,9 +323,9 @@ final class ScreenVideoStreamerTests: XCTestCase {
     func testTypingKeepsItsOrder() {
         let capture = FakeCapture(width: 320, height: 200)
         let input = RecordingInput()
-        let streamer = ScreenVideoStreamer(capture: capture, input: { _ in input })
+        let streamer = ScreenVideoStreamer(capture: { capture }, input: { _ in input })
         let (mac, phone) = MemoryPipe.pair()
-        streamer.start(stream: mac, initialBytes: ScreenVideoWire.encode(.hello(maxWidth: 320, maxHeight: 320))) {}
+        streamer.start(stream: mac, initialBytes: ScreenVideoWire.encode(.hello(width: 320, height: 320, fit: .mac))) {}
         addTeardownBlock { streamer.stop() }
         waitUntil("capture started") { capture.maxSide.get() == 320 }
         waitUntil("input ready") {
@@ -268,9 +349,9 @@ final class ScreenVideoStreamerTests: XCTestCase {
         input.clipboard = (count: 5, text: "a password copied earlier")
         var limits = ScreenVideoStreamer.Limits()
         limits.copyTimeout = 0.3
-        let streamer = ScreenVideoStreamer(capture: capture, input: { _ in input }, limits: limits)
+        let streamer = ScreenVideoStreamer(capture: { capture }, input: { _ in input }, limits: limits)
         let (mac, phone) = MemoryPipe.pair()
-        streamer.start(stream: mac, initialBytes: ScreenVideoWire.encode(.hello(maxWidth: 320, maxHeight: 320))) {}
+        streamer.start(stream: mac, initialBytes: ScreenVideoWire.encode(.hello(width: 320, height: 320, fit: .mac))) {}
         addTeardownBlock { streamer.stop() }
         let events = Locked<[ScreenVideoClient.Event]>([])
         let client = ScreenVideoClient(stream: phone, maxSide: 320, queue: DispatchQueue(label: "test")) { event in
@@ -359,10 +440,10 @@ final class ScreenVideoStreamerTests: XCTestCase {
     /// also when it couldn't hide them.
     func testTheCurtainIsAskedForAndAnswered() {
         let capture = FakeCapture(width: 320, height: 200)
-        let streamer = ScreenVideoStreamer(capture: capture, input: { _ in RecordingInput() })
+        let streamer = ScreenVideoStreamer(capture: { capture }, input: { _ in RecordingInput() })
         let (mac, phone) = MemoryPipe.pair()
         // Asked before capture is up: it waits for it.
-        streamer.start(stream: mac, initialBytes: ScreenVideoWire.encode(.hello(maxWidth: 320, maxHeight: 320))
+        streamer.start(stream: mac, initialBytes: ScreenVideoWire.encode(.hello(width: 320, height: 320, fit: .mac))
                        + ScreenVideoWire.encode(.curtain(true))) {}
         addTeardownBlock { streamer.stop() }
         let events = Locked<[ScreenVideoClient.Event]>([])
@@ -389,9 +470,9 @@ final class ScreenVideoStreamerTests: XCTestCase {
         let capture = FakeCapture(width: 320, height: 200)
         var limits = ScreenVideoStreamer.Limits()
         limits.curtainSilence = 0.4
-        let streamer = ScreenVideoStreamer(capture: capture, input: { _ in RecordingInput() }, limits: limits)
+        let streamer = ScreenVideoStreamer(capture: { capture }, input: { _ in RecordingInput() }, limits: limits)
         let (mac, phone) = MemoryPipe.pair()
-        streamer.start(stream: mac, initialBytes: ScreenVideoWire.encode(.hello(maxWidth: 320, maxHeight: 320))
+        streamer.start(stream: mac, initialBytes: ScreenVideoWire.encode(.hello(width: 320, height: 320, fit: .mac))
                        + ScreenVideoWire.encode(.curtain(true))) {}
         addTeardownBlock { streamer.stop() }
         waitUntil("hidden") { capture.curtains.get() == [true] }
@@ -401,13 +482,108 @@ final class ScreenVideoStreamerTests: XCTestCase {
         _ = phone
     }
 
+    /// The pointer goes separately from the frames: where it is when it moves,
+    /// what it looks like when that changes, in the stream's terms.
+    func testThePointerIsSentApart() {
+        let capture = FakeCapture(width: 720, height: 450)
+        let cursor = FakeCursor()
+        cursor.point.set(CGPoint(x: 720, y: 225))   // the display is 1440×900 points
+        let streamer = ScreenVideoStreamer(capture: { capture }, input: { _ in RecordingInput() }, cursor: cursor)
+        let (mac, phone) = MemoryPipe.pair()
+        streamer.start(stream: mac, initialBytes: Data()) {}
+        addTeardownBlock { streamer.stop() }
+        let events = Locked<[ScreenVideoClient.Event]>([])
+        let client = ScreenVideoClient(stream: phone, maxSide: 720, queue: DispatchQueue(label: "test")) { event in
+            events.set(events.get() + [event])
+        }
+        client.start()
+        func cursors() -> [(Double, Double, Bool)] {
+            events.get().compactMap { if case let .cursor(x, y, visible) = $0 { (x, y, visible) } else { nil } }
+        }
+        func shapes() -> [(CGSize, CGPoint)] {
+            events.get().compactMap { if case let .cursorShape(_, size, hot) = $0 { (size, hot) } else { nil } }
+        }
+        waitUntil("where it is") { !cursors().isEmpty }
+        guard !cursors().isEmpty else { return }
+        XCTAssertEqual(cursors()[0].0, 720.0 / 1439, accuracy: 0.001)
+        XCTAssertEqual(cursors()[0].1, 225.0 / 899, accuracy: 0.001)
+        XCTAssertTrue(cursors()[0].2)
+        waitUntil("what it looks like") { !shapes().isEmpty }
+        guard !cursors().isEmpty, !shapes().isEmpty else { return }
+        // 20×24 points with the tip at (4, 2), in a stream of half the display's points.
+        XCTAssertEqual(shapes()[0].0, CGSize(width: 10, height: 12))
+        XCTAssertEqual(shapes()[0].1, CGPoint(x: 2, y: 1))
+
+        spin(0.2)
+        XCTAssertEqual(cursors().count, 1, "still: nothing more")
+        XCTAssertEqual(shapes().count, 1)
+        cursor.point.set(CGPoint(x: 2000, y: 10))   // on another display
+        waitUntil("off this display") { cursors().last?.2 == false }
+    }
+
+    /// `device`: the stream moves to a display made in the phone's shape, and
+    /// back to the Mac's own when asked, which removes it. Stopping removes it too.
+    func testTheStreamMovesToADisplayMadeForThePhone() {
+        let capture = FakeCapture(width: 640, height: 400)
+        let display = FakeDisplay()
+        let streamer = ScreenVideoStreamer(capture: { capture }, input: { _ in RecordingInput() }, display: display)
+        let (mac, phone) = MemoryPipe.pair()
+        streamer.start(stream: mac, initialBytes: Data()) {}
+        let events = Locked<[ScreenVideoClient.Event]>([])
+        let client = ScreenVideoClient(stream: phone, layout: .init(width: 640, height: 640, fit: .mac),
+                                       queue: DispatchQueue(label: "test")) { event in events.set(events.get() + [event]) }
+        client.start()
+        func fits() -> [ScreenVideoWire.Fit] { events.get().compactMap { if case let .fitted(fit) = $0 { fit } else { nil } } }
+        waitUntil("the Mac's own") { fits() == [.mac] }
+        XCTAssertEqual(capture.sources.get(), [.main(maxSide: 640)])
+
+        client.relayout(.init(width: 402, height: 874, fit: .device))
+        waitUntil("the phone's") { fits() == [.mac, .device] }
+        XCTAssertEqual(display.shown.get(), [CGSize(width: 402, height: 874)])
+        XCTAssertEqual(capture.sources.get().last, .display(77, width: 402, height: 874))
+
+        // Turned: the same display, the other way round.
+        client.relayout(.init(width: 874, height: 402, fit: .device))
+        waitUntil("turned") { fits().count == 3 }
+        XCTAssertEqual(display.shown.get().last, CGSize(width: 874, height: 402))
+        XCTAssertEqual(display.closes.get(), 0)
+
+        client.relayout(.init(width: 874, height: 402, fit: .mac))
+        waitUntil("the Mac's own again") { fits().last == .mac && fits().count == 4 }
+        XCTAssertEqual(display.closes.get(), 1)
+        XCTAssertEqual(capture.sources.get().last, .main(maxSide: 874))
+
+        client.relayout(.init(width: 402, height: 874, fit: .device))
+        waitUntil("the phone's again") { fits().count == 5 }
+        streamer.stop()
+        waitUntil("removed when it ends") { display.closes.get() == 2 }
+    }
+
+    /// A Mac that can't make the phone's display shows its own, and says so.
+    func testNoDisplayForThePhoneMeansTheMacsOwn() {
+        let capture = FakeCapture(width: 640, height: 400)
+        let display = FakeDisplay()
+        display.fails.set(true)
+        let streamer = ScreenVideoStreamer(capture: { capture }, input: { _ in RecordingInput() }, display: display)
+        let (mac, phone) = MemoryPipe.pair()
+        streamer.start(stream: mac, initialBytes: Data()) {}
+        addTeardownBlock { streamer.stop() }
+        let events = Locked<[ScreenVideoClient.Event]>([])
+        let client = ScreenVideoClient(stream: phone, layout: .init(width: 402, height: 874, fit: .device),
+                                       queue: DispatchQueue(label: "test")) { event in events.set(events.get() + [event]) }
+        client.start()
+        waitUntil("answered") { events.get().contains { if case .fitted = $0 { true } else { false } } }
+        XCTAssertTrue(events.get().contains { if case .fitted(.mac) = $0 { true } else { false } })
+        XCTAssertEqual(capture.sources.get(), [.main(maxSide: 874)])
+    }
+
     /// The phone hanging up ends the stream (and so, upstream, the connection).
     func testThePhoneLeavingEndsIt() {
         let capture = FakeCapture(width: 320, height: 200)
-        let streamer = ScreenVideoStreamer(capture: capture, input: { _ in RecordingInput() })
+        let streamer = ScreenVideoStreamer(capture: { capture }, input: { _ in RecordingInput() })
         let (mac, phone) = MemoryPipe.pair()
         let ended = expectation(description: "ended")
-        streamer.start(stream: mac, initialBytes: ScreenVideoWire.encode(.hello(maxWidth: 320, maxHeight: 320))) { ended.fulfill() }
+        streamer.start(stream: mac, initialBytes: ScreenVideoWire.encode(.hello(width: 320, height: 320, fit: .mac))) { ended.fulfill() }
         waitUntil("capture started") { capture.maxSide.get() == 320 }
         phone.send(nil, isComplete: true) { _ in }
         wait(for: [ended], timeout: 5)
@@ -447,13 +623,16 @@ final class ScreenVideoStreamerTests: XCTestCase {
         return count.get()
     }
 
+    /// Runs the main queue meanwhile: the phone's display and the pointer's shape are made there.
     private func waitUntil(_ message: String, timeout: TimeInterval = 5, _ condition: () -> Bool) {
         let deadline = Date().addingTimeInterval(timeout)
         while !condition() {
             guard Date() < deadline else { return XCTFail("timed out: \(message)") }
-            Thread.sleep(forTimeInterval: 0.01)
+            RunLoop.current.run(until: Date().addingTimeInterval(0.01))
         }
     }
+
+    private func spin(_ seconds: TimeInterval) { RunLoop.current.run(until: Date().addingTimeInterval(seconds)) }
 }
 
 /// Frames of one flat shade, pushed when a test says the screen changed.
@@ -466,12 +645,21 @@ private final class FakeCapture: FrameCapturing, @unchecked Sendable {
 
     init(width: Int, height: Int) { self.width = width; self.height = height }
 
-    func start(maxSide: Int, queue: DispatchQueue, frame: @escaping (CVPixelBuffer) -> Void,
+    /// Every source it was started with, in order.
+    let sources = Locked<[CaptureSource]>([])
+
+    func start(_ source: CaptureSource, queue: DispatchQueue, frame: @escaping (CVPixelBuffer) -> Void,
                stopped: @escaping (Error?) -> Void) async throws -> (width: Int, height: Int, display: CGRect) {
         self.queue.set(queue)
         deliver.set(frame)
-        self.maxSide.set(maxSide)
-        return (width, height, CGRect(x: 0, y: 0, width: 1440, height: 900))
+        sources.set(sources.get() + [source])
+        switch source {
+        case let .main(maxSide):
+            self.maxSide.set(maxSide)
+            return (width, height, CGRect(x: 0, y: 0, width: 1440, height: 900))
+        case let .display(_, width, height):
+            return (width, height, CGRect(x: 1440, y: 0, width: Double(width) / 2, height: Double(height) / 2))
+        }
     }
 
     func stop() { stopped.set(true); deliver.set(nil) }
@@ -497,6 +685,48 @@ private final class FakeCapture: FrameCapturing, @unchecked Sendable {
         CVPixelBufferUnlockBaseAddress(buffer, [])
         guard let queue = queue.get(), let deliver = deliver.get() else { return }
         queue.sync { deliver(buffer) }
+    }
+}
+
+/// A pointer a test moves; it looks like a 20×24-point arrow.
+private final class FakeCursor: CursorSource, @unchecked Sendable {
+    let point = Locked(CGPoint.zero)
+    func location() -> CGPoint? { point.get() }
+    @MainActor func shape() -> CursorImage? {
+        CursorImage(png: Self.png, size: CGSize(width: 20, height: 24), hotSpot: CGPoint(x: 4, y: 2))
+    }
+
+    /// A 2×2 PNG: the phone skips a shape that doesn't decode.
+    static let png: Data = {
+        let context = CGContext(data: nil, width: 2, height: 2, bitsPerComponent: 8, bytesPerRow: 0, space: CGColorSpaceCreateDeviceRGB(),
+                                bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)!
+        context.setFillColor(CGColor(red: 1, green: 1, blue: 1, alpha: 1))
+        context.fill(CGRect(x: 0, y: 0, width: 2, height: 2))
+        let data = NSMutableData()
+        let destination = CGImageDestinationCreateWithData(data, "public.png" as CFString, 1, nil)!
+        CGImageDestinationAddImage(destination, context.makeImage()!, nil)
+        CGImageDestinationFinalize(destination)
+        return data as Data
+    }()
+}
+
+/// A display for the phone that a test watches being made and removed.
+private final class FakeDisplay: DeviceDisplaying, @unchecked Sendable {
+    let shown = Locked<[CGSize]>([])
+    let closes = Locked(0)
+    let fails = Locked(false)
+    private let open = Locked(false)
+    struct Failed: Error {}
+    @MainActor func show(width: Int, height: Int) async throws -> CGDirectDisplayID {
+        guard !fails.get() else { throw Failed() }
+        shown.set(shown.get() + [CGSize(width: width, height: height)])
+        open.set(true)
+        return 77
+    }
+    @MainActor func close() {
+        guard open.get() else { return }
+        open.set(false)
+        closes.set(closes.get() + 1)
     }
 }
 

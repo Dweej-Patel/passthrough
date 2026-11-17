@@ -560,7 +560,8 @@ Mac shows its screen to at most 2 connections per phone and 4 in all
 The fast way to see the screen, asked for first: `screenVideo` instead of
 `screen`, with the same screen access check. The Mac streams its main
 display itself, as H.264 from its hardware encoder in low-latency mode, at
-most at the display's size in points; no Mac password is involved (screen
+most at the display's size in points, or a display it makes in the phone's
+shape (`hello`'s fit, below); no Mac password is involved (screen
 access is the owner's consent). If it can't (Passthrough lacks Screen
 Recording or Accessibility) the reply is `error` `screen_video_unavailable`
 and the connection stays a shell connection, so the phone can ask for
@@ -592,16 +593,44 @@ Mac → phone:
   them). Also sent unasked, 0, when the curtain comes down by itself: it
   couldn't be put up again after the displays changed, or the phone went
   quiet (below).
+- `5` fitted: fit u8 (as `hello`'s), what the stream shows from now on. The
+  answer to every `hello` that changes what's shown, sent before that
+  stream's first format. 0 after a `hello` asking for 1 means the Mac
+  couldn't make the phone's display (another phone's view has it, or macOS
+  wouldn't), and shows its own.
+- `6` cursor: x u16, y u16 (each 0…65535 across the stream, as `pointer`),
+  visible u8 (0 when the pointer is on another of the Mac's displays). Sent
+  when it moves, up to 60 times a second. The frames leave the pointer out:
+  the phone draws it, at once where its own input puts it, and where this
+  says when the Mac's pointer moved by itself (its own trackpad).
+- `7` cursor shape: width u16, height u16, hot x u16, hot y u16 (all in
+  stream pixels: how big to draw it, and where its tip is), then a PNG.
+  Sent when the pointer's look changes (looked at 10 times a second), and
+  again for each new stream size.
 
 Phone → Mac:
-- `16` hello: max width u16, max height u16, the phone's largest useful
-  size in pixels. Sent first; the Mac fits the stream inside it (and
-  starts anyway after a second without it).
-- `17` ack: frame number u32, once that frame is on screen. The Mac sends
-  a new frame only while fewer than 2 are unacked, encoding only the newest
-  capture (older ones are dropped before encoding), so nothing queues
-  anywhere and the picture stays current on a slow path. A frame the phone
-  can't show (one before the keyframe it is waiting for) is acked anyway.
+- `16` hello: width u16, height u16, fit u8. Sent first, and again whenever
+  what the phone wants changes (it turned, or the user chose another fit);
+  the Mac starts anyway after a second without one. Fit 0: the Mac's own
+  main display, fitted inside width×height pixels (the phone sends its
+  longer side for both). Fit 1: a display of exactly width×height pixels
+  made for the phone (CoreGraphics' virtual display, in Retina mode, so
+  half that in points), which the Mac's own displays mirror while it lasts;
+  the phone sends its window's pixels as it's held. The display goes away
+  when the stream ends or the phone asks for fit 0, and macOS undoes the
+  mirroring if the app quits. One at a time per Mac. A fit the Mac doesn't
+  know reads as 0. Each change is a new capture (and a keyframe): the old
+  one goes on, curtain and all, until the new one is up.
+- `17` ack: frame number u32, once that frame is on screen. The Mac sends a
+  new frame only while fewer than a window of frames is unacked, encoding
+  only the newest capture (older ones are dropped before encoding), so
+  little queues anywhere and the picture stays current on a slow path. The
+  window is as many frames as fit in the shortest round trip of the last
+  10 s (frame sent to ack), 2 to 16; the bitrate falls when acks lag behind
+  that trip (a queue building on the way), more the worse the lag, and
+  creeps back up while they don't. Keyframes, slow anyway, don't count. A
+  frame the phone can't show (one before the keyframe it is waiting for) is
+  acked anyway.
 - `18` pointer: x u16, y u16 (each 0…65535 across the screen), buttons u8
   (1 left, 2 middle, 4 right, as RFB).
 - `19` scroll: dx i16, dy i16 in the Mac's points; positive dy brings
