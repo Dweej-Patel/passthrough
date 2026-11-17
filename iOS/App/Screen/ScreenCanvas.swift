@@ -34,8 +34,10 @@ final class ScreenCanvasView: UIView, UIScrollViewDelegate, UIKeyInput, UIGestur
     var onPaste: (() -> Void)?
     var onCopy: (() -> Void)?
     var onSpace: ((ScreenModel.SpaceAction) -> Void)?
-    /// The window in pixels, as the device is held now (it turned, or the window changed).
-    var onWindowPixels: ((CGSize) -> Void)?
+    /// This view in pixels, as the device is held now (it turned, the window changed, the bars
+    /// moved): a display made for the device takes its shape, clear of the Dynamic Island and the
+    /// controls. Not while the keyboard is up, which would reshape the Mac's display with every word typed.
+    var onViewPixels: ((CGSize) -> Void)?
 
     var mode = ScreenTouchMode.trackpad {
         didSet { applyMode() }
@@ -395,7 +397,9 @@ final class ScreenCanvasView: UIView, UIScrollViewDelegate, UIKeyInput, UIGestur
 
     override func layoutSubviews() {
         super.layoutSubviews()
-        if let window { onWindowPixels?(CGSize(width: window.bounds.width * window.screen.scale, height: window.bounds.height * window.screen.scale)) }
+        if let window, !isFirstResponder, bounds.width > 0, bounds.height > 0 {
+            onViewPixels?(CGSize(width: bounds.width * window.screen.scale, height: bounds.height * window.screen.scale))
+        }
         if scroll.frame != bounds {
             let place = zoomedPlace()
             scroll.frame = bounds
@@ -872,7 +876,7 @@ struct ScreenCanvas: UIViewRepresentable {
         view.onPaste = { [weak model] in model?.pastePhoneClipboard() }
         view.onCopy = { [weak model] in model?.copyFromMac() }
         view.onSpace = { [weak model] action in model?.perform(action) }
-        view.onWindowPixels = { [weak model] size in model?.windowPixelsChanged(size) }
+        view.onViewPixels = { [weak model] size in model?.viewPixelsChanged(size) }
         model.onMacPointer = { [weak view] point, onScreen in view?.macPointer(at: point, onScreen: onScreen) }
         model.onPointerShape = { [weak view] image, size, hotSpot in view?.setPointerShape(image, size: size, hotSpot: hotSpot) }
         model.onFrame = { [weak view] image in view?.show(image, size: CGSize(width: image.width, height: image.height)) }

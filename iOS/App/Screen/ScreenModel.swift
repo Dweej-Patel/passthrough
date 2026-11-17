@@ -62,6 +62,9 @@ final class ScreenModel: ObservableObject {
     @Published private(set) var fitsDevice = ScreenModel.fitsDeviceSetting
     /// What the Mac's stream shows now: `mac` while `fitsDevice` means the Mac couldn't make one.
     @Published private(set) var fitted: ScreenVideoWire.Fit?
+    /// How the view reaches the Mac: the local network, straight over the internet,
+    /// or through a relay (farther, so slower). Nil while unknown.
+    @Published private(set) var connectionPath: ShellPath?
 
     private var shell: ShellModel?
     private var context: LAContext?
@@ -89,9 +92,16 @@ final class ScreenModel: ObservableObject {
     /// The user's choice, kept for the next view: a display in this device's shape.
     private static let fitsDeviceKey = "screenFitsDevice"
     private static var fitsDeviceSetting: Bool { UserDefaults.standard.bool(forKey: fitsDeviceKey) }
-    /// This device's window in pixels, as it's held now (the canvas says when it turns).
-    private var windowPixels: CGSize?
+    /// The screen view's area in pixels, as the device is held now (the canvas says when it changes).
+    private var viewPixels: CGSize?
     private var relayoutTask: Task<Void, Never>?
+    /// How the connection's path was when it was ready, and the watch on it since (iroh can move from a relay to a direct path).
+    private var readyPath: ShellPath?
+    private var upgradeReadyPath: ShellPath?
+    private var upgradeStream: (any ByteStream)?
+    private var pathTask: Task<Void, Never>?
+    /// The relay notice is said once a view.
+    private var saidRelay = false
     /// When this phone last moved the Mac's pointer: for a moment after, where the
     /// Mac says it is is an echo of that, already drawn.
     private var lastPointerAt: TimeInterval = 0
@@ -136,6 +146,7 @@ final class ScreenModel: ObservableObject {
         macID = mac.macID
         macName = mac.macName
         slowReason = nil
+        saidRelay = false
         observeApp()
         open(video: true)
     }
@@ -252,6 +263,10 @@ final class ScreenModel: ObservableObject {
     func stop() {
         generation += 1
         fitted = nil
+        pathTask?.cancel()
+        pathTask = nil
+        connectionPath = nil
+        upgradeStream = nil
         relayoutTask?.cancel()
         rfb?.close()
         rfb = nil
@@ -279,10 +294,12 @@ final class ScreenModel: ObservableObject {
             return
         }
         switch event {
-        case .ready:
+        case let .ready(path):
+            readyPath = path
             client?.requestScreen(video: wantsVideo)
         case let .screen(stream, initialBytes) where wantsVideo:
             client = nil   // it let go of the stream; the dialer stays up for it
+            watchPath(of: stream, dialer: dialer, startingAt: readyPath)
             let video = ScreenVideoClient(stream: stream, initialBytes: initialBytes, layout: layout()) { [weak self] event in
                 MainActor.assumeIsolated { self?.handle(event, generation: gen) }
             }
@@ -293,6 +310,7 @@ final class ScreenModel: ObservableObject {
         case let .screen(stream, initialBytes):
             client = nil   // it let go of the stream; the dialer stays up for it
             guard let login = pendingLogin?.login else { return stream.cancel() }
+            watchPath(of: stream, dialer: dialer, startingAt: readyPath)
             let rfb = RFBClient(stream: stream, initialBytes: initialBytes, login: login) { [weak self] event in
                 MainActor.assumeIsolated { self?.handle(event, generation: gen) }
             }
@@ -454,10 +472,12 @@ final class ScreenModel: ObservableObject {
             return
         }
         switch event {
-        case .ready:
+        case let .ready(path):
+            upgradeReadyPath = path
             upgrade?.client?.requestScreen(video: true)
         case let .screen(stream, initialBytes):
             upgrade?.client = nil   // it let go of the stream; the dialer stays up for it
+            upgradeStream = stream
             let video = ScreenVideoClient(stream: stream, initialBytes: initialBytes, layout: layout()) { [weak self] event in
                 MainActor.assumeIsolated { self?.handleUpgrade(event, token: token, generation: gen) }
             }
@@ -496,6 +516,8 @@ final class ScreenModel: ObservableObject {
         screenSharing?.close()
         dialer?.shutdown()
         dialer = candidate.dialer
+        if let upgradeStream { watchPath(of: upgradeStream, dialer: candidate.dialer, startingAt: upgradeReadyPath) }
+        upgradeStream = nil
         video = stream
         wantsVideo = true
         slowReason = nil
@@ -698,6 +720,33 @@ final class ScreenModel: ObservableObject {
     /// The display lost its place (it was in the background, say): ask for a keyframe.
     func videoNeedsKeyframe() { video?.requestKeyframe() }
 
+    // MARK: Connection path
+
+    /// Follows the screen connection's path: iroh starts on a relay and moves to a
+    /// direct path once it can, or stays on the relay when it can't (both behind
+    /// strict routers, say). Said once, when it stays on the relay.
+    private func watchPath(of stream: any ByteStream, dialer: IrohShellDialer?, startingAt start: ShellPath?) {
+        pathTask?.cancel()
+        connectionPath = start
+        // The local network (or Tailscale): no relay to watch for.
+        guard start != .local, let dialer else { return }
+        pathTask = Task { [weak self, stream] in
+            var relayFor = 0
+            while !Task.isCancelled {
+                let path = dialer.path(of: stream)
+                guard let self else { return }
+                if path != .unknown { self.connectionPath = path }
+                relayFor = path == .relay ? relayFor + 1 : 0
+                // Still relayed after a while: not just the first moments before the direct path.
+                if relayFor == 3, !self.saidRelay, self.phase == .live {
+                    self.saidRelay = true
+                    self.show("Connected through a relay, so this may lag. It switches to a direct path when it can.")
+                }
+                try? await Task.sleep(for: .seconds(3))
+            }
+        }
+    }
+
     // MARK: Screen shape
 
     /// The user chose: a display in this device's shape, or the Mac's own as it is. Kept for the next view.
@@ -708,10 +757,10 @@ final class ScreenModel: ObservableObject {
         video?.relayout(layout())
     }
 
-    /// The canvas's window in pixels, as the device is held now: a display in its shape turns with it.
-    func windowPixelsChanged(_ size: CGSize) {
-        guard size.width > 0, size.height > 0, size != windowPixels else { return }
-        windowPixels = size
+    /// The canvas in pixels, as the device is held now: a display in its shape turns with it.
+    func viewPixelsChanged(_ size: CGSize) {
+        guard size.width > 0, size.height > 0, size != viewPixels else { return }
+        viewPixels = size
         guard fitsDevice else { return }
         // Once the turn has settled: each change remakes the Mac's display.
         relayoutTask?.cancel()
@@ -723,13 +772,13 @@ final class ScreenModel: ObservableObject {
     }
 
     /// What to ask the Mac for: its own display at no more than this device's
-    /// pixels, or one made at exactly this window's pixels.
+    /// pixels, or one made at exactly the screen view's pixels (the whole screen until it's laid out).
     private func layout() -> ScreenVideoClient.Layout {
         let native = UIScreen.main.nativeBounds.size
         let maxSide = Int(max(native.width, native.height))
         guard fitsDevice else { return .init(width: maxSide, height: maxSide, fit: .mac) }
         let screen = UIScreen.main
-        let pixels = windowPixels ?? CGSize(width: screen.bounds.width * screen.scale, height: screen.bounds.height * screen.scale)
+        let pixels = viewPixels ?? CGSize(width: screen.bounds.width * screen.scale, height: screen.bounds.height * screen.scale)
         // Even sides (4:2:0), within what the Mac's encoder takes.
         let fit = min(1, 4096 / max(pixels.width, pixels.height))
         return .init(width: Int(pixels.width * fit) & ~1, height: Int(pixels.height * fit) & ~1, fit: .device)

@@ -559,7 +559,8 @@ Mac shows its screen to at most 2 connections per phone and 4 in all
 
 The fast way to see the screen, asked for first: `screenVideo` instead of
 `screen`, with the same screen access check. The Mac streams its main
-display itself, as H.264 from its hardware encoder in low-latency mode, at
+display itself, as HEVC (when the phone decodes it) or H.264 from its
+hardware encoder in low-latency mode, at
 most at the display's size in points, or a display it makes in the phone's
 shape (`hello`'s fit, below); no Mac password is involved (screen
 access is the owner's consent). If it can't (Passthrough lacks Screen
@@ -578,10 +579,16 @@ at up to 8 KiB a second (keys sent after text wait their turn), and drops
 text once 256 KiB is waiting.
 
 Mac → phone:
-- `1` format: width u16, height u16, SPS length u16, SPS, PPS length u16,
-  PPS. Sent before every keyframe.
+- `1` format: codec u8 (0 H.264, 1 HEVC), width u16, height u16, count u8,
+  then that many parameter sets, each a length u16 and the bytes (H.264:
+  SPS, PPS; HEVC: VPS, SPS, PPS). Sent before every keyframe. The size
+  changes when the phone asks for another (`hello`) and when the link is
+  too slow for the full size: the Mac then captures each side at ¾, then
+  ½, once its bitrate has been under 35% of what that size takes for 2 s,
+  and back up a step once it reaches 70% of what the bigger size takes for
+  5 s, at most one change every 5 s.
 - `2` frame: number u32 (from 1), flags u8 (bit 0: keyframe), then the
-  frame's NAL units, each after a 4-byte length (AVCC).
+  frame's NAL units, each after a 4-byte length (AVCC, HVCC for HEVC).
 - `3` copied: the answer to `copy`. Status u8, then for status 0 the copied
   text, UTF-8. Status 0: text; 1: nothing was copied (the clipboard didn't
   change within a second of the ⌘C, the change came from another device or
@@ -609,14 +616,18 @@ Mac → phone:
   again for each new stream size.
 
 Phone → Mac:
-- `16` hello: width u16, height u16, fit u8. Sent first, and again whenever
+- `16` hello: width u16, height u16, fit u8, codecs u8 (bit 0 H.264, which
+  the Mac assumes anyway; bit 1 HEVC, sent when the phone decodes it in
+  hardware: the Mac then uses HEVC if its encoder can). Sent first, and again whenever
   what the phone wants changes (it turned, or the user chose another fit);
   the Mac starts anyway after a second without one. Fit 0: the Mac's own
   main display, fitted inside width×height pixels (the phone sends its
   longer side for both). Fit 1: a display of exactly width×height pixels
   made for the phone (CoreGraphics' virtual display, in Retina mode, so
   half that in points), which the Mac's own displays mirror while it lasts;
-  the phone sends its window's pixels as it's held. The display goes away
+  the phone sends the pixels of its screen view as it's held (clear of the
+  Dynamic Island and its own controls, and not changed while its keyboard
+  is up). The display goes away
   when the stream ends or the phone asks for fit 0, and macOS undoes the
   mirroring if the app quits. One at a time per Mac. A fit the Mac doesn't
   know reads as 0. Each change is a new capture (and a keyframe): the old

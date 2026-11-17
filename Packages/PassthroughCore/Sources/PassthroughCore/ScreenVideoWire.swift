@@ -3,7 +3,8 @@ import Foundation
 /// The Mac's own screen stream (protocol/README.md, "Screen video"): after
 /// `screenVideoReady` the connection carries messages of one type byte, a
 /// 4-byte big-endian payload length and the payload, both ways. The Mac
-/// sends H.264 (its hardware encoder) and the phone acks each frame it has
+/// sends HEVC or H.264 (its hardware encoder; HEVC when the phone decodes
+/// it, for fewer bits at the same quality) and the phone acks each frame it has
 /// shown, which is how the Mac paces what it sends to the round trip (as
 /// many frames in flight as fit in it). The pointer isn't in the picture:
 /// the Mac sends where it is and what it looks like, and the phone draws it.
@@ -23,9 +24,10 @@ public enum ScreenVideoWire {
 
     public enum Message: Equatable, Sendable {
         // Mac → phone
-        /// The stream's size in pixels and its H.264 parameter sets; sent before every keyframe.
-        case format(width: Int, height: Int, sps: Data, pps: Data)
-        /// One frame: AVCC NAL units (4-byte lengths), numbered from 1.
+        /// The stream's codec, size in pixels and parameter sets (H.264: SPS, PPS;
+        /// HEVC: VPS, SPS, PPS); sent before every keyframe.
+        case format(codec: Codec, width: Int, height: Int, parameterSets: [Data])
+        /// One frame: NAL units after 4-byte lengths (AVCC, or HVCC for HEVC), numbered from 1.
         case frame(number: UInt32, keyframe: Bool, data: Data)
         /// The answer to `copy`.
         case copied(CopyResult)
@@ -46,8 +48,9 @@ public enum ScreenVideoWire {
         /// What the phone wants to see, first and again whenever that changes
         /// (it turned, or the user chose another `fit`). `mac`: the Mac's own
         /// display, fitted inside `width`×`height` pixels. `device`: a display
-        /// of exactly `width`×`height` pixels made for the phone.
-        case hello(width: Int, height: Int, fit: Fit)
+        /// of exactly `width`×`height` pixels made for the phone. `codecs`: what
+        /// the phone decodes; the Mac picks one.
+        case hello(width: Int, height: Int, fit: Fit, codecs: Codecs)
         /// Frame `number` is on the phone's screen.
         case ack(number: UInt32)
         /// The pointer at (`x`, `y`), each 0…65535 across the screen, with RFB-numbered `buttons` held.
@@ -82,6 +85,19 @@ public enum ScreenVideoWire {
         case notText
     }
 
+    public enum Codec: UInt8, Equatable, Sendable {
+        case h264 = 0
+        case hevc = 1
+    }
+
+    /// The codecs a phone decodes.
+    public struct Codecs: OptionSet, Equatable, Sendable {
+        public let rawValue: UInt8
+        public init(rawValue: UInt8) { self.rawValue = rawValue }
+        public static let h264 = Codecs(rawValue: 1)
+        public static let hevc = Codecs(rawValue: 2)
+    }
+
     /// Which display the stream shows.
     public enum Fit: UInt8, Equatable, Sendable {
         /// The Mac's own (main) display, as it is.
@@ -110,11 +126,12 @@ public enum ScreenVideoWire {
         var payload = Data()
         let kind: Kind
         switch message {
-        case let .format(width, height, sps, pps):
+        case let .format(codec, width, height, parameterSets):
             kind = .format
+            payload.append(codec.rawValue)
             payload.append(u16: width); payload.append(u16: height)
-            payload.append(u16: sps.count); payload.append(sps)
-            payload.append(u16: pps.count); payload.append(pps)
+            payload.append(UInt8(clamping: parameterSets.count))
+            for set in parameterSets.prefix(255) { payload.append(u16: set.count); payload.append(set) }
         case let .frame(number, keyframe, data):
             kind = .frame
             payload.append(u32: number); payload.append(keyframe ? 1 : 0); payload.append(data)
@@ -126,9 +143,9 @@ public enum ScreenVideoWire {
             case .tooLong: payload.append(2)
             case .notText: payload.append(3)
             }
-        case let .hello(width, height, fit):
+        case let .hello(width, height, fit, codecs):
             kind = .hello
-            payload.append(u16: width); payload.append(u16: height); payload.append(fit.rawValue)
+            payload.append(u16: width); payload.append(u16: height); payload.append(fit.rawValue); payload.append(codecs.rawValue)
         case let .fitted(fit):
             kind = .fitted
             payload.append(fit.rawValue)
@@ -244,20 +261,24 @@ public enum ScreenVideoWire {
         switch kind {
         case .format:
             try need(6)
-            let spsLength = Int(p.u16(at: b + 4))
-            try need(6 + spsLength + 2)
-            let ppsLength = Int(p.u16(at: b + 6 + spsLength))
-            try need(8 + spsLength + ppsLength)
-            return .format(width: Int(p.u16(at: b)), height: Int(p.u16(at: b + 2)),
-                           sps: p.subdata(in: (b + 6)..<(b + 6 + spsLength)),
-                           pps: p.subdata(in: (b + 8 + spsLength)..<(b + 8 + spsLength + ppsLength)))
+            guard let codec = Codec(rawValue: p[b]) else { throw Failure.malformed }
+            var offset = 6, sets: [Data] = []
+            for _ in 0..<Int(p[b + 5]) {
+                try need(offset + 2)
+                let length = Int(p.u16(at: b + offset))
+                try need(offset + 2 + length)
+                sets.append(p.subdata(in: (b + offset + 2)..<(b + offset + 2 + length)))
+                offset += 2 + length
+            }
+            return .format(codec: codec, width: Int(p.u16(at: b + 1)), height: Int(p.u16(at: b + 3)), parameterSets: sets)
         case .frame:
             try need(5)
             return .frame(number: p.u32(at: b), keyframe: p[b + 4] & 1 != 0, data: p.subdata(in: (b + 5)..<p.endIndex))
         case .hello:
-            try need(5)
-            // A fit added later reads as the Mac's own display.
-            return .hello(width: Int(p.u16(at: b)), height: Int(p.u16(at: b + 2)), fit: Fit(rawValue: p[b + 4]) ?? .mac)
+            try need(6)
+            // A fit added later reads as the Mac's own display; H.264 is always decodable.
+            return .hello(width: Int(p.u16(at: b)), height: Int(p.u16(at: b + 2)), fit: Fit(rawValue: p[b + 4]) ?? .mac,
+                          codecs: Codecs(rawValue: p[b + 5]).union(.h264))
         case .fitted:
             try need(1)
             return .fitted(Fit(rawValue: p[b]) ?? .mac)
