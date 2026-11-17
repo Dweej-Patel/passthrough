@@ -745,6 +745,67 @@ final class ScreenVideoStreamerTests: XCTestCase {
         XCTAssertEqual(capture.sources.get().last, .display(77, width: 750, height: 600), "fast: ¾ size from the start")
     }
 
+    /// Leaving the phone's display removes it, which stops the capture on it
+    /// before the new one is up: the curtain still goes over to the new one, so
+    /// the Mac's displays don't show, and the phone isn't told otherwise.
+    func testTheCurtainStaysUpWhenTheOldDisplayGoesFirst() {
+        let made = Locked<[FakeCapture]>([])
+        let display = FakeDisplay()
+        let streamer = ScreenVideoStreamer(capture: {
+            let capture = FakeCapture(width: 320, height: 200)
+            made.set(made.get() + [capture])
+            return capture
+        }, input: { _ in RecordingInput() }, display: display)
+        let (mac, phone) = MemoryPipe.pair()
+        streamer.start(stream: mac, initialBytes: Data()) {}
+        addTeardownBlock { streamer.stop() }
+        let events = Locked<[ScreenVideoClient.Event]>([])
+        let client = ScreenVideoClient(stream: phone, layout: .init(width: 400, height: 800, fit: .device),
+                                       queue: DispatchQueue(label: "test")) { events.set(events.get() + [$0]) }
+        client.start()
+        func fits() -> Int { events.get().filter { if case .fitted = $0 { true } else { false } }.count }
+        func answers() -> [Bool] { events.get().compactMap { if case let .curtained(hidden) = $0 { hidden } else { nil } } }
+        waitUntil("on the phone's display") { fits() == 1 }
+        client.curtain(true)
+        waitUntil("hidden") { answers() == [true] }
+        XCTAssertEqual(made.get().first?.curtains.get(), [true])
+
+        display.onClose.set { made.get()[0].die() }
+        client.relayout(.init(width: 400, height: 800, fit: .mac))
+        waitUntil("on the Mac's own") { fits() == 2 }
+        waitUntil("the new capture holds the curtain") { made.get().count == 2 && made.get()[1].curtains.get() == [true] }
+        waitUntil("the old one let go after") { made.get()[0].stopped.get() }
+        spin(0.2)
+        XCTAssertEqual(answers(), [true], "the phone was never told it fell")
+    }
+
+    /// The phone can place the pointer only once it knows the stream's size, so
+    /// where it is goes again after each format, though it hasn't moved.
+    func testThePointerFollowsEachFormat() throws {
+        guard (try? VideoEncoder(width: 320, height: 200, bitRate: 1_000_000)) != nil else {
+            throw XCTSkip("no hardware H.264 encoder")
+        }
+        let capture = FakeCapture(width: 320, height: 200)
+        let cursor = FakeCursor()
+        cursor.point.set(CGPoint(x: 100, y: 100))
+        let streamer = ScreenVideoStreamer(capture: { capture }, input: { _ in RecordingInput() }, cursor: cursor)
+        let (mac, phone) = MemoryPipe.pair()
+        streamer.start(stream: mac, initialBytes: Data()) {}
+        addTeardownBlock { streamer.stop() }
+        let events = Locked<[ScreenVideoClient.Event]>([])
+        let client = ScreenVideoClient(stream: phone, maxSide: 320, queue: DispatchQueue(label: "test")) { events.set(events.get() + [$0]) }
+        client.start()
+        waitUntil("capture started") { capture.maxSide.get() == 320 }
+        spin(0.2)   // the first place goes before any format
+        capture.push(shade: 90)
+        waitUntil("a size") { events.get().contains { if case .size = $0 { true } else { false } } }
+        waitUntil("then where the pointer is") {
+            let all = events.get()
+            guard let size = all.firstIndex(where: { if case .size = $0 { true } else { false } }) else { return false }
+            return all[size...].contains { if case .cursor = $0 { true } else { false } }
+        }
+    }
+
     /// The phone hanging up ends the stream (and so, upstream, the connection).
     func testThePhoneLeavingEndsIt() {
         let capture = FakeCapture(width: 320, height: 200)
@@ -823,6 +884,7 @@ private final class FakeCapture: FrameCapturing, @unchecked Sendable {
                stopped: @escaping (Error?) -> Void) async throws -> (width: Int, height: Int, display: CGRect) {
         self.queue.set(queue)
         rates.set(rates.get() + [fps])
+        ended.set(stopped)
         deliver.set(frame)
         sources.set(sources.get() + [source])
         switch source {
@@ -835,6 +897,10 @@ private final class FakeCapture: FrameCapturing, @unchecked Sendable {
     }
 
     func stop() { stopped.set(true); deliver.set(nil) }
+
+    /// Capture ends by itself, as ScreenCaptureKit's does when its display goes away.
+    private let ended = Locked<((Error?) -> Void)?>(nil)
+    func die() { deliver.set(nil); ended.get()?(CocoaError(.featureUnsupported)) }
 
     /// What the phone asked of the curtain, and whether this capture can do it.
     let curtains = Locked<[Bool]>([])
@@ -888,6 +954,8 @@ private final class FakeDisplay: DeviceDisplaying, @unchecked Sendable {
     let shown = Locked<[CGSize]>([])
     let closes = Locked(0)
     let fails = Locked(false)
+    /// Runs as it closes (the capture on it stopping, say).
+    let onClose = Locked<(@Sendable () -> Void)?>(nil)
     private let open = Locked(false)
     struct Failed: Error {}
     @MainActor func show(width: Int, height: Int, fps: Int) async throws -> CGDirectDisplayID {
@@ -900,6 +968,7 @@ private final class FakeDisplay: DeviceDisplaying, @unchecked Sendable {
         guard open.get() else { return }
         open.set(false)
         closes.set(closes.get() + 1)
+        onClose.get()?()
     }
 }
 

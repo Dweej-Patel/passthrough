@@ -532,11 +532,11 @@ final class ScreenCanvasView: UIView, UIScrollViewDelegate, UIKeyInput, UIGestur
     // MARK: The Mac's pointer
 
     /// The Mac's pointer moved by itself (its own trackpad, an app moving it): drawn there,
-    /// and this phone's moves go on from there.
-    func macPointer(at point: CGPoint, onScreen: Bool) {
+    /// and this phone's moves go on from there. `point` nil: only whether it's on this display.
+    func macPointer(at point: CGPoint?, onScreen: Bool) {
         guard screenSize.width > 0 else { return }
         pointerOnScreen = onScreen
-        if onScreen {
+        if onScreen, let point {
             cursorPoint = CGPoint(x: point.x.clamped(0, screenSize.width - 1), y: point.y.clamped(0, screenSize.height - 1))
         }
         updateCursor()

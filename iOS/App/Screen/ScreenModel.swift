@@ -43,7 +43,7 @@ final class ScreenModel: ObservableObject {
     var onVideoFrame: ((CMSampleBuffer) -> Bool)?
     /// The Mac's own stream leaves the pointer out: the canvas draws it, where the
     /// Mac says it is (in screen pixels; or off this display) when this phone isn't moving it.
-    var onMacPointer: ((CGPoint, Bool) -> Void)?
+    var onMacPointer: ((CGPoint?, Bool) -> Void)?
     /// What the pointer looks like: the image, its size and tip in screen pixels.
     var onPointerShape: ((CGImage, CGSize, CGPoint) -> Void)?
     /// The Mac's screen in pixels.
@@ -132,6 +132,8 @@ final class ScreenModel: ObservableObject {
     private var saidRelay = false
     /// Another device took the view over, by this name (`movedAway`); the stream ends next.
     private var movedTo: String?
+    /// What the upgrade's stream said before its size, for when it takes over.
+    private var upgradeEarly: [ScreenVideoClient.Event] = []
     /// When this phone last moved the Mac's pointer: for a moment after, where the
     /// Mac says it is is an echo of that, already drawn.
     private var lastPointerAt: TimeInterval = 0
@@ -163,7 +165,8 @@ final class ScreenModel: ObservableObject {
     static let upgradeDelays: [TimeInterval] = [3, 5, 10, 20, 30]
 
     /// Uses the saved login if there is one, else asks for it.
-    func begin(shell: ShellModel, context: LAContext) {
+    /// `takeOver`: "Use Here" from a view another device took: this one ends theirs once it's up.
+    func begin(shell: ShellModel, context: LAContext, takeOver: Bool = false) {
         #if DEBUG
         if let demo = Self.demoState { return applyDemo(demo) }
         #endif
@@ -179,6 +182,7 @@ final class ScreenModel: ObservableObject {
         saidRelay = false
         observeApp()
         open(video: true)
+        usesHereOnStart = takeOver
     }
 
     private func observeApp() {
@@ -295,6 +299,8 @@ final class ScreenModel: ObservableObject {
         fitted = nil
         otherViewers = []
         movedTo = nil
+        usesHereOnStart = false
+        upgradeEarly = []
         pathTask?.cancel()
         pathTask = nil
         connectionPath = nil
@@ -405,9 +411,11 @@ final class ScreenModel: ObservableObject {
                 show("\(macName) couldn't make a display for this \(ThisDevice.name), so this is its own.")
             }
         case let .cursor(x, y, visible):
-            // Echoes of this phone's own moves are drawn already; the Mac's own moves (its trackpad) aren't.
-            guard ProcessInfo.processInfo.systemUptime - lastPointerAt > 0.4, screenSize.width > 0 else { return }
-            onMacPointer?(CGPoint(x: x * (screenSize.width - 1), y: y * (screenSize.height - 1)), visible)
+            guard screenSize.width > 0 else { return }
+            // Echoes of this phone's own moves are drawn already (only whether it's on this display
+            // counts then); the Mac's own moves (its trackpad) aren't.
+            let echo = ProcessInfo.processInfo.systemUptime - lastPointerAt <= 0.4
+            onMacPointer?(echo ? nil : CGPoint(x: x * (screenSize.width - 1), y: y * (screenSize.height - 1)), visible)
         case let .cursorShape(image, size, hotSpot):
             onPointerShape?(image, size, hotSpot)
         case let .viewers(names):
@@ -509,6 +517,7 @@ final class ScreenModel: ObservableObject {
             MainActor.assumeIsolated { self?.handleUpgrade(event, token: token, generation: gen) }
         }) else { return }
         upgrade = (connection.client, connection.dialer, nil)
+        upgradeEarly = []
     }
 
     private func handleUpgrade(_ event: ShellClient.Event, token: Int, generation gen: Int) {
@@ -543,11 +552,25 @@ final class ScreenModel: ObservableObject {
         switch event {
         case .size:
             promote(token)
+            // Said once, before the size: what it shows, the pointer's look, who else views.
+            let early = upgradeEarly
+            upgradeEarly = []
+            early.forEach { handle($0, generation: gen) }
             handle(event, generation: gen)
+        case .fitted, .cursorShape, .viewers:
+            upgradeEarly.append(event)
+        case let .movedAway(name):
+            // Another device took over: this device's whole view goes, Screen Sharing too.
+            movedTo = name
         case .closed:
+            if let movedTo {
+                stop()
+                phase = .movedAway(to: movedTo)
+                return
+            }
             upgradeFailed()
-        case .frame, .copied, .curtained, .fitted, .cursor, .cursorShape, .viewers, .movedAway:
-            break   // none before the size
+        case .frame, .copied, .curtained, .cursor:
+            break   // the pointer's place goes again after the first format
         }
     }
 
@@ -783,7 +806,7 @@ final class ScreenModel: ObservableObject {
                 if path != .unknown { self.connectionPath = path }
                 relayFor = path == .relay ? relayFor + 1 : 0
                 // Still relayed after a while: not just the first moments before the direct path.
-                if relayFor == 3, !self.saidRelay, self.phase == .live {
+                if relayFor >= 3, !self.saidRelay, self.phase == .live {
                     self.saidRelay = true
                     self.show("Connected through a relay, so this may lag. It switches to a direct path when it can.")
                 }
@@ -801,6 +824,9 @@ final class ScreenModel: ObservableObject {
         UserDefaults.standard.set(on, forKey: Self.fitsDeviceKey)
         video?.relayout(layout())
     }
+
+    /// This screen's top frame rate, as Smooth and Fast ask for it.
+    static var topFPS: Int { min(120, max(60, UIScreen.main.maximumFramesPerSecond)) }
 
     /// What matters most when the link can't carry it all; kept for the next view.
     func setQuality(_ quality: ScreenVideoWire.Quality) {
@@ -837,8 +863,7 @@ final class ScreenModel: ObservableObject {
 
     /// Back from another device that took the view over: a new view, which takes it back.
     func takeBack(shell: ShellModel, context: LAContext) {
-        usesHereOnStart = true
-        begin(shell: shell, context: context)
+        begin(shell: shell, context: context, takeOver: true)
     }
 
     /// The canvas in pixels, as the device is held now: a display in its shape turns with it.
@@ -861,7 +886,7 @@ final class ScreenModel: ObservableObject {
         let native = UIScreen.main.nativeBounds.size
         let maxSide = Int(max(native.width, native.height))
         // Sharp keeps to 60 a second (more bits for each); the others go as fast as this screen does.
-        let fps = quality == .sharp ? 60 : min(120, max(60, UIScreen.main.maximumFramesPerSecond))
+        let fps = quality == .sharp ? 60 : Self.topFPS
         guard fitsDevice else { return .init(width: maxSide, height: maxSide, fit: .mac, fps: fps, quality: quality) }
         let screen = UIScreen.main
         let pixels = viewPixels ?? CGSize(width: screen.bounds.width * screen.scale, height: screen.bounds.height * screen.scale)

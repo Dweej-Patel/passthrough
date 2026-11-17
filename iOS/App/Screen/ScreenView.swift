@@ -13,6 +13,7 @@ struct ScreenView: View {
     @StateObject private var model = ScreenModel()
     @Environment(\.dismiss) private var dismiss
     @Environment(\.verticalSizeClass) private var verticalSize
+    @Environment(\.displayScale) private var displayScale
     @AppStorage("screenTouchMode") private var modeSetting = ScreenTouchMode.trackpad.rawValue
     @State private var keyboard = false
 
@@ -260,8 +261,8 @@ struct ScreenView: View {
                 Section("Picture") {
                     Picker("Picture", selection: Binding(get: { model.quality }, set: { model.setQuality($0) })) {
                         Text("Sharp: crisp text, 60 fps").tag(ScreenVideoWire.Quality.sharp)
-                        Text("Smooth: crisp text, \(Self.topFPS) fps").tag(ScreenVideoWire.Quality.smooth)
-                        Text("Fast: softer text, \(Self.topFPS) fps").tag(ScreenVideoWire.Quality.fast)
+                        Text("Smooth: crisp text, \(ScreenModel.topFPS) fps").tag(ScreenVideoWire.Quality.smooth)
+                        Text("Fast: softer text, \(ScreenModel.topFPS) fps").tag(ScreenVideoWire.Quality.fast)
                     }
                     .pickerStyle(.inline)
                 }
@@ -275,9 +276,6 @@ struct ScreenView: View {
         }
         .accessibilityLabel("Desktops and Mission Control")
     }
-
-    /// This screen's top frame rate, as Smooth and Fast use it.
-    static var topFPS: Int { min(120, max(60, UIScreen.main.maximumFramesPerSecond)) }
 
     static func describe(_ path: ShellPath) -> (text: String, symbol: String)? {
         switch path {
@@ -323,6 +321,19 @@ struct ScreenView: View {
             VStack(spacing: 12) {
                 ProgressView()
                 Text("Connecting to \(model.macName)…").font(.subheadline).foregroundStyle(.secondary)
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            // The area the screen will fill (as the canvas does: into the bottom edge), so a
+            // display made for this device has that size from the first ask, not a second one.
+            .background {
+                GeometryReader { geometry in
+                    Color.clear
+                        .onAppear { model.viewPixelsChanged(CGSize(width: geometry.size.width * displayScale, height: geometry.size.height * displayScale)) }
+                        .onChange(of: geometry.size) { _, size in
+                            model.viewPixelsChanged(CGSize(width: size.width * displayScale, height: size.height * displayScale))
+                        }
+                }
+                .ignoresSafeArea(.container, edges: .bottom)
             }
         case let .login(error):
             ScreenLoginForm(macName: model.macName, error: error) { login, remember in

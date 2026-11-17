@@ -33,8 +33,9 @@ public enum ScreenVideoWire {
         case copied(CopyResult)
         /// The answer to `curtain`: whether the Mac's displays are hidden now.
         case curtained(Bool)
-        /// What the stream after this shows (the answer to every `hello`): the
-        /// Mac's own display, or one shaped like the phone. `mac` when the phone
+        /// What the stream after this shows, sent with each new capture (a `hello`
+        /// that changes what's captured, or the link changing its size): the Mac's
+        /// own display, or one shaped like the phone. `mac` when the phone
         /// asked for `device` means the Mac couldn't make one.
         case fitted(Fit)
         /// The Mac's pointer at (`x`, `y`), each 0…65535 across the stream, or

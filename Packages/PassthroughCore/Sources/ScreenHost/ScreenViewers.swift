@@ -1,5 +1,6 @@
 #if os(macOS)
 import Foundation
+import PassthroughCore
 
 /// The devices viewing this Mac's screen now, for "Use Here": each view is
 /// told who else is viewing, and one can end the others' views (they're told
@@ -20,6 +21,9 @@ final class ScreenViewers: @unchecked Sendable {
 
     private let lock = NSLock()
     private var viewers: [UUID: Viewer] = [:]
+    /// The lists are worked out and handed out here, one change after another, so
+    /// a view never ends up with an older list than the latest.
+    private let telling = DispatchQueue(label: "\(PassthroughProtocol.identifier).screen-viewers")
 
     func join(_ id: UUID, _ viewer: Viewer) {
         lock.withLock { viewers[id] = viewer }
@@ -44,8 +48,12 @@ final class ScreenViewers: @unchecked Sendable {
         tellEveryone()
     }
 
-    /// Each view's list of the others.
+    /// Each view's list of the others, as they are when it's their turn.
     private func tellEveryone() {
+        telling.async { [self] in tell() }
+    }
+
+    private func tell() {
         let all = lock.withLock { Array(viewers.values) }
         for viewer in all {
             var seen = Set<String>(), names: [String] = []

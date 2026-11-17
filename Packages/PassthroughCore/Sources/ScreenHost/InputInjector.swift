@@ -100,7 +100,8 @@ final class InputInjector: InputSink {
         event.setIntegerValueField(Self.gestureTypeField, value: gesture == .magnify ? 8 : 5)   // kIOHIDEventTypeZoom, …Rotation
         event.setIntegerValueField(Self.gesturePhaseField, value: Int64(phase.rawValue))
         event.setDoubleValueField(gesture == .magnify ? Self.zoomField : Self.rotationField, value: value)
-        event.location = position
+        // Where the pointer really is: the Mac's own trackpad may have moved it since the phone did.
+        event.location = CGEvent(source: nil)?.location ?? position
         event.flags = []
         event.post(tap: .cghidEventTap)
     }

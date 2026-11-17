@@ -221,13 +221,17 @@ final class ScreenCapturer: NSObject, FrameCapturing, SCStreamOutput, SCStreamDe
         return min(1, changed / area)
     }
 
+    /// Capture ended by itself (its display went away, say). The curtain is
+    /// left only by `stop()`: the owner may be handing over to a new capture,
+    /// which must want the curtain before this one lets go, or the Mac's
+    /// displays would show for a moment, or for good. The dead stream is let
+    /// go of, so the curtain doesn't ask it to leave out windows it can't.
     func stream(_ stream: SCStream, didStopWithError error: Error) {
         let stopped = lock.withLock { () -> ((Error?) -> Void)? in
-            defer { onStopped = nil }
+            defer { onStopped = nil; onFrame = nil; self.stream = nil }
             return onStopped
         }
         wake.end()
-        leaveCurtain()
         stopped?(error)
     }
 }

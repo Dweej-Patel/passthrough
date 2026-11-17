@@ -96,9 +96,11 @@ public final class ScreenVideoStreamer: ScreenVideoSource, @unchecked Sendable {
     /// A `copy`'s ⌘C is out, and its answer not yet sent.
     private var copying = false
     private var stopped = false
-    private var captureStarted = false
     /// The capture showing now, and what it shows.
     private var capture: FrameCapturing?
+    /// The capture showing before, which ended by itself while a new one starts:
+    /// kept, so the new one takes the curtain over from it, then it's stopped.
+    private var retiring: FrameCapturing?
     private var fit = ScreenVideoWire.Fit.mac
     /// Where the captured display is, in global coordinates (points).
     private var displayRect: CGRect?
@@ -418,7 +420,6 @@ public final class ScreenVideoStreamer: ScreenVideoSource, @unchecked Sendable {
         }
         wanted = hello
         updateMaxBitRate()
-        captureStarted = true
         if !starting { applyWanted() }
     }
 
@@ -432,9 +433,7 @@ public final class ScreenVideoStreamer: ScreenVideoSource, @unchecked Sendable {
         starting = true
         captureGeneration += 1
         let generation = captureGeneration
-        // Frames of the capture before are another size: none of them is encoded from now.
-        waiting = nil
-        last = nil
+        // The capture showing goes on being encoded until the new one is up.
         startingFrame = nil
         let device = deviceDisplay, queue = self.queue, capture = makeCapture()
         let before = displayWork
@@ -482,7 +481,11 @@ public final class ScreenVideoStreamer: ScreenVideoSource, @unchecked Sendable {
         guard !stopped, generation == shownGeneration, capture != nil else { return }
         ptLog(.warning, "screen: capture stopped: \(error.map { String(describing: $0) } ?? "no reason")")
         // The display it showed went away for the one starting (the phone's made, or removed).
-        if starting { capture = nil; return }
+        if starting {
+            retiring = capture
+            capture = nil
+            return
+        }
         finish()
     }
 
@@ -509,7 +512,8 @@ public final class ScreenVideoStreamer: ScreenVideoSource, @unchecked Sendable {
                               width: Int, height: Int, display: CGRect) {
         guard !stopped, generation == captureGeneration else { return new.stop() }
         starting = false
-        let old = capture
+        let old = capture ?? retiring
+        retiring = nil
         capture = new
         shownGeneration = generation
         self.fit = fit
@@ -556,7 +560,9 @@ public final class ScreenVideoStreamer: ScreenVideoSource, @unchecked Sendable {
         } else if let hidden = wantsCurtain {
             setCurtain(hidden)
         }
-        waiting = startingFrame ?? waiting
+        // Frames of the capture before may be another size: none of them is encoded from now.
+        waiting = startingFrame
+        last = nil
         startingFrame = nil
         startCursor()
         pump()
@@ -566,10 +572,14 @@ public final class ScreenVideoStreamer: ScreenVideoSource, @unchecked Sendable {
 
     /// On `queue` (capture delivers there).
     private func captured(_ buffer: CVPixelBuffer, changed: Double, generation: Int) {
-        guard !stopped, generation == captureGeneration else { return }
+        guard !stopped else { return }
+        if generation == captureGeneration {
+            // Before it's up the encoder is the old capture's, maybe another size: kept for then.
+            if starting { startingFrame = buffer; return }
+        } else if !(starting && generation == shownGeneration) {
+            return
+        }
         if changed < Self.smallChange { slivers = slivers ?? uptime } else { slivers = nil }
-        // Before it's up the encoder is the old capture's, maybe another size.
-        if starting { startingFrame = buffer; return }
         captureCount += 1
         waiting = buffer
         refinesLeft = Self.refinePasses
@@ -667,7 +677,9 @@ public final class ScreenVideoStreamer: ScreenVideoSource, @unchecked Sendable {
         guard let fullPixels, let wanted else { return }
         let frames = wanted.fps > 60 && wanted.quality != .sharp ? 1.5 : 1
         let cap = wanted.quality == .sharp ? 20_000_000 : 30_000_000
+        let before = pacer.bitRate
         pacer.setMaxBitRate(min(max(Int(fullPixels * 4 * frames), 2_000_000), cap))
+        if pacer.bitRate != before { encoder?.setBitRate(pacer.bitRate) }
     }
 
     private func heardInput() { inputAt = uptime }
@@ -679,6 +691,8 @@ public final class ScreenVideoStreamer: ScreenVideoSource, @unchecked Sendable {
             if !encoded.parameterSets.isEmpty {
                 write(ScreenVideoWire.encode(.format(codec: encoder.codec, width: encoder.width, height: encoder.height,
                                                      parameterSets: encoded.parameterSets)), frame: false)
+                // The phone places the pointer only once it knows the size: where it is goes again after each format.
+                lastCursor = nil
             }
         }
         sent &+= 1
@@ -686,14 +700,15 @@ public final class ScreenVideoStreamer: ScreenVideoSource, @unchecked Sendable {
         write(ScreenVideoWire.encode(.frame(number: sent, keyframe: encoded.keyframe, data: encoded.data)), frame: true)
     }
 
-    /// Hands `data` to the stream, counted as waiting until its send completes.
-    private func write(_ data: Data, frame: Bool) {
-        guard let stream else { return }
+    /// Hands `data` to the stream, counted as waiting until its send completes (then `then`).
+    private func write(_ data: Data, frame: Bool, then: (@Sendable () -> Void)? = nil) {
+        guard let stream else { then?(); return }
         let count = data.count
         unsentBytes += count
         if frame { unsentFrames += 1 }
         checkBacklog()
         stream.send(data, isComplete: false) { [weak self] _ in
+            then?()
             guard let self else { return }
             self.queue.async {
                 guard !self.stopped else { return }
@@ -786,10 +801,13 @@ public final class ScreenVideoStreamer: ScreenVideoSource, @unchecked Sendable {
     private func useHere() {
         guard viewer != nil else { return }
         ScreenViewers.shared.takeOver(by: viewerID)
-        queue.asyncAfter(deadline: .now() + 1) { [weak self] in
-            guard let self, !self.stopped, self.wanted?.fit == .device, self.fit == .mac else { return }
-            self.applied = nil
-            if !self.starting { self.applyWanted() }
+        // The other view lets go of the display once its own display work is done, which can take a moment.
+        for delay in [1.0, 2.5, 5] {
+            queue.asyncAfter(deadline: .now() + delay) { [weak self] in
+                guard let self, !self.stopped, !self.starting, self.wanted?.fit == .device, self.fit == .mac else { return }
+                self.applied = nil
+                self.applyWanted()
+            }
         }
     }
 
@@ -797,8 +815,14 @@ public final class ScreenVideoStreamer: ScreenVideoSource, @unchecked Sendable {
     private func moveAway(to name: String) {
         guard !stopped else { return }
         ptLog(.info, "screen: \(viewer?.name ?? "a phone")'s view moved to \(name)")
-        write(ScreenVideoWire.encode(.movedAway(to: name)), frame: false)
-        finish()
+        // Closed once it's sent (or after a couple of seconds): closing at once could drop it behind queued frames.
+        let finished = Locked(false)
+        let end: @Sendable () -> Void = { [weak self] in
+            guard !finished.exchange(true) else { return }
+            self?.queue.async { self?.finish() }
+        }
+        write(ScreenVideoWire.encode(.movedAway(to: name)), frame: false, then: end)
+        queue.asyncAfter(deadline: .now() + 2) { end() }
     }
 
     // MARK: Ending
@@ -823,6 +847,8 @@ public final class ScreenVideoStreamer: ScreenVideoSource, @unchecked Sendable {
         cursorTimer = nil
         capture?.stop()
         capture = nil
+        retiring?.stop()
+        retiring = nil
         startingFrame = nil
         // After any display change under way, so the phone's display can't outlive the stream.
         let device = deviceDisplay, before = displayWork
