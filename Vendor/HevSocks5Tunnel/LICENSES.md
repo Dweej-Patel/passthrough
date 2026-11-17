@@ -1,6 +1,8 @@
 # Licences for the prebuilt tun2socks engine
 
-`lib/libhev-socks5-tunnel.a` is a static library built by `scripts/build-hev.sh`
+`lib/libhev-socks5-tunnel.a` (macOS, for the Mac's root helper) and
+`HevSocks5Tunnel.xcframework` (iOS device and simulator, for the iOS tunnel
+extension, used on iPad) are static libraries built by `scripts/build-hev.sh`
 from the following upstream projects, each under its own licence:
 
 | Component | Upstream | Licence |
