@@ -145,21 +145,35 @@ public enum WirelessLink {
     }
 
     /// `dnsServers`: the resolver's, read while no tunnel of this app holds
-    /// the routes (the tunnel's own DNS address is ignored).
-    public static func hotspotSign(wifi: WiFiFacts?, dnsServers: [String], knownHotspotDNS: [String],
+    /// the routes (the tunnel's own DNS address is ignored). `requireCostly`:
+    /// a learned sign counts only on Wi-Fi iOS counts as costly, as it does
+    /// every iPhone hotspot, so a network learned by mistake can never start
+    /// the tunnel. (Used wherever the tunnel is down and the Wi-Fi path is
+    /// the network's; a running tunnel's watch doesn't rely on it.)
+    public static func hotspotSign(wifi: WiFiFacts?, dnsServers: [String], knownHotspotDNS: [String], requireCostly: Bool = false,
                                    addresses: [(interface: String, address: String, isIPv4: Bool)] = wifiAddresses()) -> HotspotSign {
         if hasHotspotIPv4(addresses) { return .known }
+        let costly = wifi.map { $0.up && $0.expensive } ?? false
         let markers = Set([hotspotGateway] + knownHotspotDNS.map(bareAddress))
+        if !requireCostly || costly, matchesLearned(wifi: wifi, dnsServers: dnsServers, markers: markers) { return .known }
+        return costly ? .maybe : .none
+    }
+
+    /// This network's DNS servers or routers include a learned hotspot's.
+    static func matchesLearned(wifi: WiFiFacts?, dnsServers: [String], markers: Set<String>) -> Bool {
         let seen = dnsServers.map(bareAddress).filter { $0 != HotspotTunnel.dnsAddress } + (wifi?.gateways ?? [])
-        if seen.contains(where: markers.contains) { return .known }
-        if let wifi, wifi.up, wifi.expensive { return .maybe }
-        return .none
+        return seen.contains(where: markers.contains)
+    }
+
+    /// What this network can be learned or unlearned by: its DNS servers and routers.
+    public static func networkMarkers(wifi: WiFiFacts?, dnsServers: [String]) -> [String] {
+        dnsServers.map(bareAddress).filter { $0 != HotspotTunnel.dnsAddress } + (wifi?.gateways ?? [])
     }
 
     /// Whether this device may be on an iPhone's hotspot (`known` or `maybe`).
     public static func onPhoneHotspot(wifi: WiFiFacts?, dnsServers: [String], knownHotspotDNS: [String],
                                       addresses: [(interface: String, address: String, isIPv4: Bool)] = wifiAddresses()) -> Bool {
-        hotspotSign(wifi: wifi, dnsServers: dnsServers, knownHotspotDNS: knownHotspotDNS, addresses: addresses) != .none
+        hotspotSign(wifi: wifi, dnsServers: dnsServers, knownHotspotDNS: knownHotspotDNS, requireCostly: true, addresses: addresses) != .none
     }
 
     /// Whether a tunnel holding every route should step aside. Never while

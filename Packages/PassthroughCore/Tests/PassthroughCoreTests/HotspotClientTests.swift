@@ -281,8 +281,31 @@ final class HotspotDetectionTests: XCTestCase {
     /// What an earlier build saved on the device: a duplicate and the CLAT router.
     func testAnEarlierBuildsEntriesAreReadClean() {
         let defaults = UserDefaults(suiteName: "hotspot-dns-\(UUID().uuidString)")!
-        defaults.set([phoneLinkLocal, "192.0.0.1", phoneLinkLocal], forKey: "hotspot.knownDNS")
+        defaults.set([phoneLinkLocal, "192.0.0.1", phoneLinkLocal], forKey: HotspotTunnel.knownDNSKey)
         XCTAssertEqual(HotspotTunnel.knownHotspotDNS(defaults), [phoneLinkLocal])
+        // Learned before the iPhone linked iPads over its hotspot alone: could be any Wi-Fi, so dropped.
+        let older = UserDefaults(suiteName: "hotspot-dns-\(UUID().uuidString)")!
+        older.set(["192.168.1.1"], forKey: "hotspot.knownDNS")
+        XCTAssertEqual(HotspotTunnel.knownHotspotDNS(older), [])
+    }
+
+    /// Home Wi-Fi learned by mistake (an earlier build) can never start the
+    /// tunnel: a learned sign counts only on costly Wi-Fi, and the app forgets it there.
+    func testAMistakenlyLearnedHomeNetworkNeverStartsTheTunnel() {
+        let home = Facts(up: true, expensive: false, gateways: ["192.168.1.1"])
+        XCTAssertEqual(WirelessLink.hotspotSign(wifi: home, dnsServers: ["192.168.1.1"], knownHotspotDNS: ["192.168.1.1"],
+                                                requireCostly: true, addresses: homeWiFi), .none)
+        XCTAssertFalse(WirelessLink.onPhoneHotspot(wifi: home, dnsServers: ["192.168.1.1"], knownHotspotDNS: ["192.168.1.1"], addresses: homeWiFi))
+        let defaults = UserDefaults(suiteName: "hotspot-dns-\(UUID().uuidString)")!
+        HotspotTunnel.rememberHotspotDNS(["192.168.1.1", phoneLinkLocal], in: defaults)
+        XCTAssertTrue(HotspotTunnel.forgetHotspots(matching: WirelessLink.networkMarkers(wifi: home, dnsServers: ["192.168.1.1"]), in: defaults))
+        XCTAssertEqual(HotspotTunnel.knownHotspotDNS(defaults), [phoneLinkLocal], "the real hotspot stays")
+        XCTAssertFalse(HotspotTunnel.forgetHotspots(matching: ["192.168.1.1"], in: defaults))
+    }
+
+    func testTheRealHotspotStillStartsWhenCostlyIsRequired() {
+        XCTAssertEqual(WirelessLink.hotspotSign(wifi: hotspotPath, dnsServers: [phoneLinkLocal], knownHotspotDNS: [phoneLinkLocal],
+                                                requireCostly: true, addresses: ipv6Hotspot), .known)
     }
 
     func testTheIPhoneKnowsItsHotspotInterface() {

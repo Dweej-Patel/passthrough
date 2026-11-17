@@ -199,12 +199,24 @@ final class HotspotModel: ObservableObject {
     private func hotspotSign() -> WirelessLink.HotspotSign {
         let tunnelDown = tunnel == .disconnected || tunnel == .invalid
         return WirelessLink.hotspotSign(wifi: wifi?.facts, dnsServers: tunnelDown ? DNSRedirect.systemServers() : [],
-                                        knownHotspotDNS: HotspotTunnel.knownHotspotDNS(AppModel.groupDefaults))
+                                        knownHotspotDNS: HotspotTunnel.knownHotspotDNS(AppModel.groupDefaults), requireCostly: true)
     }
 
     private func refreshOnHotspot() {
+        pruneMistakenHotspots()
         let on = hotspotSign() != .none
         if on != onPhoneHotspot { onPhoneHotspot = on }
+    }
+
+    /// On Wi-Fi iOS doesn't count as costly (never an iPhone's hotspot), with
+    /// the tunnel down: anything learned that matches this network was a
+    /// mistake. Drop it, and the on-demand rule follows on the next save.
+    private func pruneMistakenHotspots() {
+        guard tunnel == .disconnected || tunnel == .invalid, let facts = wifi?.facts, facts.up, !facts.expensive else { return }
+        let markers = WirelessLink.networkMarkers(wifi: facts, dnsServers: DNSRedirect.systemServers())
+        guard HotspotTunnel.forgetHotspots(matching: markers, in: AppModel.groupDefaults) else { return }
+        ptLog(.info, "hotspot: this Wi-Fi isn't a hotspot; forgot it as one (\(networkSummary))")
+        Task { await controller.updateClientRules() }
     }
 
     private var networkSummary: String { WirelessLink.networkSummary(wifi: wifi?.facts, dnsServers: DNSRedirect.systemServers()) }

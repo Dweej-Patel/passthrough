@@ -115,7 +115,9 @@ public enum HotspotTunnel {
     /// link through it worked. An IPv6-only hotspot names the iPhone's own
     /// link-local address rather than 172.20.10.1, so this is how the
     /// on-demand rule (and the hotspot check) knows it next time.
-    static let knownDNSKey = "hotspot.knownDNS"
+    /// v2: what earlier builds learned may be any shared Wi-Fi (the iPhone
+    /// then also linked an iPad there), so it's dropped.
+    static let knownDNSKey = "hotspot.knownDNS.v2"
 
     /// Read clean: entries saved by earlier builds may hold duplicates or
     /// addresses every network of a kind shares (192.0.0.1), which say nothing.
@@ -149,6 +151,20 @@ public enum HotspotTunnel {
     /// Forgets every hotspot learned (the iPhone was forgotten or replaced).
     public static func forgetHotspots(in defaults: UserDefaults) {
         defaults.removeObject(forKey: knownDNSKey)
+        defaults.removeObject(forKey: "hotspot.knownDNS")
+    }
+
+    /// Drops what was learned that matches `addresses` (this network's DNS
+    /// servers and routers) when the network isn't one an iPhone's hotspot
+    /// can be (iOS doesn't count it as costly). True if anything was dropped.
+    @discardableResult
+    public static func forgetHotspots(matching addresses: [String], in defaults: UserDefaults) -> Bool {
+        let bare = Set(addresses.map(WirelessLink.bareAddress))
+        let known = knownHotspotDNS(defaults)
+        let kept = known.filter { !bare.contains($0) }
+        guard kept != known else { return false }
+        defaults.set(kept, forKey: knownDNSKey)
+        return true
     }
 
     /// The on-demand rule's DNS matches: each known server, and a link-local

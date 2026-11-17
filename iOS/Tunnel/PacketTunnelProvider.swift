@@ -88,7 +88,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         let defaults = UserDefaults(suiteName: PassthroughProtocol.appGroup) ?? .standard
         let known = HotspotTunnel.knownHotspotDNS(defaults)
         let network = WirelessLink.networkSummary(wifi: wifi, dnsServers: dns)
-        let sign = WirelessLink.hotspotSign(wifi: wifi, dnsServers: dns, knownHotspotDNS: known)
+        let sign = WirelessLink.hotspotSign(wifi: wifi, dnsServers: dns, knownHotspotDNS: known, requireCostly: true)
         guard manual || sign == .known else {
             ptLog(.info, "Internet through iPhone: not on an iPhone's hotspot, so not starting (\(network))")
             completionHandler(NSError(domain: "Passthrough", code: 12,
