@@ -23,6 +23,45 @@ final class ShellRouter: ObservableObject {
 
 enum RootTab: Hashable { case mac, shells, activity, device }
 
+/// Presents the Mac's screen over everything through UIKit, not SwiftUI's own cover:
+/// measured, every publish of the app's model (at least one a second: device facts,
+/// the log, traffic while serving) reached a SwiftUI cover as a trait change, and
+/// UIKit redrew every icon and label in it. Open menus flickered like a heartbeat
+/// and lost their scroll place. A controller presented here has no such path in.
+private struct ScreenCoverPresenter: UIViewControllerRepresentable {
+    let shell: ShellModel
+    let lock: AppLock
+    @ObservedObject var router: ShellRouter
+    let onDismiss: () -> Void
+
+    final class Coordinator { var presented: UIViewController? }
+    func makeCoordinator() -> Coordinator { Coordinator() }
+    func makeUIViewController(context: Context) -> UIViewController { UIViewController() }
+
+    func updateUIViewController(_ anchor: UIViewController, context: Context) {
+        let coordinator = context.coordinator
+        if router.showScreen, coordinator.presented == nil {
+            let screen = ScreenView(shell: shell, onClose: { [weak router] in router?.showScreen = false })
+                .environmentObject(lock)
+                .tint(PTColor.tintText)
+            let host = UIHostingController(rootView: screen)
+            host.modalPresentationStyle = .fullScreen
+            host.view.backgroundColor = .black
+            coordinator.presented = host
+            // After this update, from whatever is on top (nothing else should be: the router shows one thing at a time).
+            DispatchQueue.main.async {
+                guard coordinator.presented === host, var top = anchor.view.window?.rootViewController else { return }
+                while let next = top.presentedViewController, !next.isBeingDismissed { top = next }
+                top.present(host, animated: true)
+            }
+        } else if !router.showScreen, let host = coordinator.presented {
+            coordinator.presented = nil
+            let done = onDismiss
+            if host.presentingViewController != nil { host.dismiss(animated: true) { done() } } else { done() }
+        }
+    }
+}
+
 /// The app's sections: the Mac, its shells, what happened, and this device
 /// (an iPhone's sharing and paired devices; an iPad's iPhone and Macs).
 struct RootView: View {
@@ -62,8 +101,9 @@ struct RootView: View {
         .sheet(isPresented: $router.showHistory, onDismiss: presentationDismissed) {
             ShellHistoryView(shell: model.shell)
         }
-        .fullScreenCover(isPresented: $router.showScreen, onDismiss: presentationDismissed) {
-            ScreenView(shell: model.shell).equatable().environmentObject(lock)
+        // The Mac's screen, presented through UIKit (`ScreenCoverPresenter` says why).
+        .background {
+            ScreenCoverPresenter(shell: model.shell, lock: lock, router: router, onDismiss: presentationDismissed)
         }
         .sheet(isPresented: $showPairing, onDismiss: { model.endPairing() }) {
             PairSheet().environmentObject(model)

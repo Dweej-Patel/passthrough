@@ -16,6 +16,8 @@ struct ScreenView: View, Equatable {
     /// change redrew this whole view, open menus included, which made them flicker.
     /// The one thing shown from it, whether the Mac can be locked, is followed below.
     let shell: ShellModel
+    /// How to close it when it isn't in a SwiftUI presentation (it's presented through UIKit).
+    var onClose: (() -> Void)?
     @State private var canLock = false
     @EnvironmentObject private var lock: AppLock
     @StateObject private var model = ScreenModel()
@@ -42,6 +44,8 @@ struct ScreenView: View, Equatable {
                 phoneLayout
             }
         }
+        // Safe here because the view has its own controller (`ScreenCoverPresenter`): under
+        // SwiftUI's cover this preference and the app root's took turns several times a second.
         .preferredColorScheme(.dark)
         .hiddenWhileCaptured { covered in
             if covered { keyboard = false }
@@ -81,7 +85,7 @@ struct ScreenView: View, Equatable {
     private var padBar: some View {
         VStack(spacing: 6) {
             HStack(spacing: 10) {
-                Button { model.stop(); dismiss() } label: {
+                Button { model.stop(); close() } label: {
                     Image(systemName: "xmark").font(.body.weight(.bold)).frame(width: 44, height: 44).contentShape(Circle())
                 }
                 .accessibilityLabel("Done")
@@ -127,7 +131,7 @@ struct ScreenView: View, Equatable {
 
     private var topBar: some View {
         HStack(spacing: 12) {
-            Button("Done") { model.stop(); dismiss() }
+            Button("Done") { model.stop(); close() }
                 .font(.body.weight(.semibold))
             Spacer(minLength: 0)
             VStack(spacing: 1) {
@@ -184,8 +188,12 @@ struct ScreenView: View, Equatable {
         .padding(.horizontal, 6)
     }
 
+    private func close() {
+        if let onClose { onClose() } else { dismiss() }
+    }
+
     private var doneButton: some View {
-        Button { model.stop(); dismiss() } label: { Image(systemName: "xmark").sideTarget(landscape) }
+        Button { model.stop(); close() } label: { Image(systemName: "xmark").sideTarget(landscape) }
             .font(.body.weight(.semibold))
             .accessibilityLabel("Done")
     }
@@ -293,7 +301,7 @@ struct ScreenView: View, Equatable {
         case .confirmScreenSharing:
             ScreenSharingPrompt(macName: model.macName, reason: model.slowReason,
                                 onUse: { model.useScreenSharing(always: $0) },
-                                onCancel: { model.stop(); dismiss() })
+                                onCancel: { model.stop(); close() })
         case let .movedAway(name):
             VStack(spacing: 16) {
                 Image(systemName: "arrow.left.arrow.right.square")

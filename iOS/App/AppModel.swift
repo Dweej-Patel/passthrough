@@ -260,9 +260,14 @@ final class AppModel: ObservableObject {
     private func refreshDeviceFacts() {
         let defaults = Self.groupDefaults
         let egress = defaults.string(forKey: SharedKeys.egress).flatMap(Egress.init(rawValue:)) ?? .cellular
-        radio = facts.radio(cellularOnly: cellularOnly, running: state == .running, egress: egress)
-        sharingWiFiInsteadOfCellular = cellularOnly && facts.onWiFi
-        batteryLevel = facts.battery
+        // Only what changed: this runs every second, and each assignment, same value or
+        // not, publishes the whole model and redraws everything that observes it.
+        let radio = facts.radio(cellularOnly: cellularOnly, running: state == .running, egress: egress)
+        if radio != self.radio { self.radio = radio }
+        let onWiFi = cellularOnly && facts.onWiFi
+        if onWiFi != sharingWiFiInsteadOfCellular { sharingWiFiInsteadOfCellular = onWiFi }
+        let battery = facts.battery
+        if battery != batteryLevel { batteryLevel = battery }
         // Cross-process defaults writes are not free; only when something changed.
         if defaults.string(forKey: SharedKeys.radio) != radio { defaults.set(radio, forKey: SharedKeys.radio) }
         if defaults.object(forKey: SharedKeys.battery) as? Double != batteryLevel { defaults.set(batteryLevel, forKey: SharedKeys.battery) }
