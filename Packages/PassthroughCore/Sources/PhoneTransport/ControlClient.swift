@@ -229,7 +229,8 @@ public final class ControlClient: @unchecked Sendable {
             handler(.goodbye)
         case ControlEnvelope.status:
             guard authenticated else { return }
-            let status = DeviceStatus(deviceName: m.deviceName ?? device.kindName, radio: m.radio, carrier: m.carrier, battery: m.battery, hosting: m.hosting ?? "", ipv6: m.ipv6)
+            let status = DeviceStatus(deviceName: m.deviceName ?? device.kindName, radio: m.radio, carrier: m.carrier, battery: m.battery, hosting: m.hosting ?? "", ipv6: m.ipv6,
+                                      internetFrom: m.internetFrom)
             handler(.status(status, rx: m.rxBytes ?? 0, tx: m.txBytes ?? 0, active: m.activeConnections ?? 0))
         default: break
         }

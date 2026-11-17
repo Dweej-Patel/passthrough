@@ -403,7 +403,7 @@ final class ControlServerTests: XCTestCase {
         port = freePort()
         server = ControlServer(port: port, socksPort: 7890, registry: registry, counter: counter,
                                unauthenticatedTimeout: unauthenticatedTimeout, cableSilenceLimit: cableSilenceLimit) {
-            DeviceStatus(deviceName: "Test iPhone", radio: "5G", hosting: "test")
+            DeviceStatus(deviceName: "Test iPhone", radio: "5G", hosting: "test", internetFrom: "Upstream iPhone")
         }
         try server.start()
     }
@@ -484,6 +484,7 @@ final class ControlServerTests: XCTestCase {
         let first = try receive(client2)
         XCTAssertEqual(first.t, "status", "authenticated: status flows, the first at once")
         XCTAssertEqual(first.deviceName, "Test iPhone")
+        XCTAssertEqual(first.internetFrom, "Upstream iPhone", "an iPad says which iPhone it uses")
         client2.close()
     }
 

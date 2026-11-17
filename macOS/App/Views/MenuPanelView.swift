@@ -95,7 +95,12 @@ struct MenuPanelView: View {
             return parts.joined(separator: " · ")
         case .connecting(let step): return step
         case .pairingRequired: return "Type the code shown on the \(session.phoneKindName)"
-        default: return vpnOn ? "VPN on, over this Mac's own network" : "This Mac is on its own network"
+        default:
+            // An iPad never carries the Mac's internet; say which iPhone it uses.
+            if session.device?.kind == .iPad, let from = session.phoneStatus?.internetFrom {
+                return "\(phoneName) gets its internet from \(from)"
+            }
+            return vpnOn ? "VPN on, over this Mac's own network" : "This Mac is on its own network"
         }
     }
 

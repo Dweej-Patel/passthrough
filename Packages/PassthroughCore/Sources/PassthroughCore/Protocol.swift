@@ -70,6 +70,8 @@ public struct ControlEnvelope: Codable, Equatable, Sendable {
     public var hosting: String?
     /// Whether the phone's current network routes IPv6. Absent from older phones.
     public var ipv6: Bool?
+    /// status, from an iPad: the iPhone it gets its internet from. Absent otherwise.
+    public var internetFrom: String?
     public var activeConnections: Int?
     public var rxBytes: Int64?
     public var txBytes: Int64?
@@ -187,6 +189,8 @@ extension PassthroughProtocol {
 
 public enum SharedKeys {
     public static let deviceName = "device.name"
+    /// iPad: the name of the iPhone it gets its internet from, for its Macs.
+    public static let internetFrom = "device.internetFrom"
     public static let radio = "device.radio"
     public static let carrier = "device.carrier"
     public static let battery = "device.battery"

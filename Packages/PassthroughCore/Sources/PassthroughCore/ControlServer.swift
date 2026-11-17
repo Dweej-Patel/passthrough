@@ -11,8 +11,12 @@ public struct DeviceStatus: Sendable, Equatable {
     public var hosting: String
     /// Whether the network the phone sends Mac traffic out on routes IPv6; nil when unknown.
     public var ipv6: Bool?
-    public init(deviceName: String, radio: String? = nil, carrier: String? = nil, battery: Double? = nil, hosting: String, ipv6: Bool? = nil) {
+    /// An iPad: the iPhone it gets its internet from (Internet through iPhone), if paired.
+    public var internetFrom: String?
+    public init(deviceName: String, radio: String? = nil, carrier: String? = nil, battery: Double? = nil, hosting: String, ipv6: Bool? = nil,
+                internetFrom: String? = nil) {
         self.deviceName = deviceName; self.radio = radio; self.carrier = carrier; self.battery = battery; self.hosting = hosting; self.ipv6 = ipv6
+        self.internetFrom = internetFrom
     }
 }
 
@@ -306,6 +310,7 @@ public final class ControlServer: @unchecked Sendable {
         m.battery = status.battery
         m.hosting = status.hosting
         m.ipv6 = status.ipv6
+        m.internetFrom = status.internetFrom
         m.activeConnections = snap.active
         m.rxBytes = snap.rx
         m.txBytes = snap.tx

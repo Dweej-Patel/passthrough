@@ -29,7 +29,10 @@ final class HotspotModel: ObservableObject {
         }
     }
 
-    @Published private(set) var upstream: UpstreamPhone?
+    @Published private(set) var upstream: UpstreamPhone? {
+        // Its Macs see which iPhone this iPad uses (the status the app serves them).
+        didSet { AppModel.groupDefaults.set(upstream?.name, forKey: SharedKeys.internetFrom) }
+    }
     @Published private(set) var tunnel: NEVPNStatus = .invalid
     @Published private(set) var status: HotspotStatus?
     /// On the iPhone's Personal Hotspot (172.20.10.0/28) right now.
