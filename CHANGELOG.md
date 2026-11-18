@@ -184,6 +184,10 @@ these steps as written and check each one before building.
   text once a candidate is chosen. A click, an arrow key, a shortcut or a
   paste makes it forget what you typed, so nothing the keyboard does later
   reaches back and changes other text on the Mac.
+* Screen view on iPad: the floating bar can be moved aside when it covers the
+  Mac's menu bar. Its last button slides it into a small handle at the right
+  edge, below the menu bar; tapping the handle brings it back. The handle
+  shows a red microphone while the Mac hears the iPad.
 * Screen view: an **fn** key in the row above the keyboard, held on the Mac
   for as long as you hold it (for push-to-talk dictation apps on the Mac).
 * Screen view: typing and pasting work in Windows App (RDP) and other apps

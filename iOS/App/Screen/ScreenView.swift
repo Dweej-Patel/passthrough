@@ -26,6 +26,9 @@ struct ScreenView: View, Equatable {
     @Environment(\.displayScale) private var displayScale
     @AppStorage("screenTouchMode") private var modeSetting = ScreenTouchMode.trackpad.rawValue
     @State private var keyboard = false
+    /// iPad: the floating bar is put away at the side (it covers the Mac's menu bar), remembered.
+    @AppStorage("screenBarAside") private var barAside = false
+    @Namespace private var barSpace
 
     private var mode: ScreenTouchMode { ScreenTouchMode(rawValue: modeSetting) ?? .trackpad }
     private var landscape: Bool { verticalSize == .compact }
@@ -39,7 +42,7 @@ struct ScreenView: View, Equatable {
                 content
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                     .ignoresSafeArea(.container, edges: .all)
-                    .overlay(alignment: .top) { padBar.padding(.top, 8) }
+                    .overlay(alignment: .top) { padControls }
             } else {
                 phoneLayout
             }
@@ -82,6 +85,45 @@ struct ScreenView: View, Equatable {
         }
     }
 
+    private static let barSpring = Animation.spring(response: 0.42, dampingFraction: 0.74)
+
+    /// iPad: the bar, or once it's put aside a small handle at the edge, below the Mac's
+    /// menu bar, that brings it back. The glass behind them is one shape that glides
+    /// and shrinks from one to the other; what's in it fades. Before the screen is
+    /// live the bar always shows: it has the way out.
+    @ViewBuilder private var padControls: some View {
+        if barAside, model.phase == .live {
+            Button {
+                withAnimation(Self.barSpring) { barAside = false }
+            } label: {
+                Image(systemName: model.microphone == .on ? "mic.fill" : "slider.horizontal.3")
+                    .font(.body.weight(.semibold))
+                    .foregroundStyle(model.microphone == .on ? AnyShapeStyle(.red) : AnyShapeStyle(.tint))
+                    .frame(width: 44, height: 44)
+                    .contentShape(Circle())
+            }
+            .accessibilityLabel("Show the controls")
+            .background { barGlass }
+            .tint(PTTheme.accentEnd)
+            .transition(.opacity.combined(with: .scale(scale: 0.6)))
+            .frame(maxWidth: .infinity, alignment: .trailing)
+            .padding(.trailing, 10)
+            .padding(.top, 56)
+        } else {
+            padBar
+                .padding(.top, 8)
+                .transition(.opacity.combined(with: .scale(scale: 0.9, anchor: .topTrailing)))
+        }
+    }
+
+    /// The glass behind the bar and behind its handle: the same shape to SwiftUI, so it moves between them.
+    private var barGlass: some View {
+        Capsule().fill(.ultraThinMaterial)
+            .overlay(Capsule().strokeBorder(Color.white.opacity(0.14)))
+            .shadow(color: .black.opacity(0.35), radius: 16, y: 8)
+            .matchedGeometryEffect(id: "bar", in: barSpace)
+    }
+
     /// iPad: one floating glass bar over the screen, its controls labelled
     /// since there's room. A connected keyboard and trackpad go straight to
     /// the Mac (`ScreenCanvas`), so the on-screen keyboard is only a fallback.
@@ -106,14 +148,19 @@ struct ScreenView: View, Equatable {
                     clipboardMenu.frame(width: 44, height: 44)
                     desktopsMenu.frame(height: 44)
                     displayMenu.frame(height: 44)
+                    Divider().frame(height: 24)
+                    Button {
+                        withAnimation(Self.barSpring) { barAside = true }
+                    } label: {
+                        Image(systemName: "arrow.right.to.line").font(.body.weight(.semibold)).frame(width: 44, height: 44).contentShape(Circle())
+                    }
+                    .accessibilityLabel("Move the controls aside")
                 } else {
                     Text(model.macName).font(.subheadline.weight(.semibold)).padding(.trailing, 12)
                 }
             }
             .padding(.horizontal, 6)
-            .background(.ultraThinMaterial, in: Capsule())
-            .overlay(Capsule().strokeBorder(Color.white.opacity(0.14)))
-            .shadow(color: .black.opacity(0.35), radius: 16, y: 8)
+            .background { barGlass }
             if model.phase == .live {
                 Text(model.slowReason ?? (model.macHidden ? "Hidden on \(model.macName)'s own display" : padHint))
                     .font(.caption)
