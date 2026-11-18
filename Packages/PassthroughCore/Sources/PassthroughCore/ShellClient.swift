@@ -764,6 +764,8 @@ public final class ShellClient: @unchecked Sendable {
         case ShellEnvelope.screenGranted:
             guard let viewerID = message.phoneID, ScreenPass.isViewerID(viewerID),
                   let key = message.key.flatMap({ Data(base64Encoded: $0) }), key.count == 32 else {
+                // A pass that can't be handed over: the Mac takes back the one it made, if it named it.
+                if let viewerID = message.phoneID, ScreenPass.isViewerID(viewerID) { revokeScreen(viewerID) }
                 return emit(.failed(.badRequest, session: nil))
             }
             emit(.screenGranted(viewerID: viewerID, key: key))

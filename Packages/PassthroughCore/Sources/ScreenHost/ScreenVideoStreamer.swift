@@ -81,6 +81,10 @@ public final class ScreenVideoStreamer: ScreenVideoSource, @unchecked Sendable {
     /// This view in `ScreenViewers`: its phone and that phone's name. Nil in tests that don't need it.
     private let viewer: (phoneID: String, name: String)?
     private let viewerID = UUID()
+    /// A screen pass's view (another Mac's): it sees and controls the screen,
+    /// but never hides the Mac's displays from whoever is at it, nor ends the
+    /// other views (Use Here).
+    private let restricted: Bool
 
     // On `queue`.
     private var stream: (any ByteStream)?
@@ -183,14 +187,17 @@ public final class ScreenVideoStreamer: ScreenVideoSource, @unchecked Sendable {
 
     /// The main display or one made for the phone, with input injected as the Mac's own events.
     /// `phoneID` and `name` (the paired phone's): who this view is to the other views.
-    public convenience init(phoneID: String, name: String) {
+    /// `restricted` for a screen pass's view.
+    public convenience init(phoneID: String, name: String, restricted: Bool = false) {
         self.init(capture: { ScreenCapturer() }, input: { InputInjector(display: $0) }, display: DeviceDisplay(), cursor: SystemCursor(),
-                  viewer: (phoneID, name))
+                  viewer: (phoneID, name), restricted: restricted)
     }
 
     /// A new capture for each change of what's shown. `limits` are smaller in tests.
     init(capture: @escaping () -> FrameCapturing, input: @escaping (CGRect) -> InputSink, display: DeviceDisplaying? = nil,
-         cursor: CursorSource? = nil, viewer: (phoneID: String, name: String)? = nil, limits: Limits = Limits()) {
+         cursor: CursorSource? = nil, viewer: (phoneID: String, name: String)? = nil, limits: Limits = Limits(),
+         restricted: Bool = false) {
+        self.restricted = restricted
         self.makeCapture = capture
         self.makeInput = input
         self.deviceDisplay = display
@@ -276,9 +283,11 @@ public final class ScreenVideoStreamer: ScreenVideoSource, @unchecked Sendable {
         case let .text(text): heardInput(); type(.text(text))
         case let .clipboard(text): input?.clipboard(text)
         case .copy: heardInput(); copySelection()
-        case .useHere: useHere()
+        case .useHere: if !restricted { useHere() }
         case let .gesture(gesture, phase, value): heardInput(); input?.gesture(gesture, phase: phase, value: value)
-        case let .curtain(hidden): setCurtain(hidden)
+        case let .curtain(hidden):
+            // Refused, and said so: the displays stay as they are.
+            if restricted { write(ScreenVideoWire.encode(.curtained(false)), frame: false) } else { setCurtain(hidden) }
         case .format, .frame, .copied, .curtained, .fitted, .cursor, .cursorShape, .viewers, .movedAway:
             break
         }

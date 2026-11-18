@@ -57,8 +57,13 @@ public struct ShellPhone: Codable, Equatable, Sendable {
 /// memory even when the store cannot be written, and is laid over every
 /// later read of the store until a write succeeds, so a failed write never
 /// brings back what the owner took away.
+///
+/// Screen passes are kept in their own item, apart from the phones: a build
+/// that predates them reads only the phones' item, so it can never take a
+/// pass (whose key another Mac holds) for a phone with full access.
 public final class ShellAccessStore: @unchecked Sendable {
     private static let account = "shell.phones"
+    private static let passAccount = "shell.screenPasses"
     /// How long a read that found nothing is answered from memory.
     public static let emptyTTL: TimeInterval = 5
     private let secrets: SecretStore
@@ -84,6 +89,10 @@ public final class ShellAccessStore: @unchecked Sendable {
     private var unsavedRevokes: Set<String> = []
     private var unsavedScreenOff: Set<String> = []
     private var unsavedControlOff: Set<String> = []
+    /// A read found entries it left out (passes in the phones' item, from
+    /// before they had their own, or passes that can't be used): the next
+    /// write rewrites both items without them. Guarded by `lock`.
+    private var needsTidy = false
 
     /// `now` is for tests.
     public init(secrets: SecretStore, now: @escaping @Sendable () -> Date = Date.init) {
@@ -129,6 +138,7 @@ public final class ShellAccessStore: @unchecked Sendable {
             ptLog(.error, "The stored shell phones are unreadable; not recording a new one")
             return false
         }
+        let before = list
         // A pass's id is the Mac's to mint, never a phone's to claim: a phone
         // granted under one would turn the pass (and its key, held by another
         // Mac) into full access.
@@ -156,22 +166,26 @@ public final class ShellAccessStore: @unchecked Sendable {
         }
         list.removeAll { $0.phoneID == phone.phoneID }
         list.append(phone)
-        return store(list)
+        return store(list, over: before)
     }
 
     /// Issues a screen-only pass, granted by `granter` (a phone with access,
     /// itself allowed the screen), for a device it calls `name` and knows as
-    /// `viewer`. The pass replaces any earlier one that phone got for that
-    /// viewer, and the phone's oldest once it has `ScreenPass.maxPerGranter`.
+    /// `viewer`. An earlier pass that phone got for that viewer stays until
+    /// the new one is first used (`supersede(by:)`), since the hand-over to
+    /// the viewer may still fail; only the newest such earlier pass is kept.
+    /// The phone's oldest pass goes once it has `ScreenPass.maxPerGranter`.
     /// It follows the phone's pairing: forgetting the phone removes it.
-    /// Returns the new id and key and the ids of passes it replaced, or why not.
+    /// Returns the new id and key and the ids of passes it removed, or why not.
     public func grantViewer(by granter: String, name: String, viewer: String) -> Result<(id: String, key: Data, replaced: [String]), ShellError> {
         guard ScreenPass.isValidName(name), !viewer.isEmpty, viewer.count <= ScreenPass.maxName * 2 else { return .failure(.badRequest) }
         writeLock.lock(); defer { writeLock.unlock() }
         guard var list = loadForWrite() else { return .failure(.passNotSaved) }
+        let before = list
         guard let phone = list.first(where: { $0.phoneID == granter }), !phone.isScreenOnly else { return .failure(.notAuthorized) }
         guard phone.screenAllowed else { return .failure(.screenNotAllowed) }
-        var replaced = list.filter { $0.grantedBy == granter && $0.viewerOf == viewer }.map(\.phoneID)
+        // In the order granted: the last is the newest, and the one kept.
+        var replaced = Array(list.filter { $0.grantedBy == granter && $0.viewerOf == viewer }.map(\.phoneID).dropLast())
         list.removeAll { replaced.contains($0.phoneID) }
         let others = list.filter { $0.grantedBy == granter }.sorted { $0.grantedAt < $1.grantedAt }
         if others.count >= ScreenPass.maxPerGranter {
@@ -184,7 +198,24 @@ public final class ShellAccessStore: @unchecked Sendable {
         list.append(ShellPhone(phoneID: id, label: name.trimmingCharacters(in: .whitespacesAndNewlines), pairingSlot: phone.pairingSlot,
                                key: key, grantedAt: now(), screen: true, control: false, screenOnly: true,
                                grantedBy: granter, viewerOf: viewer))
-        return store(list) ? .success((id, key, replaced)) : .failure(.passNotSaved)
+        return store(list, over: before) ? .success((id, key, replaced)) : .failure(.passNotSaved)
+    }
+
+    /// The pass `passID` was used (its viewer proved its key), so its viewer
+    /// has it: the earlier passes the same phone granted that viewer go.
+    /// Answered from memory when there are none, as there usually aren't.
+    /// Returns what it removed.
+    @discardableResult
+    public func supersede(by passID: String) -> [ShellPhone] {
+        guard let pass = phones.first(where: { $0.phoneID == passID && $0.isScreenOnly }),
+              let granter = pass.grantedBy, let viewer = pass.viewerOf else { return [] }
+        // Only older ones: a pass granted after this one may still be on its way to the viewer.
+        let stale = { (other: ShellPhone) in
+            other.isScreenOnly && other.phoneID != passID && other.grantedBy == granter && other.viewerOf == viewer
+                && other.grantedAt < pass.grantedAt
+        }
+        guard phones.contains(where: stale) else { return [] }
+        return removing(where: stale).removed
     }
 
     /// From memory, like `screenAllowed`: whether this is a screen-only pass.
@@ -225,10 +256,11 @@ public final class ShellAccessStore: @unchecked Sendable {
             // Unreadable or unknown: nobody can be allowed the screen through it anyway.
             return false
         }
+        let before = list
         list[index].screen = allowed
-        if allowed { return store(list) }
+        if allowed { return store(list, over: before) }
         setCache(list)
-        if write(list) { saved(); return true }
+        if write(list, over: before).ok { saved(); return true }
         ptLog(.error, "Could not store that a phone may no longer see the screen; it stays off until this Mac quits")
         lock.lock(); unsavedScreenOff.insert(phoneID); lock.unlock()
         return false
@@ -242,9 +274,10 @@ public final class ShellAccessStore: @unchecked Sendable {
         guard !label.isEmpty, phones.contains(where: { $0.pairingSlot == pairingSlot && !$0.isScreenOnly && $0.label != label }) else { return false }
         writeLock.lock(); defer { writeLock.unlock() }
         guard var list = loadForWrite() else { return false }
+        let before = list
         // A screen pass keeps its own name (another Mac's), not the phone's that granted it.
         for index in list.indices where list[index].pairingSlot == pairingSlot && !list[index].isScreenOnly { list[index].label = label }
-        return store(list)
+        return store(list, over: before)
     }
 
     /// From memory: asked for every `macState` and every `setAwake` / `setVPN`.
@@ -258,10 +291,11 @@ public final class ShellAccessStore: @unchecked Sendable {
     public func setControlAllowed(_ allowed: Bool, forPhone phoneID: String) -> Bool {
         writeLock.lock(); defer { writeLock.unlock() }
         guard var list = loadForWrite(), let index = list.firstIndex(where: { $0.phoneID == phoneID }) else { return false }
+        let before = list
         list[index].control = allowed
-        if allowed { return store(list) }
+        if allowed { return store(list, over: before) }
         setCache(list)
-        if write(list) { saved(); return true }
+        if write(list, over: before).ok { saved(); return true }
         ptLog(.error, "Could not store that a phone may no longer change Keep awake and the VPN; it stays off until this Mac quits")
         lock.lock(); unsavedControlOff.insert(phoneID); lock.unlock()
         return false
@@ -283,8 +317,9 @@ public final class ShellAccessStore: @unchecked Sendable {
         writeLock.lock(); defer { writeLock.unlock() }
         guard var list = loadForWrite(), let index = list.firstIndex(where: { $0.phoneID == phoneID }),
               list[index].key == proven, list[index].previousKey != nil else { return }
+        let before = list
         list[index].previousKey = nil
-        if !store(list) { ptLog(.warning, "Could not drop a phone's previous shell key") }
+        if !store(list, over: before) { ptLog(.warning, "Could not drop a phone's previous shell key") }
     }
 
     /// The phone's pairing moved from `fromSlot` to `toSlot` (an iPhone's,
@@ -296,17 +331,18 @@ public final class ShellAccessStore: @unchecked Sendable {
         writeLock.lock(); defer { writeLock.unlock() }
         guard var list = loadForWrite(),
               let index = list.firstIndex(where: { $0.phoneID == phoneID && $0.pairingSlot == fromSlot }) else { return false }
+        let before = list
         list[index].pairingSlot = toSlot
         // The screen passes it granted follow it.
         for other in list.indices where list[other].grantedBy == phoneID && list[other].pairingSlot == fromSlot {
             list[other].pairingSlot = toSlot
         }
-        return store(list)
+        return store(list, over: before)
     }
 
-    /// False only if the key may still be usable afterwards.
+    /// Also removes the screen passes that phone granted. False only if the
+    /// key may still be usable afterwards.
     @discardableResult
-    /// Also removes the screen passes that phone granted.
     public func revoke(phoneID: String) -> Bool {
         removing { $0.phoneID == phoneID || $0.grantedBy == phoneID }.done
     }
@@ -345,6 +381,8 @@ public final class ShellAccessStore: @unchecked Sendable {
     /// Revocation fails closed: the phone leaves the in-memory list first, so
     /// it is refused at once; if the stored list then cannot be rewritten (or
     /// read), it is deleted whole rather than left holding a revoked key.
+    /// Only the item that failed goes: passes that can't be rewritten never
+    /// cost the phones their access.
     private func removing(where shouldRemove: (ShellPhone) -> Bool) -> (done: Bool, removed: [ShellPhone]) {
         writeLock.lock(); defer { writeLock.unlock() }
         if var list = loadForWrite() {
@@ -352,14 +390,25 @@ public final class ShellAccessStore: @unchecked Sendable {
             // Nothing to remove: nothing to write (a failed write would set off the fallback below).
             guard !entries.isEmpty else { return (true, []) }
             let removed = Set(entries.map(\.phoneID))
+            let before = list
             list.removeAll(where: shouldRemove)
             setCache(list)
-            if write(list) { saved(); return (true, entries) }
-            ptLog(.error, "Could not update the shell phones; removing them all")
-            secrets.delete(Self.account)
+            let written = write(list, over: before)
+            if written.ok { saved(); return (true, entries) }
+            var gone = true
+            if !written.phones {
+                ptLog(.error, "Could not update the shell phones; removing them all")
+                secrets.delete(Self.account)
+                gone = secrets.read(Self.account) == nil
+            } else {
+                ptLog(.error, "Could not update the screen passes; removing them all")
+            }
+            // Passes without their phones can't be used, but they don't stay behind either.
+            secrets.delete(Self.passAccount)
+            gone = gone && secrets.read(Self.passAccount) == nil
             // Still stored: the in-memory list stays the trimmed one, and any
             // later read of the store leaves these phones out.
-            if secrets.read(Self.account) == nil { setCache(nil); saved(); return (true, entries) }
+            if gone { setCache(nil); saved(); return (true, entries) }
             lock.lock(); unsavedRevokes.formUnion(removed); lock.unlock()
             return (false, entries)
         }
@@ -367,7 +416,8 @@ public final class ShellAccessStore: @unchecked Sendable {
         lock.lock(); let everyone = cached ?? []; lock.unlock()
         setCache(nil)
         secrets.delete(Self.account)
-        return (secrets.read(Self.account) == nil, everyone.filter(shouldRemove))
+        secrets.delete(Self.passAccount)
+        return (secrets.read(Self.account) == nil && secrets.read(Self.passAccount) == nil, everyone.filter(shouldRemove))
     }
 
     private func setCache(_ list: [ShellPhone]?) {
@@ -380,15 +430,46 @@ public final class ShellAccessStore: @unchecked Sendable {
         lock.lock(); unsavedRevokes.removeAll(); unsavedScreenOff.removeAll(); unsavedControlOff.removeAll(); lock.unlock()
     }
 
-    /// Writes `list` to the store, no lock held.
-    private func write(_ list: [ShellPhone]) -> Bool {
-        guard let data = try? JSONEncoder().encode(list) else { return false }
-        return secrets.write(data, account: Self.account)
+    /// Whether an entry is a screen pass (kept in the passes' item), by what it says or by its id.
+    private static func isPass(_ entry: ShellPhone) -> Bool {
+        entry.isScreenOnly || ScreenPass.isViewerID(entry.phoneID)
+    }
+
+    /// Which of the two items a write stored (true when there was nothing to write).
+    private struct Written {
+        var phones = true, passes = true
+        var ok: Bool { phones && passes }
+    }
+
+    /// Writes `list`, its phones and its passes each to their own item, no
+    /// lock held. Only the part that differs from `previous` (the list it was
+    /// made from) is written, so changing a phone never writes the passes'
+    /// item and a pass never the phones'; both are written while a reduction
+    /// is unsaved, or a read found something to tidy.
+    private func write(_ list: [ShellPhone], over previous: [ShellPhone]) -> Written {
+        let phones = list.filter { !Self.isPass($0) }, passes = list.filter(Self.isPass)
+        lock.lock()
+        let both = needsTidy || !unsavedRevokes.isEmpty || !unsavedScreenOff.isEmpty || !unsavedControlOff.isEmpty
+        lock.unlock()
+        var written = Written()
+        if both || previous.filter({ !Self.isPass($0) }) != phones {
+            written.phones = (try? JSONEncoder().encode(phones)).map { secrets.write($0, account: Self.account) } ?? false
+        }
+        if both || previous.filter(Self.isPass) != passes {
+            if passes.isEmpty {
+                secrets.delete(Self.passAccount)
+                written.passes = secrets.read(Self.passAccount) == nil
+            } else {
+                written.passes = (try? JSONEncoder().encode(passes)).map { secrets.write($0, account: Self.passAccount) } ?? false
+            }
+        }
+        if both, written.ok { lock.lock(); needsTidy = false; lock.unlock() }
+        return written
     }
 
     /// Under `writeLock`.
-    private func store(_ list: [ShellPhone]) -> Bool {
-        if write(list) { setCache(list); saved(); return true }
+    private func store(_ list: [ShellPhone], over previous: [ShellPhone]) -> Bool {
+        if write(list, over: previous).ok { setCache(list); saved(); return true }
         setCache(nil)   // whatever the store holds now, read it again
         return false
     }
@@ -403,13 +484,32 @@ public final class ShellAccessStore: @unchecked Sendable {
         return loaded
     }
 
-    /// From the store, with the unsaved reductions applied; no lock held
-    /// across the read. Empty when nothing is stored and nil when something
-    /// is stored but unreadable.
+    /// From the store (the phones, then their passes), with the unsaved
+    /// reductions applied; no lock held across the read. Empty when nothing
+    /// is stored and nil when the phones are stored but unreadable.
     private func readStore() -> [ShellPhone]? {
-        guard let data = secrets.read(Self.account) else { return [] }
-        guard var list = try? JSONDecoder().decode([ShellPhone].self, from: data) else { return nil }
-        lock.lock(); let revoked = unsavedRevokes, screenOff = unsavedScreenOff, controlOff = unsavedControlOff; lock.unlock()
+        var list: [ShellPhone] = []
+        var tidy = false
+        if let data = secrets.read(Self.account) {
+            guard let stored = try? JSONDecoder().decode([ShellPhone].self, from: data) else { return nil }
+            // Passes stored among the phones (before they had their own item)
+            // are left out, never taken for phones, and that item is rewritten without them.
+            list = stored.filter { !Self.isPass($0) }
+            tidy = list.count != stored.count
+        }
+        if let data = secrets.read(Self.passAccount) {
+            // Passes that can't be read, aren't passes, or whose phone is gone
+            // can't be used: they're left out, and the item rewritten without them.
+            let stored = try? JSONDecoder().decode([ShellPhone].self, from: data)
+            let granters = Set(list.map(\.phoneID))
+            let passes = (stored ?? []).filter { $0.isScreenOnly && ScreenPass.isViewerID($0.phoneID) && $0.grantedBy.map(granters.contains) == true }
+            tidy = tidy || stored == nil || passes.count != stored?.count
+            list += passes
+        }
+        lock.lock()
+        if tidy { needsTidy = true }
+        let revoked = unsavedRevokes, screenOff = unsavedScreenOff, controlOff = unsavedControlOff
+        lock.unlock()
         list.removeAll { revoked.contains($0.phoneID) }
         for index in list.indices where screenOff.contains(list[index].phoneID) { list[index].screen = false }
         for index in list.indices where controlOff.contains(list[index].phoneID) { list[index].control = false }

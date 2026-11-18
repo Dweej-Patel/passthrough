@@ -285,6 +285,7 @@ final class RemoteShellController: ObservableObject {
         listener.onScreenGrant = screenGrantHandler()
         listener.onScreenPass = screenPassHandler()
         listener.onScreenRevoke = screenRevokeHandler()
+        listener.onScreenPassUsed = screenPassUsedHandler()
         listener.onFailure = { [weak self, weak listener] error in
             Task { @MainActor in
                 guard let self, let listener, self.listener === listener else { return }
@@ -371,6 +372,7 @@ final class RemoteShellController: ObservableObject {
         let onPushRegistration = notifications.registrationHandler()
         let screenSharingVerified = screenSharingVerifier()
         let onScreenGrant = screenGrantHandler(), onScreenPass = screenPassHandler(), onScreenRevoke = screenRevokeHandler()
+        let onScreenPassUsed = screenPassUsedHandler()
         lifecycle.async { [weak self] in
             let host: IrohEndpointHost
             do {
@@ -416,6 +418,7 @@ final class RemoteShellController: ObservableObject {
             listener.onScreenGrant = onScreenGrant
             listener.onScreenPass = onScreenPass
             listener.onScreenRevoke = onScreenRevoke
+            listener.onScreenPassUsed = onScreenPassUsed
             listener.onFailure = { [weak self] error in
                 Task { @MainActor in
                     guard let self, self.iroh === run else { return }
@@ -849,6 +852,10 @@ final class RemoteShellController: ObservableObject {
                         self.iroh?.listener?.disconnect(phoneID: id)
                     }
                     self.refreshPhones()
+                    // Said out loud here too: whoever is at this Mac learns another can now see and control it.
+                    self.passNotice.show(.quiet(title: "\(label) gave \(name) a pass to this screen",
+                                                detail: "It can see and control this Mac. Remove it in Passthrough's Remote Shell settings.",
+                                                symbol: "display"))
                 }
                 return .success((granted.id, granted.key))
             case let .failure(error):
@@ -872,8 +879,8 @@ final class RemoteShellController: ObservableObject {
                 guard let self else { return }
                 self.refreshScreenPasses()
                 guard kept else { return }
-                // An open view of the Mac whose pass changed reconnects with the new one.
-                if replaced != nil { Self.passChanged(credential.macID) }
+                // An open view of that Mac reconnects with the new pass (or, if its pass had gone, comes back).
+                Self.passChanged(credential.macID)
                 // Said out loud: any phone with access here can hand this Mac a pass, or replace one.
                 self.passNotice.show(.quiet(title: replaced != nil ? "Pass to \(credential.macName) replaced" : "You can now see \(credential.macName)",
                                             detail: "From \(label). Open it from Passthrough's menu.", symbol: "display"))
@@ -894,6 +901,21 @@ final class RemoteShellController: ObservableObject {
                 self?.refreshPhones()
             }
             return true
+        }
+    }
+
+    /// A pass connected, so its Mac has it: the earlier passes the same phone
+    /// granted that Mac go (they were kept in case the hand-over failed).
+    /// Runs off the listener's queue.
+    private func screenPassUsedHandler() -> @Sendable (String) -> Void {
+        let store = self.store
+        return { [weak self] viewerID in
+            let gone = store.supersede(by: viewerID)
+            guard !gone.isEmpty else { return }
+            Task { @MainActor [weak self] in
+                self?.disconnectAll(Set(gone.map(\.phoneID)))
+                self?.refreshPhones()
+            }
         }
     }
 
@@ -1048,7 +1070,8 @@ final class RemoteShellController: ObservableObject {
 
     /// For both listeners: the Mac's own H.264 stream when it may capture and post input, else nil (the phone then uses Screen Sharing).
     private static let screenVideoSource: @Sendable (String, String) -> (any ScreenVideoSource)? = { phoneID, label in
-        ScreenVideoPermissions.isReady ? ScreenVideoStreamer(phoneID: phoneID, name: label) : nil
+        // A screen pass's view may not hide this Mac's displays or end the phones' views.
+        ScreenVideoPermissions.isReady ? ScreenVideoStreamer(phoneID: phoneID, name: label, restricted: ScreenPass.isViewerID(phoneID)) : nil
     }
 
     /// For both listeners: in order on the main queue (a stop must not

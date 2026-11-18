@@ -4,6 +4,7 @@ import CoreMedia
 import Network
 import SwiftUI
 import IrohTransport
+import LocalAuthentication
 import PassthroughCore
 import ScreenClient
 import ShellHost
@@ -17,6 +18,12 @@ struct RemoteScreenWindow: View {
     let macID: String
     @EnvironmentObject private var shell: RemoteShellController
     @StateObject private var model = RemoteScreenModel()
+    /// Confirmed with Touch ID or this Mac's password, once per window: whoever
+    /// is at this Mac can't take over the other one with a click.
+    @State private var unlocked = false
+    @State private var unlocking = false
+    /// The window is open: a confirmation that comes back after it closed connects nothing.
+    @State private var shown = false
 
     var body: some View {
         ZStack {
@@ -62,10 +69,14 @@ struct RemoteScreenWindow: View {
             }
         }
         .onAppear {
+            shown = true
             start()
             NSApp.activate()
         }
-        .onDisappear { model.stop() }
+        .onDisappear {
+            shown = false
+            model.stop()
+        }
         .onReceive(NotificationCenter.default.publisher(for: .passthroughScreenPassChanged)) { note in
             guard note.userInfo?["macID"] as? String == macID else { return }
             if shell.passStore.pass(for: macID) != nil {
@@ -82,7 +93,23 @@ struct RemoteScreenWindow: View {
             model.end("This Mac no longer has a pass to that screen. Share it again from your phone.")
             return
         }
+        guard unlocked else { return unlock(pass) }
         model.start(pass)
+    }
+
+    private func unlock(_ pass: ReceivedScreenPass) {
+        guard !unlocking else { return }
+        unlocking = true
+        model.locked(pass.macName)
+        Task { @MainActor in
+            // Shown as "Passthrough is trying to …".
+            let ok = (try? await LAContext().evaluatePolicy(.deviceOwnerAuthentication,
+                                                           localizedReason: "see and control \(pass.macName)'s screen")) ?? false
+            unlocking = false
+            guard ok, shown else { return }
+            unlocked = true
+            start()
+        }
     }
 }
 
@@ -141,10 +168,8 @@ final class RemoteScreenModel: ObservableObject {
         let browser = NWBrowser(for: .bonjour(type: RemoteShell.serviceType, domain: nil), using: .tcp)
         self.browser = browser
         browser.browseResultsChangedHandler = { [weak self] results, _ in
-            let found = results.map(\.endpoint).first {
-                if case let .service(name, _, _, _) = $0 { return name == pass.macName } else { return false }
-            }
-            guard let found else { return }
+            // By name only (no count of Macs): never this Mac's own listener.
+            guard let found = ShellCredentials.discovered(among: results.map(\.endpoint), macName: pass.macName, shellMacCount: 0) else { return }
             DispatchQueue.main.async { MainActor.assumeIsolated { self?.dial(pass, discovered: found, generation: gen) } }
         }
         browser.start(queue: .main)
@@ -179,6 +204,15 @@ final class RemoteScreenModel: ObservableObject {
         dialer?.shutdown()
         dialer = nil
         buttons = []
+    }
+
+    /// Waiting for Touch ID or the password before connecting to `macName`.
+    func locked(_ name: String) {
+        stop()
+        macName = name
+        subtitle = ""
+        canRetry = true
+        phase = .failed("Confirm it's you to see and control \(name)'s screen.")
     }
 
     /// Stops for good with `message`: nothing to try again with.
@@ -256,7 +290,6 @@ final class RemoteScreenModel: ObservableObject {
         phase = .failed(message)
     }
 
-    /// The other Mac's own display, at no more than this Mac's largest screen's pixels.
     /// The other Mac's own display at no more than this Mac's largest screen's
     /// pixels; as few frames as it sends (15 a second) while nobody can see the window.
     private static func fullLayout(visible: Bool) -> ScreenVideoClient.Layout {

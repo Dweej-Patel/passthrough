@@ -92,6 +92,11 @@ final class ScreenShareModel: ObservableObject {
                     self.granted = viewerID
                     let current = shell.macs.first { $0.macID == sharedMac.macID } ?? sharedMac
                     let pass = ScreenPass.credential(from: current, viewerID: viewerID, key: key)
+                    // Checked here, as the other Mac will: else it would refuse it as `bad_request`,
+                    // which reads as that Mac needing an update.
+                    guard ScreenPass.isUsable(pass) else {
+                        return self.failed("This \(ThisDevice.name)'s details for \(sharedMac.macName) can't make a pass. Open \(sharedMac.macName) on this \(ThisDevice.name) so they refresh, then try again.")
+                    }
                     self.hand(pass, to: viewerMac, shell: shell, generation: gen)
                 case let .failed(error, _):
                     guard self.granted == nil else { return }   // the hand-over's outcome decides
@@ -165,14 +170,16 @@ final class ScreenShareModel: ObservableObject {
         generation += 1
         closeViewer()
         if let message { phase = .failed(message) }
-        guard let viewerID = granted, let connection = shared else { return closeAll() }
-        granted = nil
+        guard let connection = shared else { return closeAll() }
         shared = nil
+        if let viewerID = granted { connection.client.revokeScreen(viewerID) }
+        granted = nil
         // The step-1 handler now drops this connection's events (the generation
         // moved on), so rather than wait for `screenRevoked`, give the request
-        // time to reach the Mac before closing. The closure keeps the connection
-        // alive even if the sheet (and this model) has gone.
-        connection.client.revokeScreen(viewerID)
+        // time to reach the Mac before closing; also when nothing was granted
+        // here, since a grant `ShellClient` couldn't read is taken back on it
+        // too. The closure keeps the connection alive even if the sheet (and
+        // this model) has gone.
         DispatchQueue.main.asyncAfter(deadline: .now() + Self.revokeGrace) {
             connection.client.disconnect()
             connection.dialer?.shutdown()

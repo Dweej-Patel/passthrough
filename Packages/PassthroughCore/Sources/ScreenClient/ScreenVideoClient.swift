@@ -14,6 +14,10 @@ import VideoToolbox
 /// current. The pointer isn't in the frames: `cursor` and `cursorShape` say
 /// where to draw it.
 public final class ScreenVideoClient: @unchecked Sendable {
+    /// The widest and tallest pointer image decoded, in pixels: far past any
+    /// real one (a Mac's largest pointer at 2x is a few hundred).
+    static let maxCursorSide = 1024
+
     /// What the phone asks to see (`ScreenVideoWire.Message.hello`).
     public struct Layout: Equatable, Sendable {
         public var width: Int
@@ -258,7 +262,13 @@ public final class ScreenVideoClient: @unchecked Sendable {
             emit(.cursor(x: Double(x) / 65535, y: Double(y) / 65535, visible: visible))
         case let .cursorShape(width, height, hotX, hotY, png):
             // A shape that doesn't decode is skipped: the pointer keeps the last one.
+            // Its real size is checked before it's decoded: a few bytes can claim a huge image.
             guard width > 0, height > 0, let source = CGImageSourceCreateWithData(png as CFData, nil),
+                  CGImageSourceGetType(source).map({ $0 as String == "public.png" }) == true,
+                  let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any],
+                  let pixelWidth = properties[kCGImagePropertyPixelWidth] as? Int,
+                  let pixelHeight = properties[kCGImagePropertyPixelHeight] as? Int,
+                  (1...Self.maxCursorSide).contains(pixelWidth), (1...Self.maxCursorSide).contains(pixelHeight),
                   let image = CGImageSourceCreateImageAtIndex(source, 0, nil) else { return }
             emit(.cursorShape(image, size: CGSize(width: width, height: height), hotSpot: CGPoint(x: hotX, y: hotY)))
         default:

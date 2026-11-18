@@ -36,7 +36,7 @@ struct ShareScreenSheet: View {
                 } header: {
                     Text("Which Mac should see \(shared.macName)?")
                 } footer: {
-                    Text("That Mac gets a pass to see and control \(shared.macName)'s screen, from anywhere, without this \(ThisDevice.name). It can't open shells or change anything else. It stops working if this \(ThisDevice.name) loses access or Screen on \(shared.macName). Remove it any time in Passthrough's Remote Shell settings on \(shared.macName).")
+                    Text("That Mac gets a pass to see and control \(shared.macName)'s screen, from anywhere, without this \(ThisDevice.name). Controlling it means it can type into any app on \(shared.macName), Terminal included; it can't open Passthrough's shells or change its settings, and opening it asks for Touch ID or the password on that Mac. It stops working if this \(ThisDevice.name) loses access or Screen on \(shared.macName). Remove it any time in Passthrough's Remote Shell settings on \(shared.macName).")
                 }
 
                 switch model.phase {

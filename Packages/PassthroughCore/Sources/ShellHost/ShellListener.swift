@@ -151,6 +151,13 @@ public final class ShellListener: @unchecked Sendable {
         set { gate.screenRevoke.set(newValue) }
     }
 
+    /// A screen pass proved its key and connected (so its viewer has it).
+    /// Called off the listener's queue.
+    public var onScreenPassUsed: (@Sendable (_ viewerID: String) -> Void)? {
+        get { gate.screenPassUsed.get() }
+        set { gate.screenPassUsed.set(newValue) }
+    }
+
     /// Sends every connected phone the Mac's state again (it changed).
     public func pushMacState() { gate.pushMacState() }
 
@@ -408,6 +415,7 @@ final class ShellGate: @unchecked Sendable {
     let screenGrant = Locked<(@Sendable (_ phoneID: String, _ label: String, _ name: String, _ viewer: String) -> Result<(id: String, key: Data), ShellError>)?>(nil)
     let screenPass = Locked<(@Sendable (_ phoneID: String, _ label: String, _ pass: ShellCredential) -> Bool)?>(nil)
     let screenRevoke = Locked<(@Sendable (_ phoneID: String, _ viewerID: String) -> Bool)?>(nil)
+    let screenPassUsed = Locked<(@Sendable (_ viewerID: String) -> Void)?>(nil)
     private let shellKeys: @Sendable (String) -> [Data]
     private let keyConfirmed: @Sendable (_ phoneID: String, _ key: Data) -> Void
     private let phoneLabel: @Sendable (String) -> String
@@ -583,6 +591,8 @@ final class ShellGate: @unchecked Sendable {
         connections[key] = connection
         connection.onClose = { [weak self] in self?.connections[key] = nil }
         ptLog(.info, screenOnly ? "shell: a screen pass connected" : "shell: a phone connected")
+        // Told off this queue: it may write the Keychain.
+        if screenOnly, let used = screenPassUsed.get() { DispatchQueue.global(qos: .utility).async { used(phoneID) } }
         connection.start(initialBytes: rest, macInfo: macInfo())
     }
 
@@ -846,7 +856,9 @@ final class ShellConnection: ShellAttachment, @unchecked Sendable {
 
     private func handle(_ line: Data) {
         guard let message = try? ShellEnvelope.decode(line) else { return fail(.badRequest) }
-        if screenOnly, ![ShellEnvelope.screen, ShellEnvelope.screenVideo, ShellEnvelope.ping, ShellEnvelope.pong].contains(message.t) {
+        // Only the Mac's own stream: not the tunnel to macOS Screen Sharing,
+        // whose login would let a pass try the Mac's account password.
+        if screenOnly, ![ShellEnvelope.screenVideo, ShellEnvelope.ping, ShellEnvelope.pong].contains(message.t) {
             return fail(.screenOnly, session: message.session, ref: message.ref)
         }
         switch message.t {

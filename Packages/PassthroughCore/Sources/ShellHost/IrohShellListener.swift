@@ -113,6 +113,12 @@ public final class IrohShellListener: @unchecked Sendable {
         set { gate.screenRevoke.set(newValue) }
     }
 
+    /// As `ShellListener.onScreenPassUsed`.
+    public var onScreenPassUsed: (@Sendable (_ viewerID: String) -> Void)? {
+        get { gate.screenPassUsed.get() }
+        set { gate.screenPassUsed.set(newValue) }
+    }
+
     /// As `ShellListener.pushMacState()`.
     public func pushMacState() { gate.pushMacState() }
 

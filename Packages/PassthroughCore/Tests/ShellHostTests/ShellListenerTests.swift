@@ -1567,15 +1567,33 @@ extension ShellListenerTests {
         listener.screenVideo = { _, _ in nil }
         listener.macState = { _ in MacState(awake: true) }
         let (stream, rest) = rawAuthorized(listener)
-        let requests = ["list", "history", "open", "setAwake", "lock", "screenGrant", "events"]
+        let requests = ["list", "history", "open", "setAwake", "lock", "screenGrant", "events", "screen"]
             .map { "{\"t\":\"\($0)\",\"cols\":80,\"rows\":24,\"on\":true,\"since\":0,\"name\":\"x\",\"viewer\":\"y\"}\n" }.joined()
         stream.send(Data((requests + "{\"t\":\"screenVideo\"}\n{\"t\":\"ping\"}\n").utf8), isComplete: false) { _ in }
         let replies = Self.lines(rest + read(stream, "replies") { Self.lines(rest + $0).contains { $0.t == "pong" } })
         XCTAssertFalse(replies.contains { $0.t == ShellEnvelope.sessions || $0.t == ShellEnvelope.macState || $0.t == ShellEnvelope.opened })
         let reasons = replies.filter { $0.t == "error" }.compactMap(\.reason)
-        XCTAssertEqual(reasons.filter { $0 == "screen_only" }.count, 7, "every request but the screen: \(reasons)")
+        XCTAssertEqual(reasons.filter { $0 == "screen_only" }.count, 8, "every request but the screen video, Screen Sharing's tunnel too: \(reasons)")
         XCTAssertTrue(reasons.contains("screen_video_unavailable"), "the screen request gets past the gate")
         XCTAssertTrue(manager.sessions.isEmpty)
+    }
+
+    /// The app hears when a pass connects (so earlier passes for its Mac can
+    /// go), and not when a phone does.
+    func testTheAppHearsWhenAPassConnects() {
+        let viewerKey = WirelessLink.randomBytes(32)
+        let listener = startListener(keys: Locked(["phone-1": key, "viewer.x": viewerKey]))
+        let used = Locked<[String]>([])
+        listener.onScreenPassUsed = { used.set(used.get() + [$0]) }
+        _ = readyClient(listener)
+        _ = readyClient(listener, phoneID: "viewer.x", key: viewerKey)
+        let heard = expectation(description: "heard")
+        DispatchQueue.global().async {
+            for _ in 0..<100 where used.get().isEmpty { Thread.sleep(forTimeInterval: 0.02) }
+            heard.fulfill()
+        }
+        wait(for: [heard], timeout: 5)
+        XCTAssertEqual(used.get(), ["viewer.x"])
     }
 
     /// A pass's id is screen-only even when the store doesn't say so (it was

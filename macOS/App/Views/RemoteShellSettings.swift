@@ -130,7 +130,8 @@ struct RemoteShellSettings: View {
     /// Only once checked, so it doesn't flash "off" while the first check runs.
     @ViewBuilder private var screenSharingStep: some View {
         if let on = shell.screenSharingOn {
-            let needed = (shell.phones.contains(where: \.screenAllowed) || !shell.screenGuests.isEmpty) && !shell.screenVideo.ready
+            // A pass never uses Screen Sharing: only the phones' fallback does.
+            let needed = shell.phones.contains(where: \.screenAllowed) && !shell.screenVideo.ready
             SetupStep(status: on ? .done : (needed ? .needed : .optional),
                       title: "Screen Sharing",
                       detail: on
@@ -332,7 +333,7 @@ private struct ScreenGuestsSection: View {
         } header: {
             Text("Macs that can see this screen")
         } footer: {
-            Text("Let in from a phone. They can see and control this screen only: no shells, switches or history.")
+            Text("Let in from a phone. They can see and control this screen, so they can type into any app open on it, but can't open Passthrough's shells, switches or history.")
                 .font(.caption).foregroundStyle(.secondary)
         }
         .confirmationDialog("Stop \(removing?.label ?? "this Mac") from seeing this screen?",

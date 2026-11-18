@@ -24,7 +24,9 @@ public struct ReceivedScreenPass: Codable, Equatable, Sendable, Identifiable {
 
 /// The passes this Mac holds to other Macs' screens, in its secret store.
 /// One per Mac: a newer pass for the same Mac replaces the older. Like
-/// `ShellAccessStore`, it never writes over a stored list it can't read.
+/// `ShellAccessStore`, it never writes over a stored list it can't read, and
+/// removing fails closed: what's removed never comes back, even when the
+/// list can't be rewritten (it is then deleted whole).
 public final class ScreenPassStore: @unchecked Sendable {
     public static let account = "screenPasses"
     /// Most passes kept; the oldest goes past this.
@@ -63,7 +65,8 @@ public final class ScreenPassStore: @unchecked Sendable {
         if let sender = pass.fromPhoneID, revokedSenders.contains(sender) { return (false, nil) }
         guard let stored = load() else { return (false, nil) }
         let replaced = stored.first { $0.id == pass.id }
-        var list = stored.filter { $0.id != pass.id }
+        // What was removed or revoked stays out: it isn't written back.
+        var list = stored.filter { $0.id != pass.id && !isDenied($0) }
         list.append(pass)
         if list.count > Self.maxPasses {
             list = Array(list.sorted { $0.receivedAt > $1.receivedAt }.prefix(Self.maxPasses))
@@ -106,7 +109,12 @@ public final class ScreenPassStore: @unchecked Sendable {
         guard !gone.isEmpty else { return (true, []) }
         // Out at once, whether or not the rewrite below works.
         removedMacs.formUnion(gone)
-        return (write(list.filter { !shouldRemove($0) }), gone)
+        if write(list.filter { !shouldRemove($0) && !isDenied($0) }) { return (true, gone) }
+        // Couldn't be rewritten: drop it whole, so a relaunch (which forgets
+        // the sets above) can't bring the removed passes back.
+        ptLog(.error, "Could not update the passes to other Macs' screens; removing them all")
+        secrets.delete(Self.account)
+        return (secrets.read(Self.account) == nil, gone)
     }
 
     /// Under `lock`: removed, or from a phone that lost access.

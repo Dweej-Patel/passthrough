@@ -46,6 +46,43 @@ final class ScreenPassStoreTests: XCTestCase {
         XCTAssertNil(secrets.read(ScreenPassStore.account))
     }
 
+    /// Removed passes stay removed: a later save doesn't write them back, and
+    /// a removal that can't be rewritten drops the whole list, so a relaunch
+    /// can't bring them back either.
+    func testRemovedPassesNeverComeBack() {
+        let secrets = FlakySecrets()
+        let store = ScreenPassStore(secrets: secrets)
+        var fromA = pass("m1"); fromA.fromPhoneID = "phone-a"
+        var fromB = pass("m2"); fromB.fromPhoneID = "phone-b"
+        store.save(fromA); store.save(fromB)
+        secrets.writesFail.set(true)
+        let result = store.remove(fromPhones: ["phone-a"])
+        XCTAssertEqual(result.macIDs, ["m1"])
+        XCTAssertTrue(result.done, "deleted whole instead")
+        XCTAssertNil(secrets.inner.read(ScreenPassStore.account))
+        XCTAssertTrue(ScreenPassStore(secrets: secrets.inner).passes.isEmpty, "after a relaunch, too")
+
+        // In memory only (nor deleted): a later save leaves it out.
+        secrets.writesFail.set(false)
+        store.save(fromA)   // refused: its phone was revoked here
+        store.save(fromB)
+        secrets.writesFail.set(true)
+        secrets.deletesFail.set(true)
+        XCTAssertFalse(store.remove(macID: "m2"))
+        secrets.writesFail.set(false)
+        secrets.deletesFail.set(false)
+        store.save(pass("m3"))
+        XCTAssertEqual(ScreenPassStore(secrets: secrets.inner).passes.map(\.id), ["m3"], "neither m1 nor m2 written back")
+    }
+
+    private final class FlakySecrets: SecretStore, @unchecked Sendable {
+        let inner = InMemorySecrets()
+        let writesFail = Locked(false), deletesFail = Locked(false)
+        func read(_ account: String) -> Data? { inner.read(account) }
+        func write(_ data: Data, account: String) -> Bool { writesFail.get() ? false : inner.write(data, account: account) }
+        func delete(_ account: String) { if !deletesFail.get() { inner.delete(account) } }
+    }
+
     /// A phone that lost access here takes the passes it handed over with it.
     func testPassesGoWithThePhoneThatHandedThemOver() {
         let store = ScreenPassStore(secrets: InMemorySecrets())

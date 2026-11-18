@@ -741,9 +741,12 @@ grants only to a phone it also lets see its screen. The Mac stores the pass
 like a phone's access, under a new id starting `viewer.` with its own key,
 screen access on and Keep awake and the VPN off, and remembers the phone
 that asked: removing that phone (or forgetting its pairing) removes its
-passes, a pass may see the screen only while that phone may, and a new
-pass for the same `viewer` replaces the old one (8 per phone at most, the
-oldest going). Only the Mac mints `viewer.` ids: a phone granted access
+passes, and a pass may see the screen only while that phone may. A new
+pass for the same `viewer` replaces the old one once the viewer first
+connects with it; until then the old one keeps working, so a hand-over that
+fails leaves the viewer its working pass (8 per phone at most, the oldest
+going). Passes are kept in their own Keychain item, apart from the phones,
+so a Mac running a build from before passes never reads one as a phone. Only the Mac mints `viewer.` ids: a phone granted access
 under one is refused. The phone then builds a credential from its own for
 that Mac, updated with the `macInfo` that Mac sent on this connection
 (addresses, certificate and iroh details, including the relay token, so
@@ -757,10 +760,14 @@ The viewer connects and proves its key exactly as a phone does, on either
 path, dialing the pass's addresses and any Bonjour result named as the
 Mac. Any `viewer.` id is screen-only, whatever else the Mac knows of it. A
 Mac sends a pass's connection only `ready`: no `macInfo`,
-`macState` or `sessions`, then or later. It accepts only `screen`,
-`screenVideo`, `ping` and `pong` from it; anything else is answered `error`
-`screen_only`. The owner sees each pass in the Mac's settings and can
-remove it like a phone.
+`macState` or `sessions`, then or later. It accepts only `screenVideo`,
+`ping` and `pong` from it; anything else, `screen` (the tunnel to macOS
+Screen Sharing) included, is answered `error` `screen_only`. On the stream,
+a pass's view sends pointer, keys, text and the clipboard like a phone's,
+but its `curtain` is refused (answered `curtained` false) and its Use Here
+is ignored. The Mac shows a notice when a phone grants a pass. The owner sees
+each pass in the Mac's settings and can remove it like a phone. The viewing
+Mac asks for Touch ID or its password before each window it opens.
 
 ### Address policy
 
