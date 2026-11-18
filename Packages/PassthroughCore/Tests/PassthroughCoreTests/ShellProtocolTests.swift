@@ -230,4 +230,19 @@ final class ShellProtocolTests: XCTestCase {
         XCTAssertFalse(ShellAddressPolicy.isAllowed("2001:db8:1:2::10"), "the plain policy is unchanged")
         XCTAssertEqual(ShellAddressPolicy.advertisable(["2001:db8:1:2::10"]), [], "global addresses are never advertised")
     }
+
+    /// A pass built from the phone's credential is one the other Mac takes:
+    /// a clean name, the viewer's id and key, and no more addresses than allowed.
+    func testAScreenPassFromAPhonesCredentialIsUsable() {
+        let mac = ShellCredential(macID: "mac-b", macName: "Studio\nMac", certSHA256: String(repeating: "c", count: 64),
+                                  shellKey: Data(repeating: 1, count: 32), phoneID: "phone-1", port: 7893,
+                                  addresses: (0...IrohInfo.maxAddresses).map { "192.168.1.\($0)" })
+        let pass = ScreenPass.credential(from: mac, viewerID: "viewer.x", key: Data(repeating: 2, count: 32))
+        XCTAssertEqual(pass.macName, "Studio Mac")
+        XCTAssertEqual(pass.addresses.count, IrohInfo.maxAddresses)
+        XCTAssertEqual(pass.phoneID, "viewer.x")
+        XCTAssertTrue(ScreenPass.isUsable(pass))
+        XCTAssertFalse(ScreenPass.isUsable(mac), "a phone's own credential isn't a pass")
+        XCTAssertEqual(ScreenPass.cleanName(String(repeating: "a", count: 100)).count, ScreenPass.maxName)
+    }
 }

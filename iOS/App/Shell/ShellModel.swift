@@ -513,6 +513,17 @@ final class ShellModel: ObservableObject {
         return (client, dialer, credential)
     }
 
+    /// A connection of its own to any Mac with a shell credential (not only the
+    /// selected one), for a one-off request such as a screen pass. The caller
+    /// disconnects it and shuts the dialer down when done.
+    func oneOffConnection(to credential: ShellCredential, onEvent: @escaping (ShellClient.Event) -> Void) -> (client: ShellClient, dialer: IrohShellDialer?) {
+        let triesIroh = connectMode == .automatic && credential.irohID.map(IrohInfo.isValidID) == true
+        let dialer = triesIroh ? IrohShellDialer() : nil
+        let client = ShellClient(credential: credential, queue: .main, iroh: dialer, mode: connectMode, onEvent: onEvent)
+        client.connect(discovered: ShellCredentials.discovered(among: browseResults, macName: credential.macName, shellMacCount: macs.count))
+        return (client, dialer)
+    }
+
     func newSession(cols: Int, rows: Int) {
         #if DEBUG
         if Self.demoState != nil { return demoOpen() }
@@ -833,6 +844,9 @@ final class ShellModel: ObservableObject {
         case let .screen(stream, _):
             // The screen has its own client (`ScreenModel`); this one never asks.
             stream.cancel()
+        case .screenGranted, .screenPassSaved, .screenRevoked:
+            // Screen passes have their own clients (`ScreenShareModel`); this one never asks.
+            break
         }
     }
 
@@ -842,7 +856,14 @@ final class ShellModel: ObservableObject {
     /// addresses) with its grant, and uses it from the next connect. Never
     /// touches the shell key.
     private func apply(_ info: ShellEnvelope) {
-        guard let macID = clientMacID, let registry,
+        guard let macID = clientMacID else { return }
+        applyMacInfo(info, for: macID)
+    }
+
+    /// Keeps what a Mac said about reaching it (`macInfo`, on any connection
+    /// to it) with its grant, as `apply` does for the main connection.
+    func applyMacInfo(_ info: ShellEnvelope, for macID: String) {
+        guard let registry,
               registry.updateShellInfo(clientID: macID, irohID: info.irohID, irohRelay: info.irohRelay,
                                        relayToken: info.relayToken, addresses: info.addresses),
               let grant = registry.clients.first(where: { $0.id == macID })?.shell else { return }
@@ -1053,6 +1074,8 @@ extension ShellError {
         case .tooManyScreens: "Your Mac is already showing its screen as often as it allows (\(RemoteShell.maxScreenViewsPerPhone) views per phone, \(RemoteShell.maxScreenViews) in all). Close one to open another."
         case .notAllowed: "Your Mac doesn't let this \(ThisDevice.name) change Keep awake and the VPN. Turn on Awake & VPN for it in Passthrough's Remote Shell settings on your Mac."
         case .vpnNotSetUp: "Your Mac has no VPN set up yet. Add one in Passthrough's VPN settings on the Mac."
+        case .screenOnly: "That Mac only lets this device see its screen."
+        case .passNotSaved: "Your Mac couldn't save the screen pass. Try again."
         case .notAuthorized: nil
         }
     }

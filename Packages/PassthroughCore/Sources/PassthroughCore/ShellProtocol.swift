@@ -71,6 +71,14 @@ public struct ShellEnvelope: Codable, Equatable, Sendable {
     public var since: Double?
     public var events: [MacEvent]?
     public var battery: [BatterySample]?
+    /// screenGrant: the name the new viewer goes by on the Mac (another Mac, as the phone calls it).
+    public var name: String?
+    /// screenGrant: the viewer's own id as the phone knows it, so granting it again replaces its pass.
+    public var viewer: String?
+    /// screenGranted: the new viewer's key (base64); its id is in `phoneID`.
+    public var key: String?
+    /// screenPass: what a Mac keeps to view another Mac's screen.
+    public var pass: ShellCredential?
 
     public init(t: String) { self.t = t }
 
@@ -122,6 +130,18 @@ public struct ShellEnvelope: Codable, Equatable, Sendable {
     /// A phone asking what happened on the Mac since a time (`since`); answered `eventList`.
     public static let events = "events"
     public static let eventList = "eventList"
+    /// A phone asking this Mac for a screen-only pass for another device
+    /// (`name`, `viewer`); answered `screenGranted` (`phoneID`, `key`) or `error`.
+    public static let screenGrant = "screenGrant"
+    public static let screenGranted = "screenGranted"
+    /// A phone taking back a pass it got (`phoneID`, the viewer's) that it
+    /// couldn't hand over after all; answered `screenRevoked` or `error`.
+    public static let screenRevoke = "screenRevoke"
+    public static let screenRevoked = "screenRevoked"
+    /// A phone handing this Mac a pass to view another Mac's screen (`pass`);
+    /// answered `screenPassSaved` or `error`.
+    public static let screenPass = "screenPass"
+    public static let screenPassSaved = "screenPassSaved"
     public static let ping = "ping"
     public static let pong = "pong"
     public static let error = "error"
@@ -272,6 +292,58 @@ public enum ShellError: String, Error, Sendable {
     case notAllowed = "not_allowed"
     /// The VPN can't turn on: the Mac has no VPN set up.
     case vpnNotSetUp = "vpn_not_set_up"
+    /// A screen-only pass asked for something other than the screen.
+    case screenOnly = "screen_only"
+    /// The Mac couldn't save a pass (granted or handed to it).
+    case passNotSaved = "pass_not_saved"
+}
+
+/// A screen-only pass one device (a phone) gets a Mac to issue for another
+/// (another Mac): the viewer proves `key` as `phoneID`, like a phone, and may
+/// only ask for the screen.
+public enum ScreenPass {
+    /// Longest viewer name and id a Mac takes.
+    public static let maxName = 64
+    /// Most passes one phone may have granted on a Mac at once.
+    public static let maxPerGranter = 8
+    /// The prefix of every viewer's id, so it can never be a phone's.
+    public static let idPrefix = "viewer."
+
+    /// Whether an id is one a Mac minted for a pass.
+    public static func isViewerID(_ id: String) -> Bool { id.hasPrefix(idPrefix) }
+
+    /// A device's name as a pass may carry it: one line, at most `maxName` characters.
+    public static func cleanName(_ name: String) -> String {
+        let line = name.split(whereSeparator: \.isNewline).joined(separator: " ").trimmingCharacters(in: .whitespaces)
+        return String(line.prefix(maxName))
+    }
+
+    public static func isValidName(_ name: String) -> Bool {
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        return !trimmed.isEmpty && name.count <= maxName && !name.contains(where: \.isNewline)
+    }
+
+    /// The pass a phone builds for a viewer from its own credential for the Mac
+    /// (where and how to reach it) and what the Mac granted (id and key).
+    public static func credential(from mac: ShellCredential, viewerID: String, key: Data) -> ShellCredential {
+        var pass = mac
+        pass.macName = cleanName(mac.macName)
+        // A typed address goes first, so with the Mac's own the list can run one over.
+        pass.addresses = Array(mac.addresses.prefix(IrohInfo.maxAddresses))
+        pass.phoneID = viewerID
+        pass.shellKey = key
+        return pass
+    }
+
+    /// Whether a pass handed to a Mac is one it can use: a 32-byte key, a
+    /// viewer id, a pinned certificate, and iroh details that are valid when present.
+    public static func isUsable(_ pass: ShellCredential) -> Bool {
+        pass.shellKey.count == 32 && isViewerID(pass.phoneID) && pass.phoneID.count <= 128
+            && pass.certSHA256.count == 64 && pass.certSHA256.allSatisfy(\.isHexDigit)
+            && !pass.macID.isEmpty && pass.macID.count <= 128 && isValidName(pass.macName)
+            && pass.addresses.count <= IrohInfo.maxAddresses
+            && (pass.irohID == nil || IrohInfo.areValid(id: pass.irohID, relay: pass.irohRelay, token: pass.relayToken))
+    }
 }
 
 /// How the Mac is doing, sent to a phone in `macState`. Every field is

@@ -22,6 +22,7 @@ struct RemoteShellSettings: View {
             if session.remoteShellEnabled {
                 setup
                 PhonesSection()
+                if !shell.screenGuests.isEmpty { ScreenGuestsSection() }
                 OpenSessionsSection()
                 MacTerminalsSection()
                 PhoneNotificationsSection()
@@ -31,6 +32,8 @@ struct RemoteShellSettings: View {
                 // Whatever is still running when the setting was just turned off.
                 if shell.sessions.contains(where: \.running) { OpenSessionsSection() }
             }
+            // Viewing another Mac doesn't need this Mac's own remote shell.
+            if !shell.screenPasses.isEmpty { OtherMacScreensSection() }
             // Recorded history stays reachable (to read or delete) with the setting off.
             if session.remoteShellEnabled || !shell.history.isEmpty { HistorySection() }
         }
@@ -100,7 +103,7 @@ struct RemoteShellSettings: View {
     /// Passthrough streaming the screen itself: smooth video, no password.
     private var screenVideoStep: some View {
         let access = shell.screenVideo
-        let wanted = shell.phones.contains(where: \.screenAllowed)
+        let wanted = shell.phones.contains(where: \.screenAllowed) || !shell.screenGuests.isEmpty
         return SetupStep(status: access.ready ? .done : (wanted ? .needed : .optional),
                          title: "Screen Recording and Accessibility",
                          detail: access.ready
@@ -127,6 +130,7 @@ struct RemoteShellSettings: View {
     /// Only once checked, so it doesn't flash "off" while the first check runs.
     @ViewBuilder private var screenSharingStep: some View {
         if let on = shell.screenSharingOn {
+            // A pass never uses Screen Sharing: only the phones' fallback does.
             let needed = shell.phones.contains(where: \.screenAllowed) && !shell.screenVideo.ready
             SetupStep(status: on ? .done : (needed ? .needed : .optional),
                       title: "Screen Sharing",
@@ -299,6 +303,86 @@ private struct NotificationsContent: View {
         let phones = notifications.registeredPhones.count
         let asked = phones == 0 ? "no phone has asked yet" : phones == 1 ? "1 phone asked" : "\(phones) phones asked"
         return (notifications.isSetUp ? "Ready" : "Not set up") + " · " + asked
+    }
+}
+
+/// Other Macs a phone let see this screen (screen-only passes): each can
+/// only view and control the screen, and goes when removed here or when the
+/// phone that let it in loses access.
+private struct ScreenGuestsSection: View {
+    @EnvironmentObject private var shell: RemoteShellController
+    @State private var removing: ShellPhone?
+
+    var body: some View {
+        Section {
+            ForEach(shell.screenGuests, id: \.phoneID) { guest in
+                HStack(spacing: 12) {
+                    Image(systemName: "desktopcomputer")
+                        .font(.system(size: 17))
+                        .foregroundStyle(.secondary)
+                        .frame(width: 22)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(guest.label)
+                        Text(detail(for: guest)).font(.caption).foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                    Button("Remove…") { removing = guest }
+                }
+                .padding(.vertical, 1)
+            }
+        } header: {
+            Text("Macs that can see this screen")
+        } footer: {
+            Text("Let in from a phone. They can see and control this screen, so they can type into any app open on it, but can't open Passthrough's shells, switches or history.")
+                .font(.caption).foregroundStyle(.secondary)
+        }
+        .confirmationDialog("Stop \(removing?.label ?? "this Mac") from seeing this screen?",
+                            isPresented: Binding(get: { removing != nil }, set: { if !$0 { removing = nil } }),
+                            presenting: removing) { guest in
+            Button("Remove", role: .destructive) { shell.revoke(guest.phoneID) }
+        } message: { _ in
+            Text("Any view it has open closes and its pass stops working. A phone can let it in again.")
+        }
+    }
+
+    private func detail(for guest: ShellPhone) -> String {
+        var parts = ["Added \(guest.grantedAt.formatted(date: .abbreviated, time: .omitted))"]
+        if let by = shell.granterLabel(of: guest) { parts.append("through \(by)") }
+        if shell.screenViewers.contains(where: { $0.phoneID == guest.phoneID }) { parts.append("viewing the screen") }
+        return parts.joined(separator: " · ")
+    }
+}
+
+/// Other Macs' screens this Mac may view, with passes handed over by a phone.
+private struct OtherMacScreensSection: View {
+    @EnvironmentObject private var shell: RemoteShellController
+    @Environment(\.openWindow) private var openWindow
+
+    var body: some View {
+        Section {
+            ForEach(shell.screenPasses) { pass in
+                HStack(spacing: 12) {
+                    Image(systemName: "display")
+                        .font(.system(size: 17))
+                        .foregroundStyle(.secondary)
+                        .frame(width: 22)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(pass.macName)
+                        Text("From \(pass.from) · \(pass.receivedAt.formatted(date: .abbreviated, time: .omitted))")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                    Button("View") { openWindow(id: RemoteScreenWindow.id, value: pass.id) }
+                    Button("Remove") { shell.removeScreenPass(pass.id) }
+                }
+                .padding(.vertical, 1)
+            }
+        } header: {
+            Text("Other Macs' screens")
+        } footer: {
+            Text("A phone with access to both Macs handed these over. Removing one here only forgets it on this Mac; the other Mac can remove it too.")
+                .font(.caption).foregroundStyle(.secondary)
+        }
     }
 }
 

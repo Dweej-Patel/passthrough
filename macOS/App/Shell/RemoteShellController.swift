@@ -25,6 +25,12 @@ final class RemoteShellController: ObservableObject {
     /// Why the last change to that setting, or the terminals' socket, failed.
     @Published private(set) var terminalsError: String?
     @Published private(set) var phones: [ShellPhone] = []
+    /// Screen-only passes phones got this Mac to issue for other Macs (`ScreenPass`), newest first.
+    @Published private(set) var screenGuests: [ShellPhone] = []
+    /// Passes a phone handed this Mac to see other Macs' screens, newest first.
+    @Published private(set) var screenPasses: [ReceivedScreenPass] = []
+    nonisolated let passStore = ScreenPassStore(secrets: KeychainSecretStore())
+    private let passNotice = NotchNotice()
     /// Notices to phones through Apple's push service.
     let notifications = PhoneNotifications()
 
@@ -227,6 +233,7 @@ final class RemoteShellController: ObservableObject {
         }
         reach.set(ShellReach(reachAnywhere: reachAnywhere, relay: relay))
         refreshPhones()
+        refreshScreenPasses()
         pruneHistory()
         refreshSharesNewTerminals()
         terminalAccess.onContested = { [weak self] session in
@@ -274,6 +281,11 @@ final class RemoteShellController: ObservableObject {
         listener.onMacControl = macControlHandler()
         listener.onPushRegistration = notifications.registrationHandler()
         listener.macEvents = macEventsProvider()
+        listener.screenOnly = { store.isScreenOnly($0) }
+        listener.onScreenGrant = screenGrantHandler()
+        listener.onScreenPass = screenPassHandler()
+        listener.onScreenRevoke = screenRevokeHandler()
+        listener.onScreenPassUsed = screenPassUsedHandler()
         listener.onFailure = { [weak self, weak listener] error in
             Task { @MainActor in
                 guard let self, let listener, self.listener === listener else { return }
@@ -359,6 +371,8 @@ final class RemoteShellController: ObservableObject {
         let macState = macStateProvider(), onMacControl = macControlHandler(), macEvents = macEventsProvider()
         let onPushRegistration = notifications.registrationHandler()
         let screenSharingVerified = screenSharingVerifier()
+        let onScreenGrant = screenGrantHandler(), onScreenPass = screenPassHandler(), onScreenRevoke = screenRevokeHandler()
+        let onScreenPassUsed = screenPassUsedHandler()
         lifecycle.async { [weak self] in
             let host: IrohEndpointHost
             do {
@@ -400,6 +414,11 @@ final class RemoteShellController: ObservableObject {
             listener.onMacControl = onMacControl
             listener.onPushRegistration = onPushRegistration
             listener.macEvents = macEvents
+            listener.screenOnly = { store.isScreenOnly($0) }
+            listener.onScreenGrant = onScreenGrant
+            listener.onScreenPass = onScreenPass
+            listener.onScreenRevoke = onScreenRevoke
+            listener.onScreenPassUsed = onScreenPassUsed
             listener.onFailure = { [weak self] error in
                 Task { @MainActor in
                     guard let self, self.iroh === run else { return }
@@ -729,6 +748,8 @@ final class RemoteShellController: ObservableObject {
     // MARK: Phones
 
     func record(_ phone: ShellPhone) {
+        // Granted access again: passes it hands this Mac are kept again.
+        passStore.allowSender(phone.phoneID)
         if store.record(phone) {
             ptLog(.info, "shell: granted access to \(phone.label)")
         } else {
@@ -757,45 +778,171 @@ final class RemoteShellController: ObservableObject {
     /// connections and the sessions it opened (other phones' stay, even
     /// ones it was attached to).
     func revoke(_ phoneID: String) {
-        let label = phones.first { $0.phoneID == phoneID }?.label ?? "a phone"
-        let slots = Set(store.phones.filter { $0.phoneID == phoneID }.map(\.pairingSlot))
-        if !store.revoke(phoneID: phoneID) {
+        let entry = store.phones.first { $0.phoneID == phoneID }
+        let label = entry?.label ?? (ScreenPass.isViewerID(phoneID) ? "that Mac" : "a phone")
+        // The phone and the screen passes it granted (which go with it), as the store removed them.
+        let (done, removed) = store.revokeReporting(phoneID: phoneID)
+        if !done {
             ptLog(.error, "shell: could not remove \(label)'s access")
             listenerError = "Could not remove \(label)'s access."
         } else {
             ptLog(.info, "shell: revoked access for \(label)")
         }
-        listener?.disconnect(phoneID: phoneID)
-        iroh?.listener?.disconnect(phoneID: phoneID)
-        // The listeners also end one being opened as this runs; this covers them being off.
-        manager?.closeSessions(openedBy: phoneID)
+        disconnectAll(Set(removed.map(\.phoneID) + [phoneID]))
         notifications.forget([phoneID])
+        forgetPassesHandedOver(by: [phoneID])
         refreshPhones()
-        onAccessRevoked?(slots)
+        // Only a phone's own access is its pairing's: removing a screen pass leaves the phone's grant alone.
+        let slots = Set(removed.filter { !$0.isScreenOnly }.map(\.pairingSlot))
+        if !slots.isEmpty { onAccessRevoked?(slots) }
+    }
+
+    /// Cuts these phones' and passes' connections, and the sessions they opened.
+    private func disconnectAll(_ ids: Set<String>) {
+        for id in ids {
+            listener?.disconnect(phoneID: id)
+            iroh?.listener?.disconnect(phoneID: id)
+            // The listeners also end one being opened as this runs; this covers them being off.
+            manager?.closeSessions(openedBy: id)
+        }
     }
 
     /// Every phone granted through this pairing (it was forgotten).
     func revoke(pairingSlot: String) {
-        let removed = store.phones.filter { $0.pairingSlot == pairingSlot }
-        if !store.revoke(pairingSlot: pairingSlot) {
+        let (done, removed) = store.revokeReporting(pairingSlot: pairingSlot)
+        if !done {
             ptLog(.error, "shell: could not remove the forgotten phone's access")
             listenerError = "Could not remove the forgotten phone's shell access."
         } else if !removed.isEmpty {
             ptLog(.info, "shell: revoked access for \(removed.map(\.label).joined(separator: ", "))")
         }
-        let irohListener = iroh?.listener
         notifications.forget(removed.map(\.phoneID))
-        for phone in removed {
-            listener?.disconnect(phoneID: phone.phoneID)
-            irohListener?.disconnect(phoneID: phone.phoneID)
-            manager?.closeSessions(openedBy: phone.phoneID)
-        }
+        disconnectAll(Set(removed.map(\.phoneID)))
+        forgetPassesHandedOver(by: Set(removed.filter { !$0.isScreenOnly }.map(\.phoneID)))
         refreshPhones()
         onAccessRevoked?([pairingSlot])
     }
 
     private func refreshPhones() {
-        phones = store.phones.sorted { $0.grantedAt > $1.grantedAt }
+        let all = store.phones.sorted { $0.grantedAt > $1.grantedAt }
+        phones = all.filter { !$0.isScreenOnly }
+        screenGuests = all.filter(\.isScreenOnly)
+    }
+
+    /// The label of the phone that granted a screen pass, if it still has access.
+    func granterLabel(of guest: ShellPhone) -> String? {
+        guard let id = guest.grantedBy else { return nil }
+        return phones.first { $0.phoneID == id }?.label
+    }
+
+    // MARK: Screen passes
+
+    /// A phone (allowed the screen itself) asking for a screen-only pass for
+    /// another Mac. Runs on a listener's work queue.
+    private func screenGrantHandler() -> @Sendable (String, String, String, String) -> Result<(id: String, key: Data), ShellError> {
+        let store = self.store
+        return { [weak self] phoneID, label, name, viewer in
+            switch store.grantViewer(by: phoneID, name: name, viewer: viewer) {
+            case let .success(granted):
+                ptLog(.info, "shell: \(label) let \(name) see the screen")
+                Task { @MainActor [weak self] in
+                    guard let self else { return }
+                    for id in granted.replaced {
+                        self.listener?.disconnect(phoneID: id)
+                        self.iroh?.listener?.disconnect(phoneID: id)
+                    }
+                    self.refreshPhones()
+                    // Said out loud here too: whoever is at this Mac learns another can now see and control it.
+                    self.passNotice.show(.quiet(title: "\(label) gave \(name) a pass to this screen",
+                                                detail: "It can see and control this Mac. Remove it in Passthrough's Remote Shell settings.",
+                                                symbol: "display"))
+                }
+                return .success((granted.id, granted.key))
+            case let .failure(error):
+                ptLog(.warning, "shell: refused \(label)'s screen pass for \(name): \(error.rawValue)")
+                return .failure(error)
+            }
+        }
+    }
+
+    /// A phone handing this Mac a pass to another Mac's screen. Runs on a listener's work queue.
+    private func screenPassHandler() -> @Sendable (String, String, ShellCredential) -> Bool {
+        let passes = passStore, store = self.store
+        return { [weak self] phoneID, label, credential in
+            // Revoked while this waited on the work queue: keep nothing from it.
+            guard !store.candidateKeys(forPhone: phoneID).isEmpty, !store.isScreenOnly(phoneID) else { return false }
+            let (kept, replaced) = passes.save(ReceivedScreenPass(credential: credential, from: label, fromPhoneID: phoneID,
+                                                                  receivedAt: Date()))
+            ptLog(kept ? .info : .error, kept ? "shell: \(label) handed over a pass to \(credential.macName)'s screen"
+                                             : "shell: could not keep a pass to \(credential.macName)'s screen")
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                self.refreshScreenPasses()
+                guard kept else { return }
+                // An open view of that Mac reconnects with the new pass (or, if its pass had gone, comes back).
+                Self.passChanged(credential.macID)
+                // Said out loud: any phone with access here can hand this Mac a pass, or replace one.
+                self.passNotice.show(.quiet(title: replaced != nil ? "Pass to \(credential.macName) replaced" : "You can now see \(credential.macName)",
+                                            detail: "From \(label). Open it from Passthrough's menu.", symbol: "display"))
+            }
+            return kept
+        }
+    }
+
+    /// A phone taking back a pass it granted and couldn't hand over. Runs on a listener's work queue.
+    private func screenRevokeHandler() -> @Sendable (String, String) -> Bool {
+        let store = self.store
+        return { [weak self] phoneID, viewerID in
+            let (_, removed) = store.revokeViewer(viewerID, grantedBy: phoneID)
+            guard !removed.isEmpty else { return false }
+            // Cut even if the removal couldn't be saved: the store keeps it out in memory.
+            Task { @MainActor [weak self] in
+                self?.disconnectAll(Set(removed.map(\.phoneID)))
+                self?.refreshPhones()
+            }
+            return true
+        }
+    }
+
+    /// A pass connected, so its Mac has it: the earlier passes the same phone
+    /// granted that Mac go (they were kept in case the hand-over failed).
+    /// Runs off the listener's queue.
+    private func screenPassUsedHandler() -> @Sendable (String) -> Void {
+        let store = self.store
+        return { [weak self] viewerID in
+            let gone = store.supersede(by: viewerID)
+            guard !gone.isEmpty else { return }
+            Task { @MainActor [weak self] in
+                self?.disconnectAll(Set(gone.map(\.phoneID)))
+                self?.refreshPhones()
+            }
+        }
+    }
+
+    func refreshScreenPasses() {
+        screenPasses = passStore.passes
+    }
+
+    func removeScreenPass(_ macID: String) {
+        if !passStore.remove(macID: macID) {
+            listenerError = "Could not remove that screen pass from the Keychain."
+        }
+        Self.passChanged(macID)
+        refreshScreenPasses()
+    }
+
+    /// Phones that lost access here: forget the passes they handed this Mac, and close those views.
+    private func forgetPassesHandedOver(by phoneIDs: Set<String>) {
+        guard !phoneIDs.isEmpty else { return }
+        let (done, macIDs) = passStore.remove(fromPhones: phoneIDs)
+        if !done { listenerError = "Could not remove the screen passes that phone handed over." }
+        macIDs.forEach(Self.passChanged)
+        refreshScreenPasses()
+    }
+
+    /// Open views of that Mac's screen look at its pass again (removed: they close).
+    static func passChanged(_ macID: String) {
+        NotificationCenter.default.post(name: .passthroughScreenPassChanged, object: nil, userInfo: ["macID": macID])
     }
 
     // MARK: Screen
@@ -815,7 +962,10 @@ final class RemoteShellController: ObservableObject {
             listenerError = "Screen is off for \(label), but that could not be saved in the Keychain: "
                 + "it may come back when Passthrough restarts. Turn it off again, or remove the phone."
         }
-        if !allowed { endScreen(for: phoneID) }
+        if !allowed {
+            // Its screen passes may only see what it may (`ShellAccessStore.screenAllowed`): their views end too.
+            for id in [phoneID] + store.viewers(grantedBy: phoneID) { endScreen(for: id) }
+        }
         refreshPhones()
     }
 
@@ -920,7 +1070,8 @@ final class RemoteShellController: ObservableObject {
 
     /// For both listeners: the Mac's own H.264 stream when it may capture and post input, else nil (the phone then uses Screen Sharing).
     private static let screenVideoSource: @Sendable (String, String) -> (any ScreenVideoSource)? = { phoneID, label in
-        ScreenVideoPermissions.isReady ? ScreenVideoStreamer(phoneID: phoneID, name: label) : nil
+        // A screen pass's view may not hide this Mac's displays or end the phones' views.
+        ScreenVideoPermissions.isReady ? ScreenVideoStreamer(phoneID: phoneID, name: label, restricted: ScreenPass.isViewerID(phoneID)) : nil
     }
 
     /// For both listeners: in order on the main queue (a stop must not
@@ -1151,4 +1302,9 @@ final class IrohRun: @unchecked Sendable {
         }
         return try outcome.lock.withLock { outcome.result! }.get()
     }
+}
+
+extension Notification.Name {
+    /// A screen pass this Mac holds changed or went (`userInfo["macID"]`).
+    static let passthroughScreenPassChanged = Notification.Name("\(PassthroughProtocol.identifier).screenPassChanged")
 }

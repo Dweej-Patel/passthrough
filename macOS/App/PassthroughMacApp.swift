@@ -32,6 +32,14 @@ struct PassthroughMacApp: App {
                 .environmentObject(session.shell)
         }
 
+        WindowGroup("Screen", id: RemoteScreenWindow.id, for: String.self) { $macID in
+            if let macID {
+                RemoteScreenWindow(macID: macID)
+                    .environmentObject(session.shell)
+            }
+        }
+        .defaultSize(width: 1280, height: 820)
+
         Window("Welcome to Passthrough", id: WelcomeView.id) {
             WelcomeView()
                 .environmentObject(session)
