@@ -352,16 +352,18 @@ public final class ScreenVideoStreamer: ScreenVideoSource, @unchecked Sendable {
 
     /// The phone wants what the Mac plays from now, or no longer; it's told whether it gets it.
     private func setSound(_ on: Bool) {
-        soundAsked += 1
         soundRestarts = 0
         guard on, makeSound != nil else {
+            soundAsked += 1
             stopSound()
             return write(ScreenVideoWire.encode(.soundState(on ? .failed : .off)), frame: false)
         }
+        // Asked again while it's on, or still starting (its answer is on its way): nothing changes.
         guard sound == nil else {
             if soundOn { write(ScreenVideoWire.encode(.soundState(.on)), frame: false) }
             return
         }
+        soundAsked += 1
         startSound()
     }
 
@@ -380,7 +382,10 @@ public final class ScreenVideoStreamer: ScreenVideoSource, @unchecked Sendable {
             guard let self else { return source.stop() }
             self.queue.async {
                 // Stopped, or asked for something else, while it started.
-                guard !self.stopped, asked == self.soundAsked, self.sound === source else { return source.stop() }
+                guard !self.stopped, asked == self.soundAsked, self.sound === source else {
+                    if self.sound === source { self.sound = nil }
+                    return source.stop()
+                }
                 if started {
                     self.soundOn = true
                     ptLog(.info, "screen: \(self.viewer?.name ?? "a phone") hears this Mac's sound")
@@ -528,9 +533,19 @@ public final class ScreenVideoStreamer: ScreenVideoSource, @unchecked Sendable {
     /// Text, keys and clipboards go through the pacer, so each stays behind what came before it.
     private func type(_ item: TypingPacer.Item) {
         guard input != nil else { return }
-        if !typing.push(item) { ptLog(.warning, "screen: a phone sent text faster than it can be typed; dropped some") }
+        // The paste of a clipboard that was dropped would paste whatever the Mac's clipboard held before.
+        if clipboardDropped, case let .key(keysym, modifiers) = item {
+            clipboardDropped = false
+            if keysym == 0x76, modifiers == ScreenVideoWire.Modifiers.command.rawValue { return }
+        }
+        if !typing.push(item) {
+            ptLog(.warning, "screen: a phone sent text faster than it can be typed; dropped some")
+            if case .clipboard = item { clipboardDropped = true }
+        }
         typeWaiting()
     }
+    /// The last clipboard a phone sent didn't fit the queue: the ⌘V that follows it is dropped too.
+    private var clipboardDropped = false
 
     private func typeWaiting() {
         guard !stopped, let input else { return }

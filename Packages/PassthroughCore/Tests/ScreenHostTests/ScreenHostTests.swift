@@ -1070,6 +1070,24 @@ final class ScreenVideoStreamerTests: XCTestCase {
     }
 
     /// A clipboard waits behind text as keys do, its bytes counted while it waits.
+    /// Two pastes in a row: the second's clipboard waits until the first's ⌘V has had time to be
+    /// taken, or the first would paste the second's text.
+    func testAClipboardWaitsForThePasteBeforeIt() {
+        var pacer = TypingPacer(now: 0)
+        let paste = TypingPacer.Item.key(keysym: 0x76, modifiers: ScreenVideoWire.Modifiers.command.rawValue)
+        for item in [TypingPacer.Item.clipboard("one"), paste, .clipboard("two"), paste, .key(keysym: 0xFF0D, modifiers: 0), .clipboard("three")] {
+            XCTAssertTrue(pacer.push(item))
+        }
+        XCTAssertEqual(pacer.take(now: 0), [.clipboard("one"), paste])
+        XCTAssertEqual(pacer.nextDelay ?? -1, TypingPacer.pasteSettle, accuracy: 0.001)
+        XCTAssertEqual(pacer.take(now: 0.1), [], "still the first paste's turn")
+        // A plain key doesn't hold a clipboard back; the shortcut before it still does.
+        XCTAssertEqual(pacer.take(now: 0.16), [.clipboard("two"), paste, .key(keysym: 0xFF0D, modifiers: 0)])
+        XCTAssertEqual(pacer.take(now: 0.2), [])
+        XCTAssertEqual(pacer.take(now: 0.32), [.clipboard("three")])
+        XCTAssertTrue(pacer.isEmpty)
+    }
+
     func testClipboardsWaitBehindText() {
         var pacer = TypingPacer(rate: 10, burst: 10, limit: 40, itemLimit: 10, now: 0)
         XCTAssertTrue(pacer.push(.text(String(repeating: "x", count: 20))))
@@ -1159,6 +1177,37 @@ final class ScreenVideoStreamerTests: XCTestCase {
         client.sound(true)
         waitUntil("failed") { states() == [.on, .off, .failed] }
         XCTAssertEqual(packets().count, 3)
+    }
+
+    /// Asked for twice before the capture is up (the view came back to the front as it started):
+    /// it still starts, once, and the phone is answered.
+    func testSoundAskedForAgainWhileItStartsStillStarts() {
+        FakeSound.delay.set(0.2)
+        addTeardownBlock { FakeSound.delay.set(0) }
+        let sources = Locked<[FakeSound]>([])
+        let streamer = ScreenVideoStreamer(capture: { FakeCapture(width: 320, height: 200) }, input: { _ in RecordingInput() }, sound: {
+            let source = FakeSound()
+            sources.set(sources.get() + [source])
+            return source
+        })
+        let (mac, phone) = MemoryPipe.pair()
+        streamer.start(stream: mac, initialBytes: Data()) {}
+        addTeardownBlock { streamer.stop() }
+        let events = Locked<[ScreenVideoClient.Event]>([])
+        let client = ScreenVideoClient(stream: phone, maxSide: 320, queue: DispatchQueue(label: "test")) { event in
+            events.set(events.get() + [event])
+        }
+        client.start()
+        func states() -> [ScreenVideoWire.SoundState] { events.get().compactMap { if case let .sound(state) = $0 { return state } else { return nil } } }
+        client.sound(true)
+        client.sound(true)
+        waitUntil("on") { states() == [.on] }
+        XCTAssertEqual(sources.get().count, 1)
+        sources.get()[0].send(Data([7]))
+        waitUntil("heard") { events.get().contains { if case .soundPacket = $0 { return true } else { return false } } }
+        client.sound(true)
+        waitUntil("answered again") { states() == [.on, .on] }
+        XCTAssertEqual(sources.get().count, 1)
     }
 
     func testAPhonesVoiceStopsWithItsView() {
@@ -1421,6 +1470,8 @@ private final class StalledStream: ByteStream, @unchecked Sendable {
 
 private final class FakeSound: SoundSource, @unchecked Sendable {
     static let starts = Locked(true)
+    /// How long starting takes.
+    static let delay = Locked(0.0)
     let started = Locked(false)
     let stopped = Locked(false)
     private let packet = Locked<(@Sendable (Data) -> Void)?>(nil)
@@ -1428,6 +1479,8 @@ private final class FakeSound: SoundSource, @unchecked Sendable {
 
     func start(packet: @escaping @Sendable (Data) -> Void, stopped: @escaping @Sendable () -> Void) async -> Bool {
         guard Self.starts.get() else { return false }
+        let delay = Self.delay.get()
+        if delay > 0 { try? await Task.sleep(for: .seconds(delay)) }
         self.packet.set(packet)
         ended.set(stopped)
         started.set(true)

@@ -50,17 +50,25 @@ final class KeyboardDocumentTests: XCTestCase {
         XCTAssertEqual(document.typed, "")
     }
 
-    func testAHugeDeletionIsCutShort() {
+    /// A change that would delete more than can be trusted isn't made at all: nothing is typed on the
+    /// Mac, and the document starts over (the keyboard is told).
+    func testAChangeTooFarBackIsRefused() {
         var document = KeyboardDocument()
         _ = document.insert("abc")
-        XCTAssertEqual(document.replace(NSRange(location: 0, length: document.length), with: ""), [.backspace(KeyboardDocument.maxBackspaces)])
-        XCTAssertEqual(document.length, 0)
-        XCTAssertEqual(document.deleteBackward(), [.backspace(1)], "still deletes with nothing left")
-        document.tidy()
-        XCTAssertEqual(document.length, pad)
-        // Cut short, what followed isn't typed again.
+        XCTAssertEqual(document.replace(NSRange(location: 0, length: document.length), with: ""), [.forgotten])
+        XCTAssertEqual(document, KeyboardDocument())
         _ = document.insert(String(repeating: "y", count: 200) + " end")
-        XCTAssertEqual(document.replace(NSRange(location: pad, length: 1), with: "Y"), [.backspace(KeyboardDocument.maxBackspaces), .text("Y")])
+        XCTAssertEqual(document.replace(NSRange(location: pad, length: 1), with: "Y"), [.forgotten])
+        XCTAssertEqual(document.typed, "")
+        // At the limit it's still done.
+        _ = document.insert(String(repeating: "z", count: KeyboardDocument.maxBackspaces))
+        XCTAssertEqual(document.replace(NSRange(location: pad, length: 1), with: "Z"),
+                       [.backspace(KeyboardDocument.maxBackspaces), .text("Z" + String(repeating: "z", count: KeyboardDocument.maxBackspaces - 1))])
+        // With nothing left at all, delete still deletes on the Mac.
+        var empty = KeyboardDocument()
+        for _ in 0..<(pad / 2) { _ = empty.replace(NSRange(location: empty.length - 2, length: 2), with: "") }
+        XCTAssertEqual(empty.length, 0)
+        XCTAssertEqual(empty.deleteBackward(), [.backspace(1)])
     }
 
     /// Text being composed (an input method's candidate, a dictation not settled) reaches the Mac only when it's final.

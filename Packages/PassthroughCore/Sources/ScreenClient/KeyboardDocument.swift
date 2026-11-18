@@ -21,6 +21,9 @@ public struct KeyboardDocument: Equatable, Sendable {
         /// Delete this many characters before the Mac's caret.
         case backspace(Int)
         case text(String)
+        /// The change wasn't made (it would have deleted too much on the Mac), and what was
+        /// typed is forgotten: the keyboard must be told its text changed.
+        case forgotten
     }
 
     /// Short words, so the keyboard's delete-by-word (a long hold) takes a few characters at a time.
@@ -28,7 +31,7 @@ public struct KeyboardDocument: Equatable, Sendable {
     /// What was typed is kept this long at most (`tidy`).
     public static let typedLimit = 512
     /// The most one change may delete on the Mac. The keyboard never asks for more in
-    /// earnest; a change that would is cut short rather than wipe what's on the Mac.
+    /// earnest; a change that would is refused (`Edit.forgotten`) rather than wipe what's on the Mac.
     public static let maxBackspaces = 128
 
     private var content = KeyboardDocument.padding
@@ -79,15 +82,17 @@ public struct KeyboardDocument: Equatable, Sendable {
         }
         let source = content as NSString
         let removed = source.substring(from: range.location)
+        // Too far back to do on the Mac: nothing is typed, and nothing here is trusted any more.
+        guard removed.count <= Self.maxBackspaces else {
+            forget()
+            return [.forgotten]
+        }
         let kept = source.substring(from: range.location + range.length)
         content = source.replacingCharacters(in: range, with: text)
         paddingLength = min(paddingLength, range.location)
         var edits: [Edit] = []
-        let backspaces = min(removed.count, Self.maxBackspaces)
-        if backspaces > 0 { edits.append(.backspace(backspaces)) }
-        // Cut short: what followed the range isn't typed again over text that was never deleted.
-        let retyped = removed.count > Self.maxBackspaces ? text : text + kept
-        if !retyped.isEmpty { edits.append(.text(retyped)) }
+        if !removed.isEmpty { edits.append(.backspace(removed.count)) }
+        if !(text + kept).isEmpty { edits.append(.text(text + kept)) }
         return edits
     }
 

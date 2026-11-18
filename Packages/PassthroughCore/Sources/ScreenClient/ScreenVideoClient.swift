@@ -209,14 +209,28 @@ public final class ScreenVideoClient: @unchecked Sendable {
 
     /// What the microphone heard next: 16-bit little-endian mono at `ScreenVideoWire.voiceSampleRate`,
     /// in pieces the Mac accepts. Only after the Mac said `on`.
+    /// Voice is for now or never: with `voiceBacklog` of it still waiting to go out (a slow
+    /// link), what comes is left out, so it can't pile up in front of the pointer, keys and acks.
     public func voice(_ samples: Data) {
         var rest = samples[...]
         while !rest.isEmpty {
-            let piece = rest.prefix(ScreenVideoWire.maxVoicePayload)
-            send(.voice(Data(piece)))
+            let piece = Data(rest.prefix(ScreenVideoWire.maxVoicePayload))
             rest = rest.dropFirst(piece.count)
+            let data = ScreenVideoWire.encode(.voice(piece))
+            queue.async { [self] in
+                guard !closed, voiceUnsent < Self.voiceBacklog else { return }
+                voiceUnsent += data.count
+                stream.send(data, isComplete: false) { [weak self] _ in
+                    self?.queue.async { self?.voiceUnsent -= data.count }
+                }
+            }
         }
     }
+
+    /// Half a second of voice.
+    static let voiceBacklog = ScreenVideoWire.voiceSampleRate
+    /// Voice handed to the stream whose send hasn't completed (on `queue`).
+    private var voiceUnsent = 0
 
     /// Frame `number` is on screen.
     public func shown(_ number: UInt32) { send(.ack(number: number)) }

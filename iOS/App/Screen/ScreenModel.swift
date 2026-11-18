@@ -1,3 +1,4 @@
+import AVFoundation
 import CoreGraphics
 import CoreMedia
 import Foundation
@@ -214,6 +215,12 @@ final class ScreenModel: ObservableObject {
         guard appObservers.isEmpty else { return }
         let nc = NotificationCenter.default
         appObservers = [
+            // A call, Siri or an alarm took the audio and gave it back: the Mac's sound plays again.
+            nc.addObserver(forName: AVAudioSession.interruptionNotification, object: nil, queue: .main) { [weak self] note in
+                let ended = (note.userInfo?[AVAudioSessionInterruptionTypeKey] as? UInt) == AVAudioSession.InterruptionType.ended.rawValue
+                guard ended else { return }
+                MainActor.assumeIsolated { self?.audioCameBack() }
+            },
             nc.addObserver(forName: UIApplication.didEnterBackgroundNotification, object: nil, queue: .main) { [weak self] _ in
                 MainActor.assumeIsolated { self?.appWentAway() }
             },
@@ -760,7 +767,12 @@ final class ScreenModel: ObservableObject {
         case previousDesktop, nextDesktop, missionControl, appWindows, showDesktop
     }
 
+    /// Something sent from outside the canvas may move the Mac's caret or change its text
+    /// (a paste, another desktop): the canvas forgets what was typed (`ScreenCanvasView.forgetTyped`).
+    var onCaretMayMove: (() -> Void)?
+
     func perform(_ action: SpaceAction) {
+        onCaretMayMove?()
         switch action {
         case .previousDesktop: key(RFBKeys.left, modifiers: [RFBKeys.control])
         case .nextDesktop: key(RFBKeys.right, modifiers: [RFBKeys.control])
@@ -773,6 +785,7 @@ final class ScreenModel: ObservableObject {
 
     /// Puts the phone's clipboard on the Mac's and pastes it there.
     func pastePhoneClipboard() {
+        onCaretMayMove?()
         guard let text = UIPasteboard.general.string, !text.isEmpty else { return }
         if let video {
             // Longer than the Mac takes: pasting would paste what was there before.
@@ -933,6 +946,21 @@ final class ScreenModel: ObservableObject {
         _ = applyAudio()
     }
 
+    /// The audio is this app's again after an interruption: what played is started again,
+    /// and sound that had to be given up meanwhile is asked for again.
+    private func audioCameBack() {
+        guard playsSound, phase == .live, let video else { return }
+        if soundLive { _ = applyAudio() } else { video.sound(true) }
+    }
+
+    /// The Mac's sound can't be played now (the session was refused, or the player didn't
+    /// start): the Mac is told to stop sending it. `audioCameBack` asks again.
+    private func soundCantPlay(_ error: Error) {
+        ptLog(.warning, "screen: the Mac's sound can't be played: \(error.localizedDescription)")
+        soundLive = false
+        video?.sound(false)
+    }
+
     /// One audio session for both directions, and changing it stops whatever runs: so
     /// both stop, the session is set for what's on now (`capturing`, `soundLive`), and
     /// those start again. The microphone's failure, if it couldn't start; then it's off.
@@ -965,8 +993,7 @@ final class ScreenModel: ObservableObject {
             do {
                 try ScreenAudioSession.apply(recording: false, playing: soundLive)
             } catch {
-                ptLog(.warning, "screen: the Mac's sound can't be played: \(error.localizedDescription)")
-                soundLive = false
+                if soundLive { soundCantPlay(error) }
             }
         }
         if soundLive {
@@ -975,8 +1002,7 @@ final class ScreenModel: ObservableObject {
                 try player.start()
                 soundPlayer = player
             } catch {
-                ptLog(.warning, "screen: the Mac's sound can't be played: \(error.localizedDescription)")
-                soundLive = false
+                soundCantPlay(error)
             }
         }
         return failure

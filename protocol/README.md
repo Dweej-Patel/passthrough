@@ -630,6 +630,16 @@ Mac → phone:
   device), 2 not installed (the Mac has no such device: its audio driver is
   installed from the Mac app's Remote Shell settings), 3 failed (the device
   is there but couldn't be played to). A state added later reads as failed.
+- `11` sound state: state u8, the answer to `sound`: 0 off, 1 on (`sound
+  packet`s follow), 3 failed (the Mac's sound couldn't be captured). Sent
+  again, failed, if the capture ends and can't be started again.
+- `12` sound packet: what the Mac's apps play, next: one AAC-LC packet
+  (1024 frames, 48 kHz stereo, about 128 kb/s) with nothing around it.
+  Captured with ScreenCaptureKit, whatever the Mac's volume, without the
+  app's own sound (so a phone's `voice` isn't sent back to it). None are sent
+  while the Mac is silent, and one is left out when frames are waiting to go
+  out: sound is for now or never. The phone plays them through a small
+  buffer (it starts once 80 ms wait; over 400 ms the oldest are dropped).
 
 Phone → Mac:
 - `16` hello: width u16, height u16, fit u8, codecs u8 (bit 0 H.264, which
@@ -721,16 +731,6 @@ Phone → Mac:
   the fingers first in touch mode. The phone sends these on a display made
   for it, or on the Mac's own if the user chose it; otherwise a pinch zooms
   the phone's view.
-- `11` sound state: state u8, the answer to `sound`: 0 off, 1 on (`sound
-  packet`s follow), 3 failed (the Mac's sound couldn't be captured). Sent
-  again, failed, if the capture ends and can't be started again.
-- `12` sound packet: what the Mac's apps play, next: one AAC-LC packet
-  (1024 frames, 48 kHz stereo, about 128 kb/s) with nothing around it.
-  Captured with ScreenCaptureKit, whatever the Mac's volume, without the
-  app's own sound (so a phone's `voice` isn't sent back to it). None are sent
-  while the Mac is silent, and one is left out when frames are waiting to go
-  out: sound is for now or never. The phone plays them through a small
-  buffer (it starts once 80 ms wait; over 400 ms the oldest are dropped).
 - `28` microphone: on u8 (1 be this Mac's microphone, 0 stop). Answered
   with `microphone state`; the phone records and sends `voice` only once
   that says on, and the Mac drops voice at any other time. It ends with the

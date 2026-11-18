@@ -25,6 +25,9 @@ struct TypingPacer {
     /// Keys cost no bytes, so they are counted: a phone sending keys behind
     /// text that waits could otherwise queue them without end.
     static let itemLimit = 4096
+    /// How long a clipboard waits behind a shortcut (the ⌘V of the paste before it, usually): the
+    /// app handles that ⌘V a moment after it's posted, and must find its own text on the clipboard.
+    static let pasteSettle: TimeInterval = 0.15
 
     private let rate: Double
     private let burst: Double
@@ -38,6 +41,8 @@ struct TypingPacer {
     private var waiting: [Item] = []
     private var next = 0
     private var waitingBytes = 0
+    /// A clipboard isn't taken before this (`pasteSettle` after the last shortcut).
+    private var clipboardNotBefore: TimeInterval = 0
 
     init(rate: Double = TypingPacer.rate, burst: Double = TypingPacer.burst, limit: Int = TypingPacer.limit,
          itemLimit: Int = TypingPacer.itemLimit, now: TimeInterval) {
@@ -85,6 +90,8 @@ struct TypingPacer {
         var out: [Item] = []
         while next < waiting.count {
             guard case let .text(text) = waiting[next] else {
+                if case .clipboard = waiting[next], now < clipboardNotBefore { break }
+                if case let .key(_, modifiers) = waiting[next], modifiers != 0 { clipboardNotBefore = now + Self.pasteSettle }
                 waitingBytes -= waiting[next].waitingBytes ?? 0
                 out.append(popFirst())
                 continue
@@ -119,6 +126,7 @@ struct TypingPacer {
     /// the text waiting first), while something waits.
     var nextDelay: TimeInterval? {
         guard next < waiting.count else { return nil }
+        if case .clipboard = waiting[next] { return max(0, clipboardNotBefore - refilledAt) }
         guard case let .text(text) = waiting[next] else { return 0 }
         let needed = min(burst, Double(min(text.utf8.count, 1024)))
         return max(0.01, (needed - tokens) / rate)

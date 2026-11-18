@@ -1151,6 +1151,8 @@ struct ScreenCanvas: UIViewRepresentable {
         view.onKey = { [weak model] keysym, modifiers in model?.key(keysym, modifiers: modifiers) }
         view.onText = { [weak model] text, modifiers in model?.type(text, modifiers: modifiers) }
         view.onFunction = { [weak model] down in model?.function(down) }
+        // The menus' paste and desktop moves go by the model, not this view.
+        model.onCaretMayMove = { [weak view] in view?.forgetTyped() }
         view.onPaste = { [weak model] in model?.pastePhoneClipboard() }
         view.onCopy = { [weak model] in model?.copyFromMac() }
         view.onSpace = { [weak model] action in model?.perform(action) }

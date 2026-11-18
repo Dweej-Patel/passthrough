@@ -6,7 +6,8 @@ import Network
 /// Whatever answers on the phone's control port, scripted by the test: the
 /// real phone, an impostor, or a phone from an older release.
 final class FakePhone: @unchecked Sendable {
-    let port: UInt16
+    /// The listener's own choice, known once it's up.
+    private(set) var port: UInt16 = 0
     private let listener: NWListener
     private let queue = DispatchQueue(label: "test.fake-phone")
     private var connection: NWConnection?
@@ -17,8 +18,9 @@ final class FakePhone: @unchecked Sendable {
     private let arrived = DispatchSemaphore(value: 0)
 
     init() throws {
-        port = freePort()
-        listener = try NWListener(using: .tcp, on: NWEndpoint.Port(rawValue: port)!)
+        // The listener takes a port of its own choosing: one found free a moment before
+        // (`freePort`, on loopback only) may not be free for a listener on every address.
+        listener = try NWListener(using: .tcp)
         let ready = DispatchSemaphore(value: 0)
         listener.stateUpdateHandler = { if case .ready = $0 { ready.signal() } }
         listener.newConnectionHandler = { [weak self] c in
@@ -29,6 +31,7 @@ final class FakePhone: @unchecked Sendable {
         }
         listener.start(queue: queue)
         XCTAssertEqual(ready.wait(timeout: .now() + 5), .success)
+        port = listener.port?.rawValue ?? 0
     }
 
     private func pump(_ c: NWConnection) {

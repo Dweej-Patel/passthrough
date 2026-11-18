@@ -25,26 +25,41 @@ extension ScreenCanvasView {
     // MARK: Typing
 
     func insertText(_ text: String) {
-        send(document.insert(text), modifiers: takeModifiers())
+        // With a modifier held it's a shortcut, not text: it goes to the Mac and isn't remembered.
+        let modifiers = takeModifiers()
+        guard modifiers.isEmpty else {
+            forgetTyped()
+            onText?(text, modifiers)
+            return
+        }
+        send(document.insert(text))
+        // Return may have sent the message or run the command; Tab moved on. What was typed isn't there to edit.
+        if text.contains(where: { $0.isNewline || $0 == "\t" }) { forgetTyped() }
     }
 
     func deleteBackward() {
-        send(document.deleteBackward(), modifiers: takeModifiers())
+        let modifiers = takeModifiers()
+        guard modifiers.isEmpty else {
+            forgetTyped()
+            onKey?(RFBKeys.backspace, modifiers)
+            return
+        }
+        send(document.deleteBackward())
     }
 
-    /// Types the keyboard's change on the Mac; held modifiers go with its first key.
-    private func send(_ edits: [KeyboardDocument.Edit], modifiers: [UInt32] = []) {
-        var modifiers = modifiers
+    /// Types the keyboard's change on the Mac.
+    private func send(_ edits: [KeyboardDocument.Edit]) {
         for edit in edits {
             switch edit {
             case let .backspace(count):
-                for _ in 0..<count {
-                    onKey?(RFBKeys.backspace, modifiers)
-                    modifiers = []
-                }
+                for _ in 0..<count { onKey?(RFBKeys.backspace, []) }
             case let .text(text):
-                onText?(text, modifiers)
-                modifiers = []
+                onText?(text, [])
+            case .forgotten:
+                // The document started over by itself: the keyboard hears of it after the fact.
+                tidyWork?.cancel()
+                inputDelegate?.textWillChange(self)
+                inputDelegate?.textDidChange(self)
             }
         }
         tidyLater()
