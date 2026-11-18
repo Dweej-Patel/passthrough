@@ -1553,4 +1553,102 @@ private final class FakeVideoSource: ScreenVideoSource, @unchecked Sendable {
 
     func stop() { stopped.set(true) }
 }
+
+// MARK: - Screen passes
+
+@available(macOS 15, *)
+extension ShellListenerTests {
+    /// A screen pass hears nothing about the Mac after `ready` (no sessions,
+    /// no state) and is refused everything but the screen and pings.
+    func testAScreenPassMayOnlyAskForTheScreen() {
+        let listener = startListener()
+        listener.screenOnly = { $0 == "phone-1" }
+        listener.screenAllowed = { _ in true }
+        listener.screenVideo = { _, _ in nil }
+        listener.macState = { _ in MacState(awake: true) }
+        let (stream, rest) = rawAuthorized(listener)
+        let requests = ["list", "history", "open", "setAwake", "lock", "screenGrant", "events"]
+            .map { "{\"t\":\"\($0)\",\"cols\":80,\"rows\":24,\"on\":true,\"since\":0,\"name\":\"x\",\"viewer\":\"y\"}\n" }.joined()
+        stream.send(Data((requests + "{\"t\":\"screenVideo\"}\n{\"t\":\"ping\"}\n").utf8), isComplete: false) { _ in }
+        let replies = Self.lines(rest + read(stream, "replies") { Self.lines(rest + $0).contains { $0.t == "pong" } })
+        XCTAssertFalse(replies.contains { $0.t == ShellEnvelope.sessions || $0.t == ShellEnvelope.macState || $0.t == ShellEnvelope.opened })
+        let reasons = replies.filter { $0.t == "error" }.compactMap(\.reason)
+        XCTAssertEqual(reasons.filter { $0 == "screen_only" }.count, 7, "every request but the screen: \(reasons)")
+        XCTAssertTrue(reasons.contains("screen_video_unavailable"), "the screen request gets past the gate")
+        XCTAssertTrue(manager.sessions.isEmpty)
+    }
+
+    /// A pass's id is screen-only even when the store doesn't say so (it was
+    /// removed in between) or the hook isn't set: it never gets a phone's connection.
+    func testAPasssIdIsScreenOnlyWithoutTheHook() {
+        let viewerKey = WirelessLink.randomBytes(32)
+        let listener = startListener(keys: Locked(["viewer.x": viewerKey]))
+        listener.macState = { _ in MacState(awake: true) }
+        let (c, probe) = readyClient(listener, phoneID: "viewer.x", key: viewerKey)
+        c.list()
+        wait(for: [probe.expect(self, "refused") { _ in probe.failures == [.screenOnly] }], timeout: 5)
+        XCTAssertFalse(probe.events.get().contains {
+            switch $0 {
+            case .sessions, .macState, .macInfo: return true
+            default: return false
+            }
+        })
+    }
+
+    func testAPhoneTakesBackAPassItCouldntHandOver() {
+        let listener = startListener()
+        let taken = Locked<[String]>([])
+        listener.onScreenRevoke = { phoneID, viewer in taken.set(taken.get() + [phoneID, viewer]); return true }
+        let (c, probe) = readyClient(listener)
+        c.revokeScreen("viewer.abc")
+        wait(for: [probe.expect(self, "revoked") { $0.contains { if case .screenRevoked = $0 { return true } else { return false } } }], timeout: 5)
+        XCTAssertEqual(taken.get(), ["phone-1", "viewer.abc"])
+    }
+
+    func testAPhoneGetsAScreenPassForAnotherMac() {
+        let listener = startListener()
+        let asked = Locked<[String]>([])
+        let viewerKey = WirelessLink.randomBytes(32)
+        listener.onScreenGrant = { phoneID, _, name, viewer in
+            asked.set(asked.get() + [phoneID, name, viewer])
+            return .success(("viewer.abc", viewerKey))
+        }
+        let (c, probe) = readyClient(listener)
+        c.grantScreen(name: "Studio", viewer: "mac-2")
+        wait(for: [probe.expect(self, "granted") { $0.contains { if case .screenGranted = $0 { return true } else { return false } } }], timeout: 5)
+        XCTAssertEqual(asked.get(), ["phone-1", "Studio", "mac-2"])
+        for case let .screenGranted(id, key) in probe.events.get() {
+            XCTAssertEqual(id, "viewer.abc")
+            XCTAssertEqual(key, viewerKey)
+        }
+    }
+
+    func testARefusedScreenPassSaysWhy() {
+        let listener = startListener()
+        listener.onScreenGrant = { _, _, _, _ in .failure(.screenNotAllowed) }
+        let (c, probe) = readyClient(listener)
+        c.grantScreen(name: "Studio", viewer: "mac-2")
+        wait(for: [probe.expect(self, "refused") { _ in probe.failures == [.screenNotAllowed] }], timeout: 5)
+        XCTAssertFalse(probe.disconnected, "the connection carries on")
+    }
+
+    func testAMacKeepsAPassHandedToIt() {
+        let listener = startListener()
+        let kept = Locked<[ShellCredential]>([])
+        listener.onScreenPass = { _, _, pass in kept.set(kept.get() + [pass]); return true }
+        let (c, probe) = readyClient(listener)
+        let pass = ShellCredential(macID: "mac-2", macName: "Studio", certSHA256: String(repeating: "a", count: 64),
+                                   shellKey: WirelessLink.randomBytes(32), phoneID: "viewer.abc", port: 7893, addresses: ["192.168.1.9"])
+        c.giveScreenPass(pass)
+        wait(for: [probe.expect(self, "saved") { $0.contains { if case .screenPassSaved = $0 { return true } else { return false } } }], timeout: 5)
+        XCTAssertEqual(kept.get(), [pass])
+
+        // One it couldn't use (not a viewer's id) is refused without asking the app.
+        var bad = pass
+        bad.phoneID = "phone-9"
+        c.giveScreenPass(bad)
+        wait(for: [probe.expect(self, "refused") { _ in probe.failures == [.badRequest] }], timeout: 5)
+        XCTAssertEqual(kept.get().count, 1)
+    }
+}
 #endif

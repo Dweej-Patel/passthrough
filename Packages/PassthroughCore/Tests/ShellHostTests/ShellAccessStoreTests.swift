@@ -426,11 +426,160 @@ final class ShellAccessStoreTests: XCTestCase {
         XCTAssertNil(secrets.read("shell.phones"))
         XCTAssertTrue(store.record(phone("b")), "a deleted store starts fresh")
     }
+    // MARK: Screen passes
+
+    private func granter(_ store: ShellAccessStore, screen: Bool = true) {
+        store.record(phone("phone", slot: "token.iphone.A"))
+        store.setScreenAllowed(screen, forPhone: "phone")
+    }
+
+    func testAScreenPassIsScreenOnlyAndGoesWithItsPhone() throws {
+        let store = ShellAccessStore(secrets: InMemorySecrets())
+        granter(store)
+        let granted = try store.grantViewer(by: "phone", name: "Studio", viewer: "mac-2").get()
+        XCTAssertTrue(granted.id.hasPrefix(ScreenPass.idPrefix))
+        XCTAssertEqual(granted.key.count, 32)
+        XCTAssertEqual(store.candidateKeys(forPhone: granted.id), [granted.key])
+        let pass = try XCTUnwrap(store.phones.first { $0.phoneID == granted.id })
+        XCTAssertTrue(pass.isScreenOnly && pass.screenAllowed)
+        XCTAssertFalse(pass.controlAllowed)
+        XCTAssertEqual(pass.pairingSlot, "token.iphone.A")
+        XCTAssertTrue(store.isScreenOnly(granted.id))
+        XCTAssertFalse(store.isScreenOnly("phone"))
+
+        // Renaming the phone leaves the pass its own name; moving its pairing moves the pass.
+        store.relabel(pairingSlot: "token.iphone.A", label: "New iPhone")
+        XCTAssertEqual(store.phones.first { $0.phoneID == granted.id }?.label, "Studio")
+        XCTAssertTrue(store.move(phoneID: "phone", fromSlot: "token.iphone.A", toSlot: "token.iphone.B"))
+        XCTAssertEqual(store.phones.first { $0.phoneID == granted.id }?.pairingSlot, "token.iphone.B")
+
+        // Removing the phone removes what it granted.
+        store.record(phone("other", slot: "token.iphone.C"))
+        XCTAssertTrue(store.revoke(phoneID: "phone"))
+        XCTAssertEqual(store.phones.map(\.phoneID), ["other"])
+    }
+
+    func testOnlyAPhoneAllowedTheScreenMayShareIt() {
+        let store = ShellAccessStore(secrets: InMemorySecrets())
+        granter(store, screen: false)
+        guard case .failure(.screenNotAllowed) = store.grantViewer(by: "phone", name: "Studio", viewer: "mac-2") else { return XCTFail() }
+        guard case .failure(.notAuthorized) = store.grantViewer(by: "stranger", name: "Studio", viewer: "mac-2") else { return XCTFail() }
+        guard case .failure(.badRequest) = store.grantViewer(by: "phone", name: " ", viewer: "mac-2") else { return XCTFail() }
+    }
+
+    func testAPassCannotGrantPasses() throws {
+        let store = ShellAccessStore(secrets: InMemorySecrets())
+        granter(store)
+        let granted = try store.grantViewer(by: "phone", name: "Studio", viewer: "mac-2").get()
+        guard case .failure(.notAuthorized) = store.grantViewer(by: granted.id, name: "Other", viewer: "mac-3") else { return XCTFail() }
+    }
+
+    /// A pass's id is the Mac's to mint: a phone grant can't use one, nor
+    /// replace a pass (which would make its key, held by another Mac, a phone's).
+    func testAPhoneGrantCannotTakeAPasssId() throws {
+        let store = ShellAccessStore(secrets: InMemorySecrets())
+        granter(store)
+        let granted = try store.grantViewer(by: "phone", name: "Studio", viewer: "mac-2").get()
+        XCTAssertFalse(store.record(phone(granted.id, slot: "token.iphone.A")), "the granter's own slot")
+        XCTAssertFalse(store.record(phone("viewer.made-up", slot: "token.iphone.A")))
+        let pass = try XCTUnwrap(store.phones.first { $0.phoneID == granted.id })
+        XCTAssertTrue(pass.isScreenOnly)
+        XCTAssertEqual(store.candidateKeys(forPhone: granted.id), [granted.key])
+    }
+
+    /// Screen-only fails closed: a pass's id is screen-only even once its entry is gone.
+    func testAPasssIdIsScreenOnlyEvenWhenUnknown() {
+        let store = ShellAccessStore(secrets: InMemorySecrets())
+        XCTAssertTrue(store.isScreenOnly("viewer.gone"))
+        XCTAssertFalse(store.isScreenOnly("phone"))
+    }
+
+    /// A pass sees the screen only while the phone that granted it may, even
+    /// when turning that phone's Screen off can't be saved.
+    func testAPassSeesTheScreenOnlyWhileItsPhoneMay() throws {
+        let secrets = FlakySecrets()
+        let store = ShellAccessStore(secrets: secrets)
+        granter(store)
+        let granted = try store.grantViewer(by: "phone", name: "Studio", viewer: "mac-2").get()
+        XCTAssertTrue(store.screenAllowed(forPhone: granted.id))
+        secrets.failing.set(true)
+        store.setScreenAllowed(false, forPhone: "phone")
+        XCTAssertFalse(store.screenAllowed(forPhone: granted.id), "off in memory though unsaved")
+        secrets.failing.set(false)
+        store.setScreenAllowed(true, forPhone: "phone")
+        XCTAssertTrue(store.screenAllowed(forPhone: granted.id))
+        XCTAssertEqual(store.viewers(grantedBy: "phone"), [granted.id])
+    }
+
+    /// Forgetting a pairing removes the phone's passes too, and says which went.
+    func testForgettingAPairingRemovesItsPasses() throws {
+        let store = ShellAccessStore(secrets: InMemorySecrets())
+        granter(store)
+        let granted = try store.grantViewer(by: "phone", name: "Studio", viewer: "mac-2").get()
+        store.record(phone("other", slot: "token.iphone.C"))
+        let (done, removed) = store.revokeReporting(pairingSlot: "token.iphone.A")
+        XCTAssertTrue(done)
+        XCTAssertEqual(Set(removed.map(\.phoneID)), ["phone", granted.id])
+        XCTAssertTrue(store.candidateKeys(forPhone: granted.id).isEmpty)
+        XCTAssertEqual(store.phones.map(\.phoneID), ["other"])
+    }
+
+    /// A revoke that can't be saved still keeps the passes out.
+    func testAnUnsavedRevokeKeepsThePassesOut() throws {
+        let secrets = FlakySecrets()
+        let store = ShellAccessStore(secrets: secrets)
+        granter(store)
+        let granted = try store.grantViewer(by: "phone", name: "Studio", viewer: "mac-2").get()
+        secrets.failing.set(true)
+        let (_, removed) = store.revokeReporting(phoneID: "phone")
+        XCTAssertEqual(Set(removed.map(\.phoneID)), ["phone", granted.id])
+        XCTAssertTrue(store.candidateKeys(forPhone: granted.id).isEmpty)
+        XCTAssertFalse(store.screenAllowed(forPhone: granted.id))
+    }
+
+    /// A phone takes back only a pass it granted.
+    func testOnlyItsPhoneTakesAPassBack() throws {
+        let store = ShellAccessStore(secrets: InMemorySecrets())
+        granter(store)
+        store.record(phone("other", slot: "token.iphone.C"))
+        let granted = try store.grantViewer(by: "phone", name: "Studio", viewer: "mac-2").get()
+        XCTAssertTrue(store.revokeViewer(granted.id, grantedBy: "other").removed.isEmpty)
+        XCTAssertTrue(store.revokeViewer("other", grantedBy: "phone").removed.isEmpty, "only passes")
+        XCTAssertEqual(store.revokeViewer(granted.id, grantedBy: "phone").removed.map(\.phoneID), [granted.id])
+        XCTAssertTrue(store.candidateKeys(forPhone: granted.id).isEmpty)
+        XCTAssertNotNil(store.key(forPhone: "phone"))
+    }
+
+    /// Taking back a pass that isn't the phone's touches nothing, even when the store can't be written.
+    func testAStrangersRevokeNeverWipesTheStore() throws {
+        let secrets = FlakySecrets()
+        let store = ShellAccessStore(secrets: secrets)
+        granter(store)
+        store.record(phone("other", slot: "token.iphone.C"))
+        let granted = try store.grantViewer(by: "phone", name: "Studio", viewer: "mac-2").get()
+        secrets.failing.set(true)
+        XCTAssertTrue(store.revokeViewer(granted.id, grantedBy: "other").removed.isEmpty)
+        XCTAssertTrue(store.revokeViewer("viewer.nobody", grantedBy: "phone").removed.isEmpty)
+        secrets.failing.set(false)
+        XCTAssertEqual(Set(store.phones.map(\.phoneID)), ["phone", "other", granted.id])
+    }
+
+    func testAPassForTheSameMacReplacesTheOldOneAndTheyAreCapped() throws {
+        let store = ShellAccessStore(secrets: InMemorySecrets())
+        granter(store)
+        let first = try store.grantViewer(by: "phone", name: "Studio", viewer: "mac-2").get()
+        let second = try store.grantViewer(by: "phone", name: "Studio", viewer: "mac-2").get()
+        XCTAssertEqual(second.replaced, [first.id])
+        XCTAssertTrue(store.candidateKeys(forPhone: first.id).isEmpty)
+        for n in 0..<ScreenPass.maxPerGranter { _ = try store.grantViewer(by: "phone", name: "Mac \(n)", viewer: "m\(n)").get() }
+        XCTAssertEqual(store.phones.filter { $0.grantedBy == "phone" }.count, ScreenPass.maxPerGranter)
+    }
 }
 private final class TestClock: @unchecked Sendable {
     private let lock = NSLock()
     private var time = Date(timeIntervalSince1970: 1_000)
     var now: Date { lock.lock(); defer { lock.unlock() }; return time }
     func advance(_ seconds: TimeInterval) { lock.lock(); time += seconds; lock.unlock() }
+
 }
 #endif

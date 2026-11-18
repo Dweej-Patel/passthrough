@@ -89,6 +89,30 @@ public final class IrohShellListener: @unchecked Sendable {
         set { gate.eventsProvider.set(newValue) }
     }
 
+    /// As `ShellListener.screenOnly`.
+    public var screenOnly: (@Sendable (String) -> Bool)? {
+        get { gate.screenOnlyCheck.get() }
+        set { gate.screenOnlyCheck.set(newValue) }
+    }
+
+    /// As `ShellListener.onScreenGrant`.
+    public var onScreenGrant: (@Sendable (_ phoneID: String, _ label: String, _ name: String, _ viewer: String) -> Result<(id: String, key: Data), ShellError>)? {
+        get { gate.screenGrant.get() }
+        set { gate.screenGrant.set(newValue) }
+    }
+
+    /// As `ShellListener.onScreenPass`.
+    public var onScreenPass: (@Sendable (_ phoneID: String, _ label: String, _ pass: ShellCredential) -> Bool)? {
+        get { gate.screenPass.get() }
+        set { gate.screenPass.set(newValue) }
+    }
+
+    /// As `ShellListener.onScreenRevoke`.
+    public var onScreenRevoke: (@Sendable (_ phoneID: String, _ viewerID: String) -> Bool)? {
+        get { gate.screenRevoke.get() }
+        set { gate.screenRevoke.set(newValue) }
+    }
+
     /// As `ShellListener.pushMacState()`.
     public func pushMacState() { gate.pushMacState() }
 

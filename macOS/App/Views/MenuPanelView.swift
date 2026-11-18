@@ -39,6 +39,7 @@ struct MenuPanelView: View {
                     }
                     Switches()
                     PhoneHereSection()
+                    OtherScreensSection()
                     Details()
                 }
                 .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { bodyHeight = $0 }
@@ -636,6 +637,42 @@ struct PhoneHereSection: View {
         .padding(.horizontal, 10)
         .frame(minHeight: 36)
         .background(attention ? PTColor.attention.opacity(0.1) : Color.clear, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+    }
+}
+
+/// Other Macs' screens this Mac may view (passes a phone handed over), each one click away.
+struct OtherScreensSection: View {
+    @EnvironmentObject private var shell: RemoteShellController
+    @Environment(\.openWindow) private var openWindow
+
+    var body: some View {
+        if !shell.screenPasses.isEmpty {
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Other Macs")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(.secondary)
+                    .padding(.horizontal, 4)
+                ForEach(shell.screenPasses) { pass in
+                    Button {
+                        openWindow(id: RemoteScreenWindow.id, value: pass.id)
+                        NSApp.activate()
+                    } label: {
+                        HStack(spacing: 10) {
+                            Image(systemName: "display").font(.system(size: 12, weight: .semibold)).foregroundStyle(.secondary)
+                                .frame(width: 18)
+                            Text("View \(pass.macName)'s screen").font(.system(size: 12.5, weight: .medium)).lineLimit(1)
+                            Spacer(minLength: 6)
+                            Image(systemName: "arrow.up.forward.app").font(.system(size: 11)).foregroundStyle(.secondary)
+                        }
+                        .padding(.horizontal, 10)
+                        .frame(minHeight: 36)
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(PanelRowButtonStyle(attention: false))
+                    .help("Open \(pass.macName)'s screen in a window. Handed over by \(pass.from).")
+                }
+            }
+        }
     }
 }
 

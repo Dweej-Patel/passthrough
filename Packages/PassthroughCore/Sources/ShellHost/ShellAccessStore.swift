@@ -23,15 +23,25 @@ public struct ShellPhone: Codable, Equatable, Sendable {
     /// turned off (a phone with shell access can already run commands as the
     /// owner); absent in older lists.
     public var control: Bool?
+    /// A screen-only pass (another Mac, say) a phone got this Mac to issue:
+    /// it may ask for the screen and nothing else. Absent for a phone.
+    public var screenOnly: Bool?
+    /// The phone that got this Mac to issue the pass; removing that phone removes it too.
+    public var grantedBy: String?
+    /// The viewer's own id as that phone knows it: a new pass for it replaces this one.
+    public var viewerOf: String?
 
     public init(phoneID: String, label: String, pairingSlot: String, key: Data, previousKey: Data? = nil, grantedAt: Date,
-                screen: Bool? = nil, control: Bool? = nil) {
+                screen: Bool? = nil, control: Bool? = nil, screenOnly: Bool? = nil, grantedBy: String? = nil, viewerOf: String? = nil) {
         self.phoneID = phoneID; self.label = label; self.pairingSlot = pairingSlot; self.key = key
         self.previousKey = previousKey; self.grantedAt = grantedAt; self.screen = screen; self.control = control
+        self.screenOnly = screenOnly; self.grantedBy = grantedBy; self.viewerOf = viewerOf
     }
 
+    public var isScreenOnly: Bool { screenOnly ?? false }
     public var screenAllowed: Bool { screen ?? false }
-    public var controlAllowed: Bool { control ?? true }
+    /// A screen-only pass never changes Keep awake or the VPN.
+    public var controlAllowed: Bool { !isScreenOnly && (control ?? true) }
 }
 
 /// The phones allowed a shell, with their keys, kept in the Mac's secret store.
@@ -119,8 +129,19 @@ public final class ShellAccessStore: @unchecked Sendable {
             ptLog(.error, "The stored shell phones are unreadable; not recording a new one")
             return false
         }
+        // A pass's id is the Mac's to mint, never a phone's to claim: a phone
+        // granted under one would turn the pass (and its key, held by another
+        // Mac) into full access.
+        guard !ScreenPass.isViewerID(phone.phoneID), phone.screenOnly != true else {
+            ptLog(.error, "A phone claimed a screen pass's id; not recording it")
+            return false
+        }
         var phone = phone
         if let earlier = list.first(where: { $0.phoneID == phone.phoneID }) {
+            guard !earlier.isScreenOnly else {
+                ptLog(.error, "A phone claimed a screen pass's id; not recording it")
+                return false
+            }
             guard earlier.pairingSlot == phone.pairingSlot else {
                 ptLog(.error, "A phone claimed the shell access of a phone granted through another pairing; not recording it")
                 return false
@@ -138,13 +159,59 @@ public final class ShellAccessStore: @unchecked Sendable {
         return store(list)
     }
 
+    /// Issues a screen-only pass, granted by `granter` (a phone with access,
+    /// itself allowed the screen), for a device it calls `name` and knows as
+    /// `viewer`. The pass replaces any earlier one that phone got for that
+    /// viewer, and the phone's oldest once it has `ScreenPass.maxPerGranter`.
+    /// It follows the phone's pairing: forgetting the phone removes it.
+    /// Returns the new id and key and the ids of passes it replaced, or why not.
+    public func grantViewer(by granter: String, name: String, viewer: String) -> Result<(id: String, key: Data, replaced: [String]), ShellError> {
+        guard ScreenPass.isValidName(name), !viewer.isEmpty, viewer.count <= ScreenPass.maxName * 2 else { return .failure(.badRequest) }
+        writeLock.lock(); defer { writeLock.unlock() }
+        guard var list = loadForWrite() else { return .failure(.passNotSaved) }
+        guard let phone = list.first(where: { $0.phoneID == granter }), !phone.isScreenOnly else { return .failure(.notAuthorized) }
+        guard phone.screenAllowed else { return .failure(.screenNotAllowed) }
+        var replaced = list.filter { $0.grantedBy == granter && $0.viewerOf == viewer }.map(\.phoneID)
+        list.removeAll { replaced.contains($0.phoneID) }
+        let others = list.filter { $0.grantedBy == granter }.sorted { $0.grantedAt < $1.grantedAt }
+        if others.count >= ScreenPass.maxPerGranter {
+            let dropped = others.prefix(others.count - ScreenPass.maxPerGranter + 1).map(\.phoneID)
+            replaced += dropped
+            list.removeAll { dropped.contains($0.phoneID) }
+        }
+        let id = ScreenPass.idPrefix + UUID().uuidString.lowercased()
+        let key = Self.newKey()
+        list.append(ShellPhone(phoneID: id, label: name.trimmingCharacters(in: .whitespacesAndNewlines), pairingSlot: phone.pairingSlot,
+                               key: key, grantedAt: now(), screen: true, control: false, screenOnly: true,
+                               grantedBy: granter, viewerOf: viewer))
+        return store(list) ? .success((id, key, replaced)) : .failure(.passNotSaved)
+    }
+
+    /// From memory, like `screenAllowed`: whether this is a screen-only pass.
+    /// Fails closed: a pass's id is screen-only even once it is gone.
+    public func isScreenOnly(_ phoneID: String) -> Bool {
+        ScreenPass.isViewerID(phoneID) || (phones.first { $0.phoneID == phoneID }?.isScreenOnly ?? false)
+    }
+
+    /// The screen passes `phoneID` granted, by id.
+    public func viewers(grantedBy phoneID: String) -> [String] {
+        phones.filter { $0.grantedBy == phoneID }.map(\.phoneID)
+    }
+
     public func key(forPhone phoneID: String) -> Data? {
         phones.first { $0.phoneID == phoneID }?.key
     }
 
-    /// From memory, like `candidateKeys`: asked on every `screen` request.
+    /// From memory, like `candidateKeys`: asked on every `screen` request. A
+    /// screen pass may see the screen only while the phone that granted it
+    /// still has access and may see it too: turning that phone's Screen off
+    /// (even when that can't be saved) stops its passes with it.
     public func screenAllowed(forPhone phoneID: String) -> Bool {
-        phones.first { $0.phoneID == phoneID }?.screenAllowed ?? false
+        let list = phones
+        guard let phone = list.first(where: { $0.phoneID == phoneID }), phone.screenAllowed else { return false }
+        guard phone.isScreenOnly else { return true }
+        guard let granter = phone.grantedBy, let by = list.first(where: { $0.phoneID == granter }) else { return false }
+        return !by.isScreenOnly && by.screenAllowed
     }
 
     /// Lets the phone see and control the screen, or stops it. False if it
@@ -172,10 +239,11 @@ public final class ShellAccessStore: @unchecked Sendable {
     /// label changed.
     @discardableResult
     public func relabel(pairingSlot: String, label: String) -> Bool {
-        guard !label.isEmpty, phones.contains(where: { $0.pairingSlot == pairingSlot && $0.label != label }) else { return false }
+        guard !label.isEmpty, phones.contains(where: { $0.pairingSlot == pairingSlot && !$0.isScreenOnly && $0.label != label }) else { return false }
         writeLock.lock(); defer { writeLock.unlock() }
         guard var list = loadForWrite() else { return false }
-        for index in list.indices where list[index].pairingSlot == pairingSlot { list[index].label = label }
+        // A screen pass keeps its own name (another Mac's), not the phone's that granted it.
+        for index in list.indices where list[index].pairingSlot == pairingSlot && !list[index].isScreenOnly { list[index].label = label }
         return store(list)
     }
 
@@ -229,43 +297,77 @@ public final class ShellAccessStore: @unchecked Sendable {
         guard var list = loadForWrite(),
               let index = list.firstIndex(where: { $0.phoneID == phoneID && $0.pairingSlot == fromSlot }) else { return false }
         list[index].pairingSlot = toSlot
+        // The screen passes it granted follow it.
+        for other in list.indices where list[other].grantedBy == phoneID && list[other].pairingSlot == fromSlot {
+            list[other].pairingSlot = toSlot
+        }
         return store(list)
     }
 
     /// False only if the key may still be usable afterwards.
     @discardableResult
+    /// Also removes the screen passes that phone granted.
     public func revoke(phoneID: String) -> Bool {
-        remove { $0.phoneID == phoneID }
+        removing { $0.phoneID == phoneID || $0.grantedBy == phoneID }.done
     }
 
     /// Removes every phone granted through this pairing slot (a cable or a wireless link).
     @discardableResult
     public func revoke(pairingSlot: String) -> Bool {
-        remove { $0.pairingSlot == pairingSlot }
+        removing { $0.pairingSlot == pairingSlot }.done
+    }
+
+    /// As `revoke(phoneID:)`, also saying which entries it removed (the
+    /// phone and its passes), as found under the write lock, so a pass
+    /// granted meanwhile is among them.
+    public func revokeReporting(phoneID: String) -> (done: Bool, removed: [ShellPhone]) {
+        removing { $0.phoneID == phoneID || $0.grantedBy == phoneID }
+    }
+
+    /// As `revoke(pairingSlot:)`, also saying which entries it removed.
+    public func revokeReporting(pairingSlot: String) -> (done: Bool, removed: [ShellPhone]) {
+        removing { $0.pairingSlot == pairingSlot }
+    }
+
+    /// Removes one screen pass `granter` granted (one it gave no Mac after
+    /// all). False if there is no such pass or it may still be usable.
+    /// Returns what it removed (empty: nothing of that phone's by that id),
+    /// so the caller cuts its connections even when the removal couldn't be saved.
+    @discardableResult
+    public func revokeViewer(_ viewerID: String, grantedBy granter: String) -> (done: Bool, removed: [ShellPhone]) {
+        let matches = { (phone: ShellPhone) in phone.phoneID == viewerID && phone.grantedBy == granter && phone.isScreenOnly }
+        // Not this phone's pass (or nothing readable): touch nothing, so a
+        // stranger's request can never set off the remove-everything fallback.
+        guard ScreenPass.isViewerID(viewerID), phones.contains(where: matches) else { return (true, []) }
+        return removing(where: matches)
     }
 
     /// Revocation fails closed: the phone leaves the in-memory list first, so
     /// it is refused at once; if the stored list then cannot be rewritten (or
     /// read), it is deleted whole rather than left holding a revoked key.
-    private func remove(where shouldRemove: (ShellPhone) -> Bool) -> Bool {
+    private func removing(where shouldRemove: (ShellPhone) -> Bool) -> (done: Bool, removed: [ShellPhone]) {
         writeLock.lock(); defer { writeLock.unlock() }
         if var list = loadForWrite() {
-            let removed = Set(list.filter(shouldRemove).map(\.phoneID))
+            let entries = list.filter(shouldRemove)
+            // Nothing to remove: nothing to write (a failed write would set off the fallback below).
+            guard !entries.isEmpty else { return (true, []) }
+            let removed = Set(entries.map(\.phoneID))
             list.removeAll(where: shouldRemove)
             setCache(list)
-            if write(list) { saved(); return true }
+            if write(list) { saved(); return (true, entries) }
             ptLog(.error, "Could not update the shell phones; removing them all")
             secrets.delete(Self.account)
             // Still stored: the in-memory list stays the trimmed one, and any
             // later read of the store leaves these phones out.
-            if secrets.read(Self.account) == nil { setCache(nil); saved(); return true }
+            if secrets.read(Self.account) == nil { setCache(nil); saved(); return (true, entries) }
             lock.lock(); unsavedRevokes.formUnion(removed); lock.unlock()
-            return false
+            return (false, entries)
         }
         ptLog(.error, "Could not update the shell phones; removing them all")
+        lock.lock(); let everyone = cached ?? []; lock.unlock()
         setCache(nil)
         secrets.delete(Self.account)
-        return secrets.read(Self.account) == nil
+        return (secrets.read(Self.account) == nil, everyone.filter(shouldRemove))
     }
 
     private func setCache(_ list: [ShellPhone]?) {

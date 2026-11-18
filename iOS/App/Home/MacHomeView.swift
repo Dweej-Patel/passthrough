@@ -22,6 +22,8 @@ struct MacHomeView: View {
     @State private var lastTouched: MacSwitch?
     /// iPad: pairing with the iPhone whose internet it uses.
     @State private var showPhonePairing = false
+    /// Letting another Mac see this one's screen.
+    @State private var showShareScreen = false
     @ObservedObject private var links = PendingLinks.shared
 
     /// The Mac on screen: the shell's selection, else the first paired Mac.
@@ -75,6 +77,9 @@ struct MacHomeView: View {
         }
         .sheet(isPresented: $showSwitcher, onDismiss: runAfterSwitcher) {
             MacSwitcherSheet(shell: shell, then: $afterSwitcher)
+        }
+        .sheet(isPresented: $showShareScreen) {
+            if let mac = shell.selectedMac { ShareScreenSheet(shell: shell, shared: mac) }
         }
         .sheet(isPresented: $showPhonePairing) {
             if let hotspot = model.hotspot { PairWithPhoneSheet(hotspot: hotspot) }
@@ -239,6 +244,10 @@ struct MacHomeView: View {
                     if !wide {
                         Divider().padding(.leading, 58)
                         screenRow
+                    }
+                    if canShareScreen {
+                        Divider().padding(.leading, 58)
+                        shareScreenRow
                     }
                     if let reason = reachBlock { SwitchNote(problem: reason).padding(.horizontal, 10).padding(.bottom, 10) }
                 }
@@ -450,6 +459,28 @@ struct MacHomeView: View {
         .disabled(shell.reach != .ready)
         .opacity(shell.reach == .ready ? 1 : 0.55)
         .accessibilityHint("Opens the Mac's screen")
+    }
+
+    /// Another of this phone's Macs could be let see this one's screen.
+    private var canShareScreen: Bool { shell.selectedMac != nil && shell.macs.count >= 2 }
+
+    private var shareScreenRow: some View {
+        Button { showShareScreen = true } label: {
+            HStack(spacing: 12) {
+                SwitchIcon(symbol: "rectangle.on.rectangle", on: false, warning: false)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Share screen with a Mac").font(.body.weight(.semibold))
+                    Text("Let your other Mac see and control this one").font(.subheadline).foregroundStyle(.secondary)
+                }
+                Spacer(minLength: 8)
+                Image(systemName: "chevron.right").font(.subheadline.weight(.semibold)).foregroundStyle(.tertiary)
+            }
+            .padding(10)
+            .frame(minHeight: 60)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityHint("Gives another of your Macs a pass to this Mac's screen")
     }
 
     // MARK: Screen lock

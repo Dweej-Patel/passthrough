@@ -77,6 +77,17 @@ these steps as written and check each one before building.
 
 ### Added
 
+* **One Mac can see and control another's screen.** On the iPhone, open a
+  Mac and tap *Share screen with a Mac*, pick your other Mac and confirm with
+  Face ID. That Mac gets a screen-only pass and opens the screen from
+  Passthrough's menu (*Other Macs*), on the local network or from anywhere
+  over iroh, without the phone. The pass can't open shells or change
+  anything else. Remove it in *Settings › Remote Shell* on the shared Mac (on
+  the other Mac, removing it only forgets that Mac's copy). It stops working
+  when the phone that shared it loses access or its Screen permission there.
+  The other Mac also holds the shared Mac's relay token, if it has one. Both
+  Macs and the iPhone need this build. Not on Android yet.
+
 * Screen view, far away: the Mac now keeps as many frames in flight as fit in
   the round trip (it was two, so a phone 100 ms away got about 20 frames a
   second) and lowers its bitrate when frames start arriving late, then raises

@@ -239,6 +239,8 @@ targets:
       - package: PassthroughCore
         product: ScreenHost
       - package: PassthroughCore
+        product: ScreenClient
+      - package: PassthroughCore
         product: IrohTransport
       - package: SwiftTerm
         product: SwiftTerm
