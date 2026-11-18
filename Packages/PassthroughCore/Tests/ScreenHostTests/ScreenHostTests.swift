@@ -1,4 +1,5 @@
 #if os(macOS)
+import Carbon.HIToolbox
 import CoreMedia
 import CoreVideo
 import Foundation
@@ -37,6 +38,12 @@ final class ScreenVideoWireTests: XCTestCase {
             .scroll(dx: -3, dy: 1200),
             .key(keysym: RFBKeys.left, modifiers: ScreenVideoWire.Modifiers.control.rawValue),
             .text("héllo 👋"),
+            .microphone(true),
+            .microphone(false),
+            .voice(Data([1, 2, 3, 4])),
+            .voice(Data()),
+            .microphoneState(.on),
+            .microphoneState(.notInstalled),
             .clipboard(""),
             .keyframeRequest,
             .copy,
@@ -893,6 +900,33 @@ final class ScreenVideoStreamerTests: XCTestCase {
         XCTAssertEqual(input.log.get().filter { $0.hasPrefix("scroll") }, ["scroll 0 50", "scroll 0 1", "scroll -20 0"])
     }
 
+    /// A paste's clipboard waits behind the typing before it, as its ⌘V does: two pastes
+    /// sent while text is still being typed each paste their own text.
+    func testPastesBehindTypingPasteTheirOwnText() {
+        let capture = FakeCapture(width: 640, height: 400)
+        let input = RecordingInput()
+        let streamer = ScreenVideoStreamer(capture: { capture }, input: { _ in input }, display: FakeDisplay())
+        let (mac, phone) = MemoryPipe.pair()
+        streamer.start(stream: mac, initialBytes: Data()) {}
+        addTeardownBlock { streamer.stop() }
+        let events = Locked<[ScreenVideoClient.Event]>([])
+        let client = ScreenVideoClient(stream: phone, layout: .init(width: 1000, height: 800, fit: .device),
+                                       queue: DispatchQueue(label: "test")) { events.set(events.get() + [$0]) }
+        client.start()
+        waitUntil("on the phone's display") { events.get().contains { if case .fitted(.device) = $0 { true } else { false } } }
+        let typed = String(repeating: "x", count: Int(TypingPacer.burst) + 4096)   // longer than goes at once
+        client.text(typed)
+        client.clipboard("A")
+        client.key(0x76, modifiers: .command)
+        client.clipboard("B")
+        client.key(0x76, modifiers: .command)
+        let paste = "key 118 \(ScreenVideoWire.Modifiers.command.rawValue)"
+        waitUntil("pasted twice", timeout: 10) { input.log.get().filter { $0 == paste }.count == 2 }
+        let log = input.log.get().filter { $0.hasPrefix("clipboard") || $0 == paste || $0.hasPrefix("text") }
+        let afterTyping = Array(log.drop { $0.hasPrefix("text") })
+        XCTAssertEqual(afterTyping, ["clipboard A", paste, "clipboard B", paste])
+    }
+
     /// The phone hanging up ends the stream (and so, upstream, the connection).
     func testThePhoneLeavingEndsIt() {
         let capture = FakeCapture(width: 320, height: 200)
@@ -913,6 +947,172 @@ final class ScreenVideoStreamerTests: XCTestCase {
         XCTAssertEqual(InputInjector.keyCode(RFBKeys.left)?.2.contains(.maskSecondaryFn), true)
         XCTAssertEqual(InputInjector.keyCode(RFBKeys.function(11))?.0, 103)
         XCTAssertNil(InputInjector.keyCode(0x0100_00E9))
+    }
+
+    /// ⌘⇧V as a keyboard sends it: ⌘ and ⇧ pressed and released around V, as Windows App needs,
+    /// with a keyboard's flags (as one recorded on macOS 27: ⇧ down 0x20102, up 0x100).
+    func testModifiersArePressedAroundTheKey() {
+        typealias S = InputInjector.Stroke
+        let real = CGEventFlags.maskNonCoalesced, leftCommand = CGEventFlags(rawValue: 0x08), leftShift = CGEventFlags(rawValue: 0x02)
+        let command: CGEventFlags = [real, .maskCommand, leftCommand], both = command.union([.maskShift, leftShift])
+        XCTAssertEqual(InputInjector.strokes(9, modifiers: [.maskCommand, .maskShift]), [
+            S(code: 55, down: true, flags: command),
+            S(code: 56, down: true, flags: both),
+            S(code: 9, down: true, flags: both, isKey: true),
+            S(code: 9, down: false, flags: both, isKey: true),
+            S(code: 56, down: false, flags: command),
+            S(code: 55, down: false, flags: real),
+        ])
+        XCTAssertEqual(InputInjector.strokes(0, modifiers: .maskShift).first?.flags.rawValue, 0x20102, "as the keyboard's ⇧")
+        XCTAssertEqual(InputInjector.strokes(0, modifiers: []), [
+            S(code: 0, down: true, flags: real, isKey: true), S(code: 0, down: false, flags: real, isKey: true),
+        ])
+        // An arrow's Fn is on the key, not a key of its own, and is let go of after.
+        let control: CGEventFlags = [real, .maskControl, CGEventFlags(rawValue: 0x01)]
+        XCTAssertEqual(InputInjector.strokes(123, modifiers: .maskControl, extra: .maskSecondaryFn), [
+            S(code: 59, down: true, flags: control),
+            S(code: 123, down: true, flags: control.union(.maskSecondaryFn), isKey: true),
+            S(code: 123, down: false, flags: control.union(.maskSecondaryFn), isKey: true),
+            S(code: 59, down: false, flags: real),
+        ])
+        XCTAssertEqual(InputInjector.strokes(123, modifiers: [], extra: .maskSecondaryFn).last, S(code: 59, down: false, flags: real))
+    }
+
+    /// Typing goes as the keys of the Mac's layout: on a German one, Z is where Y is on a US one.
+    /// Shortcuts take the keys as they are with ⌘ held: on AZERTY, ⌘A is not ANSI's ⌘A (⌘Q there).
+    func testTypingKeysFollowTheLayout() throws {
+        func source(_ id: String) throws -> TISInputSource {
+            let filter = [kTISPropertyInputSourceID as String: id] as CFDictionary
+            let sources = TISCreateInputSourceList(filter, true)?.takeRetainedValue() as? [TISInputSource]
+            return try XCTUnwrap(sources?.first, id)
+        }
+        func layout(_ id: String) throws -> TypingKeys.Layout { try XCTUnwrap(TypingKeys.layout(of: source(id)), id) }
+        let us = try layout("com.apple.keylayout.US")
+        XCTAssertEqual(us.typing["a"], .init(code: 0, shift: false))
+        XCTAssertEqual(us.typing["A"], .init(code: 0, shift: true))
+        XCTAssertEqual(us.typing["!"], .init(code: 18, shift: true))
+        XCTAssertEqual(us.typing[" "], .init(code: 49, shift: false))
+        XCTAssertEqual(us.typing["5"], .init(code: 23, shift: false))   // the main row's, not the keypad's
+        XCTAssertNil(us.typing["\r"])
+        XCTAssertNil(us.typing["é"])
+        // On a US layout, shortcuts keep the keys they always had.
+        for scalar in UnicodeScalar("a").value...UnicodeScalar("z").value {
+            let letter = Character(UnicodeScalar(scalar)!)
+            XCTAssertEqual(us.command[letter]?.code, InputInjector.keyCode(scalar)?.0, "⌘\(letter)")
+        }
+        let german = try layout("com.apple.keylayout.German")
+        XCTAssertEqual(german.typing["z"], .init(code: 16, shift: false))
+        XCTAssertEqual(german.typing["y"], .init(code: 6, shift: false))
+        XCTAssertEqual(german.typing["ü"], .init(code: 33, shift: false))
+        XCTAssertNil(german.typing["^"])   // a dead key there: pressed alone it types nothing
+        let french = try layout("com.apple.keylayout.French")
+        XCTAssertEqual(french.command["a"]?.code, 12)
+        XCTAssertEqual(french.command["q"]?.code, 0)
+        let dvorakQwertyCommand = try layout("com.apple.keylayout.DVORAK-QWERTYCMD")
+        XCTAssertEqual(dvorakQwertyCommand.typing["v"]?.code, 47)
+        XCTAssertEqual(dvorakQwertyCommand.command["v"]?.code, 9, "QWERTY while ⌘ is held")
+        XCTAssertFalse(TypingKeys.isInputMethod(try source("com.apple.keylayout.US")))
+        XCTAssertTrue(TypingKeys.isInputMethod(try source("com.apple.inputmethod.Kotoeri.RomajiTyping.Japanese")))
+    }
+
+    /// A clipboard waits behind text as keys do, its bytes counted while it waits.
+    func testClipboardsWaitBehindText() {
+        var pacer = TypingPacer(rate: 10, burst: 10, limit: 40, itemLimit: 10, now: 0)
+        XCTAssertTrue(pacer.push(.text(String(repeating: "x", count: 20))))
+        XCTAssertTrue(pacer.push(.clipboard(String(repeating: "c", count: 15))))
+        XCTAssertTrue(pacer.push(.key(keysym: 0x76, modifiers: 1)))
+        XCTAssertFalse(pacer.push(.clipboard(String(repeating: "d", count: 10))), "past the byte limit")
+        XCTAssertEqual(pacer.take(now: 0), [.text(String(repeating: "x", count: 10))])
+        XCTAssertEqual(pacer.take(now: 1), [.text(String(repeating: "x", count: 10)), .clipboard(String(repeating: "c", count: 15)),
+                                            .key(keysym: 0x76, modifiers: 1)])
+        XCTAssertTrue(pacer.push(.clipboard(String(repeating: "d", count: 40))), "room again")
+    }
+
+    /// A phone becomes the Mac's microphone only once the Mac says so, and its voice goes
+    /// nowhere before that, after it stops, or when the Mac has no microphone device.
+    func testAPhonesVoiceIsPlayedOnlyWhileItsTheMicrophone() {
+        let capture = FakeCapture(width: 320, height: 200)
+        let sink = RecordingVoice()
+        let streamer = ScreenVideoStreamer(capture: { capture }, input: { _ in RecordingInput() }, voice: { sink })
+        let (mac, phone) = MemoryPipe.pair()
+        streamer.start(stream: mac, initialBytes: Data()) {}
+        addTeardownBlock { streamer.stop() }
+        let events = Locked<[ScreenVideoClient.Event]>([])
+        let client = ScreenVideoClient(stream: phone, maxSide: 320, queue: DispatchQueue(label: "test")) { event in
+            events.set(events.get() + [event])
+        }
+        client.start()
+        func states() -> [ScreenVideoWire.MicrophoneState] {
+            events.get().compactMap { if case let .microphone(state) = $0 { return state } else { return nil } }
+        }
+        client.voice(Data([9, 9]))   // unasked: dropped
+        client.microphone(true)
+        waitUntil("on") { states() == [.on] }
+        client.voice(Data([1, 0, 2, 0]))
+        client.voice(Data(repeating: 7, count: ScreenVideoWire.maxVoicePayload + 2))   // split into pieces the Mac takes
+        waitUntil("played") { sink.played.get().count == 4 + ScreenVideoWire.maxVoicePayload + 2 }
+        XCTAssertEqual(sink.played.get().prefix(4), Data([1, 0, 2, 0]))
+        client.microphone(false)
+        waitUntil("off") { states() == [.on, .off] }
+        client.voice(Data([5, 5]))
+        sink.answer.set(.notInstalled)
+        client.microphone(true)
+        waitUntil("not installed") { states() == [.on, .off, .notInstalled] }
+        client.voice(Data([6, 6]))
+        client.copySelection()   // answered after the voice before it was handled
+        waitUntil("handled") { events.get().contains { if case .copied = $0 { return true } else { return false } } }
+        XCTAssertEqual(sink.played.get().count, 4 + ScreenVideoWire.maxVoicePayload + 2)
+        XCTAssertEqual(sink.starts.get(), 2)
+        waitUntil("stopped") { sink.stops.get() == 2 }
+    }
+
+    func testAPhonesVoiceStopsWithItsView() {
+        let sink = RecordingVoice()
+        let streamer = ScreenVideoStreamer(capture: { FakeCapture(width: 320, height: 200) }, input: { _ in RecordingInput() }, voice: { sink })
+        let (mac, phone) = MemoryPipe.pair()
+        streamer.start(stream: mac, initialBytes: ScreenVideoWire.encode(.microphone(true))) {}
+        waitUntil("started") { sink.starts.get() == 1 }
+        streamer.stop()
+        waitUntil("stopped") { sink.stops.get() == 1 }
+        _ = phone
+    }
+
+    func testAVoiceMessageOverTheLimitEndsTheStream() {
+        var reader = ScreenVideoWire.Reader(from: .phone)
+        XCTAssertNoThrow(try reader.append(ScreenVideoWire.encode(.voice(Data(count: ScreenVideoWire.maxVoicePayload)))))
+        XCTAssertThrowsError(try reader.append(ScreenVideoWire.encode(.voice(Data(count: ScreenVideoWire.maxVoicePayload + 2)))))
+    }
+
+    func testVoiceWaitsForItsTargetAndStaysCurrent() {
+        var buffer = VoiceBuffer(target: 4, limit: 8)
+        func push(_ samples: [Float]) { samples.withUnsafeBufferPointer { buffer.push($0) } }
+        func pull(_ count: Int) -> [Float] {
+            var out = [Float](repeating: -1, count: count)
+            out.withUnsafeMutableBufferPointer { buffer.pull(into: $0) }
+            return out
+        }
+        push([1, 2])
+        XCTAssertEqual(pull(2), [0, 0], "silence until the target waits")
+        push([3, 4])
+        XCTAssertEqual(pull(3), [1, 2, 3])
+        XCTAssertEqual(pull(3), [4, 0, 0], "ran out: what's missing is silence")
+        push([5, 6])
+        XCTAssertEqual(pull(2), [0, 0], "and it waits for the target again")
+        push([7, 8])
+        XCTAssertEqual(pull(4), [5, 6, 7, 8])
+        // The link stalled and caught up: the oldest go, down to the target.
+        push([1, 2, 3, 4])
+        push([5, 6, 7, 8, 9])
+        XCTAssertEqual(buffer.count, 4)
+        XCTAssertEqual(pull(4), [6, 7, 8, 9])
+        // More at once than it holds: its end.
+        push((1...40).map(Float.init))
+        XCTAssertEqual(pull(4), [37, 38, 39, 40])
+        // Wrapping around its storage keeps the order.
+        for round in 0..<20 {
+            push([Float(round), Float(round) + 0.5, Float(round) + 0.25, Float(round) + 0.75])
+            XCTAssertEqual(pull(4), [Float(round), Float(round) + 0.5, Float(round) + 0.25, Float(round) + 0.75])
+        }
     }
 
     // MARK: Helpers
@@ -1122,6 +1322,21 @@ private final class StalledStream: ByteStream, @unchecked Sendable {
     }
 
     func cancel() {}
+}
+
+private final class RecordingVoice: VoiceSink, @unchecked Sendable {
+    let answer = Locked(ScreenVideoWire.MicrophoneState.on)
+    let starts = Locked(0)
+    let stops = Locked(0)
+    let played = Locked(Data())
+
+    func start() -> ScreenVideoWire.MicrophoneState {
+        starts.set(starts.get() + 1)
+        return answer.get()
+    }
+
+    func play(_ samples: Data) { played.set(played.get() + samples) }
+    func stop() { stops.set(stops.get() + 1) }
 }
 
 private final class RecordingInput: InputSink, @unchecked Sendable {

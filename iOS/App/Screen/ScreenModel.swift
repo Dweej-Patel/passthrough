@@ -63,6 +63,13 @@ final class ScreenModel: ObservableObject {
     @Published private(set) var macHidden = false
     /// Only the Mac's own stream can leave the black out of what it sends; Screen Sharing would show it.
     var canHideMac: Bool { video != nil }
+    /// This device as the Mac's microphone (the Mac's "Passthrough Microphone" input device).
+    enum Microphone: Equatable { case off, starting, on }
+    @Published private(set) var microphone = Microphone.off
+    /// Only the Mac's own stream carries voice (not Screen Sharing).
+    var canUseMicrophone: Bool { video != nil }
+    private var voiceCapture: PhoneVoiceCapture?
+    private var microphoneTimeout: Task<Void, Never>?
     /// The user's choice: the Mac makes a display in this device's shape and shows that
     /// (`Fit.device`), or shows its own display as it is (`Fit.mac`, the default).
     @Published private(set) var fitsDevice = ScreenModel.fitsDeviceSetting
@@ -211,6 +218,8 @@ final class ScreenModel: ObservableObject {
 
     /// The view outlives a short trip away, but no one is watching the Mac meanwhile.
     private func appWentAway() {
+        // Not listening while no one is looking at the Mac.
+        stopMicrophone()
         guard video != nil, macHidden || askedHidden == true else { return }
         hiddenBeforeAway = true
         quietCurtain = true
@@ -322,6 +331,7 @@ final class ScreenModel: ObservableObject {
         relayoutTask?.cancel()
         rfb?.close()
         rfb = nil
+        stopMicrophone()
         video?.close()
         video = nil
         copyTimeout?.cancel()
@@ -407,6 +417,8 @@ final class ScreenModel: ObservableObject {
             case .tooLong: copyFailed("That's too long to copy to this \(ThisDevice.name).")
             case .notText: copyFailed("Only text can be copied to this \(ThisDevice.name).")
             }
+        case let .microphone(state):
+            microphoneAnswered(state)
         case let .curtained(hidden):
             hideTimeout?.cancel()
             let asked = askedHidden
@@ -601,7 +613,7 @@ final class ScreenModel: ObservableObject {
                 return
             }
             upgradeFailed()
-        case .frame, .copied, .curtained, .cursor:
+        case .frame, .copied, .curtained, .cursor, .microphone:
             break   // the pointer's place goes again after the first format
         }
     }
@@ -698,6 +710,11 @@ final class ScreenModel: ObservableObject {
 
     func type(_ text: String, modifiers: [UInt32] = []) {
         if let video, modifiers.isEmpty {
+            // Long text (a paste, dictation) is pasted: the Mac types only short text as keys,
+            // and apps that read keys, not characters (Windows App's RDP), get nothing else right.
+            if text.utf16.count > ScreenVideoWire.typedAsKeys, video.clipboard(text) {
+                return key(0x76, modifiers: [RFBKeys.command])   // ⌘V
+            }
             // Return and Tab are keys, not characters, to the apps on the Mac.
             var run = ""
             for character in text {
@@ -790,6 +807,77 @@ final class ScreenModel: ObservableObject {
             guard saysIfUnanswered else { return }
             self.show("\(self.macName) didn't answer. Update Passthrough on it to hide its display.")
         }
+    }
+
+    // MARK: Microphone
+
+    /// Turns this device's microphone on for the Mac, or off. On: iOS is asked for the
+    /// microphone (the first time), then the Mac; recording starts once the Mac takes it.
+    func toggleMicrophone() {
+        guard microphone == .off else { return stopMicrophone() }
+        guard video != nil else { return }
+        microphone = .starting
+        let gen = generation
+        Task { [weak self] in
+            let allowed = await PhoneVoiceCapture.requestPermission()
+            guard let self, gen == self.generation, self.microphone == .starting else { return }
+            guard allowed else {
+                self.microphone = .off
+                return self.show("Allow the microphone for Passthrough in Settings.")
+            }
+            guard let video = self.video else { self.microphone = .off; return }
+            video.microphone(true)
+            self.microphoneTimeout?.cancel()
+            self.microphoneTimeout = Task { [weak self] in
+                try? await Task.sleep(for: .seconds(5))
+                guard !Task.isCancelled, let self, self.microphone == .starting else { return }
+                self.microphone = .off
+                self.show("\(self.macName) didn't answer. Update Passthrough on it to use the microphone.")
+            }
+        }
+    }
+
+    private func microphoneAnswered(_ state: ScreenVideoWire.MicrophoneState) {
+        microphoneTimeout?.cancel()
+        switch state {
+        case .on:
+            guard microphone == .starting, let video else { return }
+            let capture = PhoneVoiceCapture(onSamples: { [video] in video.voice($0) }, onStopped: { [weak self] in
+                MainActor.assumeIsolated {
+                    guard let self, self.microphone != .off else { return }
+                    self.stopMicrophone()
+                    self.show("The microphone was turned off")
+                }
+            })
+            do {
+                try capture.start()
+            } catch {
+                microphone = .off
+                video.microphone(false)
+                return show("This \(ThisDevice.name)'s microphone couldn't be started.")
+            }
+            voiceCapture = capture
+            microphone = .on
+            UIImpactFeedbackGenerator(style: .light).impactOccurred()
+            show("\(macName) hears this \(ThisDevice.name)")
+        case .off:
+            if microphone != .off { stopMicrophone(tellMac: false) }
+        case .notInstalled:
+            stopMicrophone(tellMac: false)
+            show("On \(macName), install \"Phone as microphone\" in Passthrough's Remote Shell settings.")
+        case .failed:
+            stopMicrophone(tellMac: false)
+            show("\(macName) couldn't use its Passthrough Microphone.")
+        }
+    }
+
+    private func stopMicrophone(tellMac: Bool = true) {
+        microphoneTimeout?.cancel()
+        guard microphone != .off else { return }
+        microphone = .off
+        voiceCapture?.stop()
+        voiceCapture = nil
+        if tellMac { video?.microphone(false) }
     }
 
     private func copied(_ text: String) {

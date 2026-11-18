@@ -619,6 +619,11 @@ Mac → phone:
   a device with several streams counts once). Sent when the list changes.
 - `9` moved away: UTF-8 name: another device took over (`useHere`); the
   Mac ends this stream right after it.
+- `10` microphone state: state u8, the answer to `microphone`: 0 off, 1 on
+  (the Mac plays the phone's `voice` to its "Passthrough Microphone" input
+  device), 2 not installed (the Mac has no such device: its audio driver is
+  installed from the Mac app's Remote Shell settings), 3 failed (the device
+  is there but couldn't be played to). A state added later reads as failed.
 
 Phone → Mac:
 - `16` hello: width u16, height u16, fit u8, codecs u8 (bit 0 H.264, which
@@ -664,9 +669,20 @@ Phone → Mac:
   display's width over the stream's, so content follows the fingers at any
   stream size. Positive dy brings earlier content into view.
 - `20` key: X keysym u32 (as RFB), modifiers u8 (1 command, 2 shift, 4
-  option, 8 control), pressed and released.
-- `21` text: UTF-8, typed as is whatever the Mac's keyboard layout.
-- `22` clipboard: UTF-8, put on the Mac's clipboard.
+  option, 8 control), pressed and released, with each modifier's own key
+  pressed around it as a keyboard does (apps such as Windows App's RDP follow
+  those keys, not the flags on the key). A character's key is the one that
+  types it on the Mac's layout, with ⌘ held for a ⌘ shortcut (on AZERTY,
+  ⌘A is where ANSI's Q is).
+- `21` text: UTF-8, typed as is whatever the Mac's keyboard layout. Up to 64
+  UTF-16 units go as that layout's keys (with Shift where it takes it), each
+  carrying its character, so apps that read keys (RDP, virtual machines) get
+  it too. A character no key types there, longer text, and all text while an
+  input method (Japanese, Chinese…) is selected, goes as characters on the A
+  key's code: apps that read keys get an A. The phone sends text longer than
+  that as `clipboard` and ⌘V.
+- `22` clipboard: UTF-8, put on the Mac's clipboard once the text and keys
+  before it are typed, so the ⌘V after it pastes it and not a later one.
 - `23` keyframe request: the phone lost its place (its display failed, or
   it was in the background).
 - `24` copy: no payload. Once the text and keys before it are typed, the Mac
@@ -699,6 +715,18 @@ Phone → Mac:
   the fingers first in touch mode. The phone sends these on a display made
   for it, or on the Mac's own if the user chose it; otherwise a pinch zooms
   the phone's view.
+- `28` microphone: on u8 (1 be this Mac's microphone, 0 stop). Answered
+  with `microphone state`; the phone records and sends `voice` only once
+  that says on, and the Mac drops voice at any other time. It ends with the
+  stream. A Mac that predates it skips the message and doesn't answer.
+- `29` voice: what the phone's microphone heard next, as 16-bit
+  little-endian mono samples at 16 kHz, at most 8 KiB a message (the phone
+  sends one about every 10 ms). The Mac plays it to the device as it comes,
+  through a small buffer: it starts once 60 ms wait (so a late message finds
+  some left), and when more than 250 ms wait (the link stalled, then caught
+  up) the oldest are dropped, so what the Mac hears stays close to what was
+  just said. The device records what is played to it and nothing else; any
+  app on the Mac that may use a microphone can listen to it meanwhile.
 - `26` use here: no payload. Every other device's stream of this Mac's
   screen gets `movedAway` with this phone's name and ends; a display made
   for a phone that one of them had is free again, and this stream moves to

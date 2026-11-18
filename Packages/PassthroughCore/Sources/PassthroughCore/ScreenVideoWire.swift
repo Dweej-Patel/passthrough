@@ -18,6 +18,15 @@ public enum ScreenVideoWire {
     public static let maxTextPayload = 4 << 10
     public static let maxClipboardPayload = 64 << 10
     static let maxEventPayload = 64
+    /// Text up to this many UTF-16 units the Mac types as key presses, which apps
+    /// that read keys (Windows App's RDP, virtual machines, games) get right too.
+    /// The phone pastes longer text through the clipboard; longer text that does
+    /// come as `text` is typed as characters, at once.
+    public static let typedAsKeys = 64
+    /// A phone's voice (`voice`): 16-bit little-endian mono samples at `voiceSampleRate`,
+    /// at most `maxVoicePayload` bytes a message (a quarter of a second; the phone sends 20 ms).
+    public static let voiceSampleRate = 16_000
+    public static let maxVoicePayload = 8 << 10
 
     /// Who wrote the bytes a `Reader` splits, which sets how large each payload may be.
     public enum Sender: Sendable { case mac, phone }
@@ -48,6 +57,8 @@ public enum ScreenVideoWire {
         case viewers([String])
         /// Another device took this view over (`useHere`): the stream ends after this.
         case movedAway(to: String)
+        /// The answer to `microphone`, and again if that changes: whether the Mac takes the phone's voice now.
+        case microphoneState(MicrophoneState)
 
         // Phone → Mac
         /// What the phone wants to see (`Hello`), first and again whenever that changes.
@@ -78,6 +89,22 @@ public enum ScreenVideoWire {
         /// sends them: `value` is the change since the last one (magnification, or
         /// degrees counterclockwise), 0 on `began` and `ended`.
         case gesture(Gesture, phase: GesturePhase, value: Double)
+        /// Be this Mac's microphone (the "Passthrough Microphone" input device), or stop;
+        /// answered with `microphoneState`. Voice is sent only once that says `on`.
+        case microphone(Bool)
+        /// What the phone's microphone heard next (`voiceSampleRate`), played to that device as it comes.
+        case voice(Data)
+    }
+
+    /// Whether the Mac takes a phone's voice.
+    public enum MicrophoneState: UInt8, Equatable, Sendable {
+        case off = 0
+        /// The Mac's microphone device records what the phone sends.
+        case on = 1
+        /// The Mac has no "Passthrough Microphone" device: it is turned on in the Mac app's settings.
+        case notInstalled = 2
+        /// The device is there but couldn't be played to.
+        case failed = 3
     }
 
     public enum Gesture: UInt8, Equatable, Sendable {
@@ -178,7 +205,8 @@ public enum ScreenVideoWire {
     enum Kind: UInt8 {
         case format = 1, frame = 2, copied = 3, curtained = 4, fitted = 5, cursor = 6, cursorShape = 7, viewers = 8, movedAway = 9
         case hello = 16, ack = 17, pointer = 18, scroll = 19, key = 20, text = 21, clipboard = 22, keyframeRequest = 23, copy = 24, curtain = 25
-        case useHere = 26, gesture = 27
+        case useHere = 26, gesture = 27, microphone = 28, voice = 29
+        case microphoneState = 10
     }
 
     public enum Failure: Error, Equatable { case tooLarge, malformed }
@@ -262,6 +290,15 @@ public enum ScreenVideoWire {
         case let .curtain(hidden):
             kind = .curtain
             payload.append(hidden ? 1 : 0)
+        case let .microphone(on):
+            kind = .microphone
+            payload.append(on ? 1 : 0)
+        case let .voice(samples):
+            kind = .voice
+            payload.append(samples)
+        case let .microphoneState(state):
+            kind = .microphoneState
+            payload.append(state.rawValue)
         }
         var out = Data([kind.rawValue])
         out.append(u32: UInt32(payload.count))
@@ -299,6 +336,7 @@ public enum ScreenVideoWire {
         switch Kind(rawValue: type) {
         case .text: return maxTextPayload
         case .clipboard: return maxClipboardPayload
+        case .voice: return maxVoicePayload
         case .some: return maxEventPayload
         // A type added later: skipped, but not buffered without bound either.
         case nil: return maxClipboardPayload
@@ -422,6 +460,16 @@ public enum ScreenVideoWire {
         case .curtain:
             try need(1)
             return .curtain(p[b] == 1)
+        case .microphone:
+            try need(1)
+            return .microphone(p[b] == 1)
+        case .voice:
+            // Whole samples only.
+            return .voice(p.count % 2 == 0 ? p : p.dropLast())
+        case .microphoneState:
+            try need(1)
+            // A state added later reads as not taking the voice.
+            return .microphoneState(MicrophoneState(rawValue: p[b]) ?? .failed)
         }
     }
 }

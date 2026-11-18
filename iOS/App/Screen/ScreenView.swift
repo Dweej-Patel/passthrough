@@ -102,6 +102,7 @@ struct ScreenView: View, Equatable {
                     .fixedSize()
                     Divider().frame(height: 24)
                     keyboardButton.frame(width: 44, height: 44)
+                    if model.canUseMicrophone { microphoneButton.frame(width: 44, height: 44) }
                     clipboardMenu.frame(width: 44, height: 44)
                     desktopsMenu.frame(height: 44)
                     displayMenu.frame(height: 44)
@@ -155,6 +156,7 @@ struct ScreenView: View, Equatable {
                 desktopsMenu
                 displayMenu
                 modeButton
+                if model.canUseMicrophone { microphoneButton }
                 keyboardButton
             }
         }
@@ -175,12 +177,13 @@ struct ScreenView: View, Equatable {
             if model.phase == .live {
                 if keyboard {
                     HStack(spacing: 4) { clipboardMenu; desktopsMenu; displayMenu }
-                    HStack(spacing: 4) { modeButton; keyboardButton }
+                    HStack(spacing: 4) { modeButton; if model.canUseMicrophone { microphoneButton }; keyboardButton }
                 } else {
                     clipboardMenu
                     desktopsMenu
                     displayMenu
                     modeButton
+                    if model.canUseMicrophone { microphoneButton }
                     keyboardButton
                 }
             }
@@ -209,6 +212,17 @@ struct ScreenView: View, Equatable {
                 .sideTarget(landscape)
         }
         .accessibilityLabel(mode == .trackpad ? "Trackpad mode. Switch to tapping where you click." : "Direct mode. Switch to trackpad.")
+    }
+
+    /// This device as the Mac's microphone: filled while the Mac hears it.
+    private var microphoneButton: some View {
+        Button { model.toggleMicrophone() } label: {
+            Image(systemName: model.microphone == .off ? "mic" : "mic.fill")
+                .symbolEffect(.pulse, isActive: model.microphone == .starting)
+                .foregroundStyle(model.microphone == .on ? AnyShapeStyle(.red) : AnyShapeStyle(.tint))
+                .sideTarget(landscape)
+        }
+        .accessibilityLabel(model.microphone == .off ? "Use this \(ThisDevice.name) as \(model.macName)'s microphone" : "Turn the microphone off")
     }
 
     private var keyboardButton: some View {

@@ -53,6 +53,8 @@ public final class ScreenVideoClient: @unchecked Sendable {
         case copied(ScreenVideoWire.CopyResult)
         /// The answer to `curtain(_:)`: whether the Mac's displays are hidden now.
         case curtained(Bool)
+        /// The answer to `microphone(_:)`: whether the Mac takes this device's voice now.
+        case microphone(ScreenVideoWire.MicrophoneState)
         /// The connection is over: nil when `close()` ended it.
         case closed(Error?)
     }
@@ -186,6 +188,21 @@ public final class ScreenVideoClient: @unchecked Sendable {
     /// shows it again; the Mac answers with `curtained`. A Mac that predates it doesn't answer.
     public func curtain(_ hidden: Bool) { send(.curtain(hidden)) }
 
+    /// Asks to be the Mac's microphone (or to stop); the Mac answers with `microphone`.
+    /// A Mac that predates it doesn't answer.
+    public func microphone(_ on: Bool) { send(.microphone(on)) }
+
+    /// What the microphone heard next: 16-bit little-endian mono at `ScreenVideoWire.voiceSampleRate`,
+    /// in pieces the Mac accepts. Only after the Mac said `on`.
+    public func voice(_ samples: Data) {
+        var rest = samples[...]
+        while !rest.isEmpty {
+            let piece = rest.prefix(ScreenVideoWire.maxVoicePayload)
+            send(.voice(Data(piece)))
+            rest = rest.dropFirst(piece.count)
+        }
+    }
+
     /// Frame `number` is on screen.
     public func shown(_ number: UInt32) { send(.ack(number: number)) }
 
@@ -248,6 +265,8 @@ public final class ScreenVideoClient: @unchecked Sendable {
             emit(.copied(result))
         case let .curtained(hidden):
             emit(.curtained(hidden))
+        case let .microphoneState(state):
+            emit(.microphone(state))
         case let .fitted(fit):
             emit(.fitted(fit))
         case let .viewers(names):

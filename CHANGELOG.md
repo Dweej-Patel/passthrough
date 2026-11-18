@@ -148,8 +148,31 @@ these steps as written and check each one before building.
   keyboard goes straight to the Mac.
 * iPhone: *Sharing with* lists the Macs and iPads using it right now, and
   *Paired devices* lists both.
+* Screen view: the iPhone or iPad as the Mac's microphone. A microphone
+  button in the screen view sends your voice to the Mac, where it is a
+  "Passthrough Microphone" input device that dictation and call apps can
+  listen to. The device is an audio driver the Mac app carries: install it
+  under Settings › Remote Shell › *Phone as microphone* (the root helper
+  copies it into `/Library/Audio/Plug-Ins/HAL` after checking its signature,
+  and the Mac's sound stops for a moment while its audio restarts). The
+  microphone is on only while its button is, and goes off when the view
+  closes or the app leaves the screen. While it is on, any app on the Mac
+  that may use a microphone can hear it.
 
 ### Changed
+
+* Screen view: typing and pasting work in Windows App (RDP) and other apps
+  that read keys rather than characters, such as virtual machines. Typing
+  goes as the keys of the Mac's keyboard layout (it came out as `a` for every
+  key in RDP), shortcuts press ⌘, ⇧, ⌥ and ⌃ as keys of their own (⌘V did
+  nothing there), and text longer than 64 characters typed or dictated on the
+  phone is pasted through the Mac's clipboard. Shortcuts take the keys of the
+  Mac's layout too: on AZERTY the phone's ⌘A was ⌘Q, and on Dvorak ⌘V was ⌘K.
+  A paste sent while earlier typing is still going in now pastes its own text,
+  not the one after it. Emoji, and other characters no key on the Mac's
+  layout types, still come out as `a` in RDP and virtual machines; with a
+  Japanese, Chinese or other input method selected on the Mac, typing goes as
+  characters as before, so the input method doesn't compose it again.
 
 * *This iPhone* (*This iPad* on an iPad) is its own tab, *iPhone* (*iPad*),
   replacing the row on the Mac tab.
