@@ -12,6 +12,8 @@ final class HelperService: NSObject, PassthroughHelperProtocol {
     /// arrivals and departures happened.
     private var clients: Set<UUID> = []
     private var sleepDisabled = false
+    /// One install or removal of the microphone driver at a time.
+    private let microphoneQueue = DispatchQueue(label: "\(HelperConstants.identifier).helper.microphone")
 
     func clientArrived(_ id: UUID) {
         queue.async { self.clients.insert(id) }
@@ -207,6 +209,19 @@ final class HelperService: NSObject, PassthroughHelperProtocol {
                 HelperLog.warn("port \(ScreenSharingCheck.port) is held by something other than Screen Sharing: \(who)")
             }
             reply(verdict.rawValue)
+        }
+    }
+
+    /// Off the queue: copying, verifying and restarting coreaudiod must not hold up the tunnel's calls.
+    func setMicrophoneDriver(_ installed: Bool, reply: @escaping (Bool, String) -> Void) {
+        microphoneQueue.async {
+            do {
+                if installed { try MicrophoneDriver.install() } else { try MicrophoneDriver.remove() }
+                reply(true, "")
+            } catch {
+                HelperLog.warn("microphone driver: \(error.localizedDescription)")
+                reply(false, error.localizedDescription)
+            }
         }
     }
 

@@ -77,6 +77,10 @@ public final class ScreenVideoStreamer: ScreenVideoSource, @unchecked Sendable {
     private let makeInput: (CGRect) -> InputSink
     private let deviceDisplay: DeviceDisplaying?
     private let cursorSource: CursorSource?
+    private let makeVoice: (() -> VoiceSink)?
+    private let makeSound: (() -> SoundSource)?
+    /// Starts and stops the voice's player, which can take a moment: not on `queue`, where frames wait.
+    private let voiceQueue = DispatchQueue(label: "\(PassthroughProtocol.identifier).screen-video.voice", qos: .userInitiated)
     private let limits: Limits
     /// This view in `ScreenViewers`: its phone and that phone's name. Nil in tests that don't need it.
     private let viewer: (phoneID: String, name: String)?
@@ -173,6 +177,18 @@ public final class ScreenVideoStreamer: ScreenVideoSource, @unchecked Sendable {
     private var remadeEncoder = false
     private var keyframeRetryScheduled = false
     private var input: InputSink?
+    /// Where the phone's voice goes while it is this Mac's microphone, and whether it's on (`start` said so).
+    private var voice: VoiceSink?
+    private var voiceOn = false
+    /// Bumped by every `microphone`: a start that finishes after a later one is ignored.
+    private var voiceAsked = 0
+    /// The Mac's sound for the phone, while it wants it; `soundOn` once it started.
+    private var sound: SoundSource?
+    private var soundOn = false
+    /// Bumped by every `sound`, as `voiceAsked`.
+    private var soundAsked = 0
+    /// Times in a row the sound ended by itself and was started again.
+    private var soundRestarts = 0
     private var waiting: CVPixelBuffer?
     private var last: CVPixelBuffer?
     private var encoding = false
@@ -189,19 +205,23 @@ public final class ScreenVideoStreamer: ScreenVideoSource, @unchecked Sendable {
     /// `phoneID` and `name` (the paired phone's): who this view is to the other views.
     /// `restricted` for a screen pass's view.
     public convenience init(phoneID: String, name: String, restricted: Bool = false) {
+        _ = TypingKeys.shared   // the keyboard layout read while the stream starts, before the phone types
         self.init(capture: { ScreenCapturer() }, input: { InputInjector(display: $0) }, display: DeviceDisplay(), cursor: SystemCursor(),
-                  viewer: (phoneID, name), restricted: restricted)
+                  voice: { PhoneVoicePlayer() }, sound: { MacSoundCapture() }, viewer: (phoneID, name), restricted: restricted)
     }
 
     /// A new capture for each change of what's shown. `limits` are smaller in tests.
     init(capture: @escaping () -> FrameCapturing, input: @escaping (CGRect) -> InputSink, display: DeviceDisplaying? = nil,
-         cursor: CursorSource? = nil, viewer: (phoneID: String, name: String)? = nil, limits: Limits = Limits(),
-         restricted: Bool = false) {
+         cursor: CursorSource? = nil, voice: (() -> VoiceSink)? = nil, sound: (() -> SoundSource)? = nil,
+         viewer: (phoneID: String, name: String)? = nil,
+         limits: Limits = Limits(), restricted: Bool = false) {
         self.restricted = restricted
         self.makeCapture = capture
         self.makeInput = input
         self.deviceDisplay = display
         self.cursorSource = cursor
+        self.makeVoice = voice
+        self.makeSound = sound
         self.viewer = viewer
         self.limits = limits
     }
@@ -281,16 +301,137 @@ public final class ScreenVideoStreamer: ScreenVideoSource, @unchecked Sendable {
         case let .scroll(dx, dy): heardInput(); scroll(dx: dx, dy: dy)
         case let .key(keysym, modifiers): heardInput(); type(.key(keysym: keysym, modifiers: modifiers))
         case let .text(text): heardInput(); type(.text(text))
-        case let .clipboard(text): input?.clipboard(text)
+        case let .clipboard(text): type(.clipboard(text))
         case .copy: heardInput(); copySelection()
         case .useHere: if !restricted { useHere() }
         case let .gesture(gesture, phase, value): heardInput(); input?.gesture(gesture, phase: phase, value: value)
         case let .curtain(hidden):
             // Refused, and said so: the displays stay as they are.
             if restricted { write(ScreenVideoWire.encode(.curtained(false)), frame: false) } else { setCurtain(hidden) }
-        case .format, .frame, .copied, .curtained, .fitted, .cursor, .cursorShape, .viewers, .movedAway:
+        // A screen pass's view is never this Mac's microphone.
+        case let .microphone(on):
+            if restricted { write(ScreenVideoWire.encode(.microphoneState(on ? .failed : .off)), frame: false) } else { setMicrophone(on) }
+        case let .voice(samples): if voiceOn { voice?.play(samples) }
+        case let .function(down): heardInput(); input?.function(down)
+        // A screen pass's view sees the screen; it doesn't hear the Mac.
+        case let .sound(on):
+            if restricted { write(ScreenVideoWire.encode(.soundState(on ? .failed : .off)), frame: false) } else { setSound(on) }
+        case .format, .frame, .copied, .curtained, .fitted, .cursor, .cursorShape, .viewers, .movedAway, .microphoneState,
+             .soundState, .soundPacket:
             break
         }
+    }
+
+    /// The phone is this Mac's microphone from now (its voice played to the "Passthrough
+    /// Microphone" device), or no longer; it's told which, and sends voice only once it's `on`.
+    private func setMicrophone(_ on: Bool) {
+        voiceAsked += 1
+        let asked = voiceAsked
+        guard on, let makeVoice else {
+            stopVoice()
+            return write(ScreenVideoWire.encode(.microphoneState(on ? .failed : .off)), frame: false)
+        }
+        let sink = voice ?? makeVoice()
+        voice = sink
+        voiceQueue.async { [weak self] in
+            let state = sink.start()
+            guard let self else { return sink.stop() }
+            self.queue.async {
+                // Stopped, or asked for something else, while it started.
+                guard !self.stopped, asked == self.voiceAsked else { return }
+                self.voiceOn = state == .on
+                if state == .on {
+                    ptLog(.info, "screen: \(self.viewer?.name ?? "a phone") is this Mac's microphone")
+                } else {
+                    self.stopVoice()
+                }
+                self.write(ScreenVideoWire.encode(.microphoneState(state)), frame: false)
+            }
+        }
+    }
+
+    /// The phone wants what the Mac plays from now, or no longer; it's told whether it gets it.
+    private func setSound(_ on: Bool) {
+        soundRestarts = 0
+        guard on, makeSound != nil else {
+            soundAsked += 1
+            stopSound()
+            return write(ScreenVideoWire.encode(.soundState(on ? .failed : .off)), frame: false)
+        }
+        // Asked again while it's on, or still starting (its answer is on its way): nothing changes.
+        guard sound == nil else {
+            if soundOn { write(ScreenVideoWire.encode(.soundState(.on)), frame: false) }
+            return
+        }
+        soundAsked += 1
+        startSound()
+    }
+
+    /// `again`: after the capture ended by itself; the phone, which still thinks it's on, is told only if it can't be.
+    private func startSound(again: Bool = false) {
+        guard let source = makeSound?() else { return }
+        let asked = soundAsked
+        sound = source
+        soundOn = false
+        Task { [weak self] in
+            let started = await source.start(packet: { [weak self] packet in
+                self?.queue.async { self?.send(sound: packet, from: source) }
+            }, stopped: { [weak self] in
+                self?.queue.async { self?.soundStopped(source) }
+            })
+            guard let self else { return source.stop() }
+            self.queue.async {
+                // Stopped, or asked for something else, while it started.
+                guard !self.stopped, asked == self.soundAsked, self.sound === source else {
+                    if self.sound === source { self.sound = nil }
+                    return source.stop()
+                }
+                if started {
+                    self.soundOn = true
+                    ptLog(.info, "screen: \(self.viewer?.name ?? "a phone") hears this Mac's sound")
+                } else {
+                    self.sound = nil
+                }
+                if !started || !again { self.write(ScreenVideoWire.encode(.soundState(started ? .on : .failed)), frame: false) }
+            }
+        }
+    }
+
+    /// Sound is for now or never: with the stream behind (frames waiting to go out), it's left out.
+    private func send(sound packet: Data, from source: SoundSource) {
+        guard !stopped, soundOn, sound === source, unsentBytes < limits.softBytes / 4 else { return }
+        soundRestarts = 0
+        write(ScreenVideoWire.encode(.soundPacket(packet)), frame: false)
+    }
+
+    /// The capture ended by itself (the display it hung on went away): started again, a few times.
+    private func soundStopped(_ source: SoundSource) {
+        guard !stopped, sound === source else { return }
+        sound = nil
+        soundOn = false
+        soundRestarts += 1
+        guard soundRestarts <= 3 else {
+            ptLog(.warning, "screen: the Mac's sound stopped")
+            return write(ScreenVideoWire.encode(.soundState(.failed)), frame: false)
+        }
+        let asked = soundAsked
+        queue.asyncAfter(deadline: .now() + 1) { [weak self] in
+            guard let self, !self.stopped, asked == self.soundAsked, self.sound == nil else { return }
+            self.startSound(again: true)
+        }
+    }
+
+    private func stopSound() {
+        soundOn = false
+        sound?.stop()
+        sound = nil
+    }
+
+    private func stopVoice() {
+        voiceOn = false
+        guard let sink = voice else { return }
+        voice = nil
+        voiceQueue.async { sink.stop() }
     }
 
     /// Hides the Mac's displays from whoever is at the Mac (or shows them again), and
@@ -389,12 +530,22 @@ public final class ScreenVideoStreamer: ScreenVideoSource, @unchecked Sendable {
         }
     }
 
-    /// Text and keys go through the pacer, so keys stay behind text still waiting.
+    /// Text, keys and clipboards go through the pacer, so each stays behind what came before it.
     private func type(_ item: TypingPacer.Item) {
         guard input != nil else { return }
-        if !typing.push(item) { ptLog(.warning, "screen: a phone sent text faster than it can be typed; dropped some") }
+        // The paste of a clipboard that was dropped would paste whatever the Mac's clipboard held before.
+        if clipboardDropped, case let .key(keysym, modifiers) = item {
+            clipboardDropped = false
+            if keysym == 0x76, modifiers == ScreenVideoWire.Modifiers.command.rawValue { return }
+        }
+        if !typing.push(item) {
+            ptLog(.warning, "screen: a phone sent text faster than it can be typed; dropped some")
+            if case .clipboard = item { clipboardDropped = true }
+        }
         typeWaiting()
     }
+    /// The last clipboard a phone sent didn't fit the queue: the ⌘V that follows it is dropped too.
+    private var clipboardDropped = false
 
     private func typeWaiting() {
         guard !stopped, let input else { return }
@@ -402,6 +553,7 @@ public final class ScreenVideoStreamer: ScreenVideoSource, @unchecked Sendable {
             switch item {
             case let .text(text): input.text(text)
             case let .key(keysym, modifiers): input.key(keysym: keysym, modifiers: modifiers)
+            case let .clipboard(text): input.clipboard(text)
             }
         }
         guard !typingScheduled, let delay = typing.nextDelay else { return }
@@ -906,6 +1058,10 @@ public final class ScreenVideoStreamer: ScreenVideoSource, @unchecked Sendable {
         // would think it's still held: a drag that never ends, and its own input ignored.
         input?.releaseAll()
         input = nil
+        voiceAsked += 1
+        stopVoice()
+        soundAsked += 1
+        stopSound()
         waiting = nil
         last = nil
         stream = nil

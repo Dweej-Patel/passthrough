@@ -43,6 +43,7 @@ struct RemoteShellSettings: View {
             while !Task.isCancelled {
                 fullDiskAccess = FullDiskAccess.isGranted
                 shell.refreshScreenVideo()
+                session.refreshMicrophoneDriver()
                 try? await Task.sleep(for: .seconds(2))
             }
         }
@@ -88,6 +89,7 @@ struct RemoteShellSettings: View {
             }
             screenVideoStep
             screenSharingStep
+            microphoneStep
             SetupStep(status: keepAwake.isOn ? .done : .optional,
                       title: "Keep this Mac awake",
                       detail: keepAwake.isOn
@@ -128,6 +130,43 @@ struct RemoteShellSettings: View {
     }
 
     /// Only once checked, so it doesn't flash "off" while the first check runs.
+    /// A phone viewing the screen as this Mac's microphone: the audio driver that makes its voice an input device.
+    @ViewBuilder private var microphoneStep: some View {
+        let driver = session.microphoneDriver
+        SetupStep(status: session.microphoneDriverError != nil ? .problem : (driver == .ready ? .done : (driver == .notInstalled ? .optional : .needed)),
+                  title: "Phone as microphone",
+                  detail: microphoneDetail(driver)) {
+            if session.microphoneDriverBusy {
+                ProgressView().controlSize(.small)
+            } else {
+                switch driver {
+                case .notInstalled: Button("Install…") { session.setMicrophoneDriver(true) }
+                case .outdated: Button("Update") { session.setMicrophoneDriver(true) }
+                case .notLoaded:
+                    HStack {
+                        Button("Install Again") { session.setMicrophoneDriver(true) }
+                        Button("Remove") { session.setMicrophoneDriver(false) }
+                    }
+                case .ready: Button("Remove") { session.setMicrophoneDriver(false) }
+                }
+            }
+        }
+    }
+
+    private func microphoneDetail(_ driver: MicrophoneDriverStatus) -> String {
+        if let error = session.microphoneDriverError { return error }
+        switch driver {
+        case .notInstalled:
+            return "Optional. Adds a \"Passthrough Microphone\" input device to this Mac: a phone viewing the screen can turn its microphone on and be heard through it, for dictation or a call. Installing it restarts this Mac's audio, so sound stops for a moment."
+        case .ready:
+            return "A phone viewing the screen can turn its microphone on. Choose \"Passthrough Microphone\" as the input in the app that should hear it. Any app allowed to use the microphone can listen while it's on."
+        case .outdated:
+            return "This version of Passthrough has a newer microphone driver. Updating it restarts this Mac's audio, so sound stops for a moment."
+        case .notLoaded:
+            return "The driver is installed but macOS hasn't loaded it. Install it again, or restart this Mac."
+        }
+    }
+
     @ViewBuilder private var screenSharingStep: some View {
         if let on = shell.screenSharingOn {
             // A pass never uses Screen Sharing: only the phones' fallback does.

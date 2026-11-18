@@ -57,6 +57,12 @@ public final class ScreenVideoClient: @unchecked Sendable {
         case copied(ScreenVideoWire.CopyResult)
         /// The answer to `curtain(_:)`: whether the Mac's displays are hidden now.
         case curtained(Bool)
+        /// The answer to `microphone(_:)`: whether the Mac takes this device's voice now.
+        case microphone(ScreenVideoWire.MicrophoneState)
+        /// The answer to `sound(_:)`: whether the Mac sends its sound now.
+        case sound(ScreenVideoWire.SoundState)
+        /// The Mac's sound, next (`MacSound.Decoder`).
+        case soundPacket(Data)
         /// The connection is over: nil when `close()` ended it.
         case closed(Error?)
     }
@@ -190,6 +196,42 @@ public final class ScreenVideoClient: @unchecked Sendable {
     /// shows it again; the Mac answers with `curtained`. A Mac that predates it doesn't answer.
     public func curtain(_ hidden: Bool) { send(.curtain(hidden)) }
 
+    /// Asks for the Mac's sound (or for it to stop); the Mac answers with `sound`.
+    /// A Mac that predates it doesn't answer.
+    public func sound(_ on: Bool) { send(.sound(on)) }
+
+    /// The Mac's Fn (globe) key goes down, or comes up.
+    public func function(_ down: Bool) { send(.function(down)) }
+
+    /// Asks to be the Mac's microphone (or to stop); the Mac answers with `microphone`.
+    /// A Mac that predates it doesn't answer.
+    public func microphone(_ on: Bool) { send(.microphone(on)) }
+
+    /// What the microphone heard next: 16-bit little-endian mono at `ScreenVideoWire.voiceSampleRate`,
+    /// in pieces the Mac accepts. Only after the Mac said `on`.
+    /// Voice is for now or never: with `voiceBacklog` of it still waiting to go out (a slow
+    /// link), what comes is left out, so it can't pile up in front of the pointer, keys and acks.
+    public func voice(_ samples: Data) {
+        var rest = samples[...]
+        while !rest.isEmpty {
+            let piece = Data(rest.prefix(ScreenVideoWire.maxVoicePayload))
+            rest = rest.dropFirst(piece.count)
+            let data = ScreenVideoWire.encode(.voice(piece))
+            queue.async { [self] in
+                guard !closed, voiceUnsent < Self.voiceBacklog else { return }
+                voiceUnsent += data.count
+                stream.send(data, isComplete: false) { [weak self] _ in
+                    self?.queue.async { self?.voiceUnsent -= data.count }
+                }
+            }
+        }
+    }
+
+    /// Half a second of voice.
+    static let voiceBacklog = ScreenVideoWire.voiceSampleRate
+    /// Voice handed to the stream whose send hasn't completed (on `queue`).
+    private var voiceUnsent = 0
+
     /// Frame `number` is on screen.
     public func shown(_ number: UInt32) { send(.ack(number: number)) }
 
@@ -252,6 +294,12 @@ public final class ScreenVideoClient: @unchecked Sendable {
             emit(.copied(result))
         case let .curtained(hidden):
             emit(.curtained(hidden))
+        case let .microphoneState(state):
+            emit(.microphone(state))
+        case let .soundState(state):
+            emit(.sound(state))
+        case let .soundPacket(packet):
+            emit(.soundPacket(packet))
         case let .fitted(fit):
             emit(.fitted(fit))
         case let .viewers(names):

@@ -26,6 +26,11 @@ struct ScreenView: View, Equatable {
     @Environment(\.displayScale) private var displayScale
     @AppStorage("screenTouchMode") private var modeSetting = ScreenTouchMode.trackpad.rawValue
     @State private var keyboard = false
+    /// iPad: the floating bar is put away at the side (it covers the Mac's menu bar), remembered.
+    /// View state, saved by hand: a change to a stored setting doesn't animate.
+    @State private var barAside = UserDefaults.standard.bool(forKey: "screenBarAside")
+    /// The bar's own width, for how far it slides.
+    @State private var barWidth: CGFloat = 0
 
     private var mode: ScreenTouchMode { ScreenTouchMode(rawValue: modeSetting) ?? .trackpad }
     private var landscape: Bool { verticalSize == .compact }
@@ -39,7 +44,7 @@ struct ScreenView: View, Equatable {
                 content
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                     .ignoresSafeArea(.container, edges: .all)
-                    .overlay(alignment: .top) { padBar.padding(.top, 8) }
+                    .overlay(alignment: .top) { padControls }
             } else {
                 phoneLayout
             }
@@ -82,16 +87,65 @@ struct ScreenView: View, Equatable {
         }
     }
 
+    /// A little past its mark and back, as a thing slid to the edge of the screen settles.
+    private static let barSpring = Animation.spring(response: 0.5, dampingFraction: 0.72)
+    /// How much of the bar stays on screen once it's aside: its first button, now an arrow.
+    private static let barStub: CGFloat = 54
+
+    /// The bar is aside only once the screen is live: before that it has the way out.
+    private var aside: Bool { barAside && model.phase == .live }
+
+    private func setAside(_ on: Bool) {
+        UserDefaults.standard.set(on, forKey: "screenBarAside")
+        withAnimation(Self.barSpring) { barAside = on }
+    }
+
+    /// iPad: the bar where it belongs, top centre, or slid off the right edge (and down, clear
+    /// of the Mac's menu bar) until only its first button shows, as an arrow that slides it back.
+    /// It's one bar all along, so going aside and coming back are the same motion; a swipe along
+    /// it does the same as its arrows.
+    private var padControls: some View {
+        GeometryReader { proxy in
+            padBar
+                .frame(maxWidth: .infinity)
+                .offset(x: aside ? (proxy.size.width + barWidth) / 2 - Self.barStub : 0, y: aside ? 52 : 8)
+                .animation(Self.barSpring, value: aside)
+                .gesture(DragGesture(minimumDistance: 24).onEnded { drag in
+                    guard model.phase == .live, abs(drag.translation.width) > abs(drag.translation.height) * 1.5 else { return }
+                    if drag.translation.width > 50, !barAside { setAside(true) }
+                    if drag.translation.width < -30, barAside { setAside(false) }
+                })
+        }
+    }
+
     /// iPad: one floating glass bar over the screen, its controls labelled
     /// since there's room. A connected keyboard and trackpad go straight to
     /// the Mac (`ScreenCanvas`), so the on-screen keyboard is only a fallback.
     private var padBar: some View {
         VStack(spacing: 6) {
             HStack(spacing: 10) {
-                Button { model.stop(); close() } label: {
-                    Image(systemName: "xmark").font(.body.weight(.bold)).frame(width: 44, height: 44).contentShape(Circle())
+                // Aside, this end is all that shows: the way back, in Done's place.
+                ZStack {
+                    Button { model.stop(); close() } label: {
+                        Image(systemName: "xmark").font(.body.weight(.bold)).frame(width: 44, height: 44).contentShape(Circle())
+                    }
+                    .accessibilityLabel("Done")
+                    .opacity(aside ? 0 : 1)
+                    .scaleEffect(aside ? 0.5 : 1)
+                    .allowsHitTesting(!aside)
+                    .accessibilityHidden(aside)
+                    Button { setAside(false) } label: {
+                        Image(systemName: model.microphone == .on ? "mic.fill" : "chevron.left")
+                            .font(.body.weight(.bold))
+                            .foregroundStyle(model.microphone == .on ? AnyShapeStyle(.red) : AnyShapeStyle(.tint))
+                            .frame(width: 44, height: 44).contentShape(Rectangle())
+                    }
+                    .accessibilityLabel("Show the controls")
+                    .opacity(aside ? 1 : 0)
+                    .scaleEffect(aside ? 1 : 0.5)
+                    .allowsHitTesting(aside)
+                    .accessibilityHidden(!aside)
                 }
-                .accessibilityLabel("Done")
                 if model.phase == .live {
                     Divider().frame(height: 24)
                     Picker("Touch", selection: $modeSetting) {
@@ -102,9 +156,15 @@ struct ScreenView: View, Equatable {
                     .fixedSize()
                     Divider().frame(height: 24)
                     keyboardButton.frame(width: 44, height: 44)
+                    if model.canUseMicrophone { microphoneButton.frame(width: 44, height: 44) }
                     clipboardMenu.frame(width: 44, height: 44)
                     desktopsMenu.frame(height: 44)
                     displayMenu.frame(height: 44)
+                    Divider().frame(height: 24)
+                    Button { setAside(true) } label: {
+                        Image(systemName: "chevron.right").font(.body.weight(.bold)).frame(width: 44, height: 44).contentShape(Circle())
+                    }
+                    .accessibilityLabel("Move the controls aside")
                 } else {
                     Text(model.macName).font(.subheadline.weight(.semibold)).padding(.trailing, 12)
                 }
@@ -113,6 +173,8 @@ struct ScreenView: View, Equatable {
             .background(.ultraThinMaterial, in: Capsule())
             .overlay(Capsule().strokeBorder(Color.white.opacity(0.14)))
             .shadow(color: .black.opacity(0.35), radius: 16, y: 8)
+            .background(GeometryReader { bar in Color.clear.preference(key: BarWidthKey.self, value: bar.size.width) })
+            .onPreferenceChange(BarWidthKey.self) { barWidth = $0 }
             if model.phase == .live {
                 Text(model.slowReason ?? (model.macHidden ? "Hidden on \(model.macName)'s own display" : padHint))
                     .font(.caption)
@@ -120,6 +182,7 @@ struct ScreenView: View, Equatable {
                     .padding(.horizontal, 12).padding(.vertical, 5)
                     .background(.ultraThinMaterial, in: Capsule())
                     .lineLimit(1)
+                    .opacity(aside ? 0 : 1)
             }
         }
         .tint(PTTheme.accentEnd)
@@ -155,6 +218,7 @@ struct ScreenView: View, Equatable {
                 desktopsMenu
                 displayMenu
                 modeButton
+                if model.canUseMicrophone { microphoneButton }
                 keyboardButton
             }
         }
@@ -175,12 +239,13 @@ struct ScreenView: View, Equatable {
             if model.phase == .live {
                 if keyboard {
                     HStack(spacing: 4) { clipboardMenu; desktopsMenu; displayMenu }
-                    HStack(spacing: 4) { modeButton; keyboardButton }
+                    HStack(spacing: 4) { modeButton; if model.canUseMicrophone { microphoneButton }; keyboardButton }
                 } else {
                     clipboardMenu
                     desktopsMenu
                     displayMenu
                     modeButton
+                    if model.canUseMicrophone { microphoneButton }
                     keyboardButton
                 }
             }
@@ -211,6 +276,17 @@ struct ScreenView: View, Equatable {
         .accessibilityLabel(mode == .trackpad ? "Trackpad mode. Switch to tapping where you click." : "Direct mode. Switch to trackpad.")
     }
 
+    /// This device as the Mac's microphone: filled while the Mac hears it.
+    private var microphoneButton: some View {
+        Button { model.toggleMicrophone() } label: {
+            Image(systemName: model.microphone == .off ? "mic" : "mic.fill")
+                .symbolEffect(.pulse, isActive: model.microphone == .starting)
+                .foregroundStyle(model.microphone == .on ? AnyShapeStyle(.red) : AnyShapeStyle(.tint))
+                .sideTarget(landscape)
+        }
+        .accessibilityLabel(model.microphone == .off ? "Use this \(ThisDevice.name) as \(model.macName)'s microphone" : "Turn the microphone off")
+    }
+
     private var keyboardButton: some View {
         Button { keyboard.toggle() } label: {
             Image(systemName: keyboard ? "keyboard.chevron.compact.down" : "keyboard")
@@ -226,8 +302,7 @@ struct ScreenView: View, Equatable {
 
     /// Mission Control: the same as the canvas's three-finger swipes.
     private var desktopsMenu: some View {
-        ScreenDesktopsMenu(model: model, shell: shell, macName: model.macName, canLock: canLock, canHideMac: model.canHideMac,
-                           macHidden: model.macHidden, pad: pad, landscape: landscape).equatable()
+        ScreenDesktopsMenu(model: model, shell: shell, macName: model.macName, canLock: canLock, pad: pad, landscape: landscape).equatable()
     }
 
     /// How the Mac's screen is shown here: its shape, text size, picture and gestures, and
@@ -236,7 +311,8 @@ struct ScreenView: View, Equatable {
     private var displayMenu: some View {
         ScreenDisplayMenu(model: model, macName: model.macName, canHideMac: model.canHideMac, path: model.connectionPath,
                           fitsDevice: model.fitsDevice, space: model.space, quality: model.quality,
-                          pinchesMac: model.pinchesMacOnItsDisplay, pad: pad, landscape: landscape).equatable()
+                          pinchesMac: model.pinchesMacOnItsDisplay, playsSound: model.playsSound, macHidden: model.macHidden,
+                          pad: pad, landscape: landscape).equatable()
     }
 
     static func describe(_ path: ShellPath) -> (text: String, symbol: String)? {
@@ -344,6 +420,11 @@ private extension View {
     }
 }
 
+private struct BarWidthKey: PreferenceKey {
+    static let defaultValue: CGFloat = 0
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) { value = max(value, nextValue()) }
+}
+
 // MARK: - Menus
 //
 // Each menu is its own view, equal while what it shows is equal: SwiftUI rebuilds an
@@ -376,13 +457,10 @@ struct ScreenDesktopsMenu: View, Equatable {
     let shell: ShellModel
     let macName: String
     let canLock: Bool
-    let canHideMac: Bool
-    let macHidden: Bool
     let pad: Bool
     let landscape: Bool
     nonisolated static func == (a: Self, b: Self) -> Bool {
-        a.macName == b.macName && a.canLock == b.canLock && a.canHideMac == b.canHideMac && a.macHidden == b.macHidden
-            && a.pad == b.pad && a.landscape == b.landscape
+        a.macName == b.macName && a.canLock == b.canLock && a.pad == b.pad && a.landscape == b.landscape
     }
 
     @ViewBuilder var body: some View {
@@ -397,12 +475,6 @@ struct ScreenDesktopsMenu: View, Equatable {
             // Only the lock: the Mac stays awake, and this view stays open on its lock screen.
             if canLock {
                 Button { shell.control(.lock) } label: { Label("Lock \(macName)", systemImage: "lock") }
-            }
-            // Black on the Mac's own displays while this view goes on showing the screen.
-            if canHideMac {
-                Toggle(isOn: Binding(get: { macHidden }, set: { model.setMacHidden($0) })) {
-                    Label("Hide \(macName)'s display", systemImage: "eye.slash")
-                }
             }
         } label: {
             if pad {
@@ -424,11 +496,14 @@ struct ScreenDisplayMenu: View, Equatable {
     let space: Int
     let quality: ScreenVideoWire.Quality
     let pinchesMac: Bool
+    let playsSound: Bool
+    let macHidden: Bool
     let pad: Bool
     let landscape: Bool
     nonisolated static func == (a: Self, b: Self) -> Bool {
         a.macName == b.macName && a.canHideMac == b.canHideMac && a.path == b.path && a.fitsDevice == b.fitsDevice && a.space == b.space
-            && a.quality == b.quality && a.pinchesMac == b.pinchesMac && a.pad == b.pad && a.landscape == b.landscape
+            && a.quality == b.quality && a.pinchesMac == b.pinchesMac && a.playsSound == b.playsSound && a.macHidden == b.macHidden && a.pad == b.pad
+            && a.landscape == b.landscape
     }
 
     @ViewBuilder var body: some View {
@@ -467,6 +542,13 @@ struct ScreenDisplayMenu: View, Equatable {
                         Label("Picture", systemImage: "sparkles.tv")
                     }
                     .pickerStyle(.menu)
+                    // Black on the Mac's own displays while this view goes on showing the screen.
+                    Toggle(isOn: Binding(get: { macHidden }, set: { model.setMacHidden($0) })) {
+                        Label("Hide \(macName)'s display", systemImage: "eye.slash")
+                    }
+                    Toggle(isOn: Binding(get: { playsSound }, set: { model.setPlaysSound($0) })) {
+                        Label("Play \(macName)'s sound here", systemImage: "speaker.wave.2")
+                    }
                     // Pinch and rotate: the Mac's on a display made for this device; a choice on its own display.
                     if fitsDevice {
                         Section {

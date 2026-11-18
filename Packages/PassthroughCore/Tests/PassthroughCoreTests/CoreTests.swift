@@ -84,7 +84,16 @@ final class TestClient {
     init(port: UInt16) {
         connection = NWConnection(host: .ipv4(.loopback), port: NWEndpoint.Port(rawValue: port)!, using: .tcp)
         let ready = DispatchSemaphore(value: 0)
-        connection.stateUpdateHandler = { if case .ready = $0 { ready.signal() } }
+        connection.stateUpdateHandler = { [connection, queue] state in
+            switch state {
+            case .ready: ready.signal()
+            // A server's `start()` returns before its listener accepts: a connection made right
+            // after it can be refused, and would then wait for the network to change. Tried again
+            // until the listener is up (or the wait below gives up).
+            case .waiting: queue.asyncAfter(deadline: .now() + 0.02) { connection.restart() }
+            default: break
+            }
+        }
         connection.start(queue: queue)
         XCTAssertEqual(ready.wait(timeout: .now() + 5), .success)
     }

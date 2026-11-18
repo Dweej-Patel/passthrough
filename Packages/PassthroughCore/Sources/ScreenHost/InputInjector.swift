@@ -11,6 +11,8 @@ protocol InputSink: AnyObject {
     func key(keysym: UInt32, modifiers: UInt8)
     func text(_ text: String)
     func clipboard(_ text: String)
+    /// The Fn (globe) key down, or up.
+    func function(_ down: Bool)
     /// A trackpad pinch or rotation, at the pointer.
     func gesture(_ gesture: ScreenVideoWire.Gesture, phase: ScreenVideoWire.GesturePhase, value: Double)
     /// The phone is gone: lets go of every button it holds and ends its gestures.
@@ -147,7 +149,19 @@ final class InputInjector: InputSink {
         event.post(tap: .cghidEventTap)
     }
 
+    /// The Fn key as a keyboard sends it: a "modifiers changed" event of its own, down until it's let go.
+    func function(_ down: Bool) {
+        guard down != functionDown else { return }
+        functionDown = down
+        guard let event = CGEvent(keyboardEventSource: source, virtualKey: 63, keyDown: down) else { return }
+        event.type = .flagsChanged
+        event.flags = down ? [.maskSecondaryFn, .maskNonCoalesced] : .maskNonCoalesced
+        event.post(tap: .cghidEventTap)
+    }
+    private var functionDown = false
+
     func releaseAll() {
+        function(false)
         for gesture in gestures { self.gesture(gesture, phase: .cancelled, value: 0) }
         if buttons & 0b111 != 0 {
             pointer(x: UInt16(clamping: Int(((position.x - display.minX) / max(display.width - 1, 1) * 65535).rounded())),
@@ -167,30 +181,42 @@ final class InputInjector: InputSink {
         if held.subtracting(.shift).isEmpty, Self.printable(keysym), let scalar = Unicode.Scalar(Self.codePoint(keysym)) {
             return text(String(Character(scalar)))
         }
-        guard let (code, shifted, extraFlags) = Self.keyCode(keysym) else {
+        // The key that types it on this layout, as it is with ⌘ held for a ⌘ shortcut (on
+        // AZERTY, A is where Q is on ANSI: that table's ⌘A would be ⌘Q). The ANSI table otherwise.
+        let character = Self.printable(keysym) ? Unicode.Scalar(Self.codePoint(keysym)).map(Character.init) : nil
+        let layoutKey = character.flatMap { typingKeys.shortcutKey(for: $0, command: held.contains(.command)) }
+        guard let (code, shifted, extraFlags) = layoutKey.map({ ($0.code, $0.shift, CGEventFlags()) }) ?? Self.keyCode(keysym) else {
             // A character with modifiers this layout table doesn't know: typed as is. Other keys: nothing.
             if Self.printable(keysym), let scalar = Unicode.Scalar(Self.codePoint(keysym)) { text(String(Character(scalar))) }
             return
         }
-        var flags = extraFlags
+        var flags: CGEventFlags = []
         if held.contains(.command) { flags.insert(.maskCommand) }
         if held.contains(.shift) || shifted { flags.insert(.maskShift) }
         if held.contains(.option) { flags.insert(.maskAlternate) }
         if held.contains(.control) { flags.insert(.maskControl) }
-        for down in [true, false] {
-            guard let event = CGEvent(keyboardEventSource: source, virtualKey: code, keyDown: down) else { continue }
-            event.flags = flags
-            event.post(tap: .cghidEventTap)
-        }
-        // A key's flags stay in the system's state (as if ⌃ were still down) until a key comes without them.
-        if !flags.isEmpty, let release = CGEvent(keyboardEventSource: source, virtualKey: 59, keyDown: false) {
-            release.flags = []
-            release.post(tap: .cghidEventTap)
-        }
+        press(code, modifiers: flags, extra: extraFlags)
     }
 
+    /// Short text as key presses on the Mac's keyboard layout, each with its character
+    /// on it: apps that read the key (Windows App, virtual machines) get the same
+    /// as those that read the character. What no key types there, and long text, goes as
+    /// characters, which only apps that read them get (`ScreenVideoWire.typedAsKeys`).
     func text(_ text: String) {
-        let units = Array(text.utf16)
+        guard text.utf16.count <= ScreenVideoWire.typedAsKeys else { return characters(Array(text.utf16)) }
+        var unkeyed: [UniChar] = []
+        for character in text {
+            let units = Array(character.utf16)
+            guard let key = typingKeys.key(for: character) else { unkeyed += units; continue }
+            if !unkeyed.isEmpty { characters(unkeyed); unkeyed = [] }
+            press(key.code, modifiers: key.shift ? .maskShift : [], characters: units)
+        }
+        if !unkeyed.isEmpty { characters(unkeyed) }
+    }
+
+    /// Characters with no key: on the A key's code. Apps that read the character
+    /// get it; apps that read the key (Windows App, virtual machines) get an A.
+    private func characters(_ units: [UniChar]) {
         // Events carry at most 20 UTF-16 units each.
         for start in stride(from: 0, to: units.count, by: 20) {
             var chunk = Array(units[start..<min(start + 20, units.count)])
@@ -201,6 +227,55 @@ final class InputInjector: InputSink {
                 event.post(tap: .cghidEventTap)
             }
         }
+    }
+
+    private let typingKeys = TypingKeys.shared
+
+    /// `code` pressed as a keyboard presses it (`strokes`), with `characters` on the key's own events.
+    private func press(_ code: CGKeyCode, modifiers: CGEventFlags, extra: CGEventFlags = [], characters: [UniChar]? = nil) {
+        for stroke in Self.strokes(code, modifiers: modifiers, extra: extra) {
+            guard let event = CGEvent(keyboardEventSource: source, virtualKey: stroke.code, keyDown: stroke.down) else { continue }
+            event.flags = stroke.flags
+            if stroke.isKey, var characters { event.keyboardSetUnicodeString(stringLength: characters.count, unicodeString: &characters) }
+            event.post(tap: .cghidEventTap)
+        }
+    }
+
+    struct Stroke: Equatable {
+        var code: CGKeyCode
+        var down: Bool
+        var flags: CGEventFlags
+        /// The key itself, not a modifier around it.
+        var isKey = false
+    }
+
+    /// ⌘, ⇧, ⌥ and ⌃ as their own keys (left ones), in the order they go down, with
+    /// the flag a keyboard adds for which of the two is down (IOLLEvent.h's NX_DEVICEL…KEYMASK).
+    static let modifierKeys: [(flag: CGEventFlags, side: CGEventFlags, code: CGKeyCode)] = [
+        (.maskCommand, CGEventFlags(rawValue: 0x08), 55), (.maskShift, CGEventFlags(rawValue: 0x02), 56),
+        (.maskAlternate, CGEventFlags(rawValue: 0x20), 58), (.maskControl, CGEventFlags(rawValue: 0x01), 59),
+    ]
+
+    /// What a keyboard sends for `code` with `modifiers` held: each modifier's own key
+    /// down, the key down and up (with `extra`, the flags a real keyboard puts on it),
+    /// the modifiers up, each event's flags as a keyboard's (non-coalesced, and which
+    /// modifier keys are down). Flags on the key alone are enough for most Mac apps, but
+    /// apps that follow the modifier keys themselves (Windows App's RDP) need them pressed.
+    static func strokes(_ code: CGKeyCode, modifiers: CGEventFlags, extra: CGEventFlags = []) -> [Stroke] {
+        let held = modifierKeys.filter { modifiers.contains($0.flag) }
+        var strokes: [Stroke] = [], flags: CGEventFlags = .maskNonCoalesced
+        for key in held {
+            flags.formUnion([key.flag, key.side])
+            strokes.append(Stroke(code: key.code, down: true, flags: flags))
+        }
+        for down in [true, false] { strokes.append(Stroke(code: code, down: down, flags: flags.union(extra), isKey: true)) }
+        for key in held.reversed() {
+            flags.subtract([key.flag, key.side])
+            strokes.append(Stroke(code: key.code, down: false, flags: flags))
+        }
+        // A key's flags stay in the system's state (as if Fn were still down) until a key comes without them.
+        if held.isEmpty, !extra.isEmpty { strokes.append(Stroke(code: 59, down: false, flags: .maskNonCoalesced)) }
+        return strokes
     }
 
     /// At once, not on the main queue: the ⌘V that usually follows must find it there.

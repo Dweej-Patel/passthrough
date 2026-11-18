@@ -78,6 +78,7 @@ targets:
         NSLocalNetworkUsageDescription: Passthrough finds your linked Mac on this iPhone's Personal Hotspot, or over peer-to-peer Wi-Fi, when the wireless link is on, and reaches your Mac's shell on the same network.
         NSFaceIDUsageDescription: Passthrough uses Face ID to keep your Mac's shell and settings private.
         NSCameraUsageDescription: Passthrough scans the code an iPad shows, to let it use this iPhone's internet.
+        NSMicrophoneUsageDescription: Passthrough sends your voice to your Mac while you turn the microphone on in its screen view, so the Mac can use this device as its microphone.
         NSBonjourServices: [_passthrough._tcp, _passthrough-sh._tcp]
         # Step away's Live Activity: started and updated by the app only (no push).
         NSSupportsLiveActivities: true
@@ -257,6 +258,14 @@ targets:
         codeSign: true
         copy:
           destination: executables
+      # The phone's microphone as an input device. The root helper copies it from
+      # here into /Library/Audio/Plug-Ins/HAL once its signature checks out.
+      - target: PassthroughMicrophone
+        embed: true
+        link: false
+        codeSign: true
+        copy:
+          destination: plugins
     postCompileScripts:
       - name: Install launchd plist
         inputFiles: [$(SRCROOT)/macOS/App/LaunchDaemon.plist]
@@ -394,6 +403,33 @@ targets:
         PRODUCT_BUNDLE_IDENTIFIER: $(PASSTHROUGH_ID).term
         PRODUCT_NAME: passthrough-term
         ENABLE_HARDENED_RUNTIME: YES
+        ARCHS: arm64
+        EXCLUDED_ARCHS: x86_64
+      configs:
+        Release:
+          CODE_SIGN_INJECT_BASE_ENTITLEMENTS: NO
+
+  # A Core Audio server plug-in: the "Passthrough Microphone" input device, which
+  # records what the app plays to it (a phone's voice, while it views the screen).
+  # coreaudiod loads it from /Library/Audio/Plug-Ins/HAL, where the helper installs it.
+  PassthroughMicrophone:
+    type: bundle
+    platform: macOS
+    sources:
+      - path: macOS/Microphone
+        excludes: ["Info.plist"]
+    dependencies:
+      - sdk: CoreAudio.framework
+      - sdk: CoreFoundation.framework
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: $(PASSTHROUGH_ID).microphone
+        PRODUCT_NAME: PassthroughMicrophone
+        WRAPPER_EXTENSION: driver
+        INFOPLIST_FILE: macOS/Microphone/Info.plist
+        GENERATE_INFOPLIST_FILE: NO
+        ENABLE_HARDENED_RUNTIME: YES
+        SKIP_INSTALL: YES
         ARCHS: arm64
         EXCLUDED_ARCHS: x86_64
       configs:

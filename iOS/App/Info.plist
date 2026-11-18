@@ -2,10 +2,10 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-	<key>CFBundleDevelopmentRegion</key>
-	<string>$(DEVELOPMENT_LANGUAGE)</string>
 	<key>CADisableMinimumFrameDurationOnPhone</key>
 	<true/>
+	<key>CFBundleDevelopmentRegion</key>
+	<string>$(DEVELOPMENT_LANGUAGE)</string>
 	<key>CFBundleDisplayName</key>
 	<string>Passthrough</string>
 	<key>CFBundleExecutable</key>
@@ -46,6 +46,8 @@
 	<string>Passthrough uses Face ID to keep your Mac's shell and settings private.</string>
 	<key>NSLocalNetworkUsageDescription</key>
 	<string>Passthrough finds your linked Mac on this iPhone's Personal Hotspot, or over peer-to-peer Wi-Fi, when the wireless link is on, and reaches your Mac's shell on the same network.</string>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>Passthrough sends your voice to your Mac while you turn the microphone on in its screen view, so the Mac can use this device as its microphone.</string>
 	<key>NSSupportsLiveActivities</key>
 	<true/>
 	<key>PassthroughID</key>

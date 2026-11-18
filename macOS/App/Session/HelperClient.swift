@@ -250,6 +250,12 @@ final class HelperClient {
         }
     }
 
+    /// Installs the "Passthrough Microphone" audio driver or removes it (the Mac's sound
+    /// stops for a moment while coreaudiod restarts). Throws the helper's reason if it couldn't.
+    func setMicrophoneDriver(_ installed: Bool) async throws {
+        _ = try await start(timeout: 30) { proxy, reply in proxy.setMicrophoneDriver(installed, reply: reply) }
+    }
+
     func quitHelper() {
         // quit() is a one-way message; invalidating the connection immediately
         // can cancel it before delivery, leaving the stale helper running. Send

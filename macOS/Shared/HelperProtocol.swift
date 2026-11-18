@@ -28,6 +28,10 @@ import Foundation
     /// `ScreenSharingCheck.Result` raw value. Only root can see every
     /// process's sockets, so the app asks before it relays a phone there.
     func checkScreenSharing(reply: @escaping (Int) -> Void)
+    /// Installs the app's "Passthrough Microphone" audio driver (a phone's voice as an
+    /// input device) into /Library/Audio/Plug-Ins/HAL, or removes it, and restarts
+    /// coreaudiod so it takes effect. Answers whether it worked, and why not.
+    func setMicrophoneDriver(_ installed: Bool, reply: @escaping (Bool, String) -> Void)
     func quit()
 }
 
@@ -67,7 +71,7 @@ public enum HelperConstants {
     public static let machService = "\(HelperConstants.identifier).helper"
     public static let plistName = "\(HelperConstants.identifier).helper.plist"
     /// Bump together with the helper binary so the app can detect stale daemons.
-    public static let version = "1.2.30"
+    public static let version = "1.2.31"
 }
 
 /// Keys of the configuration dictionary handed to `startTunnel`.

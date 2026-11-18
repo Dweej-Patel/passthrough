@@ -1,3 +1,4 @@
+import AVFoundation
 import CoreGraphics
 import CoreMedia
 import Foundation
@@ -63,6 +64,20 @@ final class ScreenModel: ObservableObject {
     @Published private(set) var macHidden = false
     /// Only the Mac's own stream can leave the black out of what it sends; Screen Sharing would show it.
     var canHideMac: Bool { video != nil }
+    /// This device as the Mac's microphone (the Mac's "Passthrough Microphone" input device).
+    enum Microphone: Equatable { case off, starting, on }
+    @Published private(set) var microphone = Microphone.off
+    /// Only the Mac's own stream carries voice (not Screen Sharing).
+    var canUseMicrophone: Bool { video != nil }
+    private var voiceCapture: PhoneVoiceCapture?
+    /// The Mac takes this device's voice: it should be recording.
+    private var capturing = false
+    /// Play the Mac's sound here (the user's choice, off until chosen), and whether the Mac sends it now.
+    @Published private(set) var playsSound = UserDefaults.standard.bool(forKey: ScreenModel.playsSoundKey)
+    private static let playsSoundKey = "screenPlaysMacSound"
+    private var soundLive = false
+    private var soundPlayer: MacSoundPlayer?
+    private var microphoneTimeout: Task<Void, Never>?
     /// The user's choice: the Mac makes a display in this device's shape and shows that
     /// (`Fit.device`), or shows its own display as it is (`Fit.mac`, the default).
     @Published private(set) var fitsDevice = ScreenModel.fitsDeviceSetting
@@ -200,6 +215,12 @@ final class ScreenModel: ObservableObject {
         guard appObservers.isEmpty else { return }
         let nc = NotificationCenter.default
         appObservers = [
+            // A call, Siri or an alarm took the audio and gave it back: the Mac's sound plays again.
+            nc.addObserver(forName: AVAudioSession.interruptionNotification, object: nil, queue: .main) { [weak self] note in
+                let ended = (note.userInfo?[AVAudioSessionInterruptionTypeKey] as? UInt) == AVAudioSession.InterruptionType.ended.rawValue
+                guard ended else { return }
+                MainActor.assumeIsolated { self?.audioCameBack() }
+            },
             nc.addObserver(forName: UIApplication.didEnterBackgroundNotification, object: nil, queue: .main) { [weak self] _ in
                 MainActor.assumeIsolated { self?.appWentAway() }
             },
@@ -211,6 +232,12 @@ final class ScreenModel: ObservableObject {
 
     /// The view outlives a short trip away, but no one is watching the Mac meanwhile.
     private func appWentAway() {
+        // Not listening while no one is looking at the Mac, nor playing its sound.
+        stopMicrophone()
+        if soundLive {
+            video?.sound(false)
+            stopSound()
+        }
         guard video != nil, macHidden || askedHidden == true else { return }
         hiddenBeforeAway = true
         quietCurtain = true
@@ -224,6 +251,7 @@ final class ScreenModel: ObservableObject {
     }
 
     private func appCameBack() {
+        if playsSound, phase == .live { video?.sound(true) }
         guard hiddenBeforeAway else { return }
         hiddenBeforeAway = false
         if video != nil, Self.hidesMac { askMacHidden(true, saysIfUnanswered: false) }
@@ -322,6 +350,8 @@ final class ScreenModel: ObservableObject {
         relayoutTask?.cancel()
         rfb?.close()
         rfb = nil
+        stopMicrophone()
+        stopSound()
         video?.close()
         video = nil
         copyTimeout?.cancel()
@@ -393,6 +423,7 @@ final class ScreenModel: ObservableObject {
             if first { liveSince = ProcessInfo.processInfo.systemUptime }
             phase = .live
             if first, Self.hidesMac { askMacHidden(true, saysIfUnanswered: false) }
+            if first, playsSound { video?.sound(true) }
         case let .frame(sample, number):
             // Not shown (no canvas yet, or its display failed): what follows needs a new keyframe.
             if onVideoFrame?(sample) != true { video?.requestKeyframe() }
@@ -407,6 +438,12 @@ final class ScreenModel: ObservableObject {
             case .tooLong: copyFailed("That's too long to copy to this \(ThisDevice.name).")
             case .notText: copyFailed("Only text can be copied to this \(ThisDevice.name).")
             }
+        case let .microphone(state):
+            microphoneAnswered(state)
+        case let .sound(state):
+            soundAnswered(state)
+        case let .soundPacket(packet):
+            soundPlayer?.play(packet)
         case let .curtained(hidden):
             hideTimeout?.cancel()
             let asked = askedHidden
@@ -601,7 +638,7 @@ final class ScreenModel: ObservableObject {
                 return
             }
             upgradeFailed()
-        case .frame, .copied, .curtained, .cursor:
+        case .frame, .copied, .curtained, .cursor, .microphone, .sound, .soundPacket:
             break   // the pointer's place goes again after the first format
         }
     }
@@ -698,6 +735,11 @@ final class ScreenModel: ObservableObject {
 
     func type(_ text: String, modifiers: [UInt32] = []) {
         if let video, modifiers.isEmpty {
+            // Long text (a paste, dictation) is pasted: the Mac types only short text as keys,
+            // and apps that read keys, not characters (Windows App's RDP), get nothing else right.
+            if text.utf16.count > ScreenVideoWire.typedAsKeys, video.clipboard(text) {
+                return key(0x76, modifiers: [RFBKeys.command])   // ⌘V
+            }
             // Return and Tab are keys, not characters, to the apps on the Mac.
             var run = ""
             for character in text {
@@ -716,13 +758,21 @@ final class ScreenModel: ObservableObject {
         }
     }
 
+    /// The Mac's Fn (globe) key, down for as long as the phone's key is held (the Mac's own stream only).
+    func function(_ down: Bool) { video?.function(down) }
+
     /// Mission Control's shortcuts, as macOS sets them by default (System
     /// Settings › Keyboard › Keyboard Shortcuts › Mission Control).
     enum SpaceAction {
         case previousDesktop, nextDesktop, missionControl, appWindows, showDesktop
     }
 
+    /// Something sent from outside the canvas may move the Mac's caret or change its text
+    /// (a paste, another desktop): the canvas forgets what was typed (`ScreenCanvasView.forgetTyped`).
+    var onCaretMayMove: (() -> Void)?
+
     func perform(_ action: SpaceAction) {
+        onCaretMayMove?()
         switch action {
         case .previousDesktop: key(RFBKeys.left, modifiers: [RFBKeys.control])
         case .nextDesktop: key(RFBKeys.right, modifiers: [RFBKeys.control])
@@ -735,6 +785,7 @@ final class ScreenModel: ObservableObject {
 
     /// Puts the phone's clipboard on the Mac's and pastes it there.
     func pastePhoneClipboard() {
+        onCaretMayMove?()
         guard let text = UIPasteboard.general.string, !text.isEmpty else { return }
         if let video {
             // Longer than the Mac takes: pasting would paste what was there before.
@@ -790,6 +841,171 @@ final class ScreenModel: ObservableObject {
             guard saysIfUnanswered else { return }
             self.show("\(self.macName) didn't answer. Update Passthrough on it to hide its display.")
         }
+    }
+
+    // MARK: Microphone
+
+    /// Turns this device's microphone on for the Mac, or off. On: iOS is asked for the
+    /// microphone (the first time), then the Mac; recording starts once the Mac takes it.
+    func toggleMicrophone() {
+        guard microphone == .off else { return stopMicrophone() }
+        guard video != nil else { return }
+        microphone = .starting
+        let gen = generation
+        Task { [weak self] in
+            let allowed = await PhoneVoiceCapture.requestPermission()
+            guard let self, gen == self.generation, self.microphone == .starting else { return }
+            guard allowed else {
+                self.microphone = .off
+                return self.show("Allow the microphone for Passthrough in Settings.")
+            }
+            guard let video = self.video else { self.microphone = .off; return }
+            video.microphone(true)
+            self.microphoneTimeout?.cancel()
+            self.microphoneTimeout = Task { [weak self] in
+                try? await Task.sleep(for: .seconds(5))
+                guard !Task.isCancelled, let self, self.microphone == .starting else { return }
+                self.microphone = .off
+                self.show("\(self.macName) didn't answer. Update Passthrough on it to use the microphone.")
+            }
+        }
+    }
+
+    private func microphoneAnswered(_ state: ScreenVideoWire.MicrophoneState) {
+        microphoneTimeout?.cancel()
+        switch state {
+        case .on:
+            guard microphone == .starting, let video else { return }
+            capturing = true
+            if let error = applyAudio() {
+                microphone = .off
+                video.microphone(false)
+                let reason = error as NSError
+                ptLog(.warning, "screen: the microphone couldn't be started: \(reason.domain) \(reason.code) \(reason.localizedDescription)")
+                // iOS keeps the microphone for a call or meeting in another app.
+                if reason.domain == NSOSStatusErrorDomain, reason.code == 561_017_449 {   // '!pri': insufficient priority
+                    return show("Another app has this \(ThisDevice.name)'s microphone (a call or meeting). Try again when it ends.")
+                }
+                return show("This \(ThisDevice.name)'s microphone couldn't be started.")
+            }
+            microphone = .on
+            UIImpactFeedbackGenerator(style: .light).impactOccurred()
+            show("\(macName) hears this \(ThisDevice.name)")
+        case .off:
+            if microphone != .off { stopMicrophone(tellMac: false) }
+        case .notInstalled:
+            stopMicrophone(tellMac: false)
+            show("On \(macName), install \"Phone as microphone\" in Passthrough's Remote Shell settings.")
+        case .failed:
+            stopMicrophone(tellMac: false)
+            show("\(macName) couldn't use its Passthrough Microphone.")
+        }
+    }
+
+    private func stopMicrophone(tellMac: Bool = true) {
+        microphoneTimeout?.cancel()
+        guard microphone != .off else { return }
+        microphone = .off
+        if capturing {
+            capturing = false
+            _ = applyAudio()
+        }
+        if tellMac { video?.microphone(false) }
+    }
+
+    // MARK: The Mac's sound
+
+    /// Plays what the Mac plays on this device (or stops); remembered for the next view.
+    func setPlaysSound(_ on: Bool) {
+        UserDefaults.standard.set(on, forKey: Self.playsSoundKey)
+        playsSound = on
+        guard let video else { return }
+        video.sound(on)
+        if !on { stopSound() }
+    }
+
+    private func soundAnswered(_ state: ScreenVideoWire.SoundState) {
+        switch state {
+        case .on:
+            // Turned off again meanwhile.
+            guard playsSound else { video?.sound(false); return }
+            guard !soundLive else { return }
+            soundLive = true
+            _ = applyAudio()
+        case .off:
+            stopSound()
+        case .failed:
+            stopSound()
+            if playsSound { show("\(macName) couldn't send its sound.") }
+        }
+    }
+
+    private func stopSound() {
+        guard soundLive else { return }
+        soundLive = false
+        _ = applyAudio()
+    }
+
+    /// The audio is this app's again after an interruption: what played is started again,
+    /// and sound that had to be given up meanwhile is asked for again.
+    private func audioCameBack() {
+        guard playsSound, phase == .live, let video else { return }
+        if soundLive { _ = applyAudio() } else { video.sound(true) }
+    }
+
+    /// The Mac's sound can't be played now (the session was refused, or the player didn't
+    /// start): the Mac is told to stop sending it. `audioCameBack` asks again.
+    private func soundCantPlay(_ error: Error) {
+        ptLog(.warning, "screen: the Mac's sound can't be played: \(error.localizedDescription)")
+        soundLive = false
+        video?.sound(false)
+    }
+
+    /// One audio session for both directions, and changing it stops whatever runs: so
+    /// both stop, the session is set for what's on now (`capturing`, `soundLive`), and
+    /// those start again. The microphone's failure, if it couldn't start; then it's off.
+    private func applyAudio() -> Error? {
+        voiceCapture?.stop()
+        voiceCapture = nil
+        soundPlayer?.stop()
+        soundPlayer = nil
+        var failure: Error?
+        if capturing, let video {
+            do {
+                try ScreenAudioSession.apply(recording: true, playing: soundLive)
+                let capture = PhoneVoiceCapture(onSamples: { [video] in video.voice($0) }, onStopped: { [weak self] in
+                    MainActor.assumeIsolated {
+                        guard let self, self.microphone != .off else { return }
+                        self.stopMicrophone()
+                        self.show("The microphone was turned off")
+                    }
+                })
+                try capture.start()
+                voiceCapture = capture
+            } catch {
+                failure = error
+                capturing = false
+            }
+        } else {
+            capturing = false
+        }
+        if !capturing {
+            do {
+                try ScreenAudioSession.apply(recording: false, playing: soundLive)
+            } catch {
+                if soundLive { soundCantPlay(error) }
+            }
+        }
+        if soundLive {
+            let player = MacSoundPlayer()
+            do {
+                try player.start()
+                soundPlayer = player
+            } catch {
+                soundCantPlay(error)
+            }
+        }
+        return failure
     }
 
     private func copied(_ text: String) {

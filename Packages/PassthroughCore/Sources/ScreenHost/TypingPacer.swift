@@ -7,11 +7,14 @@ import Foundation
 /// short pastes go through at once (`burst`); more waits its turn at `rate`
 /// UTF-8 bytes a second, with the keys that came after it kept behind it, and
 /// past `limit` bytes or `itemLimit` items (keys or texts) waiting the rest
-/// is dropped. Not thread-safe: the streamer's queue owns it.
+/// is dropped. A paste's clipboard waits its turn too, so the ⌘V behind it
+/// pastes it and not one sent after. Not thread-safe: the streamer's queue owns it.
 struct TypingPacer {
     enum Item: Equatable {
         case text(String)
         case key(keysym: UInt32, modifiers: UInt8)
+        /// Put on the Mac's clipboard: costs nothing to post, but its bytes count while it waits.
+        case clipboard(String)
     }
 
     /// 8 KiB of UTF-8 a second (some 8 000 plain characters, 400 events),
@@ -22,6 +25,9 @@ struct TypingPacer {
     /// Keys cost no bytes, so they are counted: a phone sending keys behind
     /// text that waits could otherwise queue them without end.
     static let itemLimit = 4096
+    /// How long a clipboard waits behind a shortcut (the ⌘V of the paste before it, usually): the
+    /// app handles that ⌘V a moment after it's posted, and must find its own text on the clipboard.
+    static let pasteSettle: TimeInterval = 0.15
 
     private let rate: Double
     private let burst: Double
@@ -35,6 +41,8 @@ struct TypingPacer {
     private var waiting: [Item] = []
     private var next = 0
     private var waitingBytes = 0
+    /// A clipboard isn't taken before this (`pasteSettle` after the last shortcut).
+    private var clipboardNotBefore: TimeInterval = 0
 
     init(rate: Double = TypingPacer.rate, burst: Double = TypingPacer.burst, limit: Int = TypingPacer.limit,
          itemLimit: Int = TypingPacer.itemLimit, now: TimeInterval) {
@@ -53,9 +61,9 @@ struct TypingPacer {
     /// Queues `item`; false (and dropped) when too much is waiting already.
     mutating func push(_ item: Item) -> Bool {
         guard count < itemLimit else { return false }
-        if case let .text(text) = item {
-            guard waitingBytes + text.utf8.count <= limit else { return false }
-            waitingBytes += text.utf8.count
+        if let bytes = item.waitingBytes {
+            guard waitingBytes + bytes <= limit else { return false }
+            waitingBytes += bytes
         }
         waiting.append(item)
         return true
@@ -82,6 +90,9 @@ struct TypingPacer {
         var out: [Item] = []
         while next < waiting.count {
             guard case let .text(text) = waiting[next] else {
+                if case .clipboard = waiting[next], now < clipboardNotBefore { break }
+                if case let .key(_, modifiers) = waiting[next], modifiers != 0 { clipboardNotBefore = now + Self.pasteSettle }
+                waitingBytes -= waiting[next].waitingBytes ?? 0
                 out.append(popFirst())
                 continue
             }
@@ -115,9 +126,20 @@ struct TypingPacer {
     /// the text waiting first), while something waits.
     var nextDelay: TimeInterval? {
         guard next < waiting.count else { return nil }
+        if case .clipboard = waiting[next] { return max(0, clipboardNotBefore - refilledAt) }
         guard case let .text(text) = waiting[next] else { return 0 }
         let needed = min(burst, Double(min(text.utf8.count, 1024)))
         return max(0.01, (needed - tokens) / rate)
+    }
+}
+
+private extension TypingPacer.Item {
+    /// What it holds against `limit` while it waits.
+    var waitingBytes: Int? {
+        switch self {
+        case let .text(text), let .clipboard(text): text.utf8.count
+        case .key: nil
+        }
     }
 }
 #endif

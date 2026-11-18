@@ -46,6 +46,11 @@ final class SessionCoordinator: ObservableObject {
     @Published private(set) var pairingInFlight = false
     /// The outcome of the last "Register again", for Settings.
     @Published private(set) var helperNote: String?
+    /// The "Passthrough Microphone" audio driver (a phone's voice as an input device): where it
+    /// stands, whether it's being installed or removed now, and why the last try failed.
+    @Published private(set) var microphoneDriver = MicrophoneDriverStatus.current
+    @Published private(set) var microphoneDriverBusy = false
+    @Published private(set) var microphoneDriverError: String?
     @Published private(set) var logEntries: [PassthroughLog.Entry] = []
     @Published private(set) var sessionRx: Int64 = 0
     @Published private(set) var sessionTx: Int64 = 0
@@ -1184,6 +1189,39 @@ final class SessionCoordinator: ObservableObject {
         helperAvailability = helper.availability
         syncHotspotGuard()   // a re-registered helper starts without it
         return responded
+    }
+
+    // MARK: Phone microphone
+
+    func refreshMicrophoneDriver() {
+        guard !microphoneDriverBusy else { return }
+        microphoneDriver = .current
+    }
+
+    /// Has the root helper install the microphone driver from this app, or remove it.
+    /// The Mac's sound stops for a moment either way (coreaudiod restarts to load it).
+    func setMicrophoneDriver(_ installed: Bool) {
+        guard !microphoneDriverBusy else { return }
+        microphoneDriverBusy = true
+        microphoneDriverError = nil
+        Task {
+            _ = helper.ensureRegistered()
+            helperAvailability = helper.availability
+            await ensureHelperCurrent()
+            do {
+                try await helper.setMicrophoneDriver(installed)
+                // coreaudiod takes a moment to come back with the device.
+                for _ in 0..<20 where MicrophoneDriverStatus.current == (installed ? .notLoaded : .ready) {
+                    try? await Task.sleep(for: .milliseconds(250))
+                }
+                ptLog(.info, installed ? "Microphone driver installed" : "Microphone driver removed")
+            } catch {
+                microphoneDriverError = error.localizedDescription
+                ptLog(.warning, "Microphone driver: \(error.localizedDescription)")
+            }
+            microphoneDriverBusy = false
+            microphoneDriver = .current
+        }
     }
 
     // MARK: Ticking

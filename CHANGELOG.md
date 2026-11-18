@@ -162,8 +162,55 @@ these steps as written and check each one before building.
   keyboard goes straight to the Mac.
 * iPhone: *Sharing with* lists the Macs and iPads using it right now, and
   *Paired devices* lists both.
+* Screen view: the iPhone or iPad as the Mac's microphone. A microphone
+  button in the screen view sends your voice to the Mac, where it is a
+  "Passthrough Microphone" input device that dictation and call apps can
+  listen to. The device is an audio driver the Mac app carries: install it
+  under Settings › Remote Shell › *Phone as microphone* (the root helper
+  copies it into `/Library/Audio/Plug-Ins/HAL` after checking its signature,
+  and the Mac's sound stops for a moment while its audio restarts). The
+  microphone is on only while its button is, and goes off when the view
+  closes or the app leaves the screen. While it is on, any app on the Mac
+  that may use a microphone can hear it.
 
 ### Changed
+
+* Screen view: the on-screen keyboard works as it does elsewhere on the iPhone
+  and iPad. Holding delete goes on deleting (it deleted one character), and
+  the keyboard's own dictation key is there. The view is a text input now:
+  the keyboard edits a short record of what you typed, and each change is
+  typed on the Mac. So a double space makes a period, a long hold on delete
+  takes a word at a time, and Chinese, Japanese and similar keyboards send
+  text once a candidate is chosen. A click, an arrow key, a shortcut or a
+  paste makes it forget what you typed, so nothing the keyboard does later
+  reaches back and changes other text on the Mac.
+* Screen view on iPad: the floating bar can be slid aside when it covers the
+  Mac's menu bar. The arrow at its right end (or a swipe to the right along
+  it) slides the whole bar off the right edge and down below the menu bar,
+  until only its first button shows, as an arrow pointing back; that arrow
+  (or a swipe to the left) slides it back. The arrow is a red microphone
+  while the Mac hears the iPad.
+* Screen view: the Mac's sound on the iPhone or iPad. *Play …'s sound here*
+  in the screen view's Display menu sends what the Mac's apps play (whatever
+  the Mac's volume is set to; the Mac's own speakers aren't muted by it). It
+  is compressed, about 128 kb/s, sent only while something plays, and left
+  out when the picture is behind. Off until chosen, then remembered.
+* Screen view: *Hide …'s display* is in the Display menu now, with the other
+  display settings (it was under Desktops).
+* Screen view: an **fn** key in the row above the keyboard, held on the Mac
+  for as long as you hold it (for push-to-talk dictation apps on the Mac).
+* Screen view: typing and pasting work in Windows App (RDP) and other apps
+  that read keys rather than characters, such as virtual machines. Typing
+  goes as the keys of the Mac's keyboard layout (it came out as `a` for every
+  key in RDP), shortcuts press ⌘, ⇧, ⌥ and ⌃ as keys of their own (⌘V did
+  nothing there), and text longer than 64 characters typed or dictated on the
+  phone is pasted through the Mac's clipboard. Shortcuts take the keys of the
+  Mac's layout too: on AZERTY the phone's ⌘A was ⌘Q, and on Dvorak ⌘V was ⌘K.
+  A paste sent while earlier typing is still going in now pastes its own text,
+  not the one after it. Emoji, and other characters no key on the Mac's
+  layout types, still come out as `a` in RDP and virtual machines; with a
+  Japanese, Chinese or other input method selected on the Mac, typing goes as
+  characters as before, so the input method doesn't compose it again.
 
 * *This iPhone* (*This iPad* on an iPad) is its own tab, *iPhone* (*iPad*),
   replacing the row on the Mac tab.
