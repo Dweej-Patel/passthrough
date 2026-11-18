@@ -44,6 +44,8 @@ final class ScreenVideoWireTests: XCTestCase {
             .voice(Data()),
             .microphoneState(.on),
             .microphoneState(.notInstalled),
+            .function(true),
+            .function(false),
             .clipboard(""),
             .keyframeRequest,
             .copy,
@@ -1399,6 +1401,7 @@ private final class RecordingInput: InputSink, @unchecked Sendable {
     }
     func text(_ text: String) { log.set(log.get() + ["text \(text)"]) }
     func clipboard(_ text: String) { log.set(log.get() + ["clipboard \(text)"]) }
+    func function(_ down: Bool) { log.set(log.get() + ["function \(down)"]) }
     func gesture(_ gesture: ScreenVideoWire.Gesture, phase: ScreenVideoWire.GesturePhase, value: Double) {
         log.set(log.get() + ["gesture \(gesture) \(phase) \(value)"])
     }

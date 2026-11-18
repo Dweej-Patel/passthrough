@@ -302,6 +302,7 @@ public final class ScreenVideoStreamer: ScreenVideoSource, @unchecked Sendable {
         case let .microphone(on):
             if restricted { write(ScreenVideoWire.encode(.microphoneState(on ? .failed : .off)), frame: false) } else { setMicrophone(on) }
         case let .voice(samples): if voiceOn { voice?.play(samples) }
+        case let .function(down): heardInput(); input?.function(down)
         case .format, .frame, .copied, .curtained, .fitted, .cursor, .cursorShape, .viewers, .movedAway, .microphoneState:
             break
         }

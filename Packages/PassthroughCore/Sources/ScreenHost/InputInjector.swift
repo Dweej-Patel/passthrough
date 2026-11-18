@@ -11,6 +11,8 @@ protocol InputSink: AnyObject {
     func key(keysym: UInt32, modifiers: UInt8)
     func text(_ text: String)
     func clipboard(_ text: String)
+    /// The Fn (globe) key down, or up.
+    func function(_ down: Bool)
     /// A trackpad pinch or rotation, at the pointer.
     func gesture(_ gesture: ScreenVideoWire.Gesture, phase: ScreenVideoWire.GesturePhase, value: Double)
     /// The phone is gone: lets go of every button it holds and ends its gestures.
@@ -147,7 +149,19 @@ final class InputInjector: InputSink {
         event.post(tap: .cghidEventTap)
     }
 
+    /// The Fn key as a keyboard sends it: a "modifiers changed" event of its own, down until it's let go.
+    func function(_ down: Bool) {
+        guard down != functionDown else { return }
+        functionDown = down
+        guard let event = CGEvent(keyboardEventSource: source, virtualKey: 63, keyDown: down) else { return }
+        event.type = .flagsChanged
+        event.flags = down ? [.maskSecondaryFn, .maskNonCoalesced] : .maskNonCoalesced
+        event.post(tap: .cghidEventTap)
+    }
+    private var functionDown = false
+
     func releaseAll() {
+        function(false)
         for gesture in gestures { self.gesture(gesture, phase: .cancelled, value: 0) }
         if buttons & 0b111 != 0 {
             pointer(x: UInt16(clamping: Int(((position.x - display.minX) / max(display.width - 1, 1) * 65535).rounded())),

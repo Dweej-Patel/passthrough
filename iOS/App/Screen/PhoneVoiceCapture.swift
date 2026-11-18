@@ -4,7 +4,7 @@ import PassthroughCore
 
 /// This device's microphone as the Mac takes it (`ScreenVideoWire.voice`: 16-bit mono
 /// at `voiceSampleRate`), a piece every audio cycle (about 10 ms), while the screen
-/// view has the microphone on. Recording stops other audio on the device.
+/// view has the microphone on. Other audio on the device goes on meanwhile.
 final class PhoneVoiceCapture: @unchecked Sendable {
     enum Failure: Error { case noInput, noConverter }
 
@@ -34,7 +34,9 @@ final class PhoneVoiceCapture: @unchecked Sendable {
 
     func start() throws {
         let session = AVAudioSession.sharedInstance()
-        try session.setCategory(.record, mode: .default)
+        // Alongside whatever else has the audio (music, another app's own recording), not instead of
+        // it: a session that must interrupt the others is refused while one of them outranks it.
+        try session.setCategory(.playAndRecord, mode: .default, options: [.mixWithOthers, .defaultToSpeaker, .allowBluetooth])
         try? session.setPreferredIOBufferDuration(0.01)
         try session.setActive(true)
         let input = engine.inputNode

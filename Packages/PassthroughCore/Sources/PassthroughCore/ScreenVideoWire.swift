@@ -94,6 +94,9 @@ public enum ScreenVideoWire {
         case microphone(Bool)
         /// What the phone's microphone heard next (`voiceSampleRate`), played to that device as it comes.
         case voice(Data)
+        /// The Fn (globe) key goes down, or comes up: held for as long as the phone's key is,
+        /// as apps that listen for it held (push-to-talk dictation) need.
+        case function(Bool)
     }
 
     /// Whether the Mac takes a phone's voice.
@@ -205,7 +208,7 @@ public enum ScreenVideoWire {
     enum Kind: UInt8 {
         case format = 1, frame = 2, copied = 3, curtained = 4, fitted = 5, cursor = 6, cursorShape = 7, viewers = 8, movedAway = 9
         case hello = 16, ack = 17, pointer = 18, scroll = 19, key = 20, text = 21, clipboard = 22, keyframeRequest = 23, copy = 24, curtain = 25
-        case useHere = 26, gesture = 27, microphone = 28, voice = 29
+        case useHere = 26, gesture = 27, microphone = 28, voice = 29, function = 30
         case microphoneState = 10
     }
 
@@ -296,6 +299,9 @@ public enum ScreenVideoWire {
         case let .voice(samples):
             kind = .voice
             payload.append(samples)
+        case let .function(down):
+            kind = .function
+            payload.append(down ? 1 : 0)
         case let .microphoneState(state):
             kind = .microphoneState
             payload.append(state.rawValue)
@@ -463,6 +469,9 @@ public enum ScreenVideoWire {
         case .microphone:
             try need(1)
             return .microphone(p[b] == 1)
+        case .function:
+            try need(1)
+            return .function(p[b] == 1)
         case .voice:
             // Whole samples only.
             return .voice(p.count % 2 == 0 ? p : p.dropLast())

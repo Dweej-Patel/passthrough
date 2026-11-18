@@ -31,6 +31,8 @@ final class ScreenCanvasView: UIView, UIScrollViewDelegate, UIKeyInput, UIGestur
     var onNeedsKeyframe: (() -> Void)?
     var onKey: ((UInt32, [UInt32]) -> Void)?
     var onText: ((String, [UInt32]) -> Void)?
+    /// The key row's fn key went down, or came up.
+    var onFunction: ((Bool) -> Void)?
     var onPaste: (() -> Void)?
     var onCopy: (() -> Void)?
     var onSpace: ((ScreenModel.SpaceAction) -> Void)?
@@ -990,6 +992,8 @@ final class ScreenKeyRow: UIInputView {
         case keysym(String, UInt32, accessibility: String)
         case symbol(String, UInt32, accessibility: String)
         case modifier(String, UInt32, accessibility: String)
+        /// The Mac's Fn (globe) key: down while it's touched, as a real key.
+        case function
         case copy
         case paste
     }
@@ -1001,6 +1005,7 @@ final class ScreenKeyRow: UIInputView {
             .modifier("⌃", RFBKeys.control, accessibility: "Control"),
             .modifier("⌥", RFBKeys.option, accessibility: "Option"),
             .modifier("⌘", RFBKeys.command, accessibility: "Command"),
+            .function,
             .symbol("arrow.left", RFBKeys.left, accessibility: "Left arrow"),
             .symbol("arrow.up", RFBKeys.up, accessibility: "Up arrow"),
             .symbol("arrow.down", RFBKeys.down, accessibility: "Down arrow"),
@@ -1042,6 +1047,15 @@ final class ScreenKeyRow: UIInputView {
                     }
                     self?.update()
                 }, for: .touchUpInside)
+            case .function:
+                button.accessibilityLabel = "Function"
+                button.accessibilityHint = "Held on the Mac while you hold it here"
+                button.addAction(UIAction { [weak self] _ in
+                    UIDevice.current.playInputClick()
+                    self?.canvas?.onFunction?(true)
+                }, for: .touchDown)
+                button.addAction(UIAction { [weak self] _ in self?.canvas?.onFunction?(false) },
+                                 for: [.touchUpInside, .touchUpOutside, .touchCancel])
             case .copy:
                 button.accessibilityLabel = "Copy from the Mac to this \(ThisDevice.name)"
                 button.addAction(UIAction { [weak self] _ in self?.canvas?.onCopy?() }, for: .touchUpInside)
@@ -1084,6 +1098,7 @@ final class ScreenKeyRow: UIInputView {
         switch key {
         case let .keysym(text, _, _), let .modifier(text, _, _): title(text)
         case let .symbol(name, _, _): symbol(name)
+        case .function: title("fn")
         case .copy: symbol("doc.on.doc")
         case .paste: symbol("doc.on.clipboard")
         }
@@ -1124,6 +1139,7 @@ struct ScreenCanvas: UIViewRepresentable {
         model.videoNeedsKeyframe()
         view.onKey = { [weak model] keysym, modifiers in model?.key(keysym, modifiers: modifiers) }
         view.onText = { [weak model] text, modifiers in model?.type(text, modifiers: modifiers) }
+        view.onFunction = { [weak model] down in model?.function(down) }
         view.onPaste = { [weak model] in model?.pastePhoneClipboard() }
         view.onCopy = { [weak model] in model?.copyFromMac() }
         view.onSpace = { [weak model] action in model?.perform(action) }

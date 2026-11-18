@@ -733,6 +733,9 @@ final class ScreenModel: ObservableObject {
         }
     }
 
+    /// The Mac's Fn (globe) key, down for as long as the phone's key is held (the Mac's own stream only).
+    func function(_ down: Bool) { video?.function(down) }
+
     /// Mission Control's shortcuts, as macOS sets them by default (System
     /// Settings › Keyboard › Keyboard Shortcuts › Mission Control).
     enum SpaceAction {
@@ -854,6 +857,12 @@ final class ScreenModel: ObservableObject {
             } catch {
                 microphone = .off
                 video.microphone(false)
+                let reason = error as NSError
+                ptLog(.warning, "screen: the microphone couldn't be started: \(reason.domain) \(reason.code) \(reason.localizedDescription)")
+                // iOS keeps the microphone for a call or meeting in another app.
+                if reason.domain == NSOSStatusErrorDomain, reason.code == 561_017_449 {   // '!pri': insufficient priority
+                    return show("Another app has this \(ThisDevice.name)'s microphone (a call or meeting). Try again when it ends.")
+                }
                 return show("This \(ThisDevice.name)'s microphone couldn't be started.")
             }
             voiceCapture = capture

@@ -192,6 +192,9 @@ public final class ScreenVideoClient: @unchecked Sendable {
     /// shows it again; the Mac answers with `curtained`. A Mac that predates it doesn't answer.
     public func curtain(_ hidden: Bool) { send(.curtain(hidden)) }
 
+    /// The Mac's Fn (globe) key goes down, or comes up.
+    public func function(_ down: Bool) { send(.function(down)) }
+
     /// Asks to be the Mac's microphone (or to stop); the Mac answers with `microphone`.
     /// A Mac that predates it doesn't answer.
     public func microphone(_ on: Bool) { send(.microphone(on)) }
