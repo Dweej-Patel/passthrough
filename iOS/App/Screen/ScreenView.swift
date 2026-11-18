@@ -28,7 +28,8 @@ struct ScreenView: View, Equatable {
     @State private var keyboard = false
     /// iPad: the floating bar is put away at the side (it covers the Mac's menu bar), remembered.
     @AppStorage("screenBarAside") private var barAside = false
-    @Namespace private var barSpace
+    /// The bar's own width, for how far it slides.
+    @State private var barWidth: CGFloat = 0
 
     private var mode: ScreenTouchMode { ScreenTouchMode(rawValue: modeSetting) ?? .trackpad }
     private var landscape: Bool { verticalSize == .compact }
@@ -85,43 +86,33 @@ struct ScreenView: View, Equatable {
         }
     }
 
-    private static let barSpring = Animation.spring(response: 0.42, dampingFraction: 0.74)
+    /// A little past its mark and back, as a thing slid to the edge of the screen settles.
+    private static let barSpring = Animation.spring(response: 0.5, dampingFraction: 0.72)
+    /// How much of the bar stays on screen once it's aside: its first button, now an arrow.
+    private static let barStub: CGFloat = 54
 
-    /// iPad: the bar, or once it's put aside a small handle at the edge, below the Mac's
-    /// menu bar, that brings it back. The glass behind them is one shape that glides
-    /// and shrinks from one to the other; what's in it fades. Before the screen is
-    /// live the bar always shows: it has the way out.
-    @ViewBuilder private var padControls: some View {
-        if barAside, model.phase == .live {
-            Button {
-                withAnimation(Self.barSpring) { barAside = false }
-            } label: {
-                Image(systemName: model.microphone == .on ? "mic.fill" : "slider.horizontal.3")
-                    .font(.body.weight(.semibold))
-                    .foregroundStyle(model.microphone == .on ? AnyShapeStyle(.red) : AnyShapeStyle(.tint))
-                    .frame(width: 44, height: 44)
-                    .contentShape(Circle())
-            }
-            .accessibilityLabel("Show the controls")
-            .background { barGlass }
-            .tint(PTTheme.accentEnd)
-            .transition(.opacity.combined(with: .scale(scale: 0.6)))
-            .frame(maxWidth: .infinity, alignment: .trailing)
-            .padding(.trailing, 10)
-            .padding(.top, 56)
-        } else {
-            padBar
-                .padding(.top, 8)
-                .transition(.opacity.combined(with: .scale(scale: 0.9, anchor: .topTrailing)))
-        }
+    /// The bar is aside only once the screen is live: before that it has the way out.
+    private var aside: Bool { barAside && model.phase == .live }
+
+    private func setAside(_ on: Bool) {
+        withAnimation(Self.barSpring) { barAside = on }
     }
 
-    /// The glass behind the bar and behind its handle: the same shape to SwiftUI, so it moves between them.
-    private var barGlass: some View {
-        Capsule().fill(.ultraThinMaterial)
-            .overlay(Capsule().strokeBorder(Color.white.opacity(0.14)))
-            .shadow(color: .black.opacity(0.35), radius: 16, y: 8)
-            .matchedGeometryEffect(id: "bar", in: barSpace)
+    /// iPad: the bar where it belongs, top centre, or slid off the right edge (and down, clear
+    /// of the Mac's menu bar) until only its first button shows, as an arrow that slides it back.
+    /// It's one bar all along, so going aside and coming back are the same motion; a swipe along
+    /// it does the same as its arrows.
+    private var padControls: some View {
+        GeometryReader { proxy in
+            padBar
+                .frame(maxWidth: .infinity)
+                .offset(x: aside ? (proxy.size.width + barWidth) / 2 - Self.barStub : 0, y: aside ? 52 : 8)
+                .gesture(DragGesture(minimumDistance: 24).onEnded { drag in
+                    guard model.phase == .live, abs(drag.translation.width) > abs(drag.translation.height) * 1.5 else { return }
+                    if drag.translation.width > 50, !barAside { setAside(true) }
+                    if drag.translation.width < -30, barAside { setAside(false) }
+                })
+        }
     }
 
     /// iPad: one floating glass bar over the screen, its controls labelled
@@ -130,10 +121,28 @@ struct ScreenView: View, Equatable {
     private var padBar: some View {
         VStack(spacing: 6) {
             HStack(spacing: 10) {
-                Button { model.stop(); close() } label: {
-                    Image(systemName: "xmark").font(.body.weight(.bold)).frame(width: 44, height: 44).contentShape(Circle())
+                // Aside, this end is all that shows: the way back, in Done's place.
+                ZStack {
+                    Button { model.stop(); close() } label: {
+                        Image(systemName: "xmark").font(.body.weight(.bold)).frame(width: 44, height: 44).contentShape(Circle())
+                    }
+                    .accessibilityLabel("Done")
+                    .opacity(aside ? 0 : 1)
+                    .scaleEffect(aside ? 0.5 : 1)
+                    .allowsHitTesting(!aside)
+                    .accessibilityHidden(aside)
+                    Button { setAside(false) } label: {
+                        Image(systemName: model.microphone == .on ? "mic.fill" : "chevron.left")
+                            .font(.body.weight(.bold))
+                            .foregroundStyle(model.microphone == .on ? AnyShapeStyle(.red) : AnyShapeStyle(.tint))
+                            .frame(width: 44, height: 44).contentShape(Rectangle())
+                    }
+                    .accessibilityLabel("Show the controls")
+                    .opacity(aside ? 1 : 0)
+                    .scaleEffect(aside ? 1 : 0.5)
+                    .allowsHitTesting(aside)
+                    .accessibilityHidden(!aside)
                 }
-                .accessibilityLabel("Done")
                 if model.phase == .live {
                     Divider().frame(height: 24)
                     Picker("Touch", selection: $modeSetting) {
@@ -149,10 +158,8 @@ struct ScreenView: View, Equatable {
                     desktopsMenu.frame(height: 44)
                     displayMenu.frame(height: 44)
                     Divider().frame(height: 24)
-                    Button {
-                        withAnimation(Self.barSpring) { barAside = true }
-                    } label: {
-                        Image(systemName: "arrow.right.to.line").font(.body.weight(.semibold)).frame(width: 44, height: 44).contentShape(Circle())
+                    Button { setAside(true) } label: {
+                        Image(systemName: "chevron.right").font(.body.weight(.bold)).frame(width: 44, height: 44).contentShape(Circle())
                     }
                     .accessibilityLabel("Move the controls aside")
                 } else {
@@ -160,7 +167,11 @@ struct ScreenView: View, Equatable {
                 }
             }
             .padding(.horizontal, 6)
-            .background { barGlass }
+            .background(.ultraThinMaterial, in: Capsule())
+            .overlay(Capsule().strokeBorder(Color.white.opacity(0.14)))
+            .shadow(color: .black.opacity(0.35), radius: 16, y: 8)
+            .background(GeometryReader { bar in Color.clear.preference(key: BarWidthKey.self, value: bar.size.width) })
+            .onPreferenceChange(BarWidthKey.self) { barWidth = $0 }
             if model.phase == .live {
                 Text(model.slowReason ?? (model.macHidden ? "Hidden on \(model.macName)'s own display" : padHint))
                     .font(.caption)
@@ -168,6 +179,7 @@ struct ScreenView: View, Equatable {
                     .padding(.horizontal, 12).padding(.vertical, 5)
                     .background(.ultraThinMaterial, in: Capsule())
                     .lineLimit(1)
+                    .opacity(aside ? 0 : 1)
             }
         }
         .tint(PTTheme.accentEnd)
@@ -403,6 +415,11 @@ private extension View {
     func sideTarget(_ on: Bool) -> some View {
         frame(width: on ? 44 : nil, height: on ? 44 : nil).contentShape(Rectangle())
     }
+}
+
+private struct BarWidthKey: PreferenceKey {
+    static let defaultValue: CGFloat = 0
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) { value = max(value, nextValue()) }
 }
 
 // MARK: - Menus
