@@ -311,6 +311,21 @@ final class IrohShellListenerTests: XCTestCase {
         XCTAssertNil(refused.first(ShellEnvelope.macInfo))
     }
 
+    /// Over iroh too, a screen pass gets `ready` and nothing about the Mac
+    /// (no `macInfo` with its relay token, no sessions), and only the screen.
+    func testAScreenPassOverIrohGetsNothingButTheScreen() async throws {
+        let viewerKey = WirelessLink.randomBytes(32)
+        _ = startIroh(keys: Locked(["viewer.x": viewerKey]), macInfo: { Self.sampleInfo })
+        let peer = try await irohPeer()
+        await ready(peer, phoneID: "viewer.x", key: viewerKey)
+        peer.send(ShellEnvelope(t: ShellEnvelope.list))
+        peer.send(ShellEnvelope(t: ShellEnvelope.ping))
+        await eventually("pong") { peer.first(ShellEnvelope.pong) != nil }
+        XCTAssertNil(peer.first(ShellEnvelope.macInfo))
+        XCTAssertNil(peer.first(ShellEnvelope.sessions))
+        XCTAssertEqual(peer.first(ShellEnvelope.error)?.reason, ShellError.screenOnly.rawValue)
+    }
+
     // MARK: Status
 
     private func paths(_ listener: IrohShellListener) async -> [String: IrohPath] {

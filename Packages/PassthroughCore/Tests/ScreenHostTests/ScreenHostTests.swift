@@ -532,6 +532,54 @@ final class ScreenVideoStreamerTests: XCTestCase {
         XCTAssertEqual(capture.curtains.get(), [true, false, true])
     }
 
+    /// A screen pass's view (another Mac's) may not hide the Mac's displays:
+    /// its curtain is refused, and said so, and nothing is hidden.
+    func testARestrictedViewCantHideTheDisplays() {
+        let capture = FakeCapture(width: 320, height: 200)
+        let streamer = ScreenVideoStreamer(capture: { capture }, input: { _ in RecordingInput() }, restricted: true)
+        let (mac, phone) = MemoryPipe.pair()
+        streamer.start(stream: mac, initialBytes: ScreenVideoWire.encode(.hello(.init(width: 320, height: 320, fit: .mac, codecs: .h264)))
+                       + ScreenVideoWire.encode(.curtain(true))) {}
+        addTeardownBlock { streamer.stop() }
+        let events = Locked<[ScreenVideoClient.Event]>([])
+        let client = ScreenVideoClient(stream: phone, maxSide: 320, queue: DispatchQueue(label: "test")) { event in
+            events.set(events.get() + [event])
+        }
+        client.start()
+        func answers() -> [Bool] { events.get().compactMap { if case let .curtained(hidden) = $0 { return hidden } else { return nil } } }
+        waitUntil("refused") { answers() == [false] }
+        client.curtain(true)
+        waitUntil("refused again") { answers() == [false, false] }
+        XCTAssertEqual(capture.curtains.get(), [], "nothing was hidden")
+    }
+
+    /// A pointer image is checked for its real size before it's decoded: a few
+    /// bytes claiming a huge image are skipped, a real pointer's shape is shown.
+    func testAHugePointerImageIsNotDecoded() throws {
+        func png(_ side: Int) throws -> Data {
+            let context = try XCTUnwrap(CGContext(data: nil, width: side, height: side, bitsPerComponent: 8, bytesPerRow: 0,
+                                                  space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue))
+            let data = NSMutableData()
+            let destination = try XCTUnwrap(CGImageDestinationCreateWithData(data, "public.png" as CFString, 1, nil))
+            CGImageDestinationAddImage(destination, try XCTUnwrap(context.makeImage()), nil)
+            XCTAssertTrue(CGImageDestinationFinalize(destination))
+            return data as Data
+        }
+        let (mac, phone) = MemoryPipe.pair()
+        let events = Locked<[ScreenVideoClient.Event]>([])
+        let client = ScreenVideoClient(stream: phone, maxSide: 320, queue: DispatchQueue(label: "test")) { event in
+            events.set(events.get() + [event])
+        }
+        client.start()
+        addTeardownBlock { client.close() }
+        func shapes() -> [CGSize] { events.get().compactMap { if case let .cursorShape(_, size, _) = $0 { size } else { nil } } }
+        let huge = ScreenVideoWire.encode(.cursorShape(width: 10, height: 10, hotX: 0, hotY: 0, png: try png(2048)))
+        let real = ScreenVideoWire.encode(.cursorShape(width: 20, height: 20, hotX: 1, hotY: 1, png: try png(64)))
+        mac.send(huge + real, isComplete: false) { _ in }
+        waitUntil("the real one") { !shapes().isEmpty }
+        XCTAssertEqual(shapes(), [CGSize(width: 20, height: 20)], "the huge one was skipped")
+    }
+
     /// A phone that goes quiet (put away) with frames it hasn't acknowledged gets its curtain
     /// taken down, and is told so; the stream itself goes on.
     func testAQuietPhonesCurtainComesDown() throws {

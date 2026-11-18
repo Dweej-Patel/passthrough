@@ -99,7 +99,15 @@ public final class PassthroughService: @unchecked Sendable {
         guard running, dialer == nil, options.wireless || registry.hasIPads else { return }
         let registry = self.registry
         let wireless = options.wireless
-        let dialer = WirelessDialer(allowedPorts: [options.socksPort, options.controlPort], peerToPeer: options.peerToPeer) {
+        // The proxy takes the streams as they are: one more loopback
+        // connection for each would all share an endpoint, which costs more
+        // the more of them are open (`SOCKS5Server.accept`). The control
+        // channel is a stream or two and stays on its port.
+        let proxied: WirelessDialer.DirectServer = { [weak socks] stream in
+            if let socks { socks.accept(stream) } else { stream.cancel() }
+        }
+        let dialer = WirelessDialer(allowedPorts: [options.socksPort, options.controlPort], peerToPeer: options.peerToPeer,
+                                    direct: [options.socksPort: proxied]) {
             registry.linkCredentials().filter { wireless || $0.hotspotOnly == true }
         }
         dialer.start()

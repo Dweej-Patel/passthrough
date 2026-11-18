@@ -475,8 +475,14 @@ opened is told `not_sharing` that way, so its own shell runs that command.
 | `lock` | phone | none | Lock the Mac's screen, as the Apple menu's Lock Screen does: the Mac stays awake and everything keeps running. Allowed and answered as `setAwake` is (`macState` about a second later, with `locked`). There is no unlocking: that takes the Mac's password. An older Mac answers `bad_request`. |
 | `events` | phone | `since` | What happened on the Mac since then (Unix seconds), for the phone's timeline. A Mac that keeps no log answers `bad_request`. |
 | `eventList` | Mac | `since`, `events`, `battery` | The answer, oldest first: at most the newest 500 `MacEvent`s since `since` and no older than 7 days (`t`, `kind`, `title`, `detail`?, `session`?, `warning`?), and `BatterySample`s (`t`, `level` 0 to 1, `charging`?), one per 5 minutes at most plus one at each plug or unplug, starting with the one just before `since`. Fewer events if the line would exceed 262144 bytes (the oldest dropped). `title` and `detail` are written by the Mac, ready to show; `kind` (`awake`, `vpn`, `link`, `power`, `sleep`, `shell`, `asked`, `answered`) picks an icon, and phones show unknown kinds plainly. |
+| `screenGrant` | phone | `name`, `viewer` | Issue a screen pass for another device (below), which the Mac lists as `name`; `viewer` is that device's id as the phone knows it. Answered `screenGranted`, or `error`: `screen_not_allowed` (the phone may not see the screen itself), `not_authorized`, `bad_request` (a name that is empty, over 64 characters or more than one line) or `pass_not_saved`. |
+| `screenGranted` | Mac | `phoneID`, `key` | The pass: the viewer's id (starting `viewer.`) and its 32-byte key, base64. |
+| `screenPass` | phone | `pass` | Keep a pass to another Mac's screen: a credential as the phone keeps its own (`macID`, `macName`, `certSHA256`, `shellKey`, `phoneID`, `port`, `addresses`, `irohID`?, `irohRelay`?, `relayToken`?). Answered `screenPassSaved`, or `error` `bad_request` when it isn't usable. |
+| `screenPassSaved` | Mac | none | The Mac kept the pass. |
+| `screenRevoke` | phone | `phoneID` | Take back a pass this phone was granted (`phoneID`, the viewer's) and couldn't hand over. Answered `screenRevoked`, or `error` `bad_request` when it isn't one of this phone's passes. |
+| `screenRevoked` | Mac | none | The pass is gone. |
 | `ping` / `pong` | either | none | Liveness; each side answers `ping` with `pong`. A phone pings after 5 s without hearing from the Mac and gives the connection up after 15 s of silence and then dials again. The iPhone also gives it up 2 s after a ping it sent because the system said the connection's path failed (the cable it used unplugged, Wi-Fi lost) and nothing came back; Android closes the sockets of a network it lost by itself. |
-| `error` | Mac | `reason`, `session`?, `ref`? | `not_authorized`, `too_many_sessions` (8 at once), `no_such_session`, `bad_request`, `screen_not_allowed`, `screen_unavailable`, `screen_video_unavailable`, `too_many_screens`, `not_allowed` (the owner hasn't let this phone change Keep awake and the VPN) or `vpn_not_set_up`. `ref` when it refuses an `open`. |
+| `error` | Mac | `reason`, `session`?, `ref`? | `not_authorized`, `too_many_sessions` (8 at once), `no_such_session`, `bad_request`, `screen_not_allowed`, `screen_unavailable`, `screen_video_unavailable`, `too_many_screens`, `not_allowed` (the owner hasn't let this phone change Keep awake and the VPN), `vpn_not_set_up`, `screen_only` (a screen pass asked for something else) or `pass_not_saved`. `ref` when it refuses an `open`. |
 
 The Mac keeps 1 MiB of scrollback per session.
 
@@ -754,6 +760,42 @@ framebuffer wider or taller than 16384 or of more than 50 million pixels
 (Screen Sharing sends every display as one), a refusal reason or desktop
 name over 64 KiB, and Zlib or ZRLE data that inflates past what its
 rectangle can hold.
+
+### Screen passes
+
+A phone with shell access to two Macs can let one see the other's screen.
+It asks the Mac to be seen for a pass (`screenGrant`), which that Mac
+grants only to a phone it also lets see its screen. The Mac stores the pass
+like a phone's access, under a new id starting `viewer.` with its own key,
+screen access on and Keep awake and the VPN off, and remembers the phone
+that asked: removing that phone (or forgetting its pairing) removes its
+passes, and a pass may see the screen only while that phone may. A new
+pass for the same `viewer` replaces the old one once the viewer first
+connects with it; until then the old one keeps working, so a hand-over that
+fails leaves the viewer its working pass (8 per phone at most, the oldest
+going). Passes are kept in their own Keychain item, apart from the phones,
+so a Mac running a build from before passes never reads one as a phone. Only the Mac mints `viewer.` ids: a phone granted access
+under one is refused. The phone then builds a credential from its own for
+that Mac, updated with the `macInfo` that Mac sent on this connection
+(addresses, certificate and iroh details, including the relay token, so
+the other Mac holds that token too), with the pass's id and key, and hands
+it to the other Mac (`screenPass`), which keeps one per Mac, noting which
+phone handed it over (revoking that phone there forgets it). If the other
+Mac doesn't keep it, the phone takes the pass back (`screenRevoke`) on the
+connection it got it on.
+
+The viewer connects and proves its key exactly as a phone does, on either
+path, dialing the pass's addresses and any Bonjour result named as the
+Mac. Any `viewer.` id is screen-only, whatever else the Mac knows of it. A
+Mac sends a pass's connection only `ready`: no `macInfo`,
+`macState` or `sessions`, then or later. It accepts only `screenVideo`,
+`ping` and `pong` from it; anything else, `screen` (the tunnel to macOS
+Screen Sharing) included, is answered `error` `screen_only`. On the stream,
+a pass's view sends pointer, keys, text and the clipboard like a phone's,
+but its `curtain` is refused (answered `curtained` false) and its Use Here
+is ignored. The Mac shows a notice when a phone grants a pass. The owner sees
+each pass in the Mac's settings and can remove it like a phone. The viewing
+Mac asks for Touch ID or its password before each window it opens.
 
 ### Address policy
 

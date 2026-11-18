@@ -121,6 +121,43 @@ public final class ShellListener: @unchecked Sendable {
         set { gate.eventsProvider.set(newValue) }
     }
 
+    /// Whether a phone ID is a screen-only pass (`ScreenPass`): it may ask for
+    /// the screen and nothing else. Asked on the listener's queue once per
+    /// connection, so it must not block. Unset: none is.
+    public var screenOnly: (@Sendable (String) -> Bool)? {
+        get { gate.screenOnlyCheck.get() }
+        set { gate.screenOnlyCheck.set(newValue) }
+    }
+
+    /// A phone asking for a screen-only pass for another device it calls
+    /// `name` and knows as `viewer`: the new pass's id and key, or why not.
+    /// Run off the listener's queue (it writes the Keychain). Unset: `bad_request`.
+    public var onScreenGrant: (@Sendable (_ phoneID: String, _ label: String, _ name: String, _ viewer: String) -> Result<(id: String, key: Data), ShellError>)? {
+        get { gate.screenGrant.get() }
+        set { gate.screenGrant.set(newValue) }
+    }
+
+    /// A phone handing this Mac a pass to view another Mac's screen: whether
+    /// it was kept. Run off the listener's queue. Unset: `bad_request`.
+    public var onScreenPass: (@Sendable (_ phoneID: String, _ label: String, _ pass: ShellCredential) -> Bool)? {
+        get { gate.screenPass.get() }
+        set { gate.screenPass.set(newValue) }
+    }
+
+    /// A phone taking back a screen pass it was granted (`viewerID`) and
+    /// couldn't hand over: whether it was removed. Run off the listener's queue.
+    public var onScreenRevoke: (@Sendable (_ phoneID: String, _ viewerID: String) -> Bool)? {
+        get { gate.screenRevoke.get() }
+        set { gate.screenRevoke.set(newValue) }
+    }
+
+    /// A screen pass proved its key and connected (so its viewer has it).
+    /// Called off the listener's queue.
+    public var onScreenPassUsed: (@Sendable (_ viewerID: String) -> Void)? {
+        get { gate.screenPassUsed.get() }
+        set { gate.screenPassUsed.set(newValue) }
+    }
+
     /// Sends every connected phone the Mac's state again (it changed).
     public func pushMacState() { gate.pushMacState() }
 
@@ -374,6 +411,11 @@ final class ShellGate: @unchecked Sendable {
     let macControl = Locked<(@Sendable (_ phoneID: String, _ label: String, _ change: MacControl) -> ShellError?)?>(nil)
     let pushRegistration = Locked<(@Sendable (_ phoneID: String, _ registration: PushRegistration?) -> Bool)?>(nil)
     let eventsProvider = Locked<(@Sendable (_ phoneID: String, _ since: Double) -> (events: [MacEvent], battery: [BatterySample]))?>(nil)
+    let screenOnlyCheck = Locked<(@Sendable (String) -> Bool)?>(nil)
+    let screenGrant = Locked<(@Sendable (_ phoneID: String, _ label: String, _ name: String, _ viewer: String) -> Result<(id: String, key: Data), ShellError>)?>(nil)
+    let screenPass = Locked<(@Sendable (_ phoneID: String, _ label: String, _ pass: ShellCredential) -> Bool)?>(nil)
+    let screenRevoke = Locked<(@Sendable (_ phoneID: String, _ viewerID: String) -> Bool)?>(nil)
+    let screenPassUsed = Locked<(@Sendable (_ viewerID: String) -> Void)?>(nil)
     private let shellKeys: @Sendable (String) -> [Data]
     private let keyConfirmed: @Sendable (_ phoneID: String, _ key: Data) -> Void
     private let phoneLabel: @Sendable (String) -> String
@@ -542,11 +584,15 @@ final class ShellGate: @unchecked Sendable {
 
     private func authorized(_ stream: any ByteStream, phoneID: String, rest: Data) {
         let label = phoneLabel(phoneID)
-        let connection = ShellConnection(gate: self, stream: stream, phoneID: phoneID, label: label)
+        // Fails closed: a pass's id is screen-only whatever the hook says (or if it is unset).
+        let screenOnly = ScreenPass.isViewerID(phoneID) || (screenOnlyCheck.get()?(phoneID) ?? false)
+        let connection = ShellConnection(gate: self, stream: stream, phoneID: phoneID, label: label, screenOnly: screenOnly)
         let key = ObjectIdentifier(connection)
         connections[key] = connection
         connection.onClose = { [weak self] in self?.connections[key] = nil }
-        ptLog(.info, "shell: a phone connected")
+        ptLog(.info, screenOnly ? "shell: a screen pass connected" : "shell: a phone connected")
+        // Told off this queue: it may write the Keychain.
+        if screenOnly, let used = screenPassUsed.get() { DispatchQueue.global(qos: .utility).async { used(phoneID) } }
         connection.start(initialBytes: rest, macInfo: macInfo())
     }
 
@@ -641,6 +687,8 @@ final class ShellConnection: ShellAttachment, @unchecked Sendable {
     private let queue: DispatchQueue
     let phoneID: String
     private let label: String
+    /// A screen pass (`ScreenPass`): only the screen, and nothing about the Mac before it.
+    private let screenOnly: Bool
     private var lines = LineBuffer(limit: RemoteShell.lineLimit)
     private var attached: String?
     /// What the manager returned for the attach to `attached`.
@@ -670,8 +718,9 @@ final class ShellConnection: ShellAttachment, @unchecked Sendable {
     private var screenView: ScreenViewLimit?
     var onClose: (() -> Void)?
 
-    init(gate: ShellGate, stream: any ByteStream, phoneID: String, label: String) {
+    init(gate: ShellGate, stream: any ByteStream, phoneID: String, label: String, screenOnly: Bool = false) {
         self.phoneID = phoneID
+        self.screenOnly = screenOnly
         self.gate = gate
         self.manager = gate.manager
         self.transcripts = gate.transcripts
@@ -684,11 +733,13 @@ final class ShellConnection: ShellAttachment, @unchecked Sendable {
     func start(initialBytes: Data, macInfo: ShellEnvelope? = nil) {
         stream.onTerminated = { [weak self] _ in self?.queue.async { self?.close() } }
         send(ShellEnvelope(t: ShellEnvelope.ready))
-        if let macInfo { send(macInfo) }
-        sendMacState()
-        var list = ShellEnvelope(t: ShellEnvelope.sessions)
-        list.sessions = manager.sessions
-        send(list)
+        if !screenOnly {
+            if let macInfo { send(macInfo) }
+            sendMacState()
+            var list = ShellEnvelope(t: ShellEnvelope.sessions)
+            list.sessions = manager.sessions
+            send(list)
+        }
         received(initialBytes)
         if busy { readPaused = true } else { receive() }
     }
@@ -708,7 +759,7 @@ final class ShellConnection: ShellAttachment, @unchecked Sendable {
 
     /// On the queue: the session list, unasked.
     func sendSessions(_ list: [ShellSessionInfo]) {
-        guard !closed, !isScreen else { return }
+        guard !closed, !isScreen, !screenOnly else { return }
         var message = ShellEnvelope(t: ShellEnvelope.sessions)
         message.sessions = list
         send(message)
@@ -716,7 +767,7 @@ final class ShellConnection: ShellAttachment, @unchecked Sendable {
 
     /// On the queue: the Mac's state as this phone may see it, if there is any.
     func sendMacState() {
-        guard !closed, !isScreen, let message = gate?.macStateMessage(for: phoneID) else { return }
+        guard !closed, !isScreen, !screenOnly, let message = gate?.macStateMessage(for: phoneID) else { return }
         send(message)
     }
 
@@ -805,6 +856,11 @@ final class ShellConnection: ShellAttachment, @unchecked Sendable {
 
     private func handle(_ line: Data) {
         guard let message = try? ShellEnvelope.decode(line) else { return fail(.badRequest) }
+        // Only the Mac's own stream: not the tunnel to macOS Screen Sharing,
+        // whose login would let a pass try the Mac's account password.
+        if screenOnly, ![ShellEnvelope.screenVideo, ShellEnvelope.ping, ShellEnvelope.pong].contains(message.t) {
+            return fail(.screenOnly, session: message.session, ref: message.ref)
+        }
         switch message.t {
         case ShellEnvelope.events:
             guard let since = message.since, since.isFinite, let provider = gate?.eventsProvider.get() else { return fail(.badRequest) }
@@ -877,12 +933,80 @@ final class ShellConnection: ShellAttachment, @unchecked Sendable {
                 return fail(.screenVideoUnavailable)
             }
             streamScreen(source)
+        case ShellEnvelope.screenGrant:
+            guard let name = message.name, let viewer = message.viewer else { return fail(.badRequest) }
+            grantScreen(name: name, viewer: viewer)
+        case ShellEnvelope.screenPass:
+            guard let pass = message.pass, ScreenPass.isUsable(pass) else { return fail(.badRequest) }
+            keepScreenPass(pass)
+        case ShellEnvelope.screenRevoke:
+            guard let viewer = message.phoneID, ScreenPass.isViewerID(viewer) else { return fail(.badRequest) }
+            revokeScreenPass(viewer)
         case ShellEnvelope.ping:
             send(ShellEnvelope(t: ShellEnvelope.pong))
         case ShellEnvelope.pong:
             break
         default:
             fail(.badRequest)
+        }
+    }
+
+    /// Issues a screen pass on the work queue (it writes the Keychain), then answers.
+    private func grantScreen(name: String, viewer: String) {
+        guard let gate, let handler = gate.screenGrant.get() else { return fail(.badRequest) }
+        busy = true
+        let phoneID = self.phoneID, label = self.label, queue = self.queue
+        let revoke = gate.screenRevoke.get(), work = gate.work
+        gate.work.async { [weak self] in
+            let result = handler(phoneID, label, name, viewer)
+            queue.async {
+                // The phone left before it could hear of the pass: nobody can hand it over, so take it back.
+                guard let self, !self.closed else {
+                    if case let .success(granted) = result, let revoke { work.async { _ = revoke(phoneID, granted.id) } }
+                    return
+                }
+                switch result {
+                case let .success(granted):
+                    var reply = ShellEnvelope(t: ShellEnvelope.screenGranted)
+                    reply.phoneID = granted.id
+                    reply.key = granted.key.base64EncodedString()
+                    self.send(reply)
+                    self.gate?.event("\(label) let \(name) see the screen")
+                case let .failure(error):
+                    self.fail(error)
+                }
+                self.resume()
+            }
+        }
+    }
+
+    /// Takes back a pass this phone granted, on the work queue, then answers.
+    private func revokeScreenPass(_ viewer: String) {
+        guard let gate, let handler = gate.screenRevoke.get() else { return fail(.badRequest) }
+        busy = true
+        let phoneID = self.phoneID, queue = self.queue
+        gate.work.async { [weak self] in
+            let removed = handler(phoneID, viewer)
+            queue.async {
+                guard let self else { return }
+                if removed { self.send(ShellEnvelope(t: ShellEnvelope.screenRevoked)) } else { self.fail(.badRequest) }
+                self.resume()
+            }
+        }
+    }
+
+    /// Keeps a pass to another Mac's screen on the work queue, then answers.
+    private func keepScreenPass(_ pass: ShellCredential) {
+        guard let gate, let handler = gate.screenPass.get() else { return fail(.badRequest) }
+        busy = true
+        let phoneID = self.phoneID, label = self.label, queue = self.queue
+        gate.work.async { [weak self] in
+            let kept = handler(phoneID, label, pass)
+            queue.async {
+                guard let self else { return }
+                if kept { self.send(ShellEnvelope(t: ShellEnvelope.screenPassSaved)) } else { self.fail(.passNotSaved) }
+                self.resume()
+            }
         }
     }
 

@@ -137,6 +137,12 @@ public final class ShellClient: @unchecked Sendable {
         /// and sends nothing more (not even `disconnected`); over iroh the
         /// stream lasts until the dialer passed to `init` is shut down.
         case screen(any ByteStream, initialBytes: Data)
+        /// The answer to `grantScreen`: the viewer's id and key on this Mac.
+        case screenGranted(viewerID: String, key: Data)
+        /// The answer to `giveScreenPass`: this Mac kept the pass.
+        case screenPassSaved
+        /// The answer to `revokeScreen`: the pass is gone.
+        case screenRevoked
     }
 
     public enum ConnectError: Error, Sendable {
@@ -425,6 +431,34 @@ public final class ShellClient: @unchecked Sendable {
             screenRequested = true
             enqueue(ShellEnvelope(t: video ? ShellEnvelope.screenVideo : ShellEnvelope.screen))
         }
+    }
+
+    /// Asks the Mac for a screen-only pass for another device, which it will
+    /// list as `name`; `viewer` is that device's id as this phone knows it
+    /// (granting it again replaces its pass). `.screenGranted` answers, or
+    /// `.failed` (`.screenNotAllowed` when this phone may not see the screen
+    /// itself, `.badRequest` from an older Mac).
+    public func grantScreen(name: String, viewer: String) {
+        var m = ShellEnvelope(t: ShellEnvelope.screenGrant)
+        m.name = name
+        m.viewer = viewer
+        command(m)
+    }
+
+    /// Takes back a pass `grantScreen` got (`viewerID`) that couldn't be
+    /// handed over; `.screenRevoked` answers, or `.failed`.
+    public func revokeScreen(_ viewerID: String) {
+        var m = ShellEnvelope(t: ShellEnvelope.screenRevoke)
+        m.phoneID = viewerID
+        command(m)
+    }
+
+    /// Hands the Mac a pass to view another Mac's screen; `.screenPassSaved`
+    /// answers, or `.failed` (`.badRequest` from an older Mac).
+    public func giveScreenPass(_ pass: ShellCredential) {
+        var m = ShellEnvelope(t: ShellEnvelope.screenPass)
+        m.pass = pass
+        command(m)
     }
 
     public func requestTranscript(_ session: String) {
@@ -727,6 +761,18 @@ public final class ShellClient: @unchecked Sendable {
             } else {
                 emit(.failed(reason, session: message.session))
             }
+        case ShellEnvelope.screenGranted:
+            guard let viewerID = message.phoneID, ScreenPass.isViewerID(viewerID),
+                  let key = message.key.flatMap({ Data(base64Encoded: $0) }), key.count == 32 else {
+                // A pass that can't be handed over: the Mac takes back the one it made, if it named it.
+                if let viewerID = message.phoneID, ScreenPass.isViewerID(viewerID) { revokeScreen(viewerID) }
+                return emit(.failed(.badRequest, session: nil))
+            }
+            emit(.screenGranted(viewerID: viewerID, key: key))
+        case ShellEnvelope.screenPassSaved:
+            emit(.screenPassSaved)
+        case ShellEnvelope.screenRevoked:
+            emit(.screenRevoked)
         case ShellEnvelope.ping:
             send(ShellEnvelope(t: ShellEnvelope.pong))
         case ShellEnvelope.screenReady where screenRequested, ShellEnvelope.screenVideoReady where screenRequested:
