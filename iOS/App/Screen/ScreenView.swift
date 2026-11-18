@@ -27,7 +27,8 @@ struct ScreenView: View, Equatable {
     @AppStorage("screenTouchMode") private var modeSetting = ScreenTouchMode.trackpad.rawValue
     @State private var keyboard = false
     /// iPad: the floating bar is put away at the side (it covers the Mac's menu bar), remembered.
-    @AppStorage("screenBarAside") private var barAside = false
+    /// View state, saved by hand: a change to a stored setting doesn't animate.
+    @State private var barAside = UserDefaults.standard.bool(forKey: "screenBarAside")
     /// The bar's own width, for how far it slides.
     @State private var barWidth: CGFloat = 0
 
@@ -95,6 +96,7 @@ struct ScreenView: View, Equatable {
     private var aside: Bool { barAside && model.phase == .live }
 
     private func setAside(_ on: Bool) {
+        UserDefaults.standard.set(on, forKey: "screenBarAside")
         withAnimation(Self.barSpring) { barAside = on }
     }
 
@@ -107,6 +109,7 @@ struct ScreenView: View, Equatable {
             padBar
                 .frame(maxWidth: .infinity)
                 .offset(x: aside ? (proxy.size.width + barWidth) / 2 - Self.barStub : 0, y: aside ? 52 : 8)
+                .animation(Self.barSpring, value: aside)
                 .gesture(DragGesture(minimumDistance: 24).onEnded { drag in
                     guard model.phase == .live, abs(drag.translation.width) > abs(drag.translation.height) * 1.5 else { return }
                     if drag.translation.width > 50, !barAside { setAside(true) }
