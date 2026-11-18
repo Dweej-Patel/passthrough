@@ -188,9 +188,12 @@ public final class SOCKS5Server: @unchecked Sendable {
         /// connections whenever another one starts (see `accept`), so these
         /// must not each sit out `udpIdleTimeout`: a peer there ends as soon
         /// as everything it was asked has been answered. A later question on
-        /// the same flow gets a new peer.
+        /// the same flow gets a new peer. Only flows that really are DNS are
+        /// treated so (`UDPQueryFlow`): anything else on the port, a VPN
+        /// say, keeps its peer like a flow to any other port.
         public var udpQueryPorts: Set<UInt16> = [DNSRedirect.port]
-        /// How long such a peer waits for an answer before it is dropped.
+        /// How long such a peer waits, after the last question, for the
+        /// answers still missing before it is dropped.
         public var udpQueryTimeout: TimeInterval = 10
         public var maxUDPPeersPerSession = 512
         /// How long a new connection may sit "waiting" for a viable path (tower
@@ -499,6 +502,8 @@ private final class Session: @unchecked Sendable {
     private var halfClosures = 0
     /// The destination has sent everything and that end was passed to the Mac.
     private var downloadEnded = false
+    /// The Mac has sent everything and that end was passed to the destination.
+    private var uploadEnded = false
     private var user: String = ""
     /// Last destination this session talked to, for log lines.
     private var remoteLabel = "remote"
@@ -719,8 +724,10 @@ private final class Session: @unchecked Sendable {
                     // A connection reports "failed" as soon as both directions
                     // have ended, while bytes it already received may still be
                     // waiting to be read: closing now would lose the end of a
-                    // reply. The read finds the end, or the error, by itself.
-                    if self.downloadEnded { self.close(reason: "remote failed") }
+                    // reply. Only then is it left to the read, which finds the
+                    // end, or the error, by itself. Any other failure ends the
+                    // session now: the read may be waiting behind a slow Mac.
+                    if self.downloadEnded || !self.uploadEnded { self.close(reason: "remote failed") }
                     return
                 }
                 fail(error)
@@ -747,6 +754,7 @@ private final class Session: @unchecked Sendable {
                     return
                 }
                 let finish = { [self] in
+                    self.uploadEnded = true
                     remote.send(content: nil, contentContext: .finalMessage, isComplete: true, completion: .idempotent)
                     self.halfClosed()
                 }
@@ -882,7 +890,7 @@ private final class Session: @unchecked Sendable {
         remoteLabel = "\(address)"
         let redirected = server.configuration.refuseLocalDestinations && DNSRedirect.applies(to: address)
         let peer = UDPPeer(address: address, target: redirected ? server.dnsRedirectTarget(for: address) : nil,
-                           endsWhenAnswered: server.configuration.udpQueryPorts.contains(address.port.rawValue),
+                           queryTimeout: server.configuration.udpQueryPorts.contains(address.port.rawValue) ? server.configuration.udpQueryTimeout : nil,
                            refuseLocal: server.configuration.refuseLocalDestinations,
                            parameters: server.remoteParameters(tcp: false), queue: queue,
                            waitTimeout: TimeInterval(server.configuration.connectTimeout)) { [weak self] datagram in
@@ -921,10 +929,9 @@ private final class Session: @unchecked Sendable {
 
     private func pruneIdlePeers() {
         udpPeers.values.forEach { $0.report(interval: Self.udpCheckInterval, queuedToMac: udpBacklog) }
-        let now = Date()
-        let cutoff = now.addingTimeInterval(-server.configuration.udpIdleTimeout)
-        let queryCutoff = now.addingTimeInterval(-server.configuration.udpQueryTimeout)
-        for (key, peer) in udpPeers where peer.isIdle(since: peer.endsWhenAnswered ? queryCutoff : cutoff) {
+        // Query peers end by themselves (`UDPPeer.queryTimeout`).
+        let cutoff = Date().addingTimeInterval(-server.configuration.udpIdleTimeout)
+        for (key, peer) in udpPeers where peer.isIdle(since: cutoff) {
             peer.cancel()
             udpPeers[key] = nil
         }
@@ -978,6 +985,48 @@ struct UDPPeerActivity {
     func isIdle(since cutoff: Date) -> Bool { last < cutoff }
 }
 
+/// Whether a flow to a query port (`Configuration.udpQueryPorts`) really is
+/// questions and answers, and which questions are still open. Port 53 also
+/// carries things that are not DNS (a VPN set to it to get through a strict
+/// network), and those send without being asked: ending their peer on the
+/// first reply would lose everything that followed. A flow counts as queries
+/// only while every datagram from the Mac is a DNS question and every one
+/// coming back answers a question still open; after anything else it is an
+/// ordinary flow for good.
+struct UDPQueryFlow {
+    private var open: Set<UInt16> = []
+    private(set) var isQuery = true
+
+    /// A datagram from the Mac.
+    mutating func fromMac(_ datagram: Data) {
+        guard isQuery else { return }
+        guard let id = Self.id(of: datagram, response: false) else { isQuery = false; open = []; return }
+        open.insert(id)
+    }
+
+    /// A datagram from the far end: true when it answered the last open question.
+    mutating func fromServer(_ datagram: Data) -> Bool {
+        guard isQuery else { return false }
+        guard let id = Self.id(of: datagram, response: true), open.remove(id) != nil else { isQuery = false; open = []; return false }
+        return open.isEmpty
+    }
+
+    /// The message ID if `datagram` has the header of a DNS question (one
+    /// standard question and no answers) or of a response.
+    private static func id(of datagram: Data, response: Bool) -> UInt16? {
+        guard datagram.count >= 12 else { return nil }
+        let b = [UInt8](datagram.prefix(12))
+        func word(_ i: Int) -> UInt16 { UInt16(b[i]) << 8 | UInt16(b[i + 1]) }
+        guard (b[2] & 0x80 != 0) == response else { return nil }
+        if !response {
+            // Opcode 0, the reserved bit clear, one question, nothing else
+            // but additional records (EDNS).
+            guard b[2] & 0x78 == 0, b[3] & 0x40 == 0, word(4) == 1, word(6) == 0, word(8) == 0 else { return nil }
+        }
+        return word(0)
+    }
+}
+
 /// One outbound UDP "socket" for a given destination inside a forwarding session.
 private final class UDPPeer: @unchecked Sendable {
     private let connection: NWConnection
@@ -1010,17 +1059,18 @@ private final class UDPPeer: @unchecked Sendable {
     /// otherwise hard to place.
     private let verbose: Bool
     private let label: String
-    /// A question-and-answer flow (`Configuration.udpQueryPorts`): the peer
-    /// ends once it has relayed an answer for every datagram it sent.
-    let endsWhenAnswered: Bool
-    private var asked = 0
-    private var answered = 0
+    /// Set for a flow to a query port (`Configuration.udpQueryPorts`): while
+    /// it is DNS (`UDPQueryFlow`) the peer ends once every question has been
+    /// answered, or this long after the last question.
+    private let queryTimeout: TimeInterval?
+    private var queryFlow = UDPQueryFlow()
+    private var queryTimer: DispatchSourceTimer?
 
     /// Datagrams go to `target` when given (a redirected DNS query), else to
     /// `address`, which `refuseLocal` refuses when it turns out to be private.
-    init(address: SOCKS5.Address, target: NWEndpoint?, endsWhenAnswered: Bool = false, refuseLocal: Bool, parameters: NWParameters, queue: DispatchQueue, waitTimeout: TimeInterval, onDatagram: @escaping (Data) -> Void) {
+    init(address: SOCKS5.Address, target: NWEndpoint?, queryTimeout: TimeInterval? = nil, refuseLocal: Bool, parameters: NWParameters, queue: DispatchQueue, waitTimeout: TimeInterval, onDatagram: @escaping (Data) -> Void) {
         self.onDatagram = onDatagram
-        self.endsWhenAnswered = endsWhenAnswered
+        self.queryTimeout = queryTimeout
         self.label = "\(address)"
         self.verbose = address.port.rawValue != 443 && address.port.rawValue != 53
         self.queue = queue
@@ -1075,6 +1125,7 @@ private final class UDPPeer: @unchecked Sendable {
         guard !dead else { return }
         dead = true
         waitTimer?.cancel(); waitTimer = nil
+        queryTimer?.cancel(); queryTimer = nil
         pending = []
         if let why { ptLog(.debug, "UDP to \(ptPrivate(label)) reset: \(why)") }
         connection.cancel()
@@ -1083,13 +1134,37 @@ private final class UDPPeer: @unchecked Sendable {
 
     func send(_ datagram: Data) {
         guard activity.fromMac(), !dead else { return }
+        if queryTimeout != nil {
+            queryFlow.fromMac(datagram)
+            armQueryTimer()
+        }
         guard ready else {
             if pending.count < 64 { pending.append(datagram) }
             return
         }
         sentSinceCheck += 1
-        asked += 1
         connection.send(content: datagram, completion: .idempotent)
+    }
+
+    /// Starts the wait for answers again, or ends it when the flow turned
+    /// out not to be DNS.
+    private func armQueryTimer() {
+        guard let queryTimeout, queryFlow.isQuery else {
+            queryTimer?.cancel(); queryTimer = nil
+            return
+        }
+        if let queryTimer {
+            queryTimer.schedule(deadline: .now() + queryTimeout)
+            return
+        }
+        let timer = DispatchSource.makeTimerSource(queue: queue)
+        timer.schedule(deadline: .now() + queryTimeout)
+        timer.setEventHandler { [weak self] in
+            guard let self, self.queryFlow.isQuery else { return }
+            self.markDead(nil)
+        }
+        timer.resume()
+        queryTimer = timer
     }
 
     /// Logs a long-lived flow whose last interval looks wrong, with its
@@ -1123,12 +1198,14 @@ private final class UDPPeer: @unchecked Sendable {
                 self.activity.fromServer()
                 self.receivedSinceCheck += 1
                 self.onDatagram(data)
-                self.answered += 1
-                if self.endsWhenAnswered, self.answered >= self.asked {
-                    // Everything asked has been answered: give the socket up
-                    // now rather than when the flow has idled out.
-                    self.markDead(nil)
-                    return
+                if self.queryTimeout != nil {
+                    if self.queryFlow.fromServer(data) {
+                        // Everything asked has been answered: give the socket
+                        // up now rather than when the flow has idled out.
+                        self.markDead(nil)
+                        return
+                    }
+                    if !self.queryFlow.isQuery { self.armQueryTimer() }
                 }
             }
             self.receiveLoop()
@@ -1137,6 +1214,7 @@ private final class UDPPeer: @unchecked Sendable {
 
     func cancel() {
         waitTimer?.cancel(); waitTimer = nil
+        queryTimer?.cancel(); queryTimer = nil
         dead = true
         connection.cancel()
     }

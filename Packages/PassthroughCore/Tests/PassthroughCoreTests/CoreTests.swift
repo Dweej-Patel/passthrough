@@ -6,6 +6,54 @@ import Network
 /// A UDP peer refused for resolving to a private address goes idle however
 /// long the Mac keeps sending, so the sweep drops it and the next datagram
 /// gets a fresh peer that resolves the name again.
+final class UDPQueryFlowTests: XCTestCase {
+    private func question(_ id: UInt16, additional: UInt8 = 0) -> Data {
+        Data([UInt8(id >> 8), UInt8(id & 0xFF), 1, 0, 0, 1, 0, 0, 0, 0, 0, additional]) + Data("name".utf8)
+    }
+    private func answer(_ id: UInt16) -> Data {
+        Data([UInt8(id >> 8), UInt8(id & 0xFF), 0x81, 0x80, 0, 1, 0, 1, 0, 0, 0, 0]) + Data("name+address".utf8)
+    }
+
+    func testEndsWhenEveryQuestionIsAnswered() {
+        var flow = UDPQueryFlow()
+        flow.fromMac(question(7))
+        flow.fromMac(question(8, additional: 1))   // with EDNS
+        flow.fromMac(question(7))                  // asked again
+        XCTAssertFalse(flow.fromServer(answer(8)))
+        XCTAssertTrue(flow.fromServer(answer(7)))
+        XCTAssertTrue(flow.isQuery)
+    }
+
+    func testAnythingButDNSMakesItAnOrdinaryFlowForGood() {
+        // A WireGuard handshake: type 1, three zero bytes, then random bytes.
+        var vpn = UDPQueryFlow()
+        vpn.fromMac(Data([1, 0, 0, 0, 0x12, 0x34, 0x56, 0x78] + [UInt8](repeating: 0xAB, count: 140)))
+        XCTAssertFalse(vpn.isQuery)
+        XCTAssertFalse(vpn.fromServer(answer(0x0100)))
+        vpn.fromMac(question(1))
+        XCTAssertFalse(vpn.fromServer(answer(1)))
+
+        var short = UDPQueryFlow()
+        short.fromMac(Data("ping".utf8))
+        XCTAssertFalse(short.isQuery)
+
+        // A reply that answers nothing that was asked, or is not a response.
+        var unasked = UDPQueryFlow()
+        unasked.fromMac(question(1))
+        XCTAssertFalse(unasked.fromServer(answer(2)))
+        XCTAssertFalse(unasked.isQuery)
+        var echoed = UDPQueryFlow()
+        echoed.fromMac(question(1))
+        XCTAssertFalse(echoed.fromServer(question(1)))
+        XCTAssertFalse(echoed.isQuery)
+
+        // A response sent as if it were a question.
+        var backwards = UDPQueryFlow()
+        backwards.fromMac(answer(1))
+        XCTAssertFalse(backwards.isQuery)
+    }
+}
+
 final class UDPPeerActivityTests: XCTestCase {
     func testARefusedPeerIdlesOutWhileTheMacKeepsSending() {
         let start = Date(timeIntervalSince1970: 1000)
@@ -129,7 +177,8 @@ final class UDPEchoServer {
     let port: UInt16
     /// How many sockets have sent it something: each is one of the proxy's peers.
     let flows = Locked(0)
-    init() throws {
+    /// `reply` makes the answer to a datagram; nil sends none.
+    init(reply: @escaping @Sendable (Data) -> Data? = { Data("echo:".utf8) + $0 }) throws {
         port = freePort()
         listener = try NWListener(using: .udp, on: NWEndpoint.Port(rawValue: port)!)
         let flows = self.flows
@@ -138,7 +187,7 @@ final class UDPEchoServer {
             c.start(queue: .global())
             func loop() {
                 c.receiveMessage { data, _, _, _ in
-                    if let data { c.send(content: Data("echo:".utf8) + data, completion: .idempotent) }
+                    if let data, let answer = reply(data) { c.send(content: answer, completion: .idempotent) }
                     loop()
                 }
             }
@@ -306,14 +355,36 @@ final class SOCKS5ServerTests: XCTestCase {
         waitForNoSessions()
     }
 
-    /// Sends "ping" to `udp` on a UDP session and reads the echo.
-    private func ask(_ client: StreamClient, _ udp: UDPEchoServer, file: StaticString = #filePath, line: UInt = #line) {
+    /// Sends `payload` ("ping" by default) to `udp` on a UDP session and
+    /// reads the answer (the echo by default).
+    private func ask(_ client: StreamClient, _ udp: UDPEchoServer, _ payload: Data = Data("ping".utf8), expecting: Data? = nil,
+                     file: StaticString = #filePath, line: UInt = #line) {
         let address = SOCKS5.Address.ipv4([127, 0, 0, 1], port: udp.port)
-        client.send(SOCKS5.frameDatagram(address: address, payload: Data("ping".utf8)))
+        client.send(SOCKS5.frameDatagram(address: address, payload: payload))
         let head = client.read(3)
         guard head.count == 3 else { return XCTFail("no reply", file: file, line: line) }
         XCTAssertEqual(client.read(address.count), address, file: file, line: line)
-        XCTAssertEqual(client.read(Int(head[0]) << 8 | Int(head[1])), Data("echo:ping".utf8), file: file, line: line)
+        XCTAssertEqual(client.read(Int(head[0]) << 8 | Int(head[1])), expecting ?? Data("echo:".utf8) + payload, file: file, line: line)
+    }
+
+    /// The header of a DNS question with this ID, and the response to it.
+    private static func dnsQuestion(_ id: UInt16) -> Data { Data([UInt8(id >> 8), UInt8(id & 0xFF), 1, 0, 0, 1, 0, 0, 0, 0, 0, 0]) + Data("name".utf8) }
+    private static func dnsAnswer(to question: Data) -> Data {
+        var answer = question
+        answer[answer.startIndex + 2] |= 0x80
+        return answer
+    }
+
+    /// A proxy whose question-and-answer ports are `ports`.
+    private func restart(queryPorts ports: Set<UInt16>, queryTimeout: TimeInterval = 10) throws {
+        server.stop()
+        var config = SOCKS5Server.Configuration()
+        config.refuseLocalDestinations = false
+        config.port = port
+        config.udpQueryPorts = ports
+        config.udpQueryTimeout = queryTimeout
+        server = SOCKS5Server(configuration: config) { user, pass in user == "mac" && pass == "secret" }
+        try server.start()
     }
 
     private func udpSession() -> StreamClient {
@@ -329,20 +400,54 @@ final class SOCKS5ServerTests: XCTestCase {
     /// A DNS-like flow gives its socket up once answered, and the flow's next
     /// question gets a fresh one; any other flow keeps its socket.
     func testAnsweredQueryPeerEndsAndTheNextQuestionGetsANewOne() throws {
-        server.stop()
-        let queries = try UDPEchoServer(), other = try UDPEchoServer()
-        var config = SOCKS5Server.Configuration()
-        config.refuseLocalDestinations = false
-        config.port = port
-        config.udpQueryPorts = [queries.port]
-        server = SOCKS5Server(configuration: config) { user, pass in user == "mac" && pass == "secret" }
-        try server.start()
+        let queries = try UDPEchoServer(reply: { Self.dnsAnswer(to: $0) }), other = try UDPEchoServer()
+        try restart(queryPorts: [queries.port])
 
         let client = udpSession()
-        for _ in 0..<3 { ask(client, queries) }
+        for id in UInt16(1)...3 {
+            let question = Self.dnsQuestion(id)
+            ask(client, queries, question, expecting: Self.dnsAnswer(to: question))
+        }
         XCTAssertEqual(queries.flows.get(), 3)
         for _ in 0..<3 { ask(client, other) }
         XCTAssertEqual(other.flows.get(), 1)
+        client.stream.cancel()
+        waitForNoSessions()
+    }
+
+    /// Something on a query port that is not DNS (a VPN on port 53) keeps its
+    /// socket: ending it on the first reply would lose what the far end sends
+    /// next, and change the port it sees with every datagram.
+    func testAFlowOnAQueryPortThatIsNotDNSKeepsItsPeer() throws {
+        let vpn = try UDPEchoServer()
+        try restart(queryPorts: [vpn.port])
+        let client = udpSession()
+        for _ in 0..<3 { ask(client, vpn) }
+        // A question whose "answer" is not one is no query flow either.
+        for id in UInt16(1)...2 { ask(client, vpn, Self.dnsQuestion(id)) }
+        XCTAssertEqual(vpn.flows.get(), 1)
+        client.stream.cancel()
+        waitForNoSessions()
+    }
+
+    /// A question nobody answers gives its socket up after the query timeout,
+    /// not the idle timeout: the next one gets a new socket.
+    func testUnansweredQueryPeerEndsAfterTheQueryTimeout() throws {
+        let silent = try UDPEchoServer(reply: { _ in nil })
+        try restart(queryPorts: [silent.port], queryTimeout: 0.3)
+        let client = udpSession()
+        let address = SOCKS5.Address.ipv4([127, 0, 0, 1], port: silent.port)
+        // Asked again within the timeout: still the same socket.
+        client.send(SOCKS5.frameDatagram(address: address, payload: Self.dnsQuestion(1)))
+        usleep(100_000)
+        client.send(SOCKS5.frameDatagram(address: address, payload: Self.dnsQuestion(1)))
+        usleep(100_000)
+        XCTAssertEqual(silent.flows.get(), 1)
+        usleep(600_000)
+        client.send(SOCKS5.frameDatagram(address: address, payload: Self.dnsQuestion(2)))
+        let deadline = Date().addingTimeInterval(5)
+        while silent.flows.get() < 2, Date() < deadline { usleep(10_000) }
+        XCTAssertEqual(silent.flows.get(), 2)
         client.stream.cancel()
         waitForNoSessions()
     }
