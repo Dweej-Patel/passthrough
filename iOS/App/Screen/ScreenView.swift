@@ -302,8 +302,7 @@ struct ScreenView: View, Equatable {
 
     /// Mission Control: the same as the canvas's three-finger swipes.
     private var desktopsMenu: some View {
-        ScreenDesktopsMenu(model: model, shell: shell, macName: model.macName, canLock: canLock, canHideMac: model.canHideMac,
-                           macHidden: model.macHidden, pad: pad, landscape: landscape).equatable()
+        ScreenDesktopsMenu(model: model, shell: shell, macName: model.macName, canLock: canLock, pad: pad, landscape: landscape).equatable()
     }
 
     /// How the Mac's screen is shown here: its shape, text size, picture and gestures, and
@@ -312,7 +311,8 @@ struct ScreenView: View, Equatable {
     private var displayMenu: some View {
         ScreenDisplayMenu(model: model, macName: model.macName, canHideMac: model.canHideMac, path: model.connectionPath,
                           fitsDevice: model.fitsDevice, space: model.space, quality: model.quality,
-                          pinchesMac: model.pinchesMacOnItsDisplay, playsSound: model.playsSound, pad: pad, landscape: landscape).equatable()
+                          pinchesMac: model.pinchesMacOnItsDisplay, playsSound: model.playsSound, macHidden: model.macHidden,
+                          pad: pad, landscape: landscape).equatable()
     }
 
     static func describe(_ path: ShellPath) -> (text: String, symbol: String)? {
@@ -457,13 +457,10 @@ struct ScreenDesktopsMenu: View, Equatable {
     let shell: ShellModel
     let macName: String
     let canLock: Bool
-    let canHideMac: Bool
-    let macHidden: Bool
     let pad: Bool
     let landscape: Bool
     nonisolated static func == (a: Self, b: Self) -> Bool {
-        a.macName == b.macName && a.canLock == b.canLock && a.canHideMac == b.canHideMac && a.macHidden == b.macHidden
-            && a.pad == b.pad && a.landscape == b.landscape
+        a.macName == b.macName && a.canLock == b.canLock && a.pad == b.pad && a.landscape == b.landscape
     }
 
     @ViewBuilder var body: some View {
@@ -478,12 +475,6 @@ struct ScreenDesktopsMenu: View, Equatable {
             // Only the lock: the Mac stays awake, and this view stays open on its lock screen.
             if canLock {
                 Button { shell.control(.lock) } label: { Label("Lock \(macName)", systemImage: "lock") }
-            }
-            // Black on the Mac's own displays while this view goes on showing the screen.
-            if canHideMac {
-                Toggle(isOn: Binding(get: { macHidden }, set: { model.setMacHidden($0) })) {
-                    Label("Hide \(macName)'s display", systemImage: "eye.slash")
-                }
             }
         } label: {
             if pad {
@@ -506,11 +497,12 @@ struct ScreenDisplayMenu: View, Equatable {
     let quality: ScreenVideoWire.Quality
     let pinchesMac: Bool
     let playsSound: Bool
+    let macHidden: Bool
     let pad: Bool
     let landscape: Bool
     nonisolated static func == (a: Self, b: Self) -> Bool {
         a.macName == b.macName && a.canHideMac == b.canHideMac && a.path == b.path && a.fitsDevice == b.fitsDevice && a.space == b.space
-            && a.quality == b.quality && a.pinchesMac == b.pinchesMac && a.playsSound == b.playsSound && a.pad == b.pad
+            && a.quality == b.quality && a.pinchesMac == b.pinchesMac && a.playsSound == b.playsSound && a.macHidden == b.macHidden && a.pad == b.pad
             && a.landscape == b.landscape
     }
 
@@ -550,6 +542,10 @@ struct ScreenDisplayMenu: View, Equatable {
                         Label("Picture", systemImage: "sparkles.tv")
                     }
                     .pickerStyle(.menu)
+                    // Black on the Mac's own displays while this view goes on showing the screen.
+                    Toggle(isOn: Binding(get: { macHidden }, set: { model.setMacHidden($0) })) {
+                        Label("Hide \(macName)'s display", systemImage: "eye.slash")
+                    }
                     Toggle(isOn: Binding(get: { playsSound }, set: { model.setPlaysSound($0) })) {
                         Label("Play \(macName)'s sound here", systemImage: "speaker.wave.2")
                     }

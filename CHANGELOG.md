@@ -195,6 +195,8 @@ these steps as written and check each one before building.
   the Mac's volume is set to; the Mac's own speakers aren't muted by it). It
   is compressed, about 128 kb/s, sent only while something plays, and left
   out when the picture is behind. Off until chosen, then remembered.
+* Screen view: *Hide …'s display* is in the Display menu now, with the other
+  display settings (it was under Desktops).
 * Screen view: an **fn** key in the row above the keyboard, held on the Mac
   for as long as you hold it (for push-to-talk dictation apps on the Mac).
 * Screen view: typing and pasting work in Windows App (RDP) and other apps
