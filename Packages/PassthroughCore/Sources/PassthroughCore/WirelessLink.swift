@@ -281,24 +281,34 @@ public struct LinkCredential: Codable, Equatable, Sendable {
 
 /// The phone's side: finds linked Macs advertising on a network it shares
 /// with them (its own Personal Hotspot, or peer-to-peer Wi-Fi when enabled),
-/// dials each, proves who it is, and then serves the streams the Mac opens by
-/// connecting them to its own proxy. When a link drops it redials and resumes
-/// the same session, so the Mac's connections pause instead of failing.
+/// dials each, proves who it is, and then serves the streams the Mac opens:
+/// handed straight to whoever serves that port in this process (`direct`), or
+/// else connected to the port on loopback. When a link drops it redials and
+/// resumes the same session, so the Mac's connections pause instead of failing.
 public final class WirelessDialer: @unchecked Sendable {
+    /// Takes a stream the Mac opened to a port, in this process.
+    public typealias DirectServer = @Sendable (ByteStream) -> Void
+
     private let queue = DispatchQueue(label: "\(PassthroughProtocol.identifier).wireless-dialer")
     private let credentials: @Sendable () -> [LinkCredential]
     private let allowedPorts: Set<UInt16>
+    private let direct: [UInt16: DirectServer]
     private let peerToPeer: Bool
     private var browser: NWBrowser?
     private var results: Set<NWBrowser.Result> = []
     private var links: [String: MacLink] = [:]   // by macTag
     private var running = false
 
-    /// `allowedPorts`: the only loopback ports the Mac may open streams to.
+    /// `allowedPorts`: the only ports the Mac may open streams to. A port in
+    /// `direct` gets its streams as they are; the proxy's port must be one,
+    /// since it carries a stream for every connection the Mac makes (see
+    /// `SOCKS5Server.accept`). The rest are dialed on loopback.
     /// Without `peerToPeer` the Mac is found only on a network both share,
     /// typically this iPhone's Personal Hotspot.
-    public init(allowedPorts: Set<UInt16>, peerToPeer: Bool = false, credentials: @escaping @Sendable () -> [LinkCredential]) {
+    public init(allowedPorts: Set<UInt16>, peerToPeer: Bool = false, direct: [UInt16: DirectServer] = [:],
+                credentials: @escaping @Sendable () -> [LinkCredential]) {
         self.allowedPorts = allowedPorts
+        self.direct = direct
         self.peerToPeer = peerToPeer
         self.credentials = credentials
     }
@@ -391,7 +401,7 @@ public final class WirelessDialer: @unchecked Sendable {
     private func link(for tag: String, peerToPeer: Bool, hotspotOnly: Bool = false, credential: @escaping () -> LinkCredential?) -> MacLink {
         if let existing = links[tag], !existing.isStopped { return existing }   // a stopped one was forgotten
         let link = MacLink(tag: tag, credential: credential, peerToPeer: peerToPeer, hotspotOnly: hotspotOnly,
-                           allowedPorts: allowedPorts, queue: queue)
+                           allowedPorts: allowedPorts, direct: direct, queue: queue)
         links[tag] = link
         return link
     }
@@ -406,6 +416,7 @@ private final class MacLink: @unchecked Sendable {
     /// An iPad: linked over this iPhone's hotspot only (`interface`, and checked before the proof).
     private let hotspotOnly: Bool
     private let allowedPorts: Set<UInt16>
+    private let direct: [UInt16: WirelessDialer.DirectServer]
     private let queue: DispatchQueue
     private var endpoint: NWEndpoint?
     private var interface: NWInterface?
@@ -423,12 +434,13 @@ private final class MacLink: @unchecked Sendable {
     var isStopped: Bool { stopped }
 
     init(tag: String, credential: @escaping () -> LinkCredential?, peerToPeer: Bool, hotspotOnly: Bool,
-         allowedPorts: Set<UInt16>, queue: DispatchQueue) {
+         allowedPorts: Set<UInt16>, direct: [UInt16: WirelessDialer.DirectServer], queue: DispatchQueue) {
         self.macTag = tag
         self.credential = credential
         self.peerToPeer = peerToPeer
         self.hotspotOnly = hotspotOnly
         self.allowedPorts = allowedPorts
+        self.direct = direct
         self.queue = queue
     }
 
@@ -571,9 +583,11 @@ private final class MacLink: @unchecked Sendable {
         queue.asyncAfter(deadline: .now() + delay, execute: work)
     }
 
-    /// A stream the Mac opened: connect it to our own proxy on loopback.
+    /// A stream the Mac opened: hand it to the port's server in this process,
+    /// or connect it to the port on loopback.
     private func serve(port: UInt16, _ muxStream: MuxStream) {
         guard allowedPorts.contains(port), let nwPort = NWEndpoint.Port(rawValue: port) else { muxStream.cancel(); return }
+        if let server = direct[port] { server(muxStream); return }
         let local = ConnectionStream(NWConnection(host: .ipv4(.loopback), port: nwPort, using: .tcp), queue: queue)
         var key: ObjectIdentifier?
         let splice = Splice(muxStream, local, queue: queue) { [weak self] in

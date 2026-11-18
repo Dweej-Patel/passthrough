@@ -65,6 +65,34 @@ final class TestClient {
     func close() { connection.cancel() }
 }
 
+/// The same for a client that is a `ByteStream`: a stream handed to
+/// `SOCKS5Server.accept`, as the wireless link does.
+final class StreamClient {
+    let stream: ByteStream
+    init(_ stream: ByteStream) { self.stream = stream }
+    func send(_ bytes: [UInt8]) { send(Data(bytes)) }
+    func send(_ data: Data, isComplete: Bool = false) {
+        let done = DispatchSemaphore(value: 0)
+        stream.send(data, isComplete: isComplete) { _ in done.signal() }
+        XCTAssertEqual(done.wait(timeout: .now() + 5), .success)
+    }
+    /// `n` bytes, or fewer if the stream ends first.
+    func read(_ n: Int, timeout: TimeInterval = 5) -> Data {
+        var out = Data()
+        while out.count < n {
+            let done = DispatchSemaphore(value: 0)
+            let got = Locked<(data: Data?, ended: Bool)>((nil, true))
+            stream.receive(maximumLength: n - out.count) { data, complete, error in
+                got.set((data, complete || error != nil)); done.signal()
+            }
+            guard done.wait(timeout: .now() + timeout) == .success else { XCTFail("read timed out"); return out }
+            if let data = got.get().data { out.append(data) }
+            if got.get().ended { break }
+        }
+        return out
+    }
+}
+
 func freePort() -> UInt16 {
     let sock = socket(AF_INET, SOCK_STREAM, 0)
     var addr = sockaddr_in(); addr.sin_family = sa_family_t(AF_INET); addr.sin_port = 0; addr.sin_addr.s_addr = inet_addr("127.0.0.1")
@@ -99,10 +127,14 @@ final class EchoServer {
 final class UDPEchoServer {
     let listener: NWListener
     let port: UInt16
+    /// How many sockets have sent it something: each is one of the proxy's peers.
+    let flows = Locked(0)
     init() throws {
         port = freePort()
         listener = try NWListener(using: .udp, on: NWEndpoint.Port(rawValue: port)!)
+        let flows = self.flows
         listener.newConnectionHandler = { c in
+            flows.set(flows.get() + 1)
             c.start(queue: .global())
             func loop() {
                 c.receiveMessage { data, _, _, _ in
@@ -210,6 +242,130 @@ final class SOCKS5ServerTests: XCTestCase {
         XCTAssertEqual(client.read(address.count), address)
         XCTAssertEqual(client.read(length), Data("echo:ping".utf8))
         client.close()
+    }
+
+    // A stream handed over in-process (the wireless link's) is a client like
+    // any other: same handshake, same proxying, and it ends the same way.
+
+    private func handshake(_ client: StreamClient) {
+        client.send([5, 1, 2])
+        XCTAssertEqual(Array(client.read(2)), [5, 2])
+        client.send([1, 3] + Array("mac".utf8) + [6] + Array("secret".utf8))
+        XCTAssertEqual(Array(client.read(2)), [1, 0])
+    }
+
+    private func waitForNoSessions(file: StaticString = #filePath, line: UInt = #line) {
+        let deadline = Date().addingTimeInterval(5)
+        while server.activeSessions > 0, Date() < deadline { usleep(10_000) }
+        XCTAssertEqual(server.activeSessions, 0, file: file, line: line)
+    }
+
+    func testHandedOverStreamIsProxied() throws {
+        let echo = try EchoServer()
+        let (mac, phone) = MemoryStream.pair()
+        server.accept(phone)
+        let client = StreamClient(mac)
+        handshake(client)
+        client.send([5, 1, 0, 1, 127, 0, 0, 1, UInt8(echo.port >> 8), UInt8(echo.port & 0xFF)])
+        XCTAssertEqual(Array(client.read(10).prefix(2)), [5, 0])
+        // Bytes sent in pieces arrive whole and in order, both ways.
+        let payload = Data((0..<300_000).map { UInt8($0 % 251) })
+        for start in stride(from: 0, to: payload.count, by: 50_000) {
+            client.send(payload.subdata(in: start ..< start + 50_000))
+        }
+        XCTAssertEqual(client.read(payload.count), payload)
+        let snap = server.counter.snapshot()
+        XCTAssertEqual(snap.rx, Int64(payload.count))
+        XCTAssertEqual(snap.tx, Int64(payload.count))
+        XCTAssertEqual(snap.active, 1)
+        XCTAssertEqual(server.activeSessions, 1)
+        // The Mac finishing its side ends the destination's, and the session.
+        client.send(Data(), isComplete: true)
+        XCTAssertEqual(client.read(1), Data())
+        waitForNoSessions()
+        XCTAssertEqual(server.counter.snapshot().active, 0)
+    }
+
+    func testHandedOverStreamCarriesUDP() throws {
+        let udp = try UDPEchoServer()
+        let (mac, phone) = MemoryStream.pair()
+        server.accept(phone)
+        let client = StreamClient(mac)
+        handshake(client)
+        client.send([5, 5, 0, 1, 0, 0, 0, 0, 0, 0])
+        XCTAssertEqual(Array(client.read(10).prefix(2)), [5, 0])
+        let address = SOCKS5.Address.ipv4([127, 0, 0, 1], port: udp.port)
+        client.send(SOCKS5.frameDatagram(address: address, payload: Data("ping".utf8)))
+        let head = client.read(3)
+        XCTAssertEqual(head.count, 3)
+        guard head.count == 3 else { return }
+        XCTAssertEqual(client.read(address.count), address)
+        XCTAssertEqual(client.read(Int(head[0]) << 8 | Int(head[1])), Data("echo:ping".utf8))
+        // The stream dropping underneath (the link ending) ends the session.
+        mac.cancel()
+        waitForNoSessions()
+    }
+
+    /// Sends "ping" to `udp` on a UDP session and reads the echo.
+    private func ask(_ client: StreamClient, _ udp: UDPEchoServer, file: StaticString = #filePath, line: UInt = #line) {
+        let address = SOCKS5.Address.ipv4([127, 0, 0, 1], port: udp.port)
+        client.send(SOCKS5.frameDatagram(address: address, payload: Data("ping".utf8)))
+        let head = client.read(3)
+        guard head.count == 3 else { return XCTFail("no reply", file: file, line: line) }
+        XCTAssertEqual(client.read(address.count), address, file: file, line: line)
+        XCTAssertEqual(client.read(Int(head[0]) << 8 | Int(head[1])), Data("echo:ping".utf8), file: file, line: line)
+    }
+
+    private func udpSession() -> StreamClient {
+        let (mac, phone) = MemoryStream.pair()
+        server.accept(phone)
+        let client = StreamClient(mac)
+        handshake(client)
+        client.send([5, 5, 0, 1, 0, 0, 0, 0, 0, 0])
+        XCTAssertEqual(Array(client.read(10).prefix(2)), [5, 0])
+        return client
+    }
+
+    /// A DNS-like flow gives its socket up once answered, and the flow's next
+    /// question gets a fresh one; any other flow keeps its socket.
+    func testAnsweredQueryPeerEndsAndTheNextQuestionGetsANewOne() throws {
+        server.stop()
+        let queries = try UDPEchoServer(), other = try UDPEchoServer()
+        var config = SOCKS5Server.Configuration()
+        config.refuseLocalDestinations = false
+        config.port = port
+        config.udpQueryPorts = [queries.port]
+        server = SOCKS5Server(configuration: config) { user, pass in user == "mac" && pass == "secret" }
+        try server.start()
+
+        let client = udpSession()
+        for _ in 0..<3 { ask(client, queries) }
+        XCTAssertEqual(queries.flows.get(), 3)
+        for _ in 0..<3 { ask(client, other) }
+        XCTAssertEqual(other.flows.get(), 1)
+        client.stream.cancel()
+        waitForNoSessions()
+    }
+
+    func testHandedOverStreamStillNeedsThePassword() {
+        let (mac, phone) = MemoryStream.pair()
+        server.accept(phone)
+        let client = StreamClient(mac)
+        client.send([5, 1, 2])
+        XCTAssertEqual(Array(client.read(2)), [5, 2])
+        client.send([1, 3] + Array("mac".utf8) + [5] + Array("wrong".utf8))
+        XCTAssertEqual(Array(client.read(2)), [1, 1])
+        waitForNoSessions()
+    }
+
+    func testStoppedServerRefusesAHandedOverStream() {
+        server.stop()
+        let (mac, phone) = MemoryStream.pair()
+        let refused = expectation(description: "refused")
+        mac.onTerminated = { _ in refused.fulfill() }
+        server.accept(phone)
+        wait(for: [refused], timeout: 5)
+        XCTAssertEqual(server.activeSessions, 0)
     }
 }
 

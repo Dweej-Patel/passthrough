@@ -182,6 +182,16 @@ public final class SOCKS5Server: @unchecked Sendable {
         public var cellularOnly = false
         public var allowUDP = true
         public var udpIdleTimeout: TimeInterval = 60
+        /// Destination ports whose UDP flows are a question and its answer
+        /// (DNS). Every lookup the Mac makes is a flow of its own to the same
+        /// resolver, and Network.framework walks all of an endpoint's
+        /// connections whenever another one starts (see `accept`), so these
+        /// must not each sit out `udpIdleTimeout`: a peer there ends as soon
+        /// as everything it was asked has been answered. A later question on
+        /// the same flow gets a new peer.
+        public var udpQueryPorts: Set<UInt16> = [DNSRedirect.port]
+        /// How long such a peer waits for an answer before it is dropped.
+        public var udpQueryTimeout: TimeInterval = 10
         public var maxUDPPeersPerSession = 512
         /// How long a new connection may sit "waiting" for a viable path (tower
         /// handoff, radio waking) before it is failed. Generous on purpose: apps
@@ -297,7 +307,7 @@ public final class SOCKS5Server: @unchecked Sendable {
                 ptLog(.warning, "SOCKS session cap reached (\(self.configuration.maxSessions)); refusing")
                 connection.cancel(); return
             }
-            let session = Session(server: self, client: connection)
+            let session = Session(server: self, connection: connection)
             self.stateQueue.async { self.sessions[ObjectIdentifier(session)] = session }
             session.start()
         }
@@ -375,6 +385,28 @@ public final class SOCKS5Server: @unchecked Sendable {
 
     public var activeSessions: Int { stateQueue.sync { sessions.count } }
 
+    /// Serves a client whose stream is already open, as if it had connected
+    /// to the listener: the wireless link hands each of the Mac's streams
+    /// here. Dialing our own port for them instead would put every stream on
+    /// one more connection to the same loopback endpoint, and Network.framework
+    /// walks all of an endpoint's connections each time another one starts:
+    /// with a thousand streams open that alone kept a core busy, and iOS
+    /// stopped the extension for it.
+    public func accept(_ stream: ByteStream) {
+        let session: Session? = stateQueue.sync {
+            guard isRunning else { return nil }
+            guard sessions.count < configuration.maxSessions else {
+                ptLog(.warning, "SOCKS session cap reached (\(configuration.maxSessions)); refusing")
+                return nil
+            }
+            let session = Session(server: self, stream: stream)
+            sessions[ObjectIdentifier(session)] = session
+            return session
+        }
+        guard let session else { stream.cancel(); return }
+        session.start()
+    }
+
     fileprivate func remove(_ session: Session) {
         stateQueue.async { self.sessions[ObjectIdentifier(session)] = nil }
     }
@@ -443,9 +475,12 @@ public final class SOCKS5Server: @unchecked Sendable {
 
 // MARK: - Session
 
+/// One client of the proxy. The client is a `ByteStream` (a connection to the
+/// listener, or one stream of the wireless link) whose callbacks may arrive on
+/// any queue, so each one hops to `queue`, where all the session's state lives.
 private final class Session: @unchecked Sendable {
     private let server: SOCKS5Server
-    private let client: NWConnection
+    private let client: ByteStream
     private let queue: DispatchQueue
     private var remote: NWConnection?
     private var udpPeers: [SOCKS5.Address: UDPPeer] = [:]
@@ -462,24 +497,29 @@ private final class Session: @unchecked Sendable {
     private var closed = false
     private var countedOpen = false
     private var halfClosures = 0
+    /// The destination has sent everything and that end was passed to the Mac.
+    private var downloadEnded = false
     private var user: String = ""
     /// Last destination this session talked to, for log lines.
     private var remoteLabel = "remote"
 
-    init(server: SOCKS5Server, client: NWConnection) {
+    /// A connection the listener accepted; started on the session's queue.
+    init(server: SOCKS5Server, connection: NWConnection) {
+        let queue = DispatchQueue(label: "\(PassthroughProtocol.identifier).socks.session", target: server.queue)
         self.server = server
-        self.client = client
+        self.queue = queue
+        self.client = ConnectionStream(connection, queue: queue)
+    }
+
+    /// A stream that is already open (`SOCKS5Server.accept`).
+    init(server: SOCKS5Server, stream: ByteStream) {
+        self.server = server
+        self.client = stream
         self.queue = DispatchQueue(label: "\(PassthroughProtocol.identifier).socks.session", target: server.queue)
     }
 
     func start() {
-        client.stateUpdateHandler = { [weak self] state in
-            switch state {
-            case .failed, .cancelled: self?.close(reason: "client closed")
-            default: break
-            }
-        }
-        client.start(queue: queue)
+        client.onTerminated = { [weak self] _ in self?.close(reason: "client closed") }
         let timer = DispatchSource.makeTimerSource(queue: queue)
         timer.schedule(deadline: .now() + server.configuration.handshakeTimeout)
         timer.setEventHandler { [weak self] in self?.close(reason: "handshake timeout") }
@@ -495,23 +535,35 @@ private final class Session: @unchecked Sendable {
 
     // MARK: Byte reading
 
+    /// Exactly `count` bytes from the client, never more: what follows the
+    /// handshake belongs to the destination and is read by the pump.
     private func read(_ count: Int, _ completion: @escaping (Data) -> Void) {
         guard count > 0 else { completion(Data()); return }
-        client.receive(minimumIncompleteLength: count, maximumLength: count) { [weak self] data, _, _, error in
+        read(count, after: Data(), completion)
+    }
+
+    private func read(_ count: Int, after got: Data, _ completion: @escaping (Data) -> Void) {
+        client.receive(maximumLength: count - got.count) { [weak self] data, isComplete, error in
             guard let self else { return }
-            guard error == nil, let data, data.count == count else {
-                self.close(reason: "short read")
-                return
+            self.queue.async {
+                guard !self.closed else { return }
+                let got = got + (data ?? Data())
+                guard error == nil, got.count <= count else { self.close(reason: "short read"); return }
+                if got.count == count { completion(got); return }
+                guard !isComplete, let data, !data.isEmpty else { self.close(reason: "short read"); return }
+                self.read(count, after: got, completion)
             }
-            completion(data)
         }
     }
 
     private func write(_ data: Data, then: (() -> Void)? = nil) {
-        client.send(content: data, completion: .contentProcessed { [weak self] error in
-            if let error { self?.close(reason: "write failed: \(error)"); return }
-            then?()
-        })
+        client.send(data, isComplete: false) { [weak self] error in
+            guard let self else { return }
+            self.queue.async {
+                if let error { self.close(reason: "write failed: \(error)"); return }
+                then?()
+            }
+        }
     }
 
     // MARK: Handshake
@@ -645,8 +697,8 @@ private final class Session: @unchecked Sendable {
                 self.countedOpen = true
                 self.server.counter.connectionOpened()
                 self.write(SOCKS5.reply(SOCKS5.Reply.succeeded)) {
-                    self.pump(from: self.client, to: remote, download: false)
-                    self.pump(from: remote, to: self.client, download: true)
+                    self.pumpUp(to: remote)
+                    self.pumpDown(from: remote)
                 }
             case .waiting(let error):
                 // The path is not viable yet (e.g. iOS is waking the cellular radio
@@ -663,7 +715,14 @@ private final class Session: @unchecked Sendable {
                 self.waitTimer = timer
             case .failed(let error):
                 remote.stateUpdateHandler = nil
-                guard !replied else { self.close(reason: "remote failed"); return }
+                guard !replied else {
+                    // A connection reports "failed" as soon as both directions
+                    // have ended, while bytes it already received may still be
+                    // waiting to be read: closing now would lose the end of a
+                    // reply. The read finds the end, or the error, by itself.
+                    if self.downloadEnded { self.close(reason: "remote failed") }
+                    return
+                }
                 fail(error)
             case .cancelled:
                 remote.stateUpdateHandler = nil
@@ -675,31 +734,80 @@ private final class Session: @unchecked Sendable {
         remote.start(queue: queue)
     }
 
-    private func pump(from source: NWConnection, to sink: NWConnection, download: Bool) {
-        source.receive(minimumIncompleteLength: 1, maximumLength: 256 * 1024) { [weak self] data, _, isComplete, error in
-            guard let self, !self.closed else { return }
-            if let error {
-                if case .posix(.ECANCELED) = error {} else { ptLog(.debug, "stream to \(ptPrivate(self.remoteLabel)) ended: \(Self.describe(error))") }
-                self.close(reason: "stream error")
-                return
-            }
-            if let data, !data.isEmpty {
-                if download { self.server.counter.addRx(data.count) } else { self.server.counter.addTx(data.count) }
-                sink.send(content: data, completion: .contentProcessed { [weak self] sendError in
-                    guard let self else { return }
-                    if sendError != nil { self.close(reason: "send failed"); return }
-                    if isComplete { self.halfClose(sink) } else { self.pump(from: source, to: sink, download: download) }
-                })
-            } else if isComplete {
-                self.halfClose(sink)
-            } else {
-                self.pump(from: source, to: sink, download: download)
+    /// Mac → destination. The next read waits for the send, so a slow
+    /// destination holds the client back instead of filling memory.
+    private func pumpUp(to remote: NWConnection) {
+        client.receive(maximumLength: 256 * 1024) { [weak self] data, isComplete, error in
+            guard let self else { return }
+            self.queue.async {
+                guard !self.closed else { return }
+                if let error {
+                    self.logStreamEnd(error as? NWError)
+                    self.close(reason: "stream error")
+                    return
+                }
+                let finish = { [self] in
+                    remote.send(content: nil, contentContext: .finalMessage, isComplete: true, completion: .idempotent)
+                    self.halfClosed()
+                }
+                if let data, !data.isEmpty {
+                    self.server.counter.addTx(data.count)
+                    remote.send(content: data, completion: .contentProcessed { sendError in
+                        guard !self.closed else { return }
+                        if sendError != nil { self.close(reason: "send failed"); return }
+                        if isComplete { finish() } else { self.pumpUp(to: remote) }
+                    })
+                } else if isComplete {
+                    finish()
+                } else {
+                    self.pumpUp(to: remote)
+                }
             }
         }
     }
 
-    private func halfClose(_ sink: NWConnection) {
-        sink.send(content: nil, contentContext: .finalMessage, isComplete: true, completion: .idempotent)
+    /// Destination → Mac, held back the same way by a slow client.
+    private func pumpDown(from remote: NWConnection) {
+        remote.receive(minimumIncompleteLength: 1, maximumLength: 256 * 1024) { [weak self] data, _, isComplete, error in
+            guard let self, !self.closed else { return }
+            if let error {
+                self.logStreamEnd(error)
+                self.close(reason: "stream error")
+                return
+            }
+            let finish = { [self] in
+                self.downloadEnded = true
+                self.client.send(nil, isComplete: true) { _ in }
+                self.halfClosed()
+            }
+            if let data, !data.isEmpty {
+                self.server.counter.addRx(data.count)
+                self.client.send(data, isComplete: false) { [weak self] sendError in
+                    guard let self else { return }
+                    self.queue.async {
+                        guard !self.closed else { return }
+                        if sendError != nil { self.close(reason: "send failed"); return }
+                        if isComplete { finish() } else { self.pumpDown(from: remote) }
+                    }
+                }
+            } else if isComplete {
+                finish()
+            } else {
+                self.pumpDown(from: remote)
+            }
+        }
+    }
+
+    /// Only a connection's own failures are worth a line; a wireless stream
+    /// the Mac reset is how it closes one.
+    private func logStreamEnd(_ error: NWError?) {
+        guard let error else { return }
+        if case .posix(.ECANCELED) = error { return }
+        ptLog(.debug, "stream to \(ptPrivate(remoteLabel)) ended: \(Self.describe(error))")
+    }
+
+    /// One direction has ended and its end has been passed on.
+    private func halfClosed() {
         halfClosures += 1
         if halfClosures >= 2 { close(reason: "both sides finished") }
     }
@@ -774,6 +882,7 @@ private final class Session: @unchecked Sendable {
         remoteLabel = "\(address)"
         let redirected = server.configuration.refuseLocalDestinations && DNSRedirect.applies(to: address)
         let peer = UDPPeer(address: address, target: redirected ? server.dnsRedirectTarget(for: address) : nil,
+                           endsWhenAnswered: server.configuration.udpQueryPorts.contains(address.port.rawValue),
                            refuseLocal: server.configuration.refuseLocalDestinations,
                            parameters: server.remoteParameters(tcp: false), queue: queue,
                            waitTimeout: TimeInterval(server.configuration.connectTimeout)) { [weak self] datagram in
@@ -792,13 +901,15 @@ private final class Session: @unchecked Sendable {
             self.udpBacklog += frame.count
             // Released whatever happens: a session that fails must not keep
             // its share of the relay-wide budget.
-            self.client.send(content: frame, completion: .contentProcessed { [weak self] error in
+            self.client.send(frame, isComplete: false) { [weak self] error in
                 server.releaseUDPBacklog(frame.count)
                 guard let self else { return }
-                self.udpBacklog -= frame.count
-                if let error { self.close(reason: "write failed: \(error)"); return }
-                self.udpPeers[address]?.relayedSinceCheck += 1
-            })
+                self.queue.async {
+                    self.udpBacklog -= frame.count
+                    if let error { self.close(reason: "write failed: \(error)"); return }
+                    self.udpPeers[address]?.relayedSinceCheck += 1
+                }
+            }
         }
         peer.onDead = { [weak self, weak peer] in
             guard let self, let peer, self.udpPeers[address] === peer else { return }
@@ -810,8 +921,10 @@ private final class Session: @unchecked Sendable {
 
     private func pruneIdlePeers() {
         udpPeers.values.forEach { $0.report(interval: Self.udpCheckInterval, queuedToMac: udpBacklog) }
-        let cutoff = Date().addingTimeInterval(-server.configuration.udpIdleTimeout)
-        for (key, peer) in udpPeers where peer.isIdle(since: cutoff) {
+        let now = Date()
+        let cutoff = now.addingTimeInterval(-server.configuration.udpIdleTimeout)
+        let queryCutoff = now.addingTimeInterval(-server.configuration.udpQueryTimeout)
+        for (key, peer) in udpPeers where peer.isIdle(since: peer.endsWhenAnswered ? queryCutoff : cutoff) {
             peer.cancel()
             udpPeers[key] = nil
         }
@@ -823,6 +936,7 @@ private final class Session: @unchecked Sendable {
         queue.async { [self] in
             guard !closed else { return }
             closed = true
+            client.onTerminated = nil
             client.cancel()
             remote?.cancel()
             udpTimer?.cancel()
@@ -896,11 +1010,17 @@ private final class UDPPeer: @unchecked Sendable {
     /// otherwise hard to place.
     private let verbose: Bool
     private let label: String
+    /// A question-and-answer flow (`Configuration.udpQueryPorts`): the peer
+    /// ends once it has relayed an answer for every datagram it sent.
+    let endsWhenAnswered: Bool
+    private var asked = 0
+    private var answered = 0
 
     /// Datagrams go to `target` when given (a redirected DNS query), else to
     /// `address`, which `refuseLocal` refuses when it turns out to be private.
-    init(address: SOCKS5.Address, target: NWEndpoint?, refuseLocal: Bool, parameters: NWParameters, queue: DispatchQueue, waitTimeout: TimeInterval, onDatagram: @escaping (Data) -> Void) {
+    init(address: SOCKS5.Address, target: NWEndpoint?, endsWhenAnswered: Bool = false, refuseLocal: Bool, parameters: NWParameters, queue: DispatchQueue, waitTimeout: TimeInterval, onDatagram: @escaping (Data) -> Void) {
         self.onDatagram = onDatagram
+        self.endsWhenAnswered = endsWhenAnswered
         self.label = "\(address)"
         self.verbose = address.port.rawValue != 443 && address.port.rawValue != 53
         self.queue = queue
@@ -968,6 +1088,7 @@ private final class UDPPeer: @unchecked Sendable {
             return
         }
         sentSinceCheck += 1
+        asked += 1
         connection.send(content: datagram, completion: .idempotent)
     }
 
@@ -1002,6 +1123,13 @@ private final class UDPPeer: @unchecked Sendable {
                 self.activity.fromServer()
                 self.receivedSinceCheck += 1
                 self.onDatagram(data)
+                self.answered += 1
+                if self.endsWhenAnswered, self.answered >= self.asked {
+                    // Everything asked has been answered: give the socket up
+                    // now rather than when the flow has idled out.
+                    self.markDead(nil)
+                    return
+                }
             }
             self.receiveLoop()
         }
