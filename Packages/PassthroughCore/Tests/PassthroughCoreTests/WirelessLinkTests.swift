@@ -106,7 +106,8 @@ final class WirelessLinkTests: XCTestCase {
     }
 
     /// Starts a listener and dials it; returns the Mac's mux if a link forms.
-    private func link(pin: String? = nil, dialKey: Data? = nil, timeout: TimeInterval = 5) -> Mux? {
+    private func link(pin: String? = nil, dialKey: Data? = nil, timeout: TimeInterval = 5,
+                      direct: [UInt16: WirelessDialer.DirectServer] = [:]) -> Mux? {
         let key = self.key
         let listener = WirelessListener(identity: identity, macTag: "t", advertise: false) { $0 == "phone-1" ? key : nil }
         let linked = expectation(description: "linked")
@@ -117,7 +118,7 @@ final class WirelessLinkTests: XCTestCase {
         let listening = expectation(description: "listening")
         try! listener.start { _ in listening.fulfill() }
         wait(for: [listening], timeout: 5)
-        let dialer = WirelessDialer(allowedPorts: [echoPort]) { [] }
+        let dialer = WirelessDialer(allowedPorts: Set([echoPort] + direct.keys), direct: direct) { [] }
         let credential = LinkCredential(macTag: "t", certSHA256: pin ?? identity.fingerprint, linkKey: dialKey ?? key, phoneID: "phone-1")
         dialer.dial(.hostPort(host: "127.0.0.1", port: NWEndpoint.Port(rawValue: listener.port!)!), credential: credential, peerToPeer: false)
         wait(for: [linked], timeout: timeout)
@@ -138,6 +139,38 @@ final class WirelessLinkTests: XCTestCase {
         }
         wait(for: [opened, done], timeout: 15)
         XCTAssertEqual(got.get(), payload)
+    }
+
+    /// The proxy's streams never touch its port: the link hands each one to
+    /// the proxy in this process (nothing listens on the port here), and a
+    /// megabyte still crosses both ways through the stream's flow control.
+    func testProxyStreamsAreServedInProcess() throws {
+        var config = SOCKS5Server.Configuration()
+        config.refuseLocalDestinations = false   // the destination is the loopback echo server
+        config.port = freePort()
+        let proxy = SOCKS5Server(configuration: config, authenticator: nil)
+        try proxy.start()
+        addTeardownBlock { proxy.stop() }
+        let unserved = freePort()   // a direct port needs no listener at all
+        let handed = Locked(0)
+        guard let mux = link(direct: [unserved: { stream in handed.set(handed.get() + 1); proxy.accept(stream) }]) else { return XCTFail("no link") }
+
+        let payload = Data((0..<1_000_000).map { UInt8(truncatingIfNeeded: $0 &* 13) })
+        let got = Locked(Data()), done = expectation(description: "echoed")
+        let stream = mux.open(port: unserved)
+        let client = StreamClient(stream)
+        client.send([5, 1, 0])
+        XCTAssertEqual(Array(client.read(2)), [5, 0])
+        client.send([5, 1, 0, 1, 127, 0, 0, 1, UInt8(echoPort >> 8), UInt8(echoPort & 0xFF)])
+        XCTAssertEqual(Array(client.read(10).prefix(2)), [5, 0])
+        readAll(stream, into: got, done: done)
+        stream.send(payload, isComplete: true) { XCTAssertNil($0) }
+        wait(for: [done], timeout: 15)
+        XCTAssertEqual(got.get(), payload)
+        XCTAssertEqual(handed.get(), 1)
+        let deadline = Date().addingTimeInterval(5)
+        while proxy.activeSessions > 0, Date() < deadline { usleep(10_000) }
+        XCTAssertEqual(proxy.activeSessions, 0)
     }
 
     /// Break the real TLS link mid-transfer: the phone redials, the Mac
