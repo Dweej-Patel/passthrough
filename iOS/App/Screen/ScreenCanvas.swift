@@ -19,7 +19,7 @@ enum ScreenTouchMode: String, CaseIterable {
 /// swipes move between desktops (left and right) or open Mission Control
 /// (up) and the app's windows (down), as on a Mac's trackpad. It is also the
 /// keyboard's text input while the keyboard is up.
-final class ScreenCanvasView: UIView, UIScrollViewDelegate, UIKeyInput, UIGestureRecognizerDelegate, UIPointerInteractionDelegate,
+final class ScreenCanvasView: UIView, UIScrollViewDelegate, UITextInput, UIGestureRecognizerDelegate, UIPointerInteractionDelegate,
                               UIPencilInteractionDelegate {
     var onPointer: ((CGPoint, RFBClient.Buttons) -> Void)?
     var onClick: ((CGPoint, RFBClient.Buttons) -> Void)?
@@ -923,13 +923,12 @@ final class ScreenCanvasView: UIView, UIScrollViewDelegate, UIKeyInput, UIGestur
     var smartInsertDeleteType: UITextSmartInsertDeleteType = .no
     var keyboardAppearance: UIKeyboardAppearance = .dark
 
-    func insertText(_ text: String) {
-        onText?(text, takeModifiers())
-    }
-
-    func deleteBackward() {
-        onKey?(RFBKeys.backspace, takeModifiers())
-    }
+    // Typing itself (`insertText`, `deleteBackward`) is in ScreenTextInput.swift, with the rest of `UITextInput`.
+    /// What the keyboard takes for the text it's editing.
+    var document = KeyboardDocument()
+    weak var inputDelegate: UITextInputDelegate?
+    lazy var tokenizer: UITextInputTokenizer = UITextInputStringTokenizer(textInput: self)
+    var tidyWork: DispatchWorkItem?
 
     /// The held modifiers apply to one key, then let go (as the terminal's ctrl).
     func takeModifiers() -> [UInt32] {
@@ -954,10 +953,12 @@ final class ScreenCanvasView: UIView, UIScrollViewDelegate, UIKeyInput, UIGestur
                 .keyboardHome: RFBKeys.home, .keyboardEnd: RFBKeys.end,
             ]
             if let keysym = special[key.keyCode] {
+                forgetTyped()
                 onKey?(keysym, modifiers)
                 handled = true
             } else if modifiers.contains(where: { $0 != RFBKeys.shift }),
                       let character = key.charactersIgnoringModifiers.first, let keysym = RFBKeys.keysym(for: character) {
+                forgetTyped()
                 onKey?(keysym, modifiers)
                 handled = true
             }
@@ -1033,6 +1034,7 @@ final class ScreenKeyRow: UIInputView {
                 button.addAction(UIAction { [weak self] _ in
                     UIDevice.current.playInputClick()
                     guard let canvas = self?.canvas else { return }
+                    canvas.forgetTyped()
                     canvas.onKey?(keysym, canvas.takeModifiers())
                 }, for: .touchUpInside)
             case let .modifier(_, keysym, accessibility):
@@ -1061,7 +1063,10 @@ final class ScreenKeyRow: UIInputView {
                 button.addAction(UIAction { [weak self] _ in self?.canvas?.onCopy?() }, for: .touchUpInside)
             case .paste:
                 button.accessibilityLabel = "Paste on the Mac"
-                button.addAction(UIAction { [weak self] _ in self?.canvas?.onPaste?() }, for: .touchUpInside)
+                button.addAction(UIAction { [weak self] _ in
+                    self?.canvas?.forgetTyped()
+                    self?.canvas?.onPaste?()
+                }, for: .touchUpInside)
             }
             stack.addArrangedSubview(button)
         }
@@ -1129,8 +1134,14 @@ struct ScreenCanvas: UIViewRepresentable {
 
     func makeUIView(context: Context) -> ScreenCanvasView {
         let view = ScreenCanvasView(frame: .zero)
-        view.onPointer = { [weak model] point, buttons in model?.pointer(at: point, buttons: buttons) }
-        view.onClick = { [weak model] point, button in model?.click(at: point, button: button) }
+        view.onPointer = { [weak model, weak view] point, buttons in
+            if !buttons.isEmpty { view?.forgetTyped() }
+            model?.pointer(at: point, buttons: buttons)
+        }
+        view.onClick = { [weak model, weak view] point, button in
+            view?.forgetTyped()
+            model?.click(at: point, button: button)
+        }
         view.onScroll = { [weak model] point, delta, notch in model?.scroll(at: point, by: delta, notch: notch) }
         view.onScrollEnded = { [weak model] in model?.scrollEnded() }
         view.onNeedsKeyframe = { [weak model] in model?.videoNeedsKeyframe() }

@@ -175,6 +175,17 @@ these steps as written and check each one before building.
 
 ### Changed
 
+* Screen view: the on-screen keyboard works as it does elsewhere on the iPhone
+  and iPad. Holding delete goes on deleting (it deleted one character), and
+  the keyboard's own dictation key is there. The view is a text input now:
+  the keyboard edits a short record of what you typed, and each change is
+  typed on the Mac. So a double space makes a period, a long hold on delete
+  takes a word at a time, and Chinese, Japanese and similar keyboards send
+  text once a candidate is chosen. A click, an arrow key, a shortcut or a
+  paste makes it forget what you typed, so nothing the keyboard does later
+  reaches back and changes other text on the Mac.
+* Screen view: an **fn** key in the row above the keyboard, held on the Mac
+  for as long as you hold it (for push-to-talk dictation apps on the Mac).
 * Screen view: typing and pasting work in Windows App (RDP) and other apps
   that read keys rather than characters, such as virtual machines. Typing
   goes as the keys of the Mac's keyboard layout (it came out as `a` for every
