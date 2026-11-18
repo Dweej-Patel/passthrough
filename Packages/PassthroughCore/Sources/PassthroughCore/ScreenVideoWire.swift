@@ -59,6 +59,10 @@ public enum ScreenVideoWire {
         case movedAway(to: String)
         /// The answer to `microphone`, and again if that changes: whether the Mac takes the phone's voice now.
         case microphoneState(MicrophoneState)
+        /// The answer to `sound`, and again if that changes: whether the Mac sends its sound now.
+        case soundState(SoundState)
+        /// The Mac's sound, next: one packet as `MacSound` makes them (AAC-LC, 48 kHz stereo).
+        case soundPacket(Data)
 
         // Phone → Mac
         /// What the phone wants to see (`Hello`), first and again whenever that changes.
@@ -94,9 +98,20 @@ public enum ScreenVideoWire {
         case microphone(Bool)
         /// What the phone's microphone heard next (`voiceSampleRate`), played to that device as it comes.
         case voice(Data)
+        /// Send what the Mac plays (its apps' sound), or stop; answered with `soundState`.
+        case sound(Bool)
         /// The Fn (globe) key goes down, or comes up: held for as long as the phone's key is,
         /// as apps that listen for it held (push-to-talk dictation) need.
         case function(Bool)
+    }
+
+    /// Whether the Mac sends its sound.
+    public enum SoundState: UInt8, Equatable, Sendable {
+        case off = 0
+        /// `soundPacket`s follow while the Mac plays anything.
+        case on = 1
+        /// The Mac's sound couldn't be captured.
+        case failed = 3
     }
 
     /// Whether the Mac takes a phone's voice.
@@ -208,8 +223,8 @@ public enum ScreenVideoWire {
     enum Kind: UInt8 {
         case format = 1, frame = 2, copied = 3, curtained = 4, fitted = 5, cursor = 6, cursorShape = 7, viewers = 8, movedAway = 9
         case hello = 16, ack = 17, pointer = 18, scroll = 19, key = 20, text = 21, clipboard = 22, keyframeRequest = 23, copy = 24, curtain = 25
-        case useHere = 26, gesture = 27, microphone = 28, voice = 29, function = 30
-        case microphoneState = 10
+        case useHere = 26, gesture = 27, microphone = 28, voice = 29, function = 30, sound = 31
+        case microphoneState = 10, soundState = 11, soundPacket = 12
     }
 
     public enum Failure: Error, Equatable { case tooLarge, malformed }
@@ -302,6 +317,15 @@ public enum ScreenVideoWire {
         case let .function(down):
             kind = .function
             payload.append(down ? 1 : 0)
+        case let .sound(on):
+            kind = .sound
+            payload.append(on ? 1 : 0)
+        case let .soundState(state):
+            kind = .soundState
+            payload.append(state.rawValue)
+        case let .soundPacket(packet):
+            kind = .soundPacket
+            payload.append(packet)
         case let .microphoneState(state):
             kind = .microphoneState
             payload.append(state.rawValue)
@@ -472,6 +496,14 @@ public enum ScreenVideoWire {
         case .function:
             try need(1)
             return .function(p[b] == 1)
+        case .sound:
+            try need(1)
+            return .sound(p[b] == 1)
+        case .soundState:
+            try need(1)
+            return .soundState(SoundState(rawValue: p[b]) ?? .failed)
+        case .soundPacket:
+            return .soundPacket(p)
         case .voice:
             // Whole samples only.
             return .voice(p.count % 2 == 0 ? p : p.dropLast())

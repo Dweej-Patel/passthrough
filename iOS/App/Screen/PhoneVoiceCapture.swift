@@ -4,7 +4,8 @@ import PassthroughCore
 
 /// This device's microphone as the Mac takes it (`ScreenVideoWire.voice`: 16-bit mono
 /// at `voiceSampleRate`), a piece every audio cycle (about 10 ms), while the screen
-/// view has the microphone on. Other audio on the device goes on meanwhile.
+/// view has the microphone on. The audio session is the screen model's to set
+/// (`ScreenAudioSession`), before this starts.
 final class PhoneVoiceCapture: @unchecked Sendable {
     enum Failure: Error { case noInput, noConverter }
 
@@ -34,24 +35,13 @@ final class PhoneVoiceCapture: @unchecked Sendable {
 
     func start() throws {
         let session = AVAudioSession.sharedInstance()
-        // Alongside whatever else has the audio (music, another app's own recording), not instead of
-        // it: a session that must interrupt the others is refused while one of them outranks it.
-        try session.setCategory(.playAndRecord, mode: .default, options: [.mixWithOthers, .defaultToSpeaker, .allowBluetooth])
-        try? session.setPreferredIOBufferDuration(0.01)
-        try session.setActive(true)
         let input = engine.inputNode
         let hardware = input.outputFormat(forBus: 0)
         guard hardware.sampleRate > 0, hardware.channelCount > 0,
               let mono = AVAudioFormat(standardFormatWithSampleRate: hardware.sampleRate, channels: 1),
               let wire = AVAudioFormat(commonFormat: .pcmFormatInt16, sampleRate: Double(ScreenVideoWire.voiceSampleRate), channels: 1,
-                                       interleaved: true) else {
-            try? session.setActive(false, options: .notifyOthersOnDeactivation)
-            throw Failure.noInput
-        }
-        guard let converter = AVAudioConverter(from: mono, to: wire) else {
-            try? session.setActive(false, options: .notifyOthersOnDeactivation)
-            throw Failure.noConverter
-        }
+                                       interleaved: true) else { throw Failure.noInput }
+        guard let converter = AVAudioConverter(from: mono, to: wire) else { throw Failure.noConverter }
         queue.sync {
             self.converter = converter
             inputFormat = mono
@@ -96,7 +86,6 @@ final class PhoneVoiceCapture: @unchecked Sendable {
         }
         guard wasRunning else { return }
         engine.stop()
-        try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
     }
 
     /// iOS stopped the recording: the owner is told once, and stops it.

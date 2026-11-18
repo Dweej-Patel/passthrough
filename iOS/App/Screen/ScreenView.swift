@@ -312,7 +312,7 @@ struct ScreenView: View, Equatable {
     private var displayMenu: some View {
         ScreenDisplayMenu(model: model, macName: model.macName, canHideMac: model.canHideMac, path: model.connectionPath,
                           fitsDevice: model.fitsDevice, space: model.space, quality: model.quality,
-                          pinchesMac: model.pinchesMacOnItsDisplay, pad: pad, landscape: landscape).equatable()
+                          pinchesMac: model.pinchesMacOnItsDisplay, playsSound: model.playsSound, pad: pad, landscape: landscape).equatable()
     }
 
     static func describe(_ path: ShellPath) -> (text: String, symbol: String)? {
@@ -505,11 +505,13 @@ struct ScreenDisplayMenu: View, Equatable {
     let space: Int
     let quality: ScreenVideoWire.Quality
     let pinchesMac: Bool
+    let playsSound: Bool
     let pad: Bool
     let landscape: Bool
     nonisolated static func == (a: Self, b: Self) -> Bool {
         a.macName == b.macName && a.canHideMac == b.canHideMac && a.path == b.path && a.fitsDevice == b.fitsDevice && a.space == b.space
-            && a.quality == b.quality && a.pinchesMac == b.pinchesMac && a.pad == b.pad && a.landscape == b.landscape
+            && a.quality == b.quality && a.pinchesMac == b.pinchesMac && a.playsSound == b.playsSound && a.pad == b.pad
+            && a.landscape == b.landscape
     }
 
     @ViewBuilder var body: some View {
@@ -548,6 +550,9 @@ struct ScreenDisplayMenu: View, Equatable {
                         Label("Picture", systemImage: "sparkles.tv")
                     }
                     .pickerStyle(.menu)
+                    Toggle(isOn: Binding(get: { playsSound }, set: { model.setPlaysSound($0) })) {
+                        Label("Play \(macName)'s sound here", systemImage: "speaker.wave.2")
+                    }
                     // Pinch and rotate: the Mac's on a display made for this device; a choice on its own display.
                     if fitsDevice {
                         Section {

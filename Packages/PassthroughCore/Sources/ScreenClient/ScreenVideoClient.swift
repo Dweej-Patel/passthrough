@@ -59,6 +59,10 @@ public final class ScreenVideoClient: @unchecked Sendable {
         case curtained(Bool)
         /// The answer to `microphone(_:)`: whether the Mac takes this device's voice now.
         case microphone(ScreenVideoWire.MicrophoneState)
+        /// The answer to `sound(_:)`: whether the Mac sends its sound now.
+        case sound(ScreenVideoWire.SoundState)
+        /// The Mac's sound, next (`MacSound.Decoder`).
+        case soundPacket(Data)
         /// The connection is over: nil when `close()` ended it.
         case closed(Error?)
     }
@@ -192,6 +196,10 @@ public final class ScreenVideoClient: @unchecked Sendable {
     /// shows it again; the Mac answers with `curtained`. A Mac that predates it doesn't answer.
     public func curtain(_ hidden: Bool) { send(.curtain(hidden)) }
 
+    /// Asks for the Mac's sound (or for it to stop); the Mac answers with `sound`.
+    /// A Mac that predates it doesn't answer.
+    public func sound(_ on: Bool) { send(.sound(on)) }
+
     /// The Mac's Fn (globe) key goes down, or comes up.
     public func function(_ down: Bool) { send(.function(down)) }
 
@@ -274,6 +282,10 @@ public final class ScreenVideoClient: @unchecked Sendable {
             emit(.curtained(hidden))
         case let .microphoneState(state):
             emit(.microphone(state))
+        case let .soundState(state):
+            emit(.sound(state))
+        case let .soundPacket(packet):
+            emit(.soundPacket(packet))
         case let .fitted(fit):
             emit(.fitted(fit))
         case let .viewers(names):

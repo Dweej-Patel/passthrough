@@ -190,6 +190,11 @@ these steps as written and check each one before building.
   until only its first button shows, as an arrow pointing back; that arrow
   (or a swipe to the left) slides it back. The arrow is a red microphone
   while the Mac hears the iPad.
+* Screen view: the Mac's sound on the iPhone or iPad. *Play …'s sound here*
+  in the screen view's Display menu sends what the Mac's apps play (whatever
+  the Mac's volume is set to; the Mac's own speakers aren't muted by it). It
+  is compressed, about 128 kb/s, sent only while something plays, and left
+  out when the picture is behind. Off until chosen, then remembered.
 * Screen view: an **fn** key in the row above the keyboard, held on the Mac
   for as long as you hold it (for push-to-talk dictation apps on the Mac).
 * Screen view: typing and pasting work in Windows App (RDP) and other apps

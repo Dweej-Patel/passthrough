@@ -46,6 +46,10 @@ final class ScreenVideoWireTests: XCTestCase {
             .microphoneState(.notInstalled),
             .function(true),
             .function(false),
+            .sound(true),
+            .soundState(.on),
+            .soundState(.failed),
+            .soundPacket(Data([0x21, 0x10, 0x05])),
             .clipboard(""),
             .keyframeRequest,
             .copy,
@@ -1116,6 +1120,47 @@ final class ScreenVideoStreamerTests: XCTestCase {
         waitUntil("stopped") { sink.stops.get() == 2 }
     }
 
+    /// The Mac's sound goes to a phone that asked for it, from when the capture is up until
+    /// the phone says stop; a capture that ends by itself is started again.
+    func testTheMacsSoundGoesToAPhoneThatAsks() {
+        let sources = Locked<[FakeSound]>([])
+        let streamer = ScreenVideoStreamer(capture: { FakeCapture(width: 320, height: 200) }, input: { _ in RecordingInput() }, sound: {
+            let source = FakeSound()
+            sources.set(sources.get() + [source])
+            return source
+        })
+        let (mac, phone) = MemoryPipe.pair()
+        streamer.start(stream: mac, initialBytes: Data()) {}
+        addTeardownBlock { streamer.stop() }
+        let events = Locked<[ScreenVideoClient.Event]>([])
+        let client = ScreenVideoClient(stream: phone, maxSide: 320, queue: DispatchQueue(label: "test")) { event in
+            events.set(events.get() + [event])
+        }
+        client.start()
+        func states() -> [ScreenVideoWire.SoundState] { events.get().compactMap { if case let .sound(state) = $0 { return state } else { return nil } } }
+        func packets() -> [Data] { events.get().compactMap { if case let .soundPacket(packet) = $0 { return packet } else { return nil } } }
+        client.sound(true)
+        waitUntil("on") { states() == [.on] }
+        sources.get()[0].send(Data([1, 2, 3]))
+        sources.get()[0].send(Data([4]))
+        waitUntil("heard") { packets() == [Data([1, 2, 3]), Data([4])] }
+        // It ends by itself: another takes over, and the phone isn't told anything changed.
+        sources.get()[0].end()
+        waitUntil("started again") { sources.get().count == 2 && sources.get()[1].started.get() }
+        sources.get()[1].send(Data([5]))
+        waitUntil("heard again") { packets().count == 3 }
+        client.sound(false)
+        waitUntil("off") { states() == [.on, .off] }
+        waitUntil("stopped") { sources.get()[1].stopped.get() }
+        sources.get()[1].send(Data([6]))
+        // One that can't start.
+        FakeSound.starts.set(false)
+        addTeardownBlock { FakeSound.starts.set(true) }
+        client.sound(true)
+        waitUntil("failed") { states() == [.on, .off, .failed] }
+        XCTAssertEqual(packets().count, 3)
+    }
+
     func testAPhonesVoiceStopsWithItsView() {
         let sink = RecordingVoice()
         let streamer = ScreenVideoStreamer(capture: { FakeCapture(width: 320, height: 200) }, input: { _ in RecordingInput() }, voice: { sink })
@@ -1372,6 +1417,26 @@ private final class StalledStream: ByteStream, @unchecked Sendable {
     }
 
     func cancel() {}
+}
+
+private final class FakeSound: SoundSource, @unchecked Sendable {
+    static let starts = Locked(true)
+    let started = Locked(false)
+    let stopped = Locked(false)
+    private let packet = Locked<(@Sendable (Data) -> Void)?>(nil)
+    private let ended = Locked<(@Sendable () -> Void)?>(nil)
+
+    func start(packet: @escaping @Sendable (Data) -> Void, stopped: @escaping @Sendable () -> Void) async -> Bool {
+        guard Self.starts.get() else { return false }
+        self.packet.set(packet)
+        ended.set(stopped)
+        started.set(true)
+        return true
+    }
+
+    func stop() { stopped.set(true) }
+    func send(_ data: Data) { packet.get()?(data) }
+    func end() { ended.get()?() }
 }
 
 private final class RecordingVoice: VoiceSink, @unchecked Sendable {
