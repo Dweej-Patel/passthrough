@@ -9,6 +9,13 @@ public enum DisconnectCategory
     /// <summary>The phone refused the connection: Passthrough isn't running on it.</summary>
     AppNotRunning,
 
+    /// <summary>
+    /// This PC's own USB service refused the connection: Apple Mobile Device Service (port 27015) or the adb server
+    /// (port 5037) isn't running. Only those local ports are dialled directly; the phone's own refusals arrive as
+    /// usbmuxd or adb answers.
+    /// </summary>
+    UsbServiceDown,
+
     /// <summary>The phone stopped answering (or usbmuxd/adb did not answer in time).</summary>
     NoAnswer,
 

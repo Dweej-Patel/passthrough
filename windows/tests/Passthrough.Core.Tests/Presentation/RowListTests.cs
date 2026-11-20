@@ -1,3 +1,5 @@
+using System.Collections.ObjectModel;
+using System.Collections.Specialized;
 using Passthrough.Core.Control;
 using Passthrough.Core.Presentation;
 using Passthrough.Core.Session;
@@ -47,5 +49,44 @@ public class RowListTests
 
         Assert.True(Sync(rows));
         Assert.Empty(rows);
+    }
+
+    [Fact]
+    public void PhonePluggedIn_OnlyItsRowIsInserted_OthersNeverLeaveTheList()
+    {
+        // A list view rebuilds a row's controls when the row leaves the list: the row being typed in must stay put.
+        var rows = new ObservableCollection<Row>();
+        RowList.Reconcile(rows, [E("a"), E("c")], r => r.Id, e => new Row(e), (r, e) => r.Entry = e);
+        var changes = new List<NotifyCollectionChangedAction>();
+        rows.CollectionChanged += (_, e) => changes.Add(e.Action);
+
+        Assert.True(RowList.Reconcile(rows, [E("a"), E("b"), E("c")], r => r.Id, e => new Row(e), (r, e) => r.Entry = e));
+        Assert.Equal(["a", "b", "c"], rows.Select(r => r.Id));
+        Assert.Equal([NotifyCollectionChangedAction.Add], changes);
+
+        changes.Clear();
+        Assert.True(RowList.Reconcile(rows, [E("a"), E("c")], r => r.Id, e => new Row(e), (r, e) => r.Entry = e));
+        Assert.Equal(["a", "c"], rows.Select(r => r.Id));
+        Assert.Equal([NotifyCollectionChangedAction.Remove], changes);
+    }
+
+    [Theory]
+    [InlineData("abc", "cab")]
+    [InlineData("abcd", "dcba")]
+    [InlineData("abc", "bxa")]
+    [InlineData("", "ab")]
+    [InlineData("ab", "")]
+    [InlineData("abcde", "eadxb")]
+    public void AnyChange_EndsInTheSessionsOrder_ReusingRows(string before, string after)
+    {
+        var rows = new List<Row>();
+        Sync(rows, [.. before.Select(c => E(c.ToString()))]);
+        var old = rows.ToDictionary(r => r.Id);
+
+        Sync(rows, [.. after.Select(c => E(c.ToString()))]);
+
+        Assert.Equal(after.Select(c => c.ToString()), rows.Select(r => r.Id));
+        foreach (var row in rows)
+            if (old.TryGetValue(row.Id, out var was)) Assert.Same(was, row);
     }
 }

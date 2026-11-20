@@ -567,8 +567,64 @@ public class HostSessionTests
         Assert.Equal("The Android phone closed the connection.", Entry(s, android)!.Message);
         await h.FireReconnect(TimeSpan.FromSeconds(2), clientsAfter: 4);
         Assert.Equal(
-            ["adb:R58M123 (Android phone): channel closed: AppNotRunning; retrying", "adb:R58M123 (Android phone): channel closed: PhoneClosed; retrying"],
-            h.Log.Take(2));
+            [
+                "adb:R58M123 (Android phone): channel closed: AppNotRunning; retrying",
+                "adb:R58M123 (Android phone): Passthrough was turned off on the phone", // its goodbye
+                "adb:R58M123 (Android phone): channel closed: PhoneClosed; retrying",
+            ],
+            h.Log.Take(3));
+    }
+
+    [Fact]
+    public async Task Code_WhoseChannelNeverOpened_IsKeptForTheNextOne_AndSentOnce()
+    {
+        // Refused twice: the code is typed during the first back-off, and its own channel is refused too. The
+        // flyout has cleared the box, so the code must not be lost: it waits (Pairing) and goes out on the next channel.
+        await using var phone = new FakePhone { IssuedToken = PhoneToken };
+        var refusals = 2;
+        var android = new PhoneDevice("adb:R58M123", PhoneKind.Android, "Pixel 8", AndroidSlot, WatchTransport.Adb,
+            (port, ct) => Interlocked.Decrement(ref refusals) >= 0 ? Task.FromException<Stream>(new AdbException("closed")) : phone.Open(ct));
+        await using var h = new Harness();
+        await h.Session.StartAsync();
+        h.Adb.Attach(android);
+        await h.WaitState(s => Entry(s, android) is { State: PhoneState.Connecting, Message: not null });
+        await WaitFor(() => h.Time.DueIn().Contains(TimeSpan.FromSeconds(2)));
+
+        Assert.True(await h.Submit(android, phone.Code));
+
+        var s = await h.WaitState(s => Entry(s, android) is { State: PhoneState.Pairing, Message: not null } && h.Time.DueIn().Count > 0);
+        Assert.Equal("Passthrough isn't running on the Android phone. Start it there, then connect.", Entry(s, android)!.Message);
+        Assert.False(await h.Submit(android, "111111")); // one code at a time: Pair stays disabled while it waits
+
+        await h.FireReconnect(TimeSpan.FromSeconds(4), clientsAfter: 3);
+        await h.WaitState(s => Entry(s, android) is { State: PhoneState.Paired, Status: not null });
+        Assert.Equal(PhoneToken, h.Secrets.Get(AndroidSlot));
+        var pair = Assert.Single(phone.Received, m => m.T == ControlEnvelope.Pair);
+        Assert.Equal(phone.Code, pair.Code);
+    }
+
+    [Fact]
+    public async Task Code_KeptForTheNextChannel_IsDroppedWhenAnotherPhoneIsMadeActive()
+    {
+        await using var other = new FakePhone();
+        var android = new PhoneDevice("adb:R58M123", PhoneKind.Android, "Pixel 8", AndroidSlot, WatchTransport.Adb,
+            (_, _) => Task.FromException<Stream>(new AdbException("closed")));
+        await using var h = new Harness();
+        await h.Session.StartAsync();
+        h.Adb.Attach(android);
+        await WaitFor(() => h.Time.DueIn().Contains(TimeSpan.FromSeconds(2)));
+        Assert.True(await h.Submit(android, "042917"));
+        await h.WaitState(s => Entry(s, android) is { State: PhoneState.Pairing } && h.Time.DueIn().Count > 0);
+
+        var iphone = IPhone(other);
+        h.Usb.Attach(iphone);
+        await h.WaitState(s => Entry(s, iphone) is not null);
+        await h.Session.MakeActiveAsync(iphone.Id);
+        await h.Session.MakeActiveAsync(android.Id);
+
+        // Active again, and refused again: back to Connecting with the reason, no code waiting (Pair can be pressed).
+        var s = await h.WaitState(s => Entry(s, android) is { IsActive: true, State: PhoneState.Connecting, Message: not null });
+        Assert.True(Core.Presentation.PhoneRowModel.From(Entry(s, android)!).CanPair);
     }
 
     [Fact]

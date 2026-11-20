@@ -15,19 +15,26 @@ public static class DisconnectReason
         UsbMuxException { ResultCode: 3 } => DisconnectCategory.AppNotRunning,
         AdbException a when a.Message.Contains("closed") || a.Message.Contains("refused") || a.Message.Contains("connect")
             => DisconnectCategory.AppNotRunning,
-        SocketException { SocketErrorCode: SocketError.ConnectionRefused } => DisconnectCategory.AppNotRunning,
+        // Only the loopback services (27015, 5037) are dialled directly, so a refused socket is this PC's, not the phone's.
+        SocketException { SocketErrorCode: SocketError.ConnectionRefused } => DisconnectCategory.UsbServiceDown,
         TimeoutException => DisconnectCategory.NoAnswer,
         ProtocolException => DisconnectCategory.ProtocolError,
         _ => DisconnectCategory.ConnectionLost,
     };
 
-    /// <summary>What the row says while the phone is tried again; <paramref name="kind"/> is "iPhone" or "Android phone".</summary>
-    public static string Describe(DisconnectCategory category, string kind) => category switch
+    /// <summary>What the row says while the phone is tried again.</summary>
+    public static string Describe(DisconnectCategory category, PhoneKind kind)
     {
-        DisconnectCategory.PhoneClosed => $"The {kind} closed the connection.",
-        DisconnectCategory.AppNotRunning => $"Passthrough isn't running on the {kind}. Start it there, then connect.",
-        DisconnectCategory.NoAnswer => $"The {kind} stopped responding.",
-        DisconnectCategory.ProtocolError => $"The {kind} sent something this PC couldn't read. Update Passthrough on both.",
-        _ => $"Lost the connection to the {kind}.",
-    };
+        var label = kind.Label();
+        return category switch
+        {
+            DisconnectCategory.PhoneClosed => $"The {label} closed the connection.",
+            DisconnectCategory.AppNotRunning => $"Passthrough isn't running on the {label}. Start it there, then connect.",
+            DisconnectCategory.UsbServiceDown when kind == PhoneKind.Android => "adb isn't answering on this PC. Passthrough keeps trying.",
+            DisconnectCategory.UsbServiceDown => "Apple Devices isn't answering on this PC. Open Apple Devices, then connect.",
+            DisconnectCategory.NoAnswer => $"The {label} stopped responding.",
+            DisconnectCategory.ProtocolError => $"The {label} sent something this PC couldn't read. Update Passthrough on both.",
+            _ => $"Lost the connection to the {label}.",
+        };
+    }
 }

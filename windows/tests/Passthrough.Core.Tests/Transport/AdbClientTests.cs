@@ -197,6 +197,22 @@ public class AdbClientTests
         Assert.Empty(runner.Calls);
     }
 
+    [Fact]
+    public async Task EnsureServer_ServerThatNeverAccepts_IsATimeout_AndAdbIsNotStarted()
+    {
+        // Something holds the port but never accepts (a hung server, a filtered SYN): not "nothing answers", so no start-server.
+        var client = new AdbClient(async ct =>
+        {
+            await Task.Delay(Timeout.InfiniteTimeSpan, ct);
+            throw new InvalidOperationException("unreachable");
+        }, TimeSpan.FromMilliseconds(200));
+        var runner = new RecordingRunner();
+
+        var e = await Assert.ThrowsAsync<TimeoutException>(() => AdbClient.EnsureServerAsync(client, "C:\\sdk\\adb.exe", runner, TimeProvider.System, Deadline()));
+        Assert.Equal("adb did not answer in time", e.Message);
+        Assert.Empty(runner.Calls);
+    }
+
     private static readonly TimeSpan Short = TimeSpan.FromMilliseconds(200);
 
     private static async Task DrainAsync(AdbClient client)

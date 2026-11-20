@@ -96,7 +96,11 @@ In this order:
    taskbar at the right size, on a scaled display and on a second monitor;
    clicking the icon again closes it; clicking elsewhere hides it; right-click
    shows Settings... and Quit; a second launch does nothing. In Task Manager,
-   Passthrough must not show the green Efficiency mode leaf.
+   Passthrough must not show the green Efficiency mode leaf. Known gap to check:
+   the flyout goes to the monitor under the mouse, so opening it from the
+   keyboard (Win+B, then Enter on the icon) with the mouse resting on another
+   monitor may open it there; if so, place it by the icon's own rectangle
+   (`Shell_NotifyIconGetRect`) instead.
 7. **Pairing end to end** with an iPhone and with an Android phone: type the
    code (Enter works, and so does a pasted "123 456"), see Paired, see the
    status line and connection counts update, unplug and replug, and see it

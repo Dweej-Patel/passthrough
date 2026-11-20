@@ -47,7 +47,9 @@ public sealed class DpapiSecretStore : ISecretStore
     {
         lock (_gate)
         {
-            File.Delete(PathFor(slot)); // does nothing when the file is absent
+            // File.Delete ignores a missing file but throws for a missing folder (deleted while the app runs): both mean none.
+            try { File.Delete(PathFor(slot)); }
+            catch (DirectoryNotFoundException) { }
         }
     }
 

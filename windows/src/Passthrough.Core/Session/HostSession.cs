@@ -79,6 +79,14 @@ public sealed class HostSession : IAsyncDisposable
     private bool _channelHasCredential;
     /// <summary>The name last saved (or tried) for each slot, so a status tick does not write the settings again.</summary>
     private readonly Dictionary<string, string> _namesSaved = [];
+    /// <summary>The current channel has had its welcome: a code given to it now goes out at once.</summary>
+    private bool _channelWelcomed;
+    /// <summary>
+    /// A code the user typed for the active phone that has not left this PC: held by a channel that was never welcomed.
+    /// When that channel fails to open, the next one is given it, so a code the flyout cleared is not lost. Cleared by a
+    /// welcome (the client sends it then) and when the active phone changes.
+    /// </summary>
+    private string? _unsentCode;
 
     public HostSession(DeviceDirectory directory, ISecretStore secrets, ISettingsStore settings, string computerName,
         Func<PhoneDevice, ControlIdentity, ControlClient> clientFactory, TimeProvider time)
@@ -113,7 +121,8 @@ public sealed class HostSession : IAsyncDisposable
     /// <summary>
     /// Fires, on the session's background loop, with a line for the log when the active phone's channel ends for a
     /// new reason (a category, never phone-supplied text or a secret); the same reason again is not repeated until
-    /// the phone welcomes the PC or another phone is made active.
+    /// the phone welcomes the PC or another phone is made active. Also when a paired phone says Passthrough was turned
+    /// off on it (<c>goodbye</c>).
     /// </summary>
     public event Action<string>? Log;
 
@@ -168,14 +177,16 @@ public sealed class HostSession : IAsyncDisposable
             _client = null;
             await current.DisposeAsync();
         }
-        else if (_client is not null) return TookCode();
+        else if (_client is not null) return TookCode(code);
         OpenClient(keepState: true);
         // A fresh client takes the code unless the store failed (the phone is Failed now, with Try again).
-        return _client is not null && await _client.SubmitCodeAsync(code) && TookCode();
+        return _client is not null && await _client.SubmitCodeAsync(code) && TookCode(code);
     });
 
-    private bool TookCode()
+    private bool TookCode(string code)
     {
+        // Before the welcome the client only holds the code; remember it until it goes out (see _unsentCode).
+        _unsentCode = _channelWelcomed ? null : code;
         _activeState = PhoneState.Pairing;
         _message = null;
         _reason = null;
@@ -312,6 +323,7 @@ public sealed class HostSession : IAsyncDisposable
         _reason = null;
         _failures = 0;
         _lastLogged = null;
+        _unsentCode = null;
         if (client is not null) await client.DisposeAsync();
     }
 
@@ -347,8 +359,11 @@ public sealed class HostSession : IAsyncDisposable
         _client = client;
         _openedAt = _time.GetTimestamp();
         _channelHasCredential = _hasToken[device.PairingSlot];
-        if (!keepState) _activeState = PhoneState.Connecting;
+        _channelWelcomed = false;
+        if (!keepState) _activeState = _unsentCode is null ? PhoneState.Connecting : PhoneState.Pairing;
         ClearStatus();
+        // A code an earlier channel never got to send: this one holds it until its welcome.
+        if (_unsentCode is { } code) _ = client.SubmitCodeAsync(code); // completes at once; true on a fresh client
         _readers.RemoveAll(t => t.IsCompleted);
         _readers.Add(Task.Run(async () =>
         {
@@ -365,6 +380,8 @@ public sealed class HostSession : IAsyncDisposable
             case ControlEvent.Welcomed w:
                 // The phone is there: the back-off and the last reason start over.
                 (_failures, _reason, _lastLogged) = (0, null, null);
+                _channelWelcomed = true;
+                _unsentCode = null; // the client sent a held code with its answer to this welcome
                 if (w.Paired)
                 {
                     _activeState = PhoneState.Paired;
@@ -410,12 +427,17 @@ public sealed class HostSession : IAsyncDisposable
                 (_status, _rx, _tx, _connections) = (s.Status, s.Rx, s.Tx, s.Active);
                 SaveName(_active!.PairingSlot, s.Status.DeviceName);
                 break;
+            case ControlEvent.Goodbye:
+                // The phone's user turned Passthrough off; the phone closes next. Logged, as on the Mac.
+                WriteLog($"{_active!.Id} ({_active.Kind.Label()}): Passthrough was turned off on the phone");
+                break;
             case ControlEvent.Disconnected d:
                 _client = null;
                 ClearStatus();
                 if (d.Error is ControlException failure)
                 {
                     // Retrying cannot fix a failed proof or another version; the stored token stays.
+                    _unsentCode = null;
                     _activeState = PhoneState.Failed;
                     _message = failure.Message;
                     _held = true;
@@ -434,8 +456,9 @@ public sealed class HostSession : IAsyncDisposable
                 else
                 {
                     var category = DisconnectReason.Classify(d.Error);
-                    _reason = DisconnectReason.Describe(category, _active!.Kind.Label());
-                    _activeState = PhoneState.Connecting;
+                    _reason = DisconnectReason.Describe(category, _active!.Kind);
+                    // A code that never reached the phone waits for the next channel: the row stays Pairing.
+                    _activeState = _unsentCode is null ? PhoneState.Connecting : PhoneState.Pairing;
                     LogClosed(category.ToString(), retrying: true);
                     ScheduleReconnect();
                 }
@@ -469,6 +492,11 @@ public sealed class HostSession : IAsyncDisposable
         var line = $"{_active!.Id} ({_active.Kind.Label()}): channel closed: {category}" + (retrying ? "; retrying" : "");
         if (line == _lastLogged) return;
         _lastLogged = line;
+        WriteLog(line);
+    }
+
+    private void WriteLog(string line)
+    {
         try { Log?.Invoke(line); }
         catch (Exception) { } // a failing logger must not stop the session
     }

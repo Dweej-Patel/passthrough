@@ -100,11 +100,10 @@ public sealed class AdbClient(StreamConnector connect, TimeSpan? connectTimeout 
         await client.ProbeAsync(ct);
     }
 
+    /// <summary>Connects to the server and hangs up; a server that does not accept in time is a <see cref="TimeoutException"/>.</summary>
     private async Task ProbeAsync(CancellationToken ct)
     {
-        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
-        timeout.CancelAfter(_connectTimeout);
-        await using var stream = await connect(timeout.Token);
+        await using var stream = await WithDeadlineAsync(c => connect(c), ct);
     }
 
     private async Task<Stream> ConnectCoreAsync(string serial, int port, CancellationToken ct)
