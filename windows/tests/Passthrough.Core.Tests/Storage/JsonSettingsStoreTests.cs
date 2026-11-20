@@ -82,7 +82,7 @@ public class JsonSettingsStoreTests
 
         Assert.Equal(ClientId, store.Get("clientID")); // phones still know this PC
         Assert.Equal(damaged, fs.Files[Path + ".bad"]);
-        Assert.False(fs.FileExists(Path));
+        Assert.Equal(ClientId, JsonSerializer.Deserialize<Dictionary<string, string>>(fs.Files[Path])!["clientID"]); // saved at once
         Assert.Equal(JsonSettingsStore.DamagedNotice, store.Notice);
 
         store.Set("androidEnabled", "false");
@@ -130,5 +130,41 @@ public class JsonSettingsStoreTests
         fs.Files[Path] = "{}";
         fs.Fail = (op, _) => op == "read" ? new IOException("The process cannot access the file") : null;
         Assert.Throws<IOException>(() => new JsonSettingsStore(fs, Path));
+    }
+
+    [Fact]
+    public void RecoveredClientId_SurvivesARestart_WithNoSetInBetween()
+    {
+        var fs = new MemoryFileSystem();
+        fs.Files[Path] = $$"""{"clientID":"{{ClientId}}","androidEnabled":""";
+
+        var first = new JsonSettingsStore(fs, Path);
+        Assert.Equal(ClientId, first.Get("clientID"));
+
+        var second = new JsonSettingsStore(fs, Path);
+        Assert.Equal(ClientId, second.Get("clientID"));
+        Assert.Null(second.Notice); // a healthy file now
+    }
+
+    [Fact]
+    public void RecoveredValues_ThatCannotBeSaved_AreRecoveredFromTheBadCopyNextTime()
+    {
+        var fs = new MemoryFileSystem();
+        fs.Files[Path] = $$"""{"clientID":"{{ClientId}}",""";
+        fs.Fail = (op, path) => op == "write" ? new IOException("There is not enough space on the disk.") : null;
+
+        var first = new JsonSettingsStore(fs, Path);
+        Assert.Equal(ClientId, first.Get("clientID"));
+        Assert.Equal(JsonSettingsStore.DamagedNotice, first.Notice);
+        Assert.False(fs.FileExists(Path));
+
+        fs.Fail = (_, _) => null; // the disk has room again
+        var second = new JsonSettingsStore(fs, Path);
+        Assert.Equal(ClientId, second.Get("clientID"));
+        Assert.Equal(JsonSettingsStore.DamagedNotice, second.Notice);
+        Assert.Equal(ClientId, JsonSerializer.Deserialize<Dictionary<string, string>>(fs.Files[Path])!["clientID"]);
+
+        var third = new JsonSettingsStore(fs, Path);
+        Assert.Equal((ClientId, (string?)null), (third.Get("clientID"), third.Notice));
     }
 }

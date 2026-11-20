@@ -9,8 +9,9 @@ namespace Passthrough.Core.Storage;
 /// <para>
 /// Reading is lenient: string values are kept, <c>true</c>/<c>false</c> and numbers are kept as their text, anything
 /// else is skipped. A file that is not a JSON object at all is damaged: it is renamed to <c>&lt;file&gt;.bad</c> before
-/// anything is written, the client id is recovered from its text when it can be (so phones still know this PC), and
-/// <see cref="Notice"/> says what happened. If the damaged file cannot be renamed, the store refuses to write over it.
+/// anything is written, the client id is recovered from its text when it can be (so phones still know this PC) and
+/// saved at once, and <see cref="Notice"/> says what happened. If that save fails, the next launch recovers from the
+/// <c>.bad</c> copy again. If the damaged file cannot be renamed, the store refuses to write over it.
 /// </para>
 /// </summary>
 public sealed partial class JsonSettingsStore : ISettingsStore
@@ -35,9 +36,17 @@ public sealed partial class JsonSettingsStore : ISettingsStore
     {
         _files = files;
         _path = path;
+        _values = [];
+        var bad = path + ".bad";
         if (!files.FileExists(path))
         {
-            _values = [];
+            // No settings, but a damaged copy whose recovered values could not be saved last time: recover them again.
+            if (ReadBad(bad) is { Count: > 0 } again)
+            {
+                _values = again;
+                Notice = DamagedNotice;
+                TrySave();
+            }
             return;
         }
         var text = files.ReadAllText(path);
@@ -48,18 +57,21 @@ public sealed partial class JsonSettingsStore : ISettingsStore
         }
 
         // Damaged: keep what can be saved of it, and never write over it unless it was moved aside first.
-        _values = [];
-        if (ClientIdPattern().Match(text) is { Success: true } m) _values[ClientIdKey] = m.Groups[1].Value;
+        _values = Salvage(text);
         try
         {
-            files.Move(path, path + ".bad", overwrite: true);
-            Notice = _values.ContainsKey(ClientIdKey) ? DamagedNotice : DamagedLostNotice;
+            files.Move(path, bad, overwrite: true);
         }
         catch (Exception e) when (e is IOException or UnauthorizedAccessException)
         {
             _readOnly = true;
             Notice = DamagedUnsavedNotice;
+            return;
         }
+        Notice = _values.ContainsKey(ClientIdKey) ? DamagedNotice : DamagedLostNotice;
+        // Save what was recovered now, so a restart with no change in between still has it. If that fails, the next
+        // launch recovers it from the .bad copy again.
+        if (_values.Count > 0) TrySave();
     }
 
     /// <summary>What to tell the user about the file (it was damaged), or null.</summary>
@@ -77,12 +89,39 @@ public sealed partial class JsonSettingsStore : ISettingsStore
         {
             if (_readOnly) throw new InvalidOperationException("The settings file is damaged and could not be moved aside, so it is not overwritten.");
             var candidate = new Dictionary<string, string>(_values) { [key] = value };
-            if (Path.GetDirectoryName(_path) is { Length: > 0 } dir) _files.CreateDirectory(dir);
-            var temp = _path + ".tmp";
-            _files.WriteAllTextDurably(temp, JsonSerializer.Serialize(candidate));
-            _files.Move(temp, _path, overwrite: true);
+            Write(candidate);
             _values[key] = value;
         }
+    }
+
+    /// <summary>Writes <paramref name="values"/> to a durable temp file, then renames it over the settings file.</summary>
+    private void Write(Dictionary<string, string> values)
+    {
+        if (Path.GetDirectoryName(_path) is { Length: > 0 } dir) _files.CreateDirectory(dir);
+        var temp = _path + ".tmp";
+        _files.WriteAllTextDurably(temp, JsonSerializer.Serialize(values));
+        _files.Move(temp, _path, overwrite: true);
+    }
+
+    private void TrySave()
+    {
+        try { Write(_values); }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException) { } // the .bad copy is still there
+    }
+
+    /// <summary>What can be recovered from the .bad copy; nothing when there is none or it can't be read (only settings.json must be readable).</summary>
+    private Dictionary<string, string> ReadBad(string bad)
+    {
+        try { return _files.FileExists(bad) ? Salvage(_files.ReadAllText(bad)) : []; }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException) { return []; }
+    }
+
+    /// <summary>What can be kept from a damaged file: the client id, when one is in its text.</summary>
+    private static Dictionary<string, string> Salvage(string text)
+    {
+        var values = new Dictionary<string, string>();
+        if (ClientIdPattern().Match(text) is { Success: true } m) values[ClientIdKey] = m.Groups[1].Value;
+        return values;
     }
 
     /// <summary>The values in <paramref name="text"/>, or null when it is not a JSON object.</summary>
