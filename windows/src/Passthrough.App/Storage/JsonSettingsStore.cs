@@ -25,11 +25,14 @@ public sealed class JsonSettingsStore : ISettingsStore
     {
         lock (_gate)
         {
-            _values[key] = value;
+            // Write a candidate copy; the cache changes only once the file holds it. A failed write throws and
+            // leaves both as they were.
+            var candidate = new Dictionary<string, string>(_values) { [key] = value };
             Directory.CreateDirectory(Path.GetDirectoryName(_path)!);
             var temp = _path + ".tmp";
-            File.WriteAllText(temp, JsonSerializer.Serialize(_values));
+            File.WriteAllText(temp, JsonSerializer.Serialize(candidate));
             File.Move(temp, _path, overwrite: true);
+            _values[key] = value;
         }
     }
 
