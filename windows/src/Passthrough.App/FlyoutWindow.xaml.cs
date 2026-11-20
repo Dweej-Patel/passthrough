@@ -1,3 +1,4 @@
+using Microsoft.UI;
 using Microsoft.UI.Windowing;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
@@ -64,13 +65,17 @@ public sealed partial class FlyoutWindow : Window
 
     /// <summary>
     /// Places the window at the bottom right of the work area of the monitor under the cursor (the one whose taskbar was
-    /// clicked), sized for that monitor's DPI, and brings it forward.
+    /// clicked), sized for that monitor's DPI, and brings it forward. The window is moved onto that monitor first, so the
+    /// DPI read from its own handle is that monitor's; it is sized after that move, so a size Windows suggests when the
+    /// DPI changes (WM_DPICHANGED, which WinUI applies) is replaced by this one.
     /// </summary>
     private void ShowAtTray()
     {
         var cursor = NativeMethods.CursorPosition();
         var area = DisplayArea.GetFromPoint(new PointInt32(cursor.X, cursor.Y), DisplayAreaFallback.Primary).WorkArea;
-        var scale = FlyoutPlacement.ScaleFromDpi(NativeMethods.DpiAt(cursor));
+        AppWindow.Move(new PointInt32(area.X, area.Y));
+        var hwnd = Win32Interop.GetWindowFromWindowId(AppWindow.Id);
+        var scale = FlyoutPlacement.ScaleFromDpi(NativeMethods.DpiOf(hwnd));
         var r = FlyoutPlacement.Place(new PixelRect(area.X, area.Y, area.Width, area.Height), scale);
         AppWindow.MoveAndResize(new RectInt32(r.X, r.Y, r.Width, r.Height));
         AppWindow.Show();

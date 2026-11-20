@@ -38,6 +38,11 @@ public partial class App : Application
         {
             LogFile.Error(e.Exception);
             LogFile.Flush();
+            // No tray icon yet: part of startup failed outside OnLaunched's try (an async callback). Without an icon there
+            // is no Quit, so treat it as a failed start.
+            if (_tray is not null || _shuttingDown) return;
+            e.Handled = true;
+            _ = FailStartupAsync(e.Exception);
         };
         AppDomain.CurrentDomain.UnhandledException += (_, e) =>
         {
@@ -78,11 +83,12 @@ public partial class App : Application
                     User: name => Environment.GetEnvironmentVariable(name, EnvironmentVariableTarget.User),
                     Machine: name => Environment.GetEnvironmentVariable(name, EnvironmentVariableTarget.Machine)),
                 File.Exists, ";", "adb.exe", '\\');
-            LogFile.Write($"adb: {locator.Find() ?? "not found"}");
+            var adb = new AdbWatcher(new AdbClient(ByteStreamConnector.Tcp("127.0.0.1", 5037)), locator, runner, TimeProvider.System);
+            adb.AdbPathChanged += path => LogFile.Write($"adb: {path ?? "not found"}"); // on each search that finds it elsewhere, or not at all
             var directory = new DeviceDirectory(new IDeviceWatcher[]
             {
                 new UsbMuxWatcher(new UsbMuxClient(ByteStreamConnector.Tcp("127.0.0.1", 27015)), TimeProvider.System),
-                new AdbWatcher(new AdbClient(ByteStreamConnector.Tcp("127.0.0.1", 5037)), locator, runner, TimeProvider.System),
+                adb,
             });
             directory.Error += LogFile.Error; // watcher failures (adb that won't start, a daemon that falls silent), once each
 
@@ -105,11 +111,18 @@ public partial class App : Application
         }
         catch (Exception e)
         {
-            // Never leave an invisible process holding the mutex: say what failed, take down what was made, exit.
             LogFile.Error(e);
-            NativeMethods.ShowError(StartupFailure.Message(e, LogFile.Path), StartupFailure.Caption);
-            await ShutDownAsync();
+            await FailStartupAsync(e);
         }
+    }
+
+    /// <summary>Never leaves an invisible process holding the mutex: says what failed, takes down what was made, exits.</summary>
+    private async Task FailStartupAsync(Exception e)
+    {
+        if (_shuttingDown) return;
+        try { NativeMethods.ShowError(StartupFailure.Message(e, LogFile.Path), StartupFailure.Caption); }
+        catch (Exception shown) { LogFile.Error(shown); }
+        await ShutDownAsync();
     }
 
     /// <summary>An enabled Start at login entry left by a build elsewhere now starts this one.</summary>

@@ -1,6 +1,5 @@
 using H.NotifyIcon;
 using Microsoft.UI.Xaml.Controls;
-using Microsoft.UI.Xaml.Media.Imaging;
 using Passthrough.App.Platform;
 
 namespace Passthrough.App;
@@ -11,6 +10,7 @@ namespace Passthrough.App;
 /// </summary>
 public sealed class TrayIcon : IDisposable
 {
+    private readonly System.Drawing.Icon _image;
     private readonly TaskbarIcon _icon;
 
     public TrayIcon(Action toggleFlyout, Action openSettings, Action quit)
@@ -19,10 +19,15 @@ public sealed class TrayIcon : IDisposable
         menu.Items.Add(new MenuFlyoutItem { Text = "Settings…", Command = new ActionCommand(openSettings) });
         menu.Items.Add(new MenuFlyoutItem { Text = "Quit", Command = new ActionCommand(quit) });
 
+        // Loaded here, not through IconSource: H.NotifyIcon loads an IconSource in an async void callback, where a missing
+        // or damaged file would be an unhandled exception instead of a startup failure. Reading the handle decodes it now.
+        _image = new System.Drawing.Icon(Path.Combine(AppContext.BaseDirectory, "Assets", "tray.ico"));
+        _ = _image.Handle;
+
         _icon = new TaskbarIcon
         {
             ToolTipText = "Passthrough",
-            IconSource = new BitmapImage(new Uri(Path.Combine(AppContext.BaseDirectory, "Assets", "tray.ico"))),
+            Icon = _image,
             ContextFlyout = menu,
             ContextMenuMode = ContextMenuMode.PopupMenu,
             LeftClickCommand = new ActionCommand(toggleFlyout),
@@ -33,5 +38,9 @@ public sealed class TrayIcon : IDisposable
         _icon.ForceCreate(enablesEfficiencyMode: false);
     }
 
-    public void Dispose() => _icon.Dispose();
+    public void Dispose()
+    {
+        _icon.Dispose();
+        _image.Dispose();
+    }
 }
