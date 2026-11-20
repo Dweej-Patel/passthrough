@@ -106,6 +106,17 @@ public sealed class HostSession : IAsyncDisposable
         await ActivateAsync(device);
     });
 
+    /// <summary>
+    /// "Try again" for a phone whose channel failed: when it is the active phone, clears the hold and the failure
+    /// message and opens a fresh channel to it; otherwise makes it active. Nothing for a phone that is not attached
+    /// or cannot carry the PC's internet.
+    /// </summary>
+    public Task RetryAsync(string phoneId) => RunAsync(async () =>
+    {
+        if (_closed || _devices.FirstOrDefault(d => d.Id == phoneId) is not { CanRoute: true } device) return;
+        await ActivateAsync(device); // dropping the old channel clears the hold and the message
+    });
+
     /// <summary>Sends the six-digit code shown on the active phone (held until its welcome when the channel is still opening).</summary>
     public Task SubmitCodeAsync(string code) => RunAsync(async () =>
     {

@@ -46,6 +46,8 @@
                                              InputScope="Number" />
                                     <Button Content="Pair" IsEnabled="{x:Bind CanPair, Mode=OneWay}" Click="OnPairClick" />
                                 </StackPanel>
+                                <Button Margin="22,0,0,0" Content="Try again"
+                                        Visibility="{x:Bind RetryVisibility, Mode=OneWay}" Click="OnRetryClick" />
                                 <Button Margin="22,0,0,0" Content="Use this phone"
                                         Visibility="{x:Bind UseVisibility, Mode=OneWay}" Click="OnUseClick" />
                             </StackPanel>

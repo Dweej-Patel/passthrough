@@ -54,17 +54,18 @@ public class HostSessionTests
         public ValueTask DisposeAsync() => Session.DisposeAsync();
     }
 
-    /// <summary>A secret store that fails: on every Set, or on Get for one slot.</summary>
-    private sealed class FailingSecretStore(bool failSet = false, string? failGetSlot = null) : ISecretStore
+    /// <summary>A secret store that fails: on every Set (or only the first <paramref name="failSets"/>), or on Get for one slot.</summary>
+    private sealed class FailingSecretStore(bool failSet = false, string? failGetSlot = null, int failSets = 0) : ISecretStore
     {
         private readonly MemorySecretStore _inner = new();
+        private int _failSets = failSets;
 
         public string? Get(string slot) =>
             slot == failGetSlot ? throw new IOException("the credential store is unavailable") : _inner.Get(slot);
 
         public void Set(string slot, string value)
         {
-            if (failSet) throw new IOException("the credential store is unavailable");
+            if (failSet || Interlocked.Decrement(ref _failSets) >= 0) throw new IOException("the credential store is unavailable");
             _inner.Set(slot, value);
         }
 
@@ -384,6 +385,70 @@ public class HostSessionTests
         // Made active again: one more try.
         await h.Session.MakeActiveAsync(android.Id);
         await h.WaitState(s => Entry(s, android) is { State: PhoneState.NotPaired } && h.Clients.Count == 2);
+    }
+
+    [Fact]
+    public async Task Retry_AfterTokenSaveFailure_ReconnectsAndPairs()
+    {
+        await using var phone = new FakePhone { IssuedToken = PhoneToken };
+        await using var h = new Harness(secrets: new FailingSecretStore(failSets: 1));
+        await h.Session.StartAsync();
+        var android = Android(phone);
+        h.Adb.Attach(android);
+        await h.WaitState(s => Entry(s, android) is { State: PhoneState.NotPaired });
+        await h.Session.SubmitCodeAsync(phone.Code);
+        await h.WaitState(s => Entry(s, android) is { State: PhoneState.Failed });
+        h.Time.Advance(TimeSpan.FromSeconds(10));
+        await Task.Delay(200);
+        Assert.Single(h.Clients);
+
+        await h.Session.RetryAsync(android.Id);
+
+        // The hold is gone: a fresh channel, the failure message cleared, and the phone may pair again.
+        var s = await h.WaitState(s => Entry(s, android) is { IsActive: true, State: PhoneState.NotPaired } && h.Clients.Count == 2);
+        Assert.Null(Entry(s, android)!.Message);
+        await h.Session.SubmitCodeAsync(phone.Code);
+        s = await h.WaitState(s => Entry(s, android) is { State: PhoneState.Paired, Status: not null });
+        Assert.Equal(PhoneToken, h.Secrets.Get(AndroidSlot));
+        Assert.True(Entry(s, android)!.HasPairing);
+    }
+
+    [Fact]
+    public async Task Retry_AfterProofFailure_TriesAgain()
+    {
+        await using var phone = new FakePhone { Token = PhoneToken, BadProof = true };
+        await using var h = new Harness();
+        h.Secrets.Set(AndroidSlot, PhoneToken);
+        await h.Session.StartAsync();
+        var android = Android(phone);
+        h.Adb.Attach(android);
+        await h.WaitState(s => Entry(s, android) is { State: PhoneState.Failed });
+
+        await h.Session.RetryAsync(android.Id);
+
+        await WaitFor(() => h.Clients.Count == 2);
+        Assert.Equal(PhoneToken, h.Client(1).Identity.Token);
+        await h.WaitState(s => Entry(s, android) is { State: PhoneState.Failed });
+        Assert.Equal(PhoneToken, h.Secrets.Get(AndroidSlot));
+    }
+
+    [Fact]
+    public async Task Retry_PhoneNotActive_MakesItActive()
+    {
+        await using var androidPhone = new FakePhone();
+        await using var iPhonePhone = new FakePhone();
+        await using var h = new Harness();
+        await h.Session.StartAsync();
+        var android = Android(androidPhone);
+        var iPhone = IPhone(iPhonePhone);
+        h.Adb.Attach(android);
+        h.Usb.Attach(iPhone);
+        await h.WaitState(s => Entry(s, android) is { IsActive: true, State: PhoneState.NotPaired } && Entry(s, iPhone) is not null);
+
+        await h.Session.RetryAsync(iPhone.Id);
+
+        await h.WaitState(s => Entry(s, iPhone) is { IsActive: true, State: PhoneState.NotPaired } && Entry(s, android) is { IsActive: false });
+        Assert.Equal([android, iPhone], h.Clients.Select(c => c.Device));
     }
 
     [Fact]

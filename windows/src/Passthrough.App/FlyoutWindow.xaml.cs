@@ -81,6 +81,13 @@ public sealed partial class FlyoutWindow : Window
         catch (Exception ex) { LogFile.Error(ex); }
     }
 
+    private async void OnRetryClick(object sender, RoutedEventArgs e)
+    {
+        var row = (PhoneRow)((FrameworkElement)sender).DataContext;
+        try { await ViewModel.RetryAsync(row.Id); }
+        catch (Exception ex) { LogFile.Error(ex); }
+    }
+
     private void OnSettingsClick(object sender, RoutedEventArgs e)
     {
         AppWindow.Hide();

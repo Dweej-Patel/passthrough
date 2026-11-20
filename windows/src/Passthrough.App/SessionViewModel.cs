@@ -47,6 +47,8 @@ public sealed class SessionViewModel : ObservableBase
 
     public Task UseAsync(string phoneId) => _session.MakeActiveAsync(phoneId);
 
+    public Task RetryAsync(string phoneId) => _session.RetryAsync(phoneId);
+
     public Task SubmitCodeAsync(string code) => _session.SubmitCodeAsync(code);
 
     public Task ForgetAsync(string phoneId) => _session.ForgetAsync(phoneId);

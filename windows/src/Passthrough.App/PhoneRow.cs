@@ -70,6 +70,9 @@ public sealed class PhoneRow : ObservableBase
 
     public bool CanPair => _entry.State == PhoneState.NotPaired;
 
+    /// <summary>[Try again]: the active phone, once its channel failed for good (failed proof, other version, token not saved).</summary>
+    public Visibility RetryVisibility => Show(_entry.IsActive && _entry.State == PhoneState.Failed);
+
     /// <summary>[Use this phone]: any other phone that can be made active.</summary>
     public Visibility UseVisibility => Show(!_entry.IsActive && _entry.State != PhoneState.RemoteOnlyLater);
 
