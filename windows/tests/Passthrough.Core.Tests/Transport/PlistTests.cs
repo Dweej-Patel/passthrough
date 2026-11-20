@@ -253,9 +253,19 @@ public class PlistTests
     [InlineData("<plist version=\"1.0\"><dict/><dict/></plist>")]                                  // a second top value
     [InlineData("<plist version=\"1.0\"><dict/><string>x</string></plist>")]
     [InlineData("<plist version=\"1.0\"><dict/>")]                                                 // no </plist>
+    [InlineData("<plist><dict/>junk</plist>")]                                                       // text before </plist>
+    [InlineData("<plist>junk<dict/></plist>")]                                                       // text before the dict
+    [InlineData("<wrong><dict/></wrong>")]                                                           // a root that is not plist
+    [InlineData("<dict/>")]                                                                          // no plist at all
     public void Plist_AnythingAfterTheTopDict_IsRefused(string xml)
     {
         Assert.Throws<FormatException>(() => Plist.Decode(Encoding.UTF8.GetBytes(xml)));
+    }
+
+    [Fact]
+    public void Plist_WhitespaceCommentsAndInstructionsAroundTheDict_AreFine()
+    {
+        Assert.Empty(Plist.Decode(Encoding.UTF8.GetBytes("<plist version=\"1.0\">\n\t<!-- a -->\n\t<?pi x?>\n<dict/>\n\t<!-- b -->\n\t<?pi y?>\n</plist>\n")));
     }
 
     [Fact]

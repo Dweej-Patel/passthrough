@@ -108,28 +108,32 @@ public static class Plist
         try
         {
             using var reader = XmlReader.Create(ms, settings);
-            if (reader.MoveToContent() != XmlNodeType.Element || reader.IsEmptyElement) throw new FormatException("Empty plist");
+            if (reader.MoveToContent() != XmlNodeType.Element || reader.LocalName != "plist") throw new FormatException("Not a plist");
+            if (reader.IsEmptyElement) throw new FormatException("Empty plist");
             reader.Read(); // into <plist>
-            while (reader.NodeType != XmlNodeType.Element)
-            {
-                if (reader.NodeType is XmlNodeType.EndElement or XmlNodeType.None) throw new FormatException("Empty plist");
-                reader.Read();
-            }
+            SkipMarkup(reader);
+            if (reader.NodeType != XmlNodeType.Element) throw new FormatException("Plist holds no dict");
             var top = DecodeValue(reader, 1) as Dictionary<string, object> ?? throw new FormatException("Plist root is not a dict");
-            // Then the root's end tag, and the end of the input: no second value, no second root, no trailing text.
-            while (reader.NodeType is not (XmlNodeType.EndElement or XmlNodeType.Element or XmlNodeType.None)) reader.Read();
-            if (reader.NodeType != XmlNodeType.EndElement) throw new FormatException("Plist has more than one top value");
-            while (reader.Read())
-            {
-                if (reader.NodeType is not (XmlNodeType.Whitespace or XmlNodeType.Comment or XmlNodeType.ProcessingInstruction))
-                    throw new FormatException("Plist has something after its end");
-            }
+            // Then </plist> with nothing but markup before it, and the end of the input after it (markup allowed).
+            SkipMarkup(reader);
+            if (reader.NodeType != XmlNodeType.EndElement) throw new FormatException("Plist holds more than its dict");
+            reader.Read();
+            SkipMarkup(reader);
+            if (!reader.EOF) throw new FormatException("Plist has something after its end");
             return top;
         }
         catch (XmlException e)
         {
             throw new FormatException("Plist is not well-formed XML", e);
         }
+    }
+
+    /// <summary>Moves past whitespace, comments and processing instructions; stops on anything else (text included).</summary>
+    private static void SkipMarkup(XmlReader reader)
+    {
+        while (reader.NodeType is XmlNodeType.Whitespace or XmlNodeType.SignificantWhitespace or XmlNodeType.Comment
+               or XmlNodeType.ProcessingInstruction or XmlNodeType.XmlDeclaration or XmlNodeType.DocumentType)
+            reader.Read();
     }
 
     /// <summary>
