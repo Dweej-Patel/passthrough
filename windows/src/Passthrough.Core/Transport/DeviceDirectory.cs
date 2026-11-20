@@ -1,13 +1,15 @@
+using System.Threading.Channels;
+
 namespace Passthrough.Core.Transport;
 
 /// <summary>
 /// Tracks every watcher's phones in attach order and reports each change. Thread-safe: <see cref="Devices"/> is a snapshot,
-/// and <see cref="Changed"/> fires on whichever background thread a watcher reported from, in order, with no lock held.
+/// and <see cref="Changed"/> is delivered in order from one dispatcher thread-pool loop, with no lock held, so a handler may block on a watcher or on <see cref="StopAsync"/>.
 /// </summary>
 public sealed class DeviceDirectory
 {
     private readonly Lock _gate = new();
-    private readonly Lock _eventGate = new();
+    private readonly Channel<DeviceChange> _changes = Channel.CreateUnbounded<DeviceChange>(new UnboundedChannelOptions { SingleReader = true });
     private readonly List<PhoneDevice> _devices = [];
     private readonly Dictionary<string, WatchTransport> _source = [];
     private readonly IReadOnlyList<IDeviceWatcher> _watchers;
@@ -20,6 +22,7 @@ public sealed class DeviceDirectory
             var transport = watcher.Transport;
             watcher.DevicesChanged += list => Update(transport, list);
         }
+        _ = Task.Run(DispatchAsync);
     }
 
     /// <summary>Attached phones, oldest first. A snapshot.</summary>
@@ -32,7 +35,7 @@ public sealed class DeviceDirectory
 
     public IDeviceWatcher? Watcher(WatchTransport t) => _watchers.FirstOrDefault(w => w.Transport == t);
 
-    /// <summary>Fires on a background thread, once per phone arriving or leaving, in order.</summary>
+    /// <summary>Fires on a background dispatcher, once per phone arriving or leaving, in order, shortly after <see cref="Devices"/> changes. A handler that throws is ignored.</summary>
     public event Action<DeviceChange>? Changed;
 
     public void Start()
@@ -45,29 +48,33 @@ public sealed class DeviceDirectory
         foreach (var watcher in _watchers) await watcher.StopAsync();
     }
 
-    /// <summary>Detaches first, then attaches, so a replugged phone reads as a fresh arrival.</summary>
+    private async Task DispatchAsync()
+    {
+        await foreach (var change in _changes.Reader.ReadAllAsync())
+        {
+            try { Changed?.Invoke(change); }
+            catch (Exception) { } // one failing handler must not stop later changes reaching the others
+        }
+    }
+
+    /// <summary>Detaches first, then attaches, so a replugged phone reads as a fresh arrival. Changes are queued under the lock so their order matches the state.</summary>
     private void Update(WatchTransport transport, IReadOnlyList<PhoneDevice> list)
     {
-        lock (_eventGate)
+        lock (_gate)
         {
-            var changes = new List<DeviceChange>();
-            lock (_gate)
+            var listed = list.Select(d => d.Id).ToHashSet();
+            foreach (var gone in _devices.Where(d => _source[d.Id] == transport && !listed.Contains(d.Id)).ToList())
             {
-                var listed = list.Select(d => d.Id).ToHashSet();
-                foreach (var gone in _devices.Where(d => _source[d.Id] == transport && !listed.Contains(d.Id)).ToList())
-                {
-                    _devices.Remove(gone);
-                    _source.Remove(gone.Id);
-                    changes.Add(new DeviceChange.Detached(gone));
-                }
-                foreach (var added in list.Where(d => !_devices.Contains(d)))
-                {
-                    _devices.Add(added);
-                    _source[added.Id] = transport;
-                    changes.Add(new DeviceChange.Attached(added));
-                }
+                _devices.Remove(gone);
+                _source.Remove(gone.Id);
+                _changes.Writer.TryWrite(new DeviceChange.Detached(gone));
             }
-            foreach (var change in changes) Changed?.Invoke(change);
+            foreach (var added in list.Where(d => !_devices.Contains(d)))
+            {
+                _devices.Add(added);
+                _source[added.Id] = transport;
+                _changes.Writer.TryWrite(new DeviceChange.Attached(added));
+            }
         }
     }
 }

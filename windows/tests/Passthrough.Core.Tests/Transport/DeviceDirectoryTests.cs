@@ -22,13 +22,13 @@ public class DeviceDirectoryTests
         new(id, PhoneKind.IPhone, id, "token.iphone." + id, t, (_, _) => throw new NotSupportedException());
 
     [Fact]
-    public void DeviceDirectory_AttachOrderAndDetach()
+    public async Task DeviceDirectory_AttachOrderAndDetach()
     {
         var usb = new FakeWatcher(WatchTransport.UsbMux);
         var adb = new FakeWatcher(WatchTransport.Adb);
         var directory = new DeviceDirectory([usb, adb]);
-        var changes = new List<DeviceChange>();
-        directory.Changed += changes.Add;
+        var changes = new System.Collections.Concurrent.ConcurrentQueue<DeviceChange>();
+        directory.Changed += changes.Enqueue;
         var a = Phone("A");
         var b = Phone("B", WatchTransport.Adb);
 
@@ -37,9 +37,10 @@ public class DeviceDirectoryTests
         usb.Report();
 
         Assert.Equal([b], directory.Devices);
+        await WaitFor(() => changes.Count == 3);
         Assert.Equal(
             new DeviceChange[] { new DeviceChange.Attached(a), new DeviceChange.Attached(b), new DeviceChange.Detached(a) },
-            changes);
+            changes.ToArray());
     }
 
     [Fact]
@@ -61,15 +62,16 @@ public class DeviceDirectoryTests
     }
 
     [Fact]
-    public void DeviceDirectory_ReplugReadsAsFreshArrival()
+    public async Task DeviceDirectory_ReplugReadsAsFreshArrival()
     {
         var usb = new FakeWatcher(WatchTransport.UsbMux);
         var directory = new DeviceDirectory([usb]);
-        var changes = new List<DeviceChange>();
-        directory.Changed += changes.Add;
+        var changes = new System.Collections.Concurrent.ConcurrentQueue<DeviceChange>();
+        directory.Changed += changes.Enqueue;
 
         usb.Report(Phone("usbmux:3"));
         usb.Report(Phone("usbmux:4"));
+        await WaitFor(() => changes.Count == 3);
 
         Assert.Equal(
             ["Attached:usbmux:3", "Detached:usbmux:3", "Attached:usbmux:4"],
@@ -90,6 +92,33 @@ public class DeviceDirectoryTests
         Assert.Empty(directory.Devices);
     }
 
+    private static async Task WaitFor(Func<bool> done)
+    {
+        var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(10);
+        while (!done())
+        {
+            Assert.True(DateTime.UtcNow < deadline, "timed out");
+            await Task.Delay(10);
+        }
+    }
+
+    [Fact]
+    public async Task DeviceDirectory_HandlerMayBlockOnStopAsync()
+    {
+        var usb = new FakeWatcher(WatchTransport.UsbMux);
+        var directory = new DeviceDirectory([usb]);
+        var stopped = new TaskCompletionSource();
+        directory.Changed += c =>
+        {
+            if (c is DeviceChange.Attached) { directory.StopAsync().GetAwaiter().GetResult(); stopped.TrySetResult(); }
+        };
+
+        usb.Report(Phone("A"));
+
+        await stopped.Task.WaitAsync(TimeSpan.FromSeconds(10));
+        Assert.Empty(directory.Devices);
+    }
+
     [Fact]
     public void PhoneDevice_SlotSafe()
     {
@@ -98,6 +127,17 @@ public class DeviceDirectoryTests
         Assert.Equal("token.android.abc", d.PairingSlot);
         Assert.Equal("adb:a/b c", d.Id);
         Assert.Equal("a/b c", d.Label);
+    }
+
+    [Fact]
+    public void PhoneDevice_SlotSafe_KeepsUnicodeLettersAndMarksPerScalar()
+    {
+        var client = new AdbClient(_ => throw new NotSupportedException());
+        string Slot(string serial) => PhoneDevice.FromAdb(new AdbDevice(serial, "device", null, true), client).PairingSlot;
+
+        Assert.Equal("token.android.\U0001D400x", Slot("\U0001D400/x"));      // supplementary-plane letter survives whole
+        Assert.Equal("token.android.e\u0301-1", Slot("e\u0301 -1"));       // decomposed accent stays with its letter
+        Assert.Equal("token.android.a_b.c-d", Slot("a_b.c-d!\u2603"));    // a symbol is dropped
     }
 
     [Fact]

@@ -1,3 +1,5 @@
+using System.Text;
+
 namespace Passthrough.Core.Transport;
 
 /// <summary>A phone the PC can reach, and the way to reach it. Two devices are equal when their <see cref="Id"/> matches.</summary>
@@ -54,9 +56,23 @@ public sealed class PhoneDevice : IEquatable<PhoneDevice>
         new($"adb:{d.Serial}", PhoneKind.Android, d.Model ?? d.Serial, "token.android." + SlotSafe(d.Serial),
             WatchTransport.Adb, (port, ct) => client.ConnectAsync(d.Serial, port, ct));
 
-    /// <summary>A hardware id as it may appear in a credential account name: anything but letters, digits, "-", "_" and "." is dropped.</summary>
-    private static string SlotSafe(string id) =>
-        new(id.Where(c => char.IsLetterOrDigit(c) || c is '-' or '_' or '.').ToArray());
+    /// <summary>
+    /// A hardware id as it may appear in a credential account name: anything but letters, digits, combining marks,
+    /// "-", "_" and "." is dropped. Works per Unicode scalar, as Swift's Character does (marks stay with their letter).
+    /// </summary>
+    private static string SlotSafe(string id)
+    {
+        var sb = new System.Text.StringBuilder();
+        foreach (var r in id.EnumerateRunes())
+        {
+            var keep = Rune.IsLetterOrDigit(r) || Rune.IsNumber(r) || r.Value is '-' or '_' or '.'
+                || Rune.GetUnicodeCategory(r) is System.Globalization.UnicodeCategory.NonSpacingMark
+                    or System.Globalization.UnicodeCategory.SpacingCombiningMark
+                    or System.Globalization.UnicodeCategory.EnclosingMark;
+            if (keep) sb.Append(r.ToString());
+        }
+        return sb.ToString();
+    }
 
     public bool Equals(PhoneDevice? other) => other is not null && Id == other.Id;
 

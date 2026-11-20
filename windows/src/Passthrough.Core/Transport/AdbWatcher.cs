@@ -10,6 +10,7 @@ public sealed class AdbWatcher(AdbClient client, AdbLocator locator, IProcessRun
     public const string NotInstalledHint = "Install Android platform-tools to use an Android phone.";
     public const string UnauthorizedHint = "Allow USB debugging on the phone.";
 
+    private static readonly TimeSpan ServerStartInterval = TimeSpan.FromSeconds(60);
     private static readonly TimeSpan RetryDelay = TimeSpan.FromSeconds(5);
     private static readonly TimeSpan NotInstalledRetryDelay = TimeSpan.FromSeconds(30);
 
@@ -24,7 +25,7 @@ public sealed class AdbWatcher(AdbClient client, AdbLocator locator, IProcessRun
                 SetStatus(new WatchStatus(WatchState.Starting));
             try
             {
-                await AdbClient.EnsureServerAsync(client, adbPath, runner, ct);
+                await AdbClient.EnsureServerAsync(client, adbPath, new ThrottledRunner(this), ct);
                 await foreach (var list in client.TrackDevicesAsync(ct))
                 {
                     published = true;
@@ -61,5 +62,20 @@ public sealed class AdbWatcher(AdbClient client, AdbLocator locator, IProcessRun
         if (devices.Any(d => d.State.Contains("permission"))) return "adb can't access the Android phone. Replug the cable and choose File Transfer if asked.";
         if (devices.Any(d => d.State == "offline")) return "The Android phone is offline to adb. Replug the cable.";
         return null;
+    }
+
+    private readonly IProcessRunner _runner = runner;
+    private long? _lastServerStart;
+
+    /// <summary>Runs adb at most once per 60 s on the injected clock; a skipped start leaves the probe to fail, so the watcher reports Unavailable and retries later.</summary>
+    private sealed class ThrottledRunner(AdbWatcher owner) : IProcessRunner
+    {
+        public Task<int> RunAsync(string exe, string args, CancellationToken ct)
+        {
+            if (owner._lastServerStart is { } last && owner.Time.GetElapsedTime(last) < ServerStartInterval)
+                return Task.FromResult(-1);
+            owner._lastServerStart = owner.Time.GetTimestamp();
+            return owner._runner.RunAsync(exe, args, ct);
+        }
     }
 }

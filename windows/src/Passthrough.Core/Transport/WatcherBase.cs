@@ -6,6 +6,7 @@ public abstract class WatcherBase(WatchTransport transport, TimeProvider time) :
     private readonly Lock _gate = new();
     private CancellationTokenSource? _cts;
     private Task? _run;
+    private Task? _stopping;
     private WatchStatus _status = new(WatchState.Idle);
 
     protected TimeProvider Time { get; } = time;
@@ -28,24 +29,35 @@ public abstract class WatcherBase(WatchTransport transport, TimeProvider time) :
             if (_cts is not null) return;
             _cts = new CancellationTokenSource();
             var ct = _cts.Token;
-            _run = Task.Run(() => RunAsync(ct));
+            var prior = _stopping; // a run started right after a stop waits for that stop to finish, so the stop's Idle and empty list never land on it.
+            _run = Task.Run(async () =>
+            {
+                if (prior is not null) await prior;
+                await RunAsync(ct);
+            });
         }
     }
 
-    public async Task StopAsync()
+    public Task StopAsync()
     {
-        CancellationTokenSource? cts;
-        Task? run;
         lock (_gate)
         {
-            cts = _cts;
-            run = _run;
+            if (_cts is null) return _stopping ?? Task.CompletedTask; // already stopped, or a stop in flight: share it
+            var cts = _cts;
+            var run = _run!;
+            var prior = _stopping;
             _cts = null;
             _run = null;
+            return _stopping = StopCoreAsync(cts, run, prior);
         }
-        if (cts is null) return;
+    }
+
+    private async Task StopCoreAsync(CancellationTokenSource cts, Task run, Task? prior)
+    {
+        await Task.Yield();
+        if (prior is not null) await prior;
         await cts.CancelAsync();
-        try { await run!; } catch (OperationCanceledException) { }
+        try { await run; } catch (OperationCanceledException) { }
         cts.Dispose();
         SetStatus(new WatchStatus(WatchState.Idle));
         Publish([]);

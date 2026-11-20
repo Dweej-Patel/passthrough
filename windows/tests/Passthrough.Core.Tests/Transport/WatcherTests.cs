@@ -194,4 +194,78 @@ public class WatcherTests
 
         Assert.True(runner.Runs >= 1);
     }
+
+    [Fact]
+    public async Task AdbWatcher_StartsServerAtMostOncePerMinute()
+    {
+        var connects = 0;
+        StreamConnector connector = _ =>
+        {
+            Interlocked.Increment(ref connects);
+            throw new SocketException((int)SocketError.ConnectionRefused);
+        };
+        var runner = new FakeRunner();
+        var time = new FakeTimeProvider();
+        var start = time.GetUtcNow();
+        var watcher = new AdbWatcher(new AdbClient(connector), Locator("C:\\sdk\\platform-tools\\adb.exe"), runner, time);
+        watcher.Start();
+
+        await Poll(() => Volatile.Read(ref connects) >= 2);
+        Assert.Equal(1, runner.Runs);
+        // Retry every 5 s; the second start is allowed only once 60 s have passed.
+        await Poll(() => { time.Advance(TimeSpan.FromSeconds(5)); return Volatile.Read(ref runner.Runs) == 2; });
+        Assert.True(time.GetUtcNow() - start >= TimeSpan.FromSeconds(60));
+        await watcher.StopAsync();
+    }
+
+    [Fact]
+    public async Task Watcher_StopThenImmediateStart_NewRunsDevicesSurvive()
+    {
+        await using var fake = new FakeUsbMuxd(async s =>
+        {
+            var (_, _, _, tag, _) = await FakeUsbMuxd.ReadPacketAsync(s);
+            await FakeUsbMuxd.WriteResultAsync(s, tag, 0);
+            await FakeUsbMuxd.WritePacketAsync(s, 0, Attached(3, "UDID-A", 0x12A8));
+            await Task.Delay(Timeout.InfiniteTimeSpan);
+        });
+        var watcher = new UsbMuxWatcher(new UsbMuxClient(fake.Connector), TimeProvider.System);
+        var lists = new System.Collections.Concurrent.ConcurrentQueue<int>();
+        watcher.DevicesChanged += l => lists.Enqueue(l.Count);
+        watcher.Start();
+        await Poll(() => lists.Contains(1));
+
+        var stop = watcher.StopAsync();
+        watcher.Start();
+        await stop;
+        await Poll(() => lists.ToArray() is [.., 1] && lists.Count >= 3);
+
+        Assert.Equal(WatchState.Watching, await WaitState(watcher));
+        await watcher.StopAsync();
+    }
+
+    private static async Task<WatchState> WaitState(IDeviceWatcher w)
+    {
+        await Poll(() => w.Status.State == WatchState.Watching);
+        return w.Status.State;
+    }
+
+    [Fact]
+    public async Task Watcher_ConcurrentStops_BothReturnOnlyAfterTheRunEnded()
+    {
+        await using var fake = new FakeUsbMuxd(async s =>
+        {
+            var (_, _, _, tag, _) = await FakeUsbMuxd.ReadPacketAsync(s);
+            await FakeUsbMuxd.WriteResultAsync(s, tag, 0);
+            await Task.Delay(Timeout.InfiniteTimeSpan);
+        });
+        var watcher = new UsbMuxWatcher(new UsbMuxClient(fake.Connector), TimeProvider.System);
+        watcher.Start();
+        await Poll(() => watcher.Status.State == WatchState.Watching);
+
+        var a = watcher.StopAsync();
+        var b = watcher.StopAsync();
+        await Task.WhenAll(a, b).WaitAsync(Wait);
+
+        Assert.Equal(WatchState.Idle, watcher.Status.State);
+    }
 }
