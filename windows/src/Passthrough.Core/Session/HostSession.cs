@@ -24,6 +24,7 @@ public sealed class HostSession : IAsyncDisposable
     private const string AndroidEnabledKey = "androidEnabled";
     private const string IPadMessage = "Pairs once Remote shell is available.";
     private const string SaveFailedMessage = "Couldn't save the pairing on this PC. Try pairing again.";
+    private const string OpenFailedMessage = "Couldn't read this PC's saved pairings or settings. Try again.";
 
     private readonly DeviceDirectory _directory;
     private readonly ISecretStore _secrets;
@@ -51,7 +52,7 @@ public sealed class HostSession : IAsyncDisposable
     private long _tx;
     private int _connections;
     private string? _message;
-    /// <summary>The active phone's channel failed for good (failed proof, other version, token not saved): no reconnect until it is re-attached or made active.</summary>
+    /// <summary>The active phone's channel failed for good (failed proof, other version, token not saved, store unreadable): no reconnect until it is re-attached or made active.</summary>
     private bool _held;
     private ITimer? _reconnect;
     private long _reconnectSeq;
@@ -231,8 +232,23 @@ public sealed class HostSession : IAsyncDisposable
     {
         CancelReconnect();
         var device = _active!;
-        _clientId ??= HostIdentity.ClientId(_settings);
-        var client = _clientFactory(device, new ControlIdentity(_clientId, _computerName, StoredToken(device)));
+        ControlClient client;
+        try
+        {
+            _clientId ??= HostIdentity.ClientId(_settings);
+            client = _clientFactory(device, new ControlIdentity(_clientId, _computerName, StoredToken(device)));
+        }
+        catch (Exception e)
+        {
+            // The slot or the settings could not be read or written (a locked file, a full disk): nothing to retry
+            // on its own, but Try again may work once the store recovers.
+            ReportError(e);
+            ClearStatus();
+            _activeState = PhoneState.Failed;
+            _message = OpenFailedMessage;
+            _held = true;
+            return;
+        }
         _client = client;
         if (!keepState) _activeState = PhoneState.Connecting;
         ClearStatus();

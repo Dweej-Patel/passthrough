@@ -20,14 +20,14 @@ public class HostSessionTests
         public readonly FakeDeviceWatcher Usb = new(WatchTransport.UsbMux);
         public readonly FakeDeviceWatcher Adb = new(WatchTransport.Adb);
         public readonly ISecretStore Secrets;
-        public readonly MemorySettingsStore Settings;
+        public readonly ISettingsStore Settings;
         public readonly FakeTimeProvider Time = new();
         public readonly ConcurrentQueue<(PhoneDevice Device, ControlIdentity Identity, ControlClient Client)> Clients = new();
         public readonly ConcurrentQueue<SessionState> History = new();
         public readonly ConcurrentQueue<Exception> Errors = new();
         public readonly HostSession Session;
 
-        public Harness(MemorySettingsStore? settings = null, ISecretStore? secrets = null)
+        public Harness(ISettingsStore? settings = null, ISecretStore? secrets = null)
         {
             Settings = settings ?? new MemorySettingsStore();
             Secrets = secrets ?? new MemorySecretStore();
@@ -54,14 +54,25 @@ public class HostSessionTests
         public ValueTask DisposeAsync() => Session.DisposeAsync();
     }
 
-    /// <summary>A secret store that fails: on every Set (or only the first <paramref name="failSets"/>), or on Get for one slot.</summary>
+    /// <summary>
+    /// A secret store that fails: on every Set (or only the first <paramref name="failSets"/>), or on Get for one slot
+    /// until <see cref="Healed"/>. Counts Gets.
+    /// </summary>
     private sealed class FailingSecretStore(bool failSet = false, string? failGetSlot = null, int failSets = 0) : ISecretStore
     {
         private readonly MemorySecretStore _inner = new();
         private int _failSets = failSets;
+        private int _gets;
 
-        public string? Get(string slot) =>
-            slot == failGetSlot ? throw new IOException("the credential store is unavailable") : _inner.Get(slot);
+        public volatile bool Healed;
+
+        public int Gets => Volatile.Read(ref _gets);
+
+        public string? Get(string slot)
+        {
+            Interlocked.Increment(ref _gets);
+            return slot == failGetSlot && !Healed ? throw new IOException("the credential store is unavailable") : _inner.Get(slot);
+        }
 
         public void Set(string slot, string value)
         {
@@ -72,6 +83,21 @@ public class HostSessionTests
         public void Delete(string slot) => _inner.Delete(slot);
 
         public IReadOnlyList<string> Slots() => _inner.Slots();
+    }
+
+    /// <summary>A settings store whose first <paramref name="failSets"/> writes fail (a full disk).</summary>
+    private sealed class FailingSettingsStore(int failSets) : ISettingsStore
+    {
+        private readonly MemorySettingsStore _inner = new();
+        private int _failSets = failSets;
+
+        public string? Get(string key) => _inner.Get(key);
+
+        public void Set(string key, string value)
+        {
+            if (Interlocked.Decrement(ref _failSets) >= 0) throw new IOException("There is not enough space on the disk.");
+            _inner.Set(key, value);
+        }
     }
 
     private static PhoneDevice Android(FakePhone phone) =>
@@ -502,6 +528,53 @@ public class HostSessionTests
 
         await h.WaitState(s => Entry(s, iPhone) is { IsActive: true, State: PhoneState.NotPaired } && Entry(s, android) is { IsActive: false });
         Assert.Equal([android, iPhone], h.Clients.Select(c => c.Device));
+    }
+
+    [Fact]
+    public async Task ActiveSlotReadFailure_FailsWithTryAgain_ThenRetryOpens()
+    {
+        await using var phone = new FakePhone();
+        var secrets = new FailingSecretStore(failGetSlot: AndroidSlot);
+        await using var h = new Harness(secrets: secrets);
+        await h.Session.StartAsync();
+        var android = Android(phone);
+        h.Adb.Attach(android);
+
+        var s = await h.WaitState(s => Entry(s, android) is { State: PhoneState.Failed });
+        Assert.True(Entry(s, android)!.IsActive);
+        Assert.Equal("Couldn't read this PC's saved pairings or settings. Try again.", Entry(s, android)!.Message);
+        Assert.Contains(h.Errors, e => e is IOException);
+        h.Time.Advance(TimeSpan.FromSeconds(60));
+        await Task.Delay(200);
+        Assert.Empty(h.Clients);
+        Assert.Equal(PhoneState.Failed, Entry(h.Session.State, android)!.State);
+        secrets.Healed = true;
+
+        await h.Session.RetryAsync(android.Id);
+
+        s = await h.WaitState(s => Entry(s, android) is { State: PhoneState.NotPaired });
+        Assert.Null(Entry(s, android)!.Message);
+        Assert.Single(h.Clients);
+    }
+
+    [Fact]
+    public async Task ClientIdWriteFailure_FailsWithTryAgain_ThenRetryOpens()
+    {
+        await using var phone = new FakePhone();
+        await using var h = new Harness(settings: new FailingSettingsStore(failSets: 1));
+        await h.Session.StartAsync();
+        var android = Android(phone);
+        h.Adb.Attach(android);
+
+        var s = await h.WaitState(s => Entry(s, android) is { State: PhoneState.Failed });
+        Assert.Equal("Couldn't read this PC's saved pairings or settings. Try again.", Entry(s, android)!.Message);
+        Assert.Contains(h.Errors, e => e is IOException);
+        Assert.Empty(h.Clients);
+
+        await h.Session.RetryAsync(android.Id);
+
+        await h.WaitState(s => Entry(s, android) is { State: PhoneState.NotPaired });
+        Assert.Equal(h.Settings.Get("clientID"), h.Client(0).Identity.ClientId);
     }
 
     [Fact]
