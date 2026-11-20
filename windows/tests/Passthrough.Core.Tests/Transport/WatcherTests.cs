@@ -505,4 +505,40 @@ public class WatcherTests
         Assert.Equal([0], lists); // listed by adb, but not usable: no phone reported
         await watcher.StopAsync();
     }
+
+    [Fact]
+    public async Task AdbWatcher_ReportsTheAdbPath_WhenItChanges()
+    {
+        const string adb = "C:\\sdk\\platform-tools\\adb.exe";
+        var installed = false;
+        var locator = new AdbLocator(k => k == "ANDROID_HOME" ? "C:\\sdk" : null, p => Volatile.Read(ref installed) && p == adb, ";", "adb.exe");
+        var time = new FakeTimeProvider();
+        var watcher = new AdbWatcher(new AdbClient(Refused), locator, new FakeRunner(), time);
+        var paths = new System.Collections.Concurrent.ConcurrentQueue<string?>();
+        watcher.AdbPathChanged += paths.Enqueue;
+        watcher.Start();
+
+        // Not installed: reported once as null, then the 30 s retry.
+        await Poll(() => watcher.Status.State == WatchState.NotInstalled && time.DueIn().Count == 1);
+        Assert.Equal([null], paths);
+
+        // Installed while running: the next search finds it.
+        Volatile.Write(ref installed, true);
+        time.Advance(time.DueIn()[0]);
+        await Poll(() => watcher.Status.State == WatchState.Unavailable && time.DueIn().Count == 1);
+        Assert.Equal([null, adb], paths);
+
+        // The same path on later searches: nothing new.
+        time.Advance(time.DueIn()[0]);
+        await Poll(() => watcher.Status.State == WatchState.Unavailable && time.DueIn().Count == 1);
+        Assert.Equal([null, adb], paths);
+
+        // Removed: reported again.
+        Volatile.Write(ref installed, false);
+        time.Advance(time.DueIn()[0]);
+        await Poll(() => watcher.Status.State == WatchState.NotInstalled && time.DueIn().Count == 1);
+        Assert.Equal([null, adb, null], paths);
+
+        await watcher.StopAsync().WaitAsync(Wait);
+    }
 }

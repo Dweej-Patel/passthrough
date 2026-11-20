@@ -141,7 +141,7 @@ public abstract class WatcherBase(WatchTransport transport, TimeProvider time) :
     }
 
     /// <summary>Calls each subscriber on its own; one that throws is reported and the rest still run.</summary>
-    private void Raise<T>(Action<T>? handlers, T arg)
+    protected void Raise<T>(Action<T>? handlers, T arg)
     {
         foreach (var handler in handlers?.GetInvocationList() ?? [])
         {

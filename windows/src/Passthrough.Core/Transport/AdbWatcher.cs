@@ -14,6 +14,15 @@ public sealed class AdbWatcher(AdbClient client, AdbLocator locator, IProcessRun
     private static readonly TimeSpan RetryDelay = TimeSpan.FromSeconds(5);
     private static readonly TimeSpan NotInstalledRetryDelay = TimeSpan.FromSeconds(30);
 
+    private string? _adbPath;
+    private bool _adbPathKnown;
+
+    /// <summary>
+    /// Where adb was found (null: not found), raised on the first search and whenever a later search finds it somewhere
+    /// else or no longer finds it. For the log. Each subscriber runs on its own; one that throws is reported through Error.
+    /// </summary>
+    public event Action<string?>? AdbPathChanged;
+
     protected override async Task RunAsync(CancellationToken ct)
     {
         while (!ct.IsCancellationRequested)
@@ -21,6 +30,11 @@ public sealed class AdbWatcher(AdbClient client, AdbLocator locator, IProcessRun
             var delay = RetryDelay;
             var published = false;
             var adbPath = locator.Find();
+            if (!_adbPathKnown || adbPath != _adbPath)
+            {
+                (_adbPathKnown, _adbPath) = (true, adbPath);
+                Raise(AdbPathChanged, adbPath);
+            }
             if (Status.State == WatchState.Idle || adbPath is not null && Status.State == WatchState.NotInstalled)
                 SetStatus(new WatchStatus(WatchState.Starting));
             try
