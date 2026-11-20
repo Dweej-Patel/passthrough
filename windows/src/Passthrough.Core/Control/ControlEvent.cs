@@ -13,8 +13,11 @@ public abstract record ControlEvent
     /// </summary>
     public sealed record Welcomed(bool Paired) : ControlEvent;
 
-    /// <summary>A code pairing this PC asked for worked; store <paramref name="Token"/> for the phone.</summary>
-    public sealed record PairedWith(string Token) : ControlEvent;
+    /// <summary>A code pairing this PC asked for worked; store <paramref name="Token"/> for the phone. Never printed.</summary>
+    public sealed record PairedWith(string Token) : ControlEvent
+    {
+        public override string ToString() => "PairedWith { Token = (redacted) }";
+    }
 
     public sealed record PairingFailed(PairingFailure Reason) : ControlEvent;
 

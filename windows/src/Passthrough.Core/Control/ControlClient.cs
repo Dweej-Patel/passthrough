@@ -95,6 +95,11 @@ public sealed class ControlClient(
         catch (Exception e)
         {
             // We gave up on the open (disposed, or it failed); a stream it yields, now or later, is never used.
+            // Cancel the open ourselves (our own wait may have seen _stop before the link did), then let the source
+            // go: an open that never completes must not keep it alive. After the open is over this does nothing.
+            try { linked.Cancel(); }
+            catch (ObjectDisposedException) { }
+            linked.Dispose();
             _ = pending.ContinueWith(t =>
             {
                 if (t.IsCompletedSuccessfully) t.Result.Dispose();
@@ -161,6 +166,7 @@ public sealed class ControlClient(
         Task running;
         lock (_gate) running = _running; // final once the open is over
         await running.ConfigureAwait(false);
+        _stop.Dispose(); // cancelled by Finish; nothing uses it once the open and the loops are over
     }
 
     private Task RunAsync(LineChannel channel) => Task.Run(async () =>
@@ -233,17 +239,15 @@ public sealed class ControlClient(
                 // Only the answer to our own pair, once: anything else could plant a token of its choosing.
                 if (!_pairing) return;
                 _pairing = false;
-                if (m.Token is { } token)
+                if (m.Token is not { } token || !PairingToken.IsWellFormed(token))
                 {
-                    if (!PairingToken.IsWellFormed(token))
-                    {
-                        // Not a token a phone issues: nothing on this channel can be trusted. Send nothing, end it.
-                        Finish(new ProtocolException("The phone sent a malformed pairing token."));
-                        return;
-                    }
-                    _authenticated = true;
-                    Emit(new ControlEvent.PairedWith(token));
+                    // No token, or not one a phone issues: nothing on this channel can be trusted, and the pairing
+                    // would hang half-done. Send nothing, end it.
+                    Finish(new ProtocolException("The phone sent a malformed pairing token."));
+                    return;
                 }
+                _authenticated = true;
+                Emit(new ControlEvent.PairedWith(token));
                 break;
             case ControlEnvelope.Error:
                 var failure = PairingFailureWire.Parse(m.Reason);
@@ -252,6 +256,14 @@ public sealed class ControlClient(
                     // Phones from before version 2 say nothing of their own version.
                     Finish(new ControlException(ControlErrorKind.Incompatible, deviceKind,
                         phoneIsOlder: (m.ProtocolVersion ?? 1) < ProtocolConstants.Version));
+                    return;
+                }
+                if (!_pairing)
+                {
+                    // Not an answer to a code. After our auth, not_authenticated means the phone refused our proof
+                    // (it closes next); anything else is no pairing failure, so it is not reported as one.
+                    if (failure == PairingFailure.NotAuthenticated && _authenticated)
+                        Finish(new ControlException(ControlErrorKind.NotAuthenticated, deviceKind));
                     return;
                 }
                 _pairing = false;

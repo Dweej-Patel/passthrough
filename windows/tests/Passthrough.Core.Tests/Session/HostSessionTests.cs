@@ -225,6 +225,24 @@ public class HostSessionTests
     }
 
     [Fact]
+    public async Task PhoneRejectsAuth_FailsWithItsOwnWording_NotABadCode()
+    {
+        await using var phone = new FakePhone { Token = PhoneToken, RejectsAuth = true };
+        await using var h = new Harness();
+        h.Secrets.Set(AndroidSlot, PhoneToken);
+        await h.Session.StartAsync();
+        var android = Android(phone);
+        h.Adb.Attach(android);
+
+        var s = await h.WaitState(s => Entry(s, android) is { State: PhoneState.Failed });
+        Assert.Equal(
+            "The Android phone on the cable did not accept this PC's pairing. If it is yours, use Forget Pairing in Settings and pair again.",
+            Entry(s, android)!.Message);
+        Assert.Equal(PhoneToken, h.Secrets.Get(AndroidSlot));
+        Assert.DoesNotContain(h.History, st => Entry(st, android)?.Message?.Contains("didn't match") == true);
+    }
+
+    [Fact]
     public async Task MalformedStoredToken_CountsAsNotPaired_SlotLeftAlone()
     {
         // The phone would prove a pairing with this string, so only the PC's format check keeps it from being used.

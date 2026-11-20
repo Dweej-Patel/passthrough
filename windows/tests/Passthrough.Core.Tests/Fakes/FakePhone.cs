@@ -75,10 +75,19 @@ public sealed class FakePhone : IAsyncDisposable
     public bool GoodbyeAfterStatus { get; init; }
 
     /// <summary>
-    /// Right after <c>welcome</c>, send a <c>paired</c> the PC never asked for, carrying this token, then an
-    /// <c>error bad_code</c> as a marker: once the PC reports that failure, it has read the planted <c>paired</c>.
+    /// Right after <c>welcome</c>, send a <c>paired</c> the PC never asked for, carrying this token, then close: by
+    /// the time the PC reports the close, it has read the planted <c>paired</c>.
     /// </summary>
     public string? UnsolicitedPairedToken { get; init; }
+
+    /// <summary>Right after <c>welcome</c>, send an <c>error</c> with this reason the PC never asked for, then close.</summary>
+    public string? ErrorAfterWelcome { get; init; }
+
+    /// <summary>Answer every <c>auth</c> with <c>error not_authenticated</c> and close, even a correct one.</summary>
+    public bool RejectsAuth { get; init; }
+
+    /// <summary>Answer a right code with a <c>paired</c> that carries no token.</summary>
+    public bool PairedWithoutToken { get; init; }
 
     /// <summary>Instead of a <c>welcome</c>, write these bytes after <c>hello</c> and hold the connection open.</summary>
     public byte[]? GarbageAfterHello { get; init; }
@@ -87,8 +96,8 @@ public sealed class FakePhone : IAsyncDisposable
     public bool CloseAfterGarbage { get; init; }
 
     /// <summary>
-    /// After answering a wrong code with <c>bad_code</c>, also send a <c>paired</c> carrying this token, then another
-    /// <c>error bad_code</c> as a marker that the PC has read it.
+    /// After answering a wrong code with <c>bad_code</c>, also send a <c>paired</c> carrying this token, then close:
+    /// by the time the PC reports the close, it has read the planted <c>paired</c>.
     /// </summary>
     public string? PairedAfterErrorToken { get; init; }
 
@@ -171,7 +180,13 @@ public sealed class FakePhone : IAsyncDisposable
         if (UnsolicitedPairedToken is not null)
         {
             await SendAsync(s, new ControlEnvelope(ControlEnvelope.Paired) { Token = UnsolicitedPairedToken });
-            await SendAsync(s, new ControlEnvelope(ControlEnvelope.Error) { Reason = PairingFailure.BadCode.ToWire() });
+            return;
+        }
+
+        if (ErrorAfterWelcome is not null)
+        {
+            await SendAsync(s, new ControlEnvelope(ControlEnvelope.Error) { Reason = ErrorAfterWelcome });
+            return;
         }
 
         var silent = false;
@@ -183,7 +198,7 @@ public sealed class FakePhone : IAsyncDisposable
             {
                 case ControlEnvelope.Auth:
                     var expected = key is null ? null : ControlAuth.MacProof(key, hello.ClientID!, macNonce, phoneNonce);
-                    if (expected is null || m.Proof != Convert.ToBase64String(expected))
+                    if (RejectsAuth || expected is null || m.Proof != Convert.ToBase64String(expected))
                     {
                         await SendAsync(s, new ControlEnvelope(ControlEnvelope.Error) { Reason = PairingFailure.NotAuthenticated.ToWire() });
                         return;
@@ -197,7 +212,7 @@ public sealed class FakePhone : IAsyncDisposable
                     {
                         await SendAsync(s, new ControlEnvelope(ControlEnvelope.Paired)
                         {
-                            Token = IssuedToken,
+                            Token = PairedWithoutToken ? null : IssuedToken,
                             SocksPort = ProtocolConstants.SocksPort,
                             DeviceName = DeviceName,
                         });
@@ -222,7 +237,7 @@ public sealed class FakePhone : IAsyncDisposable
                         if (PairedAfterErrorToken is not null)
                         {
                             await SendAsync(s, new ControlEnvelope(ControlEnvelope.Paired) { Token = PairedAfterErrorToken });
-                            await SendAsync(s, new ControlEnvelope(ControlEnvelope.Error) { Reason = PairingFailure.BadCode.ToWire() });
+                            return;
                         }
                     }
                     break;

@@ -161,17 +161,67 @@ public class ControlClientTests
     [Fact]
     public async Task UnsolicitedPaired_NoPairSubmitted_Ignored()
     {
-        // The phone plants a paired right behind its welcome, then a bad_code marker: by the time the marker is
-        // reported the planted paired has been read, and no pair was ever submitted.
+        // The phone plants a paired right behind its welcome, then closes: by the time the close is reported the
+        // planted paired has been read, and no pair was ever submitted.
         await using var phone = new FakePhone { UnsolicitedPairedToken = "planted-token-PPPPPPPPPPPPPPPPPPPPPPPPPPPPP" };
         await using var client = Client(phone, token: null);
 
         await client.StartAsync(CancellationToken.None);
 
         Assert.Equal(new ControlEvent.Welcomed(false), await NextAsync(client));
-        Assert.Equal(new ControlEvent.PairingFailed(PairingFailure.BadCode), await NextAsync(client));
-        await client.DisposeAsync();
         Assert.Equal([new ControlEvent.Disconnected(null)], await RestAsync(client));
+    }
+
+    [Fact]
+    public async Task ErrorWithNoPairingInFlight_Ignored()
+    {
+        // An error answers a pair; with none out, it is not a pairing failure (it used to read as "That code didn't match").
+        await using var phone = new FakePhone { ErrorAfterWelcome = PairingFailure.BadCode.ToWire() };
+        await using var client = Client(phone, token: null);
+
+        await client.StartAsync(CancellationToken.None);
+
+        Assert.Equal(new ControlEvent.Welcomed(false), await NextAsync(client));
+        Assert.Equal([new ControlEvent.Disconnected(null)], await RestAsync(client));
+    }
+
+    [Fact]
+    public async Task NotAuthenticatedAfterAuth_FailsWithNotAuthenticated()
+    {
+        await using var phone = new FakePhone { Token = PhoneToken, RejectsAuth = true };
+        await using var client = Client(phone, PhoneToken);
+
+        await client.StartAsync(CancellationToken.None);
+
+        Assert.Equal(new ControlEvent.Welcomed(true), await NextAsync(client));
+        var error = Assert.IsType<ControlException>(await DisconnectErrorAsync(client));
+        Assert.Equal(ControlErrorKind.NotAuthenticated, error.Kind);
+        Assert.Equal(
+            "The iPhone on the cable did not accept this PC's pairing. If it is yours, use Forget Pairing in Settings and pair again.",
+            error.Message);
+    }
+
+    [Fact]
+    public async Task PairedWithoutToken_DisconnectsWithProtocolError()
+    {
+        await using var phone = new FakePhone { PairedWithoutToken = true };
+        await using var client = Client(phone, token: null);
+
+        await client.StartAsync(CancellationToken.None);
+        Assert.Equal(new ControlEvent.Welcomed(false), await NextAsync(client));
+        await client.SubmitCodeAsync("042917");
+
+        var events = await RestAsync(client);
+        var last = Assert.IsType<ControlEvent.Disconnected>(Assert.Single(events));
+        Assert.Equal("The phone sent a malformed pairing token.", Assert.IsType<ProtocolException>(last.Error).Message);
+    }
+
+    [Fact]
+    public void Records_NeverPrintTheToken()
+    {
+        Assert.DoesNotContain(PhoneToken, new ControlIdentity(ClientId, PcName, PhoneToken).ToString());
+        Assert.DoesNotContain(PhoneToken, new ControlEvent.PairedWith(PhoneToken).ToString());
+        Assert.Contains(ClientId, new ControlIdentity(ClientId, PcName, PhoneToken).ToString());
     }
 
     [Fact]
@@ -194,7 +244,7 @@ public class ControlClientTests
     [Fact]
     public async Task PairedAfterError_Ignored()
     {
-        // A wrong code is answered bad_code, then a paired nobody asked for, then a bad_code marker.
+        // A wrong code is answered bad_code, then a paired nobody asked for, then the phone closes.
         await using var phone = new FakePhone { PairedAfterErrorToken = "planted-token-PPPPPPPPPPPPPPPPPPPPPPPPPPPPP" };
         await using var client = Client(phone, token: null);
 
@@ -203,7 +253,7 @@ public class ControlClientTests
         await client.SubmitCodeAsync("000000");
 
         Assert.Equal(new ControlEvent.PairingFailed(PairingFailure.BadCode), await NextAsync(client));
-        Assert.Equal(new ControlEvent.PairingFailed(PairingFailure.BadCode), await NextAsync(client)); // the marker: the paired between was ignored
+        Assert.Equal([new ControlEvent.Disconnected(null)], await RestAsync(client)); // the paired before the close was ignored
     }
 
     [Theory]
