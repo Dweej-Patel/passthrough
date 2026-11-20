@@ -36,9 +36,31 @@ public class AdbClientTests
     }
 
     [Fact]
-    public async Task Track_OrdinarySerialWithoutUsbIsExcluded()
+    public async Task Track_WindowsLineWithoutUsbIsReported()
     {
-        Assert.Empty(await FirstListAsync("R58M123 device product:x model:Pixel_8\n"));
+        // Native Windows adb registers USB devices with no device path, so their lines carry no usb: property.
+        var list = await FirstListAsync("R58M123 device product:p model:Pixel_8 device:d transport_id:1\n");
+
+        Assert.Equal(new[] { new AdbDevice("R58M123", "device", "Pixel 8", true) }, list);
+    }
+
+    [Fact]
+    public async Task Track_WindowsUnauthorizedWithoutUsbIsListedNotUsable()
+    {
+        var device = Assert.Single(await FirstListAsync("R58M123 unauthorized transport_id:2\n"));
+
+        Assert.Equal("R58M123", device.Serial);
+        Assert.False(device.IsUsable);
+    }
+
+    [Theory]
+    [InlineData("192.168.1.5:5555 device product:p model:m device:d transport_id:3")]
+    [InlineData("emulator-5554 device product:sdk model:sdk_phone device:emu transport_id:4")]
+    [InlineData("adb-R58M123-abc._adb-tls-connect._tcp device product:p model:m device:d transport_id:5")]
+    [InlineData("adb-R58M123-abc._adb._tcp device product:p model:m device:d transport_id:6")]
+    public async Task Track_NetworkAndEmulatorSerialsWithoutUsbAreExcluded(string line)
+    {
+        Assert.Empty(await FirstListAsync(line + "\n"));
     }
 
     [Fact]

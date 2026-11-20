@@ -11,7 +11,7 @@ public sealed class AdbClient(StreamConnector connect, TimeSpan? connectTimeout 
 
     private const int MaxBlock = 1 << 20;
 
-    /// <summary>Yields the USB-attached device list (Wi-Fi and emulator entries removed) each time the adb server reports.</summary>
+    /// <summary>Yields the USB-attached device list (Wi-Fi, mDNS and emulator entries removed) each time the adb server reports.</summary>
     public async IAsyncEnumerable<IReadOnlyList<AdbDevice>> TrackDevicesAsync([EnumeratorCancellation] CancellationToken ct)
     {
         var stream = await connect(ct);
@@ -111,9 +111,22 @@ public sealed class AdbClient(StreamConnector connect, TimeSpan? connectTimeout 
                 fields[0],
                 string.Join(' ', stateWords),
                 props.GetValueOrDefault("model")?.Replace('_', ' '),
-                props.ContainsKey("usb")));
+                props.ContainsKey("usb") || !IsNetworkOrEmulatorSerial(fields[0])));
         }
         return devices;
+    }
+
+    /// <summary>
+    /// Whether a serial names adb over the network or an emulator: <c>host:port</c>, <c>emulator-*</c>, or an mDNS
+    /// service name. Native Windows adb gives USB devices no device path, so their lines carry no <c>usb:</c>
+    /// property; a line without one counts as USB unless its serial is one of these.
+    /// </summary>
+    internal static bool IsNetworkOrEmulatorSerial(string serial)
+    {
+        if (serial.StartsWith("emulator-", StringComparison.Ordinal)) return true;
+        if (serial.Contains("._adb-tls-connect._tcp", StringComparison.Ordinal) || serial.Contains("._adb._tcp", StringComparison.Ordinal)) return true;
+        var colon = serial.LastIndexOf(':');
+        return colon >= 0 && colon < serial.Length - 1 && serial[(colon + 1)..].All(char.IsAsciiDigit);
     }
 
     private static async Task SendAsync(Stream stream, string payload, CancellationToken ct)
