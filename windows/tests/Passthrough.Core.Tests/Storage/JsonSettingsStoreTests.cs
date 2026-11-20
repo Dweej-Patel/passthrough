@@ -124,12 +124,36 @@ public class JsonSettingsStoreTests
     }
 
     [Fact]
-    public void UnreadableFile_Throws_SoStartupCanSaySo()
+    public void UnreadableFile_IsTriedAFewTimes_ThenFailsStartupNamingTheFile()
     {
         var fs = new MemoryFileSystem();
         fs.Files[Path] = "{}";
-        fs.Fail = (op, _) => op == "read" ? new IOException("The process cannot access the file") : null;
-        Assert.Throws<IOException>(() => new JsonSettingsStore(fs, Path));
+        var reads = 0;
+        fs.Fail = (op, path) => op == "read" && path == Path && ++reads > 0 ? new IOException("The process cannot access the file") : null;
+        var waits = new List<TimeSpan>();
+
+        var e = Assert.Throws<SettingsUnreadableException>(() => new JsonSettingsStore(fs, Path, waits.Add));
+
+        Assert.Equal(Path, e.Path);
+        Assert.Equal($"Passthrough couldn't read its settings at {Path}. Close anything using it and start Passthrough again.", e.Message);
+        Assert.IsType<IOException>(e.InnerException);
+        Assert.Equal(JsonSettingsStore.ReadAttempts, reads);
+        Assert.Equal(Enumerable.Repeat(JsonSettingsStore.ReadRetryDelay, JsonSettingsStore.ReadAttempts - 1), waits);
+        Assert.Equal("{}", fs.Files[Path]);
+    }
+
+    [Fact]
+    public void UnreadableFile_ReadableOnARetry_LoadsNormally()
+    {
+        var fs = new MemoryFileSystem();
+        fs.Files[Path] = $$"""{"clientID":"{{ClientId}}"}""";
+        var reads = 0;
+        fs.Fail = (op, path) => op == "read" && path == Path && ++reads < JsonSettingsStore.ReadAttempts ? new IOException("in use") : null;
+
+        var store = new JsonSettingsStore(fs, Path, _ => { });
+
+        Assert.Equal((ClientId, (string?)null), (store.Get("clientID"), store.Notice));
+        Assert.Equal(JsonSettingsStore.ReadAttempts, reads);
     }
 
     [Fact]
@@ -203,8 +227,8 @@ public class JsonSettingsStoreTests
         Assert.Equal(Path + ".bad", e.Path);
         Assert.Equal($"Passthrough couldn't read its saved settings backup at {Path}.bad. Close anything using it and start Passthrough again.", e.Message);
         Assert.IsType<IOException>(e.InnerException);
-        Assert.Equal(JsonSettingsStore.BackupReadAttempts, reads);
-        Assert.Equal(Enumerable.Repeat(JsonSettingsStore.BackupRetryDelay, JsonSettingsStore.BackupReadAttempts - 1), waits);
+        Assert.Equal(JsonSettingsStore.ReadAttempts, reads);
+        Assert.Equal(Enumerable.Repeat(JsonSettingsStore.ReadRetryDelay, JsonSettingsStore.ReadAttempts - 1), waits);
         Assert.False(fs.FileExists(Path)); // no fresh settings that would mint a new client id
         Assert.Equal(bad, fs.Files[Path + ".bad"]);
     }
@@ -215,7 +239,7 @@ public class JsonSettingsStoreTests
         var fs = new MemoryFileSystem();
         fs.Files[Path + ".bad"] = $$"""{"clientID":"{{ClientId}}",""";
         var reads = 0;
-        fs.Fail = (op, path) => op == "read" && path == Path + ".bad" && ++reads < JsonSettingsStore.BackupReadAttempts ? new IOException("in use") : null;
+        fs.Fail = (op, path) => op == "read" && path == Path + ".bad" && ++reads < JsonSettingsStore.ReadAttempts ? new IOException("in use") : null;
 
         var store = new JsonSettingsStore(fs, Path, _ => { });
 
@@ -259,7 +283,7 @@ public class JsonSettingsStoreTests
         var e = Assert.Throws<SettingsBackupUnreadableException>(() => new JsonSettingsStore(fs, Path, _ => { }));
 
         Assert.IsType<UnauthorizedAccessException>(e.InnerException);
-        Assert.Equal(JsonSettingsStore.BackupReadAttempts, reads);
+        Assert.Equal(JsonSettingsStore.ReadAttempts, reads);
         Assert.False(fs.Files.ContainsKey(Path));
     }
 
@@ -271,7 +295,8 @@ public class JsonSettingsStoreTests
         fs.HiddenFromExists[Path] = true;
         fs.Fail = (op, path) => op == "read" && path == Path ? new UnauthorizedAccessException("Access to the path is denied.") : null;
 
-        Assert.Throws<UnauthorizedAccessException>(() => new JsonSettingsStore(fs, Path, _ => { }));
+        var e = Assert.Throws<SettingsUnreadableException>(() => new JsonSettingsStore(fs, Path, _ => { }));
+        Assert.IsType<UnauthorizedAccessException>(e.InnerException);
         Assert.Equal($$"""{"clientID":"{{ClientId}}"}""", fs.Files[Path]);
     }
 }

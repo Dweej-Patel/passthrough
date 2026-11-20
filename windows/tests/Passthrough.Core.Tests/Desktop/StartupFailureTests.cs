@@ -33,4 +33,15 @@ public class StartupFailureTests
             "Details are in log. Passthrough will now close; start it again once the problem is fixed.",
             StartupFailure.Message(e, "log"));
     }
+
+    [Fact]
+    public void UnreadableSettings_AreShownInTheirOwnWords()
+    {
+        var e = new Passthrough.Core.Storage.SettingsUnreadableException(@"C:\p\settings.json", new IOException("in use"));
+        Assert.Equal(
+            "Passthrough couldn't start.\n\n" +
+            "Passthrough couldn't read its settings at C:\\p\\settings.json. Close anything using it and start Passthrough again.\n\n" +
+            "Details are in log. Passthrough will now close; start it again once the problem is fixed.",
+            StartupFailure.Message(e, "log"));
+    }
 }

@@ -32,18 +32,19 @@ public sealed partial class JsonSettingsStore : ISettingsStore
     private readonly bool _readOnly;
     private readonly Action<TimeSpan> _wait;
 
-    /// <summary>How many times a <c>.bad</c> copy that exists but can't be read is tried (a sharing violation is often brief).</summary>
-    public const int BackupReadAttempts = 3;
+    /// <summary>How many times <c>settings.json</c>, or its <c>.bad</c> copy, is tried when it is there but can't be read (a sharing violation is often brief).</summary>
+    public const int ReadAttempts = 3;
 
     /// <summary>The pause between those tries.</summary>
-    public static readonly TimeSpan BackupRetryDelay = TimeSpan.FromMilliseconds(200);
+    public static readonly TimeSpan ReadRetryDelay = TimeSpan.FromMilliseconds(200);
 
     /// <summary>
     /// Reads the file. Only "not found" counts as no file (an existence check can't tell a missing file from one it may
     /// not look at); a file that exists but cannot be read throws, so startup can say so, and so does a <c>.bad</c> copy
     /// that stays unreadable while the file is missing.
     /// </summary>
-    /// <param name="wait">Pauses between reads of an unreadable <c>.bad</c> copy (default: <see cref="Thread.Sleep(TimeSpan)"/>); tests pass their own.</param>
+    /// <param name="wait">Pauses between reads of a file that is there but can't be read (default: <see cref="Thread.Sleep(TimeSpan)"/>); tests pass their own.</param>
+    /// <exception cref="SettingsUnreadableException">The settings file is there but stays unreadable.</exception>
     /// <exception cref="SettingsBackupUnreadableException">The settings are missing and their <c>.bad</c> copy exists but stays unreadable.</exception>
     public JsonSettingsStore(IFileSystem files, string path, Action<TimeSpan>? wait = null)
     {
@@ -52,7 +53,7 @@ public sealed partial class JsonSettingsStore : ISettingsStore
         _path = path;
         _values = [];
         var bad = path + ".bad";
-        if (ReadIfPresent(path) is not { } text)
+        if (ReadWithRetries(path, e => new SettingsUnreadableException(path, e)) is not { } text)
         {
             // No settings, but a damaged copy whose recovered values could not be saved last time: recover them again.
             if (ReadBad(bad) is { Count: > 0 } again)
@@ -123,28 +124,30 @@ public sealed partial class JsonSettingsStore : ISettingsStore
     }
 
     /// <summary>
-    /// What can be recovered from the .bad copy; nothing when there is none. One that exists but can't be read is tried
-    /// <see cref="BackupReadAttempts"/> times; then <see cref="SettingsBackupUnreadableException"/>, never an empty start
-    /// that would give the PC a new client id.
+    /// What can be recovered from the .bad copy; nothing when there is none. One that is there but can't be read raises
+    /// <see cref="SettingsBackupUnreadableException"/> after the retries, never an empty start that would give the PC a
+    /// new client id.
     /// </summary>
-    private Dictionary<string, string> ReadBad(string bad)
+    private Dictionary<string, string> ReadBad(string bad) =>
+        ReadWithRetries(bad, e => new SettingsBackupUnreadableException(bad, e)) is { } text ? Salvage(text) : [];
+
+    /// <summary>
+    /// The file's text, or null when it is not there. Only "not found" means absent (an existence check can't tell a
+    /// missing file from one it may not look at). Any other failure is tried <see cref="ReadAttempts"/> times,
+    /// <see cref="ReadRetryDelay"/> apart, then becomes <paramref name="unreadable"/>'s exception.
+    /// </summary>
+    private string? ReadWithRetries(string file, Func<Exception, Exception> unreadable)
     {
         for (var attempt = 1; ; attempt++)
         {
-            try { return ReadIfPresent(bad) is { } text ? Salvage(text) : []; }
+            try { return _files.ReadAllText(file); }
+            catch (Exception e) when (e is FileNotFoundException or DirectoryNotFoundException) { return null; }
             catch (Exception e)
             {
-                if (attempt >= BackupReadAttempts) throw new SettingsBackupUnreadableException(bad, e);
-                _wait(BackupRetryDelay);
+                if (attempt >= ReadAttempts) throw unreadable(e);
+                _wait(ReadRetryDelay);
             }
         }
-    }
-
-    /// <summary>The file's text, or null when it is not there; any other failure (denied, in use) is thrown.</summary>
-    private string? ReadIfPresent(string file)
-    {
-        try { return _files.ReadAllText(file); }
-        catch (Exception e) when (e is FileNotFoundException or DirectoryNotFoundException) { return null; }
     }
 
     /// <summary>What can be kept from a damaged file: the client id, when one is in its text.</summary>
