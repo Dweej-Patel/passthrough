@@ -46,13 +46,11 @@ public sealed class FakeUsbMuxd : IAsyncDisposable
     }
 
     /// <summary>
-    /// A failure that only says the connection was torn down: by DisposeAsync, or by the client resetting the socket
-    /// as it hangs up (the socket reports it; a closing client may leave a reply unread). Anything else a handler
-    /// throws, an EndOfStreamException from a script that expected more than came included, fails the test.
+    /// A failure that only says DisposeAsync tore the connection down. Before disposal begins, anything a handler throws
+    /// fails the test: an assertion, an EndOfStreamException from a script that expected more than the client sent,
+    /// or a socket reset. A client hanging up is expected only where the script says so, in <see cref="HoldOpenAsync"/>.
     /// </summary>
-    private bool IsTeardown(Exception e) =>
-        e is IOException { InnerException: SocketException { SocketErrorCode: SocketError.ConnectionReset or SocketError.ConnectionAborted or SocketError.Shutdown } }
-        || (_closing && e is IOException or ObjectDisposedException);
+    private bool IsTeardown(Exception e) => _closing && e is IOException or ObjectDisposedException;
 
     public int Port => ((IPEndPoint)_listener.LocalEndpoint).Port;
 
@@ -104,10 +102,20 @@ public sealed class FakeUsbMuxd : IAsyncDisposable
         WritePacketAsync(s, tag, new Dictionary<string, object> { ["MessageType"] = "Result", ["Number"] = number });
 
     /// <summary>Keeps the connection open until the client closes it (or the fake is disposed), so a handler never outlives its test.</summary>
+    /// <remarks>
+    /// The script's last step: from here the client is expected to hang up, cleanly or by resetting the socket (a
+    /// client that closes with a reply unread resets it), and either ends the handler quietly.
+    /// </remarks>
     public static async Task HoldOpenAsync(Stream s)
     {
         var buffer = new byte[256];
-        while (await s.ReadAsync(buffer) > 0) { }
+        try
+        {
+            while (await s.ReadAsync(buffer) > 0) { }
+        }
+        catch (IOException e) when (e.InnerException is SocketException { SocketErrorCode: SocketError.ConnectionReset or SocketError.ConnectionAborted })
+        {
+        }
     }
 
     /// <summary>Stops listening, closes every connection, waits for every handler, and rethrows any handler failure.</summary>
