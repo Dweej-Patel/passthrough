@@ -7,6 +7,9 @@
 
     <ScrollViewer>
         <StackPanel Padding="24" Spacing="20" MaxWidth="520" HorizontalAlignment="Left">
+            <TextBlock x:Name="ErrorText" Visibility="Collapsed" TextWrapping="Wrap"
+                       Foreground="{ThemeResource SystemFillColorCriticalBrush}" />
+
             <StackPanel Spacing="8">
                 <TextBlock Text="General" Style="{StaticResource SubtitleTextBlockStyle}" />
                 <ToggleSwitch x:Name="StartAtLoginSwitch" Header="Start at login" />

@@ -331,9 +331,10 @@ public sealed class HostSession : IAsyncDisposable
 
     private PhoneEntry EntryFor(PhoneDevice d)
     {
-        if (!d.CanRoute) return new PhoneEntry(d, PhoneState.RemoteOnlyLater, false, null, 0, 0, 0, IPadMessage);
-        if (d.Equals(_active)) return new PhoneEntry(d, _activeState, true, _status, _rx, _tx, _connections, _message);
-        return new PhoneEntry(d, HasToken(d) ? PhoneState.Paired : PhoneState.NotPaired, false, null, 0, 0, 0, null);
+        if (!d.CanRoute) return new PhoneEntry(d, PhoneState.RemoteOnlyLater, false, null, 0, 0, 0, IPadMessage, HasToken(d));
+        if (d.Equals(_active)) return new PhoneEntry(d, _activeState, true, _status, _rx, _tx, _connections, _message, HasToken(d));
+        var hasToken = HasToken(d);
+        return new PhoneEntry(d, hasToken ? PhoneState.Paired : PhoneState.NotPaired, false, null, 0, 0, 0, null, hasToken);
     }
 
     /// <summary>Whether the phone's slot holds a token; a slot that cannot be read counts as empty.</summary>

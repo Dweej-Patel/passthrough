@@ -73,8 +73,8 @@ public sealed class PhoneRow : ObservableBase
     /// <summary>[Use this phone]: any other phone that can be made active.</summary>
     public Visibility UseVisibility => Show(!_entry.IsActive && _entry.State != PhoneState.RemoteOnlyLater);
 
-    /// <summary>Forget pairing, offered once a token is stored for the phone.</summary>
-    public Visibility ForgetVisibility => Show(_entry.State == PhoneState.Paired);
+    /// <summary>Forget pairing, offered whenever this PC holds a token for the phone (even if it is Failed or Connecting).</summary>
+    public Visibility ForgetVisibility => Show(_entry.HasPairing);
 
     public string Code
     {

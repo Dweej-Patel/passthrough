@@ -15,19 +15,24 @@ public sealed class SessionViewModel : ObservableBase
     private readonly HostSession _session;
     private readonly DispatcherQueue _ui;
     private string _hints = "";
+    private bool _androidEnabled;
 
     public SessionViewModel(HostSession session, DispatcherQueue ui, bool androidEnabled)
     {
         _session = session;
         _ui = ui;
-        AndroidEnabled = androidEnabled;
+        _androidEnabled = androidEnabled;
         _session.StateChanged += state => _ui.TryEnqueue(() => Apply(state));
         Apply(_session.State);
     }
 
     public ObservableCollection<PhoneRow> Rows { get; } = new();
 
-    public bool AndroidEnabled { get; }
+    public bool AndroidEnabled
+    {
+        get => _androidEnabled;
+        private set { _androidEnabled = value; Raise(nameof(AndroidEnabled)); }
+    }
 
     public Visibility EmptyVisibility => Rows.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
 
@@ -46,7 +51,12 @@ public sealed class SessionViewModel : ObservableBase
 
     public Task ForgetAsync(string phoneId) => _session.ForgetAsync(phoneId);
 
-    public Task SetAndroidEnabledAsync(bool on) => _session.SetAndroidEnabledAsync(on);
+    /// <summary>Changes the setting; <see cref="AndroidEnabled"/> follows only once the session has accepted it.</summary>
+    public async Task SetAndroidEnabledAsync(bool on)
+    {
+        await _session.SetAndroidEnabledAsync(on);
+        AndroidEnabled = on;
+    }
 
     private void Apply(SessionState state)
     {

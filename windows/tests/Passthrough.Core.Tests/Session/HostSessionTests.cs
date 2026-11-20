@@ -120,7 +120,7 @@ public class HostSessionTests
         s = await h.WaitState(s => Entry(s, iPhone) is not null);
         Assert.Equal([iPad, android, iPhone], s.Phones.Select(p => p.Device));
         Assert.True(Entry(s, android)!.IsActive);
-        Assert.Equal(new PhoneEntry(iPhone, PhoneState.NotPaired, false, null, 0, 0, 0, null), Entry(s, iPhone));
+        Assert.Equal(new PhoneEntry(iPhone, PhoneState.NotPaired, false, null, 0, 0, 0, null, false), Entry(s, iPhone));
         Assert.Equal(PhoneState.RemoteOnlyLater, Entry(s, iPad)!.State);
         Assert.Equal([android], h.Clients.Select(c => c.Device));
     }
@@ -143,7 +143,7 @@ public class HostSessionTests
         Assert.True(h.Client(0).Client.Events.Completion.IsCompleted);
         await androidPhone.WaitClosedAsync();
         var s = await h.WaitState(s => Entry(s, iPhone) is { IsActive: true, State: PhoneState.NotPaired });
-        Assert.Equal(new PhoneEntry(android, PhoneState.NotPaired, false, null, 0, 0, 0, null), Entry(s, android));
+        Assert.Equal(new PhoneEntry(android, PhoneState.NotPaired, false, null, 0, 0, 0, null, false), Entry(s, android));
         Assert.Equal([android, iPhone], h.Clients.Select(c => c.Device));
     }
 
@@ -203,6 +203,7 @@ public class HostSessionTests
             Entry(s, android)!.Message);
         Assert.True(Entry(s, android)!.IsActive);
         Assert.Equal(PhoneToken, h.Secrets.Get(AndroidSlot));
+        Assert.True(Entry(s, android)!.HasPairing);
 
         h.Time.Advance(TimeSpan.FromSeconds(10));
         await Task.Delay(200);
@@ -286,7 +287,7 @@ public class HostSessionTests
         await h.Session.StartAsync();
         var android = Android(phone);
         h.Adb.Attach(android);
-        await h.WaitState(s => Entry(s, android) is { State: PhoneState.Paired, Status: not null });
+        await h.WaitState(s => Entry(s, android) is { State: PhoneState.Paired, Status: not null, HasPairing: true });
 
         await h.Session.ForgetAsync(android.Id);
 
@@ -296,6 +297,7 @@ public class HostSessionTests
         var s = await h.WaitState(s => Entry(s, android) is { State: PhoneState.NotPaired } && h.Clients.Count == 2);
         Assert.Null(h.Client(1).Identity.Token);
         Assert.Null(Entry(s, android)!.Status);
+        Assert.False(Entry(s, android)!.HasPairing);
     }
 
     [Fact]
@@ -356,7 +358,7 @@ public class HostSessionTests
         h.Time.Advance(TimeSpan.FromSeconds(10));
         await Task.Delay(200);
         Assert.Single(h.Clients);
-        Assert.Equal(new PhoneEntry(android, PhoneState.Failed, true, null, 0, 0, 0, "Couldn't save the pairing on this PC. Try pairing again."),
+        Assert.Equal(new PhoneEntry(android, PhoneState.Failed, true, null, 0, 0, 0, "Couldn't save the pairing on this PC. Try pairing again.", false),
             Entry(h.Session.State, android));
         Assert.DoesNotContain(h.History, st => Entry(st, android) is { State: PhoneState.Paired });
 
