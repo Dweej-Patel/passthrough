@@ -11,6 +11,8 @@ public sealed class FakeAdbServer : IAsyncDisposable
     private readonly TcpListener _listener = new(IPAddress.Loopback, 0);
     private readonly Task _accepting;
     private readonly CancellationTokenSource _stop = new();
+    private readonly List<Task> _handlers = [];
+    private volatile bool _closing;
 
     public FakeAdbServer(Func<Stream, Task> handler)
     {
@@ -22,17 +24,18 @@ public sealed class FakeAdbServer : IAsyncDisposable
                 while (true)
                 {
                     var client = await _listener.AcceptTcpClientAsync(_stop.Token);
-                    _ = Task.Run(async () =>
+                    var task = Task.Run(async () =>
                     {
                         using (client)
                         {
                             try { await handler(client.GetStream()); }
-                            catch (Exception) when (_stop.IsCancellationRequested) { }
+                            catch (IOException) { } // client hung up; any other failure (e.g. an assertion) is rethrown by DisposeAsync
                         }
                     });
+                    lock (_handlers) _handlers.Add(task);
                 }
             }
-            catch (OperationCanceledException) { }
+            catch (Exception) when (_closing) { }
         });
     }
 
@@ -62,11 +65,29 @@ public sealed class FakeAdbServer : IAsyncDisposable
     public static Task WriteBlockAsync(Stream s, string text) =>
         WriteAsync(s, Encoding.UTF8.GetByteCount(text).ToString("x4") + text);
 
+    /// <summary>Keeps the connection open until the client closes it, so a handler never outlives its test.</summary>
+    public static async Task HoldOpenAsync(Stream s)
+    {
+        var buffer = new byte[256];
+        while (await s.ReadAsync(buffer) > 0) { }
+    }
+
+    /// <summary>Stops listening, waits for every handler, and rethrows any handler failure (e.g. a failed assertion) so it fails the test.</summary>
     public async ValueTask DisposeAsync()
     {
-        await _stop.CancelAsync();
+        _closing = true;
         _listener.Stop();
-        await _accepting;
-        _stop.Dispose();
+        await _accepting.WaitAsync(TimeSpan.FromSeconds(5)).ConfigureAwait(false);
+        Task[] handlers;
+        lock (_handlers) handlers = [.. _handlers];
+        try
+        {
+            await Task.WhenAll(handlers).WaitAsync(TimeSpan.FromSeconds(10));
+        }
+        finally
+        {
+            await _stop.CancelAsync();
+            _stop.Dispose();
+        }
     }
 }

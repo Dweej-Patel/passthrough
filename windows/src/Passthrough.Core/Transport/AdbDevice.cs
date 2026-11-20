@@ -1,14 +1,9 @@
 namespace Passthrough.Core.Transport;
 
 /// <summary>An Android phone as the adb server reports it.</summary>
-public sealed record AdbDevice(string Serial, string State, string? Model)
+/// <param name="IsUsb">Attached over a USB cable: the track line carries a <c>usb:</c> property (adb over Wi-Fi and emulators do not).</param>
+public sealed record AdbDevice(string Serial, string State, string? Model, bool IsUsb)
 {
     /// <summary>True when the phone is authorised and online (state "device").</summary>
     public bool IsUsable => State == "device";
-
-    /// <summary>Wi-Fi adb (host:port, mDNS) and emulators are not USB-attached phones.</summary>
-    public static bool IsIgnored(string serial) =>
-        serial.StartsWith("emulator-", StringComparison.Ordinal)
-        || serial.Contains(':')
-        || serial.Contains("_adb-tls-connect._tcp", StringComparison.Ordinal);
 }

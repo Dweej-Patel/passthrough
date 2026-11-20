@@ -17,7 +17,7 @@ public class AdbClientTests
             Assert.Equal("host:track-devices-l", await FakeAdbServer.ReadRequestAsync(s));
             await FakeAdbServer.WriteAsync(s, "OKAY");
             await FakeAdbServer.WriteBlockAsync(s, block);
-            await Task.Delay(System.Threading.Timeout.InfiniteTimeSpan, Deadline());
+            await FakeAdbServer.HoldOpenAsync(s);
         });
         var client = new AdbClient(fake.Connector);
         await foreach (var list in client.TrackDevicesAsync(Deadline())) return list;
@@ -28,17 +28,31 @@ public class AdbClientTests
     public async Task Track_ParsesAndFiltersDevices()
     {
         var list = await FirstListAsync(
-            "R58M123 device product:x model:Pixel_8 device:y\n" +
-            "emulator-5554 device\n" +
-            "192.168.1.5:5555 device\n");
+            "R58M123 device usb:1-1 product:x model:Pixel_8 device:y\n" +
+            "emulator-5554 device product:sdk model:sdk_phone\n" +
+            "192.168.1.5:5555 device product:x model:Pixel_7\n");
 
-        Assert.Equal(new[] { new AdbDevice("R58M123", "device", "Pixel_8") }, list);
+        Assert.Equal(new[] { new AdbDevice("R58M123", "device", "Pixel 8", true) }, list);
+    }
+
+    [Fact]
+    public async Task Track_OrdinarySerialWithoutUsbIsExcluded()
+    {
+        Assert.Empty(await FirstListAsync("R58M123 device product:x model:Pixel_8\n"));
+    }
+
+    [Fact]
+    public async Task Track_OddSerialWithUsbIsIncluded()
+    {
+        var list = await FirstListAsync("emulator-like:5555 device usb:2-3 model:P\n");
+
+        Assert.Equal("emulator-like:5555", Assert.Single(list).Serial);
     }
 
     [Fact]
     public async Task Track_UnauthorizedDeviceIsListedNotUsable()
     {
-        var list = await FirstListAsync("R58M123 unauthorized\n");
+        var list = await FirstListAsync("R58M123 unauthorized usb:1-1\n");
 
         var device = Assert.Single(list);
         Assert.Equal("R58M123", device.Serial);
@@ -59,14 +73,6 @@ public class AdbClientTests
         Assert.Empty(await FirstListAsync(""));
     }
 
-    [Theory]
-    [InlineData("adb-ABC123-xyz._adb-tls-connect._tcp", true)]
-    [InlineData("emulator-5554", true)]
-    [InlineData("10.0.0.2:5555", true)]
-    [InlineData("R58M123", false)]
-    public void IsIgnored_MatchesWifiAndEmulators(string serial, bool ignored) =>
-        Assert.Equal(ignored, AdbDevice.IsIgnored(serial));
-
     [Fact]
     public async Task Connect_SendsTransportThenTcpPort()
     {
@@ -81,7 +87,7 @@ public class AdbClientTests
             await s.ReadExactlyAsync(buf);
             await s.WriteAsync(buf);
             await s.FlushAsync();
-            await Task.Delay(System.Threading.Timeout.InfiniteTimeSpan, Deadline());
+            await FakeAdbServer.HoldOpenAsync(s);
         });
         var client = new AdbClient(fake.Connector);
 
@@ -102,7 +108,7 @@ public class AdbClientTests
         {
             await FakeAdbServer.ReadRequestAsync(s);
             await FakeAdbServer.WriteAsync(s, "FAIL0010device not found");
-            await Task.Delay(System.Threading.Timeout.InfiniteTimeSpan, Deadline());
+            await FakeAdbServer.HoldOpenAsync(s);
         });
         var client = new AdbClient(fake.Connector);
 
@@ -113,7 +119,7 @@ public class AdbClientTests
     [Fact]
     public async Task Connect_SilentServer_TimesOut()
     {
-        await using var fake = new FakeAdbServer(s => Task.Delay(System.Threading.Timeout.InfiniteTimeSpan, Deadline()));
+        await using var fake = new FakeAdbServer(FakeAdbServer.HoldOpenAsync);
         var client = new AdbClient(fake.Connector, TimeSpan.FromMilliseconds(200));
 
         await Assert.ThrowsAsync<TimeoutException>(() => client.ConnectAsync("R58M123", 7891, Deadline()));
@@ -133,7 +139,7 @@ public class AdbClientTests
     [Fact]
     public async Task EnsureServer_StartsServerWhenNothingAnswers()
     {
-        await using var fake = new FakeAdbServer(s => Task.Delay(System.Threading.Timeout.InfiniteTimeSpan, Deadline()));
+        await using var fake = new FakeAdbServer(FakeAdbServer.HoldOpenAsync);
         var attempts = 0;
         var client = new AdbClient(async ct =>
         {
@@ -151,7 +157,7 @@ public class AdbClientTests
     [Fact]
     public async Task EnsureServer_ServerAlreadyUp_DoesNotRunAdb()
     {
-        await using var fake = new FakeAdbServer(s => Task.Delay(System.Threading.Timeout.InfiniteTimeSpan, Deadline()));
+        await using var fake = new FakeAdbServer(FakeAdbServer.HoldOpenAsync);
         var runner = new RecordingRunner();
 
         await AdbClient.EnsureServerAsync(new AdbClient(fake.Connector), "adb", runner, Deadline());

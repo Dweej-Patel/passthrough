@@ -11,7 +11,7 @@ public sealed class AdbClient(StreamConnector connect, TimeSpan? connectTimeout 
 
     private const int MaxBlock = 1 << 20;
 
-    /// <summary>Yields the USB device list (Wi-Fi and emulator serials removed) each time the adb server reports.</summary>
+    /// <summary>Yields the USB-attached device list (Wi-Fi and emulator entries removed) each time the adb server reports.</summary>
     public async IAsyncEnumerable<IReadOnlyList<AdbDevice>> TrackDevicesAsync([EnumeratorCancellation] CancellationToken ct)
     {
         var stream = await connect(ct);
@@ -23,7 +23,7 @@ public sealed class AdbClient(StreamConnector connect, TimeSpan? connectTimeout 
             {
                 var text = await ReadLengthPrefixedAsync(stream, allowCleanEof: true, ct);
                 if (text is null) yield break;
-                yield return ParseDevices(text).Where(d => !AdbDevice.IsIgnored(d.Serial)).ToList();
+                yield return ParseDevices(text).Where(d => d.IsUsb).ToList();
             }
         }
         finally
@@ -107,7 +107,11 @@ public sealed class AdbClient(StreamConnector connect, TimeSpan? connectTimeout 
                 if (colon >= 0) props[field[..colon]] = field[(colon + 1)..];
                 else if (props.Count == 0) stateWords.Add(field);
             }
-            devices.Add(new AdbDevice(fields[0], string.Join(' ', stateWords), props.GetValueOrDefault("model")));
+            devices.Add(new AdbDevice(
+                fields[0],
+                string.Join(' ', stateWords),
+                props.GetValueOrDefault("model")?.Replace('_', ' '),
+                props.ContainsKey("usb")));
         }
         return devices;
     }
