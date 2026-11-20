@@ -46,15 +46,36 @@ public sealed class PhoneDevice : IEquatable<PhoneDevice>
             $"usbmux:{d.DeviceId}",
             isIPad ? PhoneKind.IPad : PhoneKind.IPhone,
             d.Udid[..Math.Min(8, d.Udid.Length)] + "…",
-            (isIPad ? "token.ipad." : "token.iphone.") + SlotSafe(d.Udid),
+            SlotFor(isIPad ? PhoneKind.IPad : PhoneKind.IPhone, d.Udid),
             WatchTransport.UsbMux,
             (port, ct) => client.ConnectAsync(d.DeviceId, port, ct));
     }
 
     /// <summary>An Android phone on the cable, as adb reports it.</summary>
     public static PhoneDevice FromAdb(AdbDevice d, AdbClient client) =>
-        new($"adb:{d.Serial}", PhoneKind.Android, d.Model ?? d.Serial, "token.android." + SlotSafe(d.Serial),
+        new($"adb:{d.Serial}", PhoneKind.Android, d.Model ?? d.Serial, SlotFor(PhoneKind.Android, d.Serial),
             WatchTransport.Adb, (port, ct) => client.ConnectAsync(d.Serial, port, ct));
+
+    /// <summary>
+    /// The pairing slot for a phone of <paramref name="kind"/> with this UDID or serial: <c>token.iphone.</c>,
+    /// <c>token.ipad.</c> or <c>token.android.</c>, then the id as <see cref="SlotSafe"/> leaves it. When that filter
+    /// changed the id, <c>-</c> and the first 8 hex digits of the SHA-256 of the whole original id follow, so ids that
+    /// filter to the same text ("A+B" and "AB") keep separate slots. Ids the filter leaves alone (every normal UDID and
+    /// serial) keep the plain form. Slots stay on this PC, so they need not match the Mac's.
+    /// </summary>
+    public static string SlotFor(PhoneKind kind, string hardwareId)
+    {
+        var prefix = kind switch
+        {
+            PhoneKind.IPhone => "token.iphone.",
+            PhoneKind.IPad => "token.ipad.",
+            _ => "token.android.",
+        };
+        var safe = SlotSafe(hardwareId);
+        if (safe == hardwareId) return prefix + safe;
+        var hash = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(Encoding.UTF8.GetBytes(hardwareId)));
+        return prefix + safe + "-" + hash[..8].ToLowerInvariant();
+    }
 
     /// <summary>
     /// A hardware id as it may appear in a credential account name: anything but letters, digits, combining marks,

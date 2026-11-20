@@ -175,7 +175,7 @@ public class DeviceDirectoryTests
     {
         var d = PhoneDevice.FromAdb(new AdbDevice("a/b c", "device", null, true), new AdbClient(_ => throw new NotSupportedException()));
 
-        Assert.Equal("token.android.abc", d.PairingSlot);
+        Assert.Equal("token.android.abc-" + Hash8("a/b c"), d.PairingSlot); // changed by filtering: tagged with the original's hash
         Assert.Equal("adb:a/b c", d.Id);
         Assert.Equal("a/b c", d.Label);
     }
@@ -186,10 +186,36 @@ public class DeviceDirectoryTests
         var client = new AdbClient(_ => throw new NotSupportedException());
         string Slot(string serial) => PhoneDevice.FromAdb(new AdbDevice(serial, "device", null, true), client).PairingSlot;
 
-        Assert.Equal("token.android.\U0001D400x", Slot("\U0001D400/x"));      // supplementary-plane letter survives whole
-        Assert.Equal("token.android.e\u0301-1", Slot("e\u0301 -1"));       // decomposed accent stays with its letter
-        Assert.Equal("token.android.a_b.c-d", Slot("a_b.c-d!\u2603"));    // a symbol is dropped
+        Assert.Equal("token.android.\U0001D400x-" + Hash8("\U0001D400/x"), Slot("\U0001D400/x")); // supplementary-plane letter survives whole
+        Assert.Equal("token.android.e\u0301-1-" + Hash8("e\u0301 -1"), Slot("e\u0301 -1"));       // decomposed accent stays with its letter
+        Assert.Equal("token.android.a_b.c-d-" + Hash8("a_b.c-d!\u2603"), Slot("a_b.c-d!\u2603")); // a symbol is dropped
+        Assert.Equal("token.android.e\u0301x", Slot("e\u0301x"));          // nothing dropped: no tag
     }
+
+    [Fact]
+    public void PhoneDevice_SlotOfAnIdFilteringLeavesAlone_IsUnchanged()
+    {
+        var adb = new AdbClient(_ => throw new NotSupportedException());
+        var usb = new UsbMuxClient(_ => throw new NotSupportedException());
+        Assert.Equal("token.android.R58M123ABC", PhoneDevice.FromAdb(new AdbDevice("R58M123ABC", "device", null, true), adb).PairingSlot);
+        Assert.Equal("token.iphone.00008110-001A2B3C4D5E6F7A", PhoneDevice.FromUsbMux(new UsbMuxDevice(3, "00008110-001A2B3C4D5E6F7A", 0x12A8, "USB"), usb).PairingSlot);
+        Assert.Equal("token.ipad.00008027-BBBB", PhoneDevice.FromUsbMux(new UsbMuxDevice(4, "00008027-BBBB", 0x12AB, "USB"), usb).PairingSlot);
+    }
+
+    [Fact]
+    public void PhoneDevice_IdsThatFilterToTheSameText_GetDistinctSlots()
+    {
+        var adb = new AdbClient(_ => throw new NotSupportedException());
+        string Slot(string serial) => PhoneDevice.FromAdb(new AdbDevice(serial, "device", null, true), adb).PairingSlot;
+
+        Assert.Equal("token.android.AB", Slot("AB"));
+        Assert.Equal("token.android.AB-" + Hash8("A+B"), Slot("A+B"));
+        Assert.NotEqual(Slot("A+B"), Slot("A B"));
+        Assert.Equal(Slot("A+B"), PhoneDevice.SlotFor(PhoneKind.Android, "A+B"));
+    }
+
+    private static string Hash8(string id) =>
+        Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(id)))[..8].ToLowerInvariant();
 
     [Fact]
     public void PhoneDevice_UsbMuxIdsAndLabels_EqualityById()

@@ -998,4 +998,38 @@ public class HostSessionTests
         await h.WaitState(s => Entry(s, android) is { HasPairing: false, SavedName: null });
         Assert.Null(DeviceNames.Get(h.Settings, AndroidSlot));
     }
+
+    [Fact]
+    public async Task SerialsThatFilterAlike_KeepTheirOwnTokens_AndForgetOnlyItsOwn()
+    {
+        const string otherToken = "ZZECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8";
+        await using var plusPhone = new FakePhone { IssuedToken = PhoneToken };
+        await using var plainPhone = new FakePhone { IssuedToken = otherToken };
+        await using var h = new Harness();
+        await h.Session.StartAsync();
+        var plus = new PhoneDevice("adb:A+B", PhoneKind.Android, "A+B", PhoneDevice.SlotFor(PhoneKind.Android, "A+B"), WatchTransport.Adb, Connect(plusPhone));
+        var plain = new PhoneDevice("adb:AB", PhoneKind.Android, "AB", PhoneDevice.SlotFor(PhoneKind.Android, "AB"), WatchTransport.Adb, Connect(plainPhone));
+        Assert.NotEqual(plus.PairingSlot, plain.PairingSlot);
+
+        h.Adb.Attach(plus);
+        await h.WaitState(s => Entry(s, plus) is { IsActive: true, State: PhoneState.NotPaired });
+        await h.Submit(plus, plusPhone.Code);
+        await h.WaitState(s => Entry(s, plus) is { State: PhoneState.Paired, HasPairing: true });
+
+        h.Adb.Attach(plain);
+        await h.WaitState(s => Entry(s, plain) is { State: PhoneState.NotPaired, HasPairing: false }); // the other's token isn't its
+        await h.Session.MakeActiveAsync(plain.Id);
+        await h.WaitState(s => Entry(s, plain) is { IsActive: true, State: PhoneState.NotPaired });
+        await h.Submit(plain, plainPhone.Code);
+        await h.WaitState(s => Entry(s, plain) is { State: PhoneState.Paired, HasPairing: true });
+
+        Assert.Equal(PhoneToken, h.Secrets.Get(plus.PairingSlot));
+        Assert.Equal(otherToken, h.Secrets.Get(plain.PairingSlot));
+
+        await h.Session.ForgetSlotAsync(plus.PairingSlot);
+
+        Assert.Null(h.Secrets.Get(plus.PairingSlot));
+        Assert.Equal(otherToken, h.Secrets.Get(plain.PairingSlot));
+        await h.WaitState(s => Entry(s, plus) is { HasPairing: false } && Entry(s, plain) is { State: PhoneState.Paired, HasPairing: true });
+    }
 }
