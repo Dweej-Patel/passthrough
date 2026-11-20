@@ -35,8 +35,7 @@ public sealed class FakeUsbMuxd : IAsyncDisposable
                         using (client)
                         {
                             try { await handler(client.GetStream()); }
-                            catch (IOException) { } // the client hung up
-                            catch (ObjectDisposedException) when (_closing) { } // closed by DisposeAsync
+                            catch (Exception e) when (IsTeardown(e)) { }
                         }
                     });
                     lock (_handlers) _handlers.Add(task);
@@ -45,6 +44,15 @@ public sealed class FakeUsbMuxd : IAsyncDisposable
             catch (Exception) when (_closing) { }
         });
     }
+
+    /// <summary>
+    /// A failure that only says the connection was torn down: by DisposeAsync, or by the client resetting the socket
+    /// as it hangs up (the socket reports it; a closing client may leave a reply unread). Anything else a handler
+    /// throws, an EndOfStreamException from a script that expected more than came included, fails the test.
+    /// </summary>
+    private bool IsTeardown(Exception e) =>
+        e is IOException { InnerException: SocketException { SocketErrorCode: SocketError.ConnectionReset or SocketError.ConnectionAborted or SocketError.Shutdown } }
+        || (_closing && e is IOException or ObjectDisposedException);
 
     public int Port => ((IPEndPoint)_listener.LocalEndpoint).Port;
 
