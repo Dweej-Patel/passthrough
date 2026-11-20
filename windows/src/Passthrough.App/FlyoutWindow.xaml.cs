@@ -69,8 +69,11 @@ public sealed partial class FlyoutWindow : Window
         var row = (PhoneRow)((FrameworkElement)sender).DataContext;
         var code = row.Code.Trim();
         if (code.Length != 6 || !code.All(char.IsAsciiDigit)) return;
-        row.Code = "";
-        try { await ViewModel.SubmitCodeAsync(code); }
+        try
+        {
+            // Cleared only once the session took it for this row's phone; otherwise the code stays to try again.
+            if (await ViewModel.SubmitCodeAsync(row, code) && row.Code.Trim() == code) row.Code = "";
+        }
         catch (Exception ex) { LogFile.Error(ex); }
     }
 

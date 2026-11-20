@@ -43,6 +43,9 @@ public sealed class HostSession : IAsyncDisposable
 
     // Everything below is touched only by work items on the loop.
     private readonly List<PhoneDevice> _devices = [];
+    /// <summary>Each attached phone's attachment number (see <see cref="PhoneEntry.Attachment"/>).</summary>
+    private readonly Dictionary<string, long> _attachments = [];
+    private long _attachSeq;
     private readonly List<Task> _readers = [];
     private string? _clientId;
     private bool _started;
@@ -136,13 +139,28 @@ public sealed class HostSession : IAsyncDisposable
         await ActivateAsync(device); // dropping the old channel clears the hold and the message
     });
 
-    /// <summary>Sends the six-digit code shown on the active phone (held until its welcome when the channel is still opening).</summary>
-    public Task SubmitCodeAsync(string code) => RunAsync(async () =>
+    /// <summary>
+    /// Sends the six-digit code shown on a phone, addressed by the phone's id and the <see cref="PhoneEntry.Attachment"/>
+    /// of the row it was typed into, and checked when the call runs on the loop: only to that phone, still attached
+    /// that same time, still active and unpaired (NotPaired, or Connecting with no stored token). A channel still
+    /// opening holds the code until its welcome; with no channel (waiting to reconnect) one is opened at once. True
+    /// when the code went (or is held) for that phone; false when it was not sent, so the caller can keep it.
+    /// </summary>
+    public Task<bool> SubmitCodeAsync(string phoneId, long attachment, string code) => RunAsync(async () =>
     {
-        if (_client is null || _activeState is not (PhoneState.Connecting or PhoneState.NotPaired)) return;
+        if (_closed || _active is not { } device || device.Id != phoneId || AttachmentOf(device) != attachment) return false;
+        var unpaired = _activeState == PhoneState.NotPaired || (_activeState == PhoneState.Connecting && !HasToken(device));
+        if (!unpaired) return false;
+        if (_client is null)
+        {
+            OpenClient(keepState: true);
+            if (_client is null) return false; // the store failed: the phone is Failed now, with Try again
+        }
         _activeState = PhoneState.Pairing;
         _message = null;
+        _reason = null;
         await _client.SubmitCodeAsync(code);
+        return true;
     });
 
     /// <summary>Deletes the phone's stored token; when it is the active phone, closes its channel and opens a fresh one, which asks to pair.</summary>
@@ -200,6 +218,14 @@ public sealed class HostSession : IAsyncDisposable
         return _work.Writer.TryWrite((work, done)) ? done.Task : Task.CompletedTask;
     }
 
+    /// <summary>As <see cref="RunAsync(Func{Task})"/>, with the work's result; after disposal, <c>default</c>.</summary>
+    private async Task<T?> RunAsync<T>(Func<Task<T>> work)
+    {
+        T? result = default;
+        await RunAsync(async () => { result = await work(); });
+        return result;
+    }
+
     /// <summary>Queues work without waiting; safe from any thread, never blocks.</summary>
     private void Post(Func<Task> work) => _work.Writer.TryWrite((work, null));
 
@@ -209,10 +235,15 @@ public sealed class HostSession : IAsyncDisposable
         switch (change)
         {
             case DeviceChange.Attached a:
-                if (!_devices.Contains(a.Device)) _devices.Add(a.Device);
+                if (!_devices.Contains(a.Device))
+                {
+                    _devices.Add(a.Device);
+                    _attachments[a.Device.Id] = ++_attachSeq;
+                }
                 break;
             case DeviceChange.Detached d:
                 _devices.Remove(d.Device);
+                _attachments.Remove(d.Device.Id);
                 if (d.Device.Equals(_active)) await DropActiveAsync();
                 break;
         }
@@ -423,10 +454,10 @@ public sealed class HostSession : IAsyncDisposable
 
     private PhoneEntry EntryFor(PhoneDevice d)
     {
-        if (!d.CanRoute) return new PhoneEntry(d, PhoneState.RemoteOnlyLater, false, null, 0, 0, 0, IPadMessage, HasToken(d));
-        if (d.Equals(_active)) return new PhoneEntry(d, _activeState, true, _status, _rx, _tx, _connections, _message ?? _reason, HasToken(d));
+        if (!d.CanRoute) return new PhoneEntry(d, PhoneState.RemoteOnlyLater, false, null, 0, 0, 0, IPadMessage, HasToken(d), AttachmentOf(d));
+        if (d.Equals(_active)) return new PhoneEntry(d, _activeState, true, _status, _rx, _tx, _connections, _message ?? _reason, HasToken(d), AttachmentOf(d));
         var hasToken = HasToken(d);
-        return new PhoneEntry(d, hasToken ? PhoneState.Paired : PhoneState.NotPaired, false, null, 0, 0, 0, null, hasToken);
+        return new PhoneEntry(d, hasToken ? PhoneState.Paired : PhoneState.NotPaired, false, null, 0, 0, 0, null, hasToken, AttachmentOf(d));
     }
 
     /// <summary>Whether the phone's slot holds a well-formed token; a slot that cannot be read counts as empty.</summary>
@@ -452,6 +483,8 @@ public sealed class HostSession : IAsyncDisposable
         try { Error?.Invoke(e); }
         catch (Exception) { } // a failing logger must not stop the session
     }
+
+    private long AttachmentOf(PhoneDevice d) => _attachments.GetValueOrDefault(d.Id);
 
     private WatchStatus WatcherStatus(WatchTransport t) => _directory.Watcher(t)?.Status ?? new WatchStatus(WatchState.Idle);
 }

@@ -49,7 +49,8 @@ public sealed class SessionViewModel : ObservableBase
 
     public Task RetryAsync(string phoneId) => _session.RetryAsync(phoneId);
 
-    public Task SubmitCodeAsync(string code) => _session.SubmitCodeAsync(code);
+    /// <summary>Sends a code to the phone of the row it was typed into; false when it was not sent (the phone changed meanwhile).</summary>
+    public Task<bool> SubmitCodeAsync(PhoneRow row, string code) => _session.SubmitCodeAsync(row.Id, row.Attachment, code);
 
     public Task ForgetAsync(string phoneId) => _session.ForgetAsync(phoneId);
 

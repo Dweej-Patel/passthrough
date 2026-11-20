@@ -17,6 +17,9 @@ public sealed class PhoneRow : ObservableBase
 
     public string Id => _entry.Device.Id;
 
+    /// <summary>Which attachment of the phone this row shows; a code typed here is addressed to it.</summary>
+    public long Attachment => _entry.Attachment;
+
     public string Marker => _entry.IsActive ? "●" : "○";
 
     public string Title => _entry.Status?.DeviceName ?? _entry.Device.Label;

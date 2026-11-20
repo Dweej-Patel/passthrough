@@ -63,6 +63,10 @@ public class HostSessionTests
             await WaitFor(() => Clients.Count == clientsAfter);
         }
 
+        /// <summary>Submits a code to <paramref name="device"/> as the flyout does: addressed by its id and current attachment.</summary>
+        public Task<bool> Submit(PhoneDevice device, string code) =>
+            Session.SubmitCodeAsync(device.Id, Entry(Session.State, device)!.Attachment, code);
+
         public ValueTask DisposeAsync() => Session.DisposeAsync();
     }
 
@@ -161,7 +165,7 @@ public class HostSessionTests
         s = await h.WaitState(s => Entry(s, iPhone) is not null);
         Assert.Equal([iPad, android, iPhone], s.Phones.Select(p => p.Device));
         Assert.True(Entry(s, android)!.IsActive);
-        Assert.Equal(new PhoneEntry(iPhone, PhoneState.NotPaired, false, null, 0, 0, 0, null, false), Entry(s, iPhone));
+        Assert.Equal(new PhoneEntry(iPhone, PhoneState.NotPaired, false, null, 0, 0, 0, null, false, Entry(s, iPhone)!.Attachment), Entry(s, iPhone));
         Assert.Equal(PhoneState.RemoteOnlyLater, Entry(s, iPad)!.State);
         Assert.Equal([android], h.Clients.Select(c => c.Device));
     }
@@ -184,7 +188,7 @@ public class HostSessionTests
         Assert.True(h.Client(0).Client.Events.Completion.IsCompleted);
         await androidPhone.WaitClosedAsync();
         var s = await h.WaitState(s => Entry(s, iPhone) is { IsActive: true, State: PhoneState.NotPaired });
-        Assert.Equal(new PhoneEntry(android, PhoneState.NotPaired, false, null, 0, 0, 0, null, false), Entry(s, android));
+        Assert.Equal(new PhoneEntry(android, PhoneState.NotPaired, false, null, 0, 0, 0, null, false, Entry(s, android)!.Attachment), Entry(s, android));
         Assert.Equal([android, iPhone], h.Clients.Select(c => c.Device));
     }
 
@@ -198,7 +202,7 @@ public class HostSessionTests
         h.Adb.Attach(android);
         await h.WaitState(s => Entry(s, android) is { State: PhoneState.NotPaired });
 
-        await h.Session.SubmitCodeAsync(phone.Code);
+        await h.Submit(android, phone.Code);
 
         var s = await h.WaitState(s => Entry(s, android) is { State: PhoneState.Paired, Status: not null });
         Assert.Equal(PhoneToken, h.Secrets.Get(AndroidSlot));
@@ -225,7 +229,7 @@ public class HostSessionTests
         h.Adb.Attach(android);
         await h.WaitState(s => Entry(s, android) is { State: PhoneState.NotPaired });
 
-        await h.Session.SubmitCodeAsync(phone.Code);
+        await h.Submit(android, phone.Code);
 
         var s = await h.WaitState(s => Entry(s, android)?.Message is not null);
         Assert.Equal(message, Entry(s, android)!.Message);
@@ -245,11 +249,11 @@ public class HostSessionTests
         await h.WaitState(s => Entry(s, iPhone) is { State: PhoneState.NotPaired });
         foreach (var code in new[] { "000000", "000001" })
         {
-            await h.Session.SubmitCodeAsync(code);
+            await h.Submit(iPhone, code);
             await h.WaitState(s => Entry(s, iPhone) is { State: PhoneState.NotPaired, Message: not null });
         }
 
-        await h.Session.SubmitCodeAsync("000002");
+        await h.Submit(iPhone, "000002");
 
         var s = await h.WaitState(s => Entry(s, iPhone)?.Message?.Contains("again") == true && h.Clients.Count == 2);
         Assert.Equal("That code didn't match again. Check the digits on the iPhone, then type them once more.", Entry(s, iPhone)!.Message);
@@ -257,7 +261,7 @@ public class HostSessionTests
         var states = h.History.Select(st => Entry(st, iPhone)?.State).ToList();
         Assert.DoesNotContain(PhoneState.Connecting, states.Skip(states.IndexOf(PhoneState.NotPaired))); // the box never went away
         // The right code now pairs on the fresh channel, without waiting for a reconnect.
-        await h.Session.SubmitCodeAsync(phone.Code);
+        await h.Submit(iPhone, phone.Code);
         await h.WaitState(s => Entry(s, iPhone) is { State: PhoneState.Paired, Status: not null });
     }
 
@@ -344,7 +348,7 @@ public class HostSessionTests
         var android = Android(phone);
         h.Adb.Attach(android);
         await h.WaitState(s => Entry(s, android) is { IsActive: true, State: PhoneState.Connecting });
-        await h.Session.SubmitCodeAsync(phone.Code);
+        await h.Submit(android, phone.Code);
         await h.WaitState(s => Entry(s, android) is { State: PhoneState.Pairing });
 
         h.Adb.Detach(android);
@@ -387,6 +391,92 @@ public class HostSessionTests
         h.Time.Advance(TimeSpan.FromSeconds(0.1));
         await WaitFor(() => h.Clients.Count == 2);
         Assert.Equal(PhoneToken, h.Client(1).Identity.Token);
+    }
+
+    [Fact]
+    public async Task Code_AddressedToAnotherPhone_IsNotSent()
+    {
+        await using var androidPhone = new FakePhone();
+        await using var iPhonePhone = new FakePhone();
+        await using var h = new Harness();
+        await h.Session.StartAsync();
+        var android = Android(androidPhone);
+        var iPhone = IPhone(iPhonePhone);
+        h.Adb.Attach(android);
+        h.Usb.Attach(iPhone);
+        var s = await h.WaitState(s => Entry(s, android) is { IsActive: true, State: PhoneState.NotPaired } && Entry(s, iPhone) is not null);
+        var typedFor = Entry(s, android)!; // the user types into the Android row...
+        await h.Session.MakeActiveAsync(iPhone.Id); // ...as the iPhone becomes active
+        s = await h.WaitState(s => Entry(s, iPhone) is { IsActive: true, State: PhoneState.NotPaired });
+
+        Assert.False(await h.Session.SubmitCodeAsync(typedFor.Device.Id, typedFor.Attachment, iPhonePhone.Code));
+        Assert.False(await h.Session.SubmitCodeAsync(iPhone.Id, typedFor.Attachment, iPhonePhone.Code)); // another attachment's number
+
+        await h.Session.MakeActiveAsync(android.Id); // nothing went to either phone
+        await h.WaitState(s => Entry(s, android) is { IsActive: true, State: PhoneState.NotPaired });
+        Assert.DoesNotContain(iPhonePhone.Received, m => m.T == ControlEnvelope.Pair);
+        Assert.DoesNotContain(androidPhone.Received, m => m.T == ControlEnvelope.Pair);
+    }
+
+    [Fact]
+    public async Task Code_ForAnEarlierAttachment_IsNotSent()
+    {
+        await using var phone = new FakePhone();
+        await using var h = new Harness();
+        await h.Session.StartAsync();
+        var android = Android(phone);
+        h.Adb.Attach(android);
+        var before = Entry(await h.WaitState(s => Entry(s, android) is { State: PhoneState.NotPaired }), android)!;
+        h.Adb.Detach(android);
+        await h.WaitState(s => s.Phones.Count == 0);
+        h.Adb.Attach(android);
+        var after = Entry(await h.WaitState(s => Entry(s, android) is { State: PhoneState.NotPaired }), android)!;
+        Assert.NotEqual(before.Attachment, after.Attachment);
+
+        Assert.False(await h.Session.SubmitCodeAsync(android.Id, before.Attachment, phone.Code));
+        Assert.Equal(PhoneState.NotPaired, Entry(h.Session.State, android)!.State);
+
+        Assert.True(await h.Session.SubmitCodeAsync(android.Id, after.Attachment, phone.Code));
+        await h.WaitState(s => Entry(s, android) is { State: PhoneState.Paired, Status: not null });
+    }
+
+    [Fact]
+    public async Task Code_WhileWaitingToReconnect_OpensAChannelAtOnceAndSendsIt()
+    {
+        await using var phone = new FakePhone { IssuedToken = PhoneToken };
+        var refusals = 1;
+        var android = new PhoneDevice("adb:R58M123", PhoneKind.Android, "Pixel 8", AndroidSlot, WatchTransport.Adb,
+            (port, ct) => Interlocked.Decrement(ref refusals) >= 0 ? Task.FromException<Stream>(new AdbException("closed")) : phone.Open(ct));
+        await using var h = new Harness();
+        await h.Session.StartAsync();
+        h.Adb.Attach(android);
+        await h.WaitState(s => Entry(s, android) is { State: PhoneState.Connecting, Message: not null });
+        await WaitFor(() => h.Time.DueIn().Contains(TimeSpan.FromSeconds(2)));
+
+        Assert.True(await h.Submit(android, phone.Code));
+
+        await h.WaitState(s => Entry(s, android) is { State: PhoneState.Paired, Status: not null });
+        Assert.Equal(2, h.Clients.Count); // no waiting out the back-off
+        Assert.Equal(PhoneToken, h.Secrets.Get(AndroidSlot));
+    }
+
+    [Fact]
+    public async Task Code_ForAPairedPhoneStillConnecting_IsNotSent()
+    {
+        var gate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        await using var phone = new FakePhone { Token = PhoneToken, WelcomeGate = gate.Task };
+        await using var h = new Harness();
+        h.Secrets.Set(AndroidSlot, PhoneToken);
+        await h.Session.StartAsync();
+        var android = Android(phone);
+        h.Adb.Attach(android);
+        await h.WaitState(s => Entry(s, android) is { State: PhoneState.Connecting, HasPairing: true });
+
+        Assert.False(await h.Submit(android, phone.Code));
+
+        gate.SetResult();
+        await h.WaitState(s => Entry(s, android) is { State: PhoneState.Paired, Status: not null });
+        Assert.DoesNotContain(phone.Received, m => m.T == ControlEnvelope.Pair);
     }
 
     [Fact]
@@ -547,7 +637,7 @@ public class HostSessionTests
         h.Adb.Attach(android);
         await h.WaitState(s => Entry(s, android) is { State: PhoneState.NotPaired });
 
-        await h.Session.SubmitCodeAsync(phone.Code);
+        await h.Submit(android, phone.Code);
 
         var s = await h.WaitState(s => Entry(s, android) is { State: PhoneState.Failed });
         Assert.Equal("Couldn't save the pairing on this PC. Try pairing again.", Entry(s, android)!.Message);
@@ -558,8 +648,8 @@ public class HostSessionTests
         h.Time.Advance(TimeSpan.FromSeconds(10));
         await Task.Delay(200);
         Assert.Single(h.Clients);
-        Assert.Equal(new PhoneEntry(android, PhoneState.Failed, true, null, 0, 0, 0, "Couldn't save the pairing on this PC. Try pairing again.", false),
-            Entry(h.Session.State, android));
+        Assert.Equal(new PhoneEntry(android, PhoneState.Failed, true, null, 0, 0, 0, "Couldn't save the pairing on this PC. Try pairing again.", false,
+            Entry(h.Session.State, android)!.Attachment), Entry(h.Session.State, android));
         Assert.DoesNotContain(h.History, st => Entry(st, android) is { State: PhoneState.Paired });
 
         // Made active again: one more try.
@@ -576,7 +666,7 @@ public class HostSessionTests
         var android = Android(phone);
         h.Adb.Attach(android);
         await h.WaitState(s => Entry(s, android) is { State: PhoneState.NotPaired });
-        await h.Session.SubmitCodeAsync(phone.Code);
+        await h.Submit(android, phone.Code);
         await h.WaitState(s => Entry(s, android) is { State: PhoneState.Failed });
         h.Time.Advance(TimeSpan.FromSeconds(10));
         await Task.Delay(200);
@@ -587,7 +677,7 @@ public class HostSessionTests
         // The hold is gone: a fresh channel, the failure message cleared, and the phone may pair again.
         var s = await h.WaitState(s => Entry(s, android) is { IsActive: true, State: PhoneState.NotPaired } && h.Clients.Count == 2);
         Assert.Null(Entry(s, android)!.Message);
-        await h.Session.SubmitCodeAsync(phone.Code);
+        await h.Submit(android, phone.Code);
         s = await h.WaitState(s => Entry(s, android) is { State: PhoneState.Paired, Status: not null });
         Assert.Equal(PhoneToken, h.Secrets.Get(AndroidSlot));
         Assert.True(Entry(s, android)!.HasPairing);
@@ -697,7 +787,7 @@ public class HostSessionTests
             Assert.NotEmpty(h.Errors);
 
             // Later calls still run and complete.
-            await h.Session.SubmitCodeAsync(androidPhone.Code).WaitAsync(TimeSpan.FromSeconds(10));
+            await h.Submit(android, androidPhone.Code).WaitAsync(TimeSpan.FromSeconds(10));
             await h.WaitState(s => Entry(s, android) is { State: PhoneState.Paired, Status: not null });
             await h.Session.SetAndroidEnabledAsync(true).WaitAsync(TimeSpan.FromSeconds(10));
         }
