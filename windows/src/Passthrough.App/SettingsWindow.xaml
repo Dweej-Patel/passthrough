@@ -2,7 +2,7 @@
     x:Class="Passthrough.App.SettingsWindow"
     xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-    xmlns:local="using:Passthrough.App"
+    xmlns:core="using:Passthrough.Core.Presentation"
     Title="Passthrough settings">
 
     <ScrollViewer>
@@ -20,18 +20,21 @@
 
             <StackPanel Spacing="8">
                 <TextBlock Text="Paired phones" Style="{StaticResource SubtitleTextBlockStyle}" />
-                <TextBlock Text="Attached phones that are paired with this PC appear here."
+                <TextBlock Text="Every phone this PC holds a pairing for, attached or not. Forget one you no longer use."
                            Opacity="0.7" TextWrapping="Wrap" />
-                <ItemsControl ItemsSource="{x:Bind ViewModel.Rows}">
+                <TextBlock x:Name="NoPairingsText" Text="No phone is paired with this PC." Opacity="0.7" Visibility="Collapsed" />
+                <ItemsControl ItemsSource="{x:Bind Paired}">
                     <ItemsControl.ItemTemplate>
-                        <DataTemplate x:DataType="local:PhoneRow">
-                            <Grid ColumnSpacing="12" Margin="0,0,0,8"
-                                  Visibility="{x:Bind ForgetVisibility, Mode=OneWay}">
+                        <DataTemplate x:DataType="core:PairedPhone">
+                            <Grid ColumnSpacing="12" Margin="0,0,0,8">
                                 <Grid.ColumnDefinitions>
                                     <ColumnDefinition Width="*" />
                                     <ColumnDefinition Width="Auto" />
                                 </Grid.ColumnDefinitions>
-                                <TextBlock Text="{x:Bind Title, Mode=OneWay}" VerticalAlignment="Center" />
+                                <StackPanel VerticalAlignment="Center">
+                                    <TextBlock Text="{x:Bind Title}" />
+                                    <TextBlock Text="{x:Bind Detail}" Opacity="0.7" />
+                                </StackPanel>
                                 <Button Grid.Column="1" Content="Forget pairing" Click="OnForgetClick" />
                             </Grid>
                         </DataTemplate>

@@ -1,47 +1,21 @@
+using Passthrough.Core.Logging;
+using Passthrough.Core.Storage;
+
 namespace Passthrough.App.Platform;
 
 /// <summary>
-/// Appends to <c>%LOCALAPPDATA%\Passthrough\passthrough.log</c>. A message identical to the one before it is
-/// counted, not repeated, and the count is written when something different arrives.
+/// <c>%LOCALAPPDATA%\Passthrough\passthrough.log</c>, written by Core's <see cref="LogBook"/> (formatting, repeat counting,
+/// redaction and the 1 MB roll-over are there, with tests). Safe from any thread; never throws.
 /// </summary>
 internal static class LogFile
 {
-    private static readonly object Gate = new();
-    private static string? _last;
-    private static int _repeats;
+    private static readonly LogBook Book = new(PhysicalFileSystem.Instance, System.IO.Path.Combine(AppFolder.Path, "passthrough.log"), TimeProvider.System);
 
-    public static string Path { get; } = System.IO.Path.Combine(AppFolder.Path, "passthrough.log");
+    public static string Path => Book.Path;
 
-    public static void Error(Exception e) => Write($"{e.GetType().Name}: {e.Message}");
+    public static void Write(string message) => Book.Info(message);
 
-    public static void Write(string message)
-    {
-        lock (Gate)
-        {
-            if (message == _last)
-            {
-                _repeats++;
-                return;
-            }
-            try
-            {
-                Directory.CreateDirectory(AppFolder.Path);
-                var text = "";
-                if (_repeats > 0) text += $"{Stamp()} (previous message repeated {_repeats} more times){Environment.NewLine}";
-                text += $"{Stamp()} {message}{Environment.NewLine}";
-                File.AppendAllText(Path, text);
-            }
-            catch (IOException)
-            {
-                // The log is best effort: a locked or full disk must not take the app down.
-            }
-            catch (UnauthorizedAccessException)
-            {
-            }
-            _last = message;
-            _repeats = 0;
-        }
-    }
+    public static void Error(Exception e) => Book.Error(e);
 
-    private static string Stamp() => DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss");
+    public static void Flush() => Book.Flush();
 }

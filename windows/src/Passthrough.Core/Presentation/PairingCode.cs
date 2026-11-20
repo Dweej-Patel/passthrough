@@ -6,6 +6,9 @@ public static class PairingCode
     /// <summary>Longest text the code box accepts: six digits with room for spaces or a dash, as pasted.</summary>
     public const int MaxTyped = 12;
 
+    /// <summary>Shown when Pair is pressed without six digits in the box.</summary>
+    public const string NotSixDigits = "Type the six digits the phone shows.";
+
     /// <summary>The code with spaces, dashes and other non-digits taken out, when six ASCII digits remain; otherwise null.</summary>
     public static string? Normalize(string? typed)
     {

@@ -1,32 +1,44 @@
 using System.Collections.ObjectModel;
 using Microsoft.UI.Dispatching;
 using Microsoft.UI.Xaml;
+using Passthrough.Core.Presentation;
 using Passthrough.Core.Session;
-using Passthrough.Core.Transport;
+using Passthrough.Core.Storage;
 
 namespace Passthrough.App;
 
 /// <summary>
 /// What the windows bind to. <see cref="HostSession.StateChanged"/> arrives on the session's own thread, so each
-/// state is handed to the UI thread and applied there; the handler never waits on the session.
+/// state is handed to the UI thread and applied there; the handler never waits on the session. The rules (rows,
+/// hints, stored pairings) are Core's <see cref="PhoneRowModel"/>, <see cref="RowList"/>, <see cref="WatcherHints"/>
+/// and <see cref="PairedPhone"/>.
 /// </summary>
 public sealed class SessionViewModel : ObservableBase
 {
     private readonly HostSession _session;
+    private readonly ISettingsStore _settings;
     private readonly DispatcherQueue _ui;
+    private readonly string? _notice;
     private string _hints = "";
+    private string _pairingsKey = "";
     private bool _androidEnabled;
 
-    public SessionViewModel(HostSession session, DispatcherQueue ui, bool androidEnabled)
+    /// <param name="notice">A line to show above the watcher hints for the whole run (the settings file was damaged), or null.</param>
+    public SessionViewModel(HostSession session, ISettingsStore settings, DispatcherQueue ui, bool androidEnabled, string? notice)
     {
         _session = session;
+        _settings = settings;
         _ui = ui;
         _androidEnabled = androidEnabled;
+        _notice = notice;
         _session.StateChanged += state => _ui.TryEnqueue(() => Apply(state));
         Apply(_session.State);
     }
 
     public ObservableCollection<PhoneRow> Rows { get; } = new();
+
+    /// <summary>Raised on the UI thread when an attached phone's pairing or saved name changed, so Settings can list the stored pairings again.</summary>
+    public event Action? PairingsChanged;
 
     public bool AndroidEnabled
     {
@@ -36,7 +48,7 @@ public sealed class SessionViewModel : ObservableBase
 
     public Visibility EmptyVisibility => Rows.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
 
-    /// <summary>What each watcher needs from the user (install Apple Devices, allow USB debugging), one per line.</summary>
+    /// <summary>What the user should do (install or open Apple Devices, allow USB debugging…), one per line.</summary>
     public string Hints
     {
         get => _hints;
@@ -52,7 +64,11 @@ public sealed class SessionViewModel : ObservableBase
     /// <summary>Sends a code to the phone of the row it was typed into; false when it was not sent (the phone changed meanwhile).</summary>
     public Task<bool> SubmitCodeAsync(PhoneRow row, string code) => _session.SubmitCodeAsync(row.Id, row.Attachment, code);
 
-    public Task ForgetAsync(string phoneId) => _session.ForgetAsync(phoneId);
+    /// <summary>Every pairing this PC holds, attached or not, named for Settings.</summary>
+    public async Task<IReadOnlyList<PairedPhone>> PairedPhonesAsync() =>
+        PairedPhone.List(await _session.PairedSlotsAsync(), slot => DeviceNames.Get(_settings, slot));
+
+    public Task ForgetSlotAsync(string slot) => _session.ForgetSlotAsync(slot);
 
     /// <summary>Changes the setting; <see cref="AndroidEnabled"/> follows only once the session has accepted it.</summary>
     public async Task SetAndroidEnabledAsync(bool on)
@@ -63,32 +79,17 @@ public sealed class SessionViewModel : ObservableBase
 
     private void Apply(SessionState state)
     {
-        var existing = Rows.ToDictionary(r => r.Id);
-        var next = new List<PhoneRow>();
-        foreach (var entry in state.Phones)
-        {
-            if (existing.TryGetValue(entry.Device.Id, out var row)) row.Update(entry);
-            else row = new PhoneRow(entry);
-            next.Add(row);
-        }
-
-        // Add, remove and reorder only when the set of phones changed, so rows being edited are left alone.
-        if (!next.SequenceEqual(Rows))
-        {
-            Rows.Clear();
-            foreach (var row in next) Rows.Add(row);
-        }
+        RowList.Reconcile(Rows, state.Phones, r => r.Id, e => new PhoneRow(e), (r, e) => r.Update(e));
         Raise(nameof(EmptyVisibility));
 
         var hints = new List<string>();
-        AddHint(hints, "Apple Devices", state.UsbMux);
-        AddHint(hints, "adb", state.Adb);
+        if (_notice is not null) hints.Add(_notice);
+        hints.AddRange(WatcherHints.For(state));
         Hints = string.Join(Environment.NewLine, hints);
-    }
 
-    private static void AddHint(List<string> hints, string name, WatchStatus status)
-    {
-        if (!string.IsNullOrEmpty(status.Hint)) hints.Add(status.Hint);
-        else if (status.State == WatchState.NotInstalled) hints.Add($"{name} was not found.");
+        var key = string.Join("\n", state.Phones.Select(p => $"{p.Device.PairingSlot}|{p.HasPairing}|{p.SavedName}"));
+        if (key == _pairingsKey) return;
+        _pairingsKey = key;
+        PairingsChanged?.Invoke();
     }
 }
