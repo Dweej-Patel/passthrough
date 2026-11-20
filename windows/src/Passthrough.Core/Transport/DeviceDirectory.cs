@@ -9,10 +9,11 @@ namespace Passthrough.Core.Transport;
 public sealed class DeviceDirectory
 {
     private readonly Lock _gate = new();
-    private readonly Channel<DeviceChange> _changes = Channel.CreateUnbounded<DeviceChange>(new UnboundedChannelOptions { SingleReader = true });
+    private readonly Channel<(DeviceChange? Change, TaskCompletionSource? Barrier)> _changes = Channel.CreateUnbounded<(DeviceChange?, TaskCompletionSource?)>(new UnboundedChannelOptions { SingleReader = true });
     private readonly List<PhoneDevice> _devices = [];
     private readonly Dictionary<string, WatchTransport> _source = [];
     private readonly IReadOnlyList<IDeviceWatcher> _watchers;
+    private static readonly AsyncLocal<bool> InHandler = new();
 
     public DeviceDirectory(IEnumerable<IDeviceWatcher> watchers)
     {
@@ -43,17 +44,33 @@ public sealed class DeviceDirectory
         foreach (var watcher in _watchers) watcher.Start();
     }
 
+    /// <summary>
+    /// Stops every watcher, then waits until every change queued so far has been delivered to <see cref="Changed"/>, so no
+    /// stale event arrives after it returns. Called from inside a <see cref="Changed"/> handler it does not wait for delivery
+    /// (the dispatcher is busy running that handler).
+    /// </summary>
     public async Task StopAsync()
     {
         foreach (var watcher in _watchers) await watcher.StopAsync();
+        if (InHandler.Value) return;
+        var barrier = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        _changes.Writer.TryWrite((null, barrier));
+        await barrier.Task;
     }
 
     private async Task DispatchAsync()
     {
-        await foreach (var change in _changes.Reader.ReadAllAsync())
+        await foreach (var (change, barrier) in _changes.Reader.ReadAllAsync())
         {
-            try { Changed?.Invoke(change); }
+            if (barrier is not null)
+            {
+                barrier.TrySetResult();
+                continue;
+            }
+            InHandler.Value = true;
+            try { Changed?.Invoke(change!); }
             catch (Exception) { } // one failing handler must not stop later changes reaching the others
+            finally { InHandler.Value = false; }
         }
     }
 
@@ -67,13 +84,13 @@ public sealed class DeviceDirectory
             {
                 _devices.Remove(gone);
                 _source.Remove(gone.Id);
-                _changes.Writer.TryWrite(new DeviceChange.Detached(gone));
+                _changes.Writer.TryWrite((new DeviceChange.Detached(gone), null));
             }
             foreach (var added in list.Where(d => !_devices.Contains(d)))
             {
                 _devices.Add(added);
                 _source[added.Id] = transport;
-                _changes.Writer.TryWrite(new DeviceChange.Attached(added));
+                _changes.Writer.TryWrite((new DeviceChange.Attached(added), null));
             }
         }
     }

@@ -103,6 +103,28 @@ public class DeviceDirectoryTests
     }
 
     [Fact]
+    public async Task DeviceDirectory_StopAsync_DeliversQueuedChangesBeforeReturning()
+    {
+        var usb = new FakeWatcher(WatchTransport.UsbMux);
+        var directory = new DeviceDirectory([usb]);
+        var seen = new System.Collections.Concurrent.ConcurrentQueue<string>();
+        directory.Changed += c =>
+        {
+            Thread.Sleep(50); // a slow subscriber: the queue is still draining when StopAsync is called
+            seen.Enqueue(c.GetType().Name);
+        };
+        usb.Report(Phone("A"));
+        usb.Report(Phone("A"), Phone("B"));
+
+        await directory.StopAsync();
+        var atReturn = seen.ToArray();
+        await Task.Delay(200);
+
+        Assert.Equal(["Attached", "Attached", "Detached", "Detached"], atReturn);
+        Assert.Equal(atReturn, seen.ToArray());
+    }
+
+    [Fact]
     public async Task DeviceDirectory_HandlerMayBlockOnStopAsync()
     {
         var usb = new FakeWatcher(WatchTransport.UsbMux);
