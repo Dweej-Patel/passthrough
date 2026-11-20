@@ -78,12 +78,21 @@ these steps as written and check each one before building.
 ### Added
 
 * **A Windows tray app (first stage).** `windows/` holds a C# port of the host
-  side: a tray flyout that lists the iPhone or Android phone on the cable, pairs
-  with the six-digit code and shows the phone's live status. It does not carry
-  internet yet, and has no shell, screen, wireless link, VPN layer or
-  keep-awake. The phones and the wire protocol are unchanged. iPhone needs
-  Apple Devices from the Microsoft Store; Android needs platform-tools. Nothing
-  to do for existing Mac or phone builds. See [windows/README.md](windows/README.md).
+  side: a tray flyout that lists the iPhone, iPad or Android phone on the
+  cable, pairs with the six-digit code and shows the phone's live status. Each
+  phone gets its own pairing, named after the phone; Settings lists them all,
+  attached or not, and can forget any of them. When a phone can't be reached
+  the row says why (for example that Passthrough isn't running on it) and the
+  PC retries with the Mac's back-off. Failures go to a log in
+  `%LOCALAPPDATA%\Passthrough`, and the app says so and exits if it can't
+  start. It does not carry internet yet, and has no shell, screen, wireless
+  link, VPN layer or keep-awake. The phones and the wire protocol are
+  unchanged. iPhone needs Apple Devices from the Microsoft Store; Android needs
+  platform-tools; the PC needs the .NET 10 Desktop Runtime. On Windows the
+  iPhone link goes over loopback TCP, which the
+  [guide](docs/GUIDE.md#windows) explains. The app has not been run on a real
+  PC yet. Nothing to do for existing Mac or phone builds. See
+  [windows/README.md](windows/README.md).
 
 * **One Mac can see and control another's screen.** On the iPhone, open a
   Mac and tap *Share screen with a Mac*, pick your other Mac and confirm with
