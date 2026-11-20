@@ -34,6 +34,35 @@ public class PlistTests
     }
 
     [Fact]
+    public void Plist_EncodesExactlyThisXml()
+    {
+        // Pinned bytes: a change in what the encoder emits (declaration, escaping, element names, order) shows here.
+        var dict = new Dictionary<string, object>
+        {
+            ["MessageType"] = "Connect",
+            ["DeviceID"] = 3L,
+            ["PortNumber"] = 0xD31EL,
+            ["s"] = "a<b>&",
+            ["t"] = true,
+            ["f"] = false,
+            ["d"] = new byte[] { 0, 1, 255 },
+            ["a"] = new List<object> { "x", 2L },
+        };
+
+        Assert.Equal(
+            "<?xml version=\"1.0\" encoding=\"utf-8\"?><plist version=\"1.0\"><dict>" +
+            "<key>MessageType</key><string>Connect</string>" +
+            "<key>DeviceID</key><integer>3</integer>" +
+            "<key>PortNumber</key><integer>54046</integer>" +
+            "<key>s</key><string>a&lt;b&gt;&amp;</string>" +
+            "<key>t</key><true /><key>f</key><false />" +
+            "<key>d</key><data>AAH/</data>" +
+            "<key>a</key><array><string>x</string><integer>2</integer></array>" +
+            "</dict></plist>",
+            Encoding.UTF8.GetString(Plist.Encode(dict)));
+    }
+
+    [Fact]
     public void Plist_DecodesUsbmuxdAttachedSample()
     {
         const string xml = """

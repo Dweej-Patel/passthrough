@@ -10,14 +10,11 @@ public class WatcherTests
 {
     private static readonly TimeSpan Wait = TimeSpan.FromSeconds(10);
 
-    private static int UnusedPort()
-    {
-        var l = new TcpListener(IPAddress.Loopback, 0);
-        l.Start();
-        var port = ((IPEndPoint)l.LocalEndpoint).Port;
-        l.Stop();
-        return port;
-    }
+    /// <summary>
+    /// Nothing listening: every connect is refused at once, as a closed loopback port refuses it. A stub rather than a
+    /// port chosen and released, which another test could take before the connect.
+    /// </summary>
+    private static readonly StreamConnector Refused = _ => throw new SocketException((int)SocketError.ConnectionRefused);
 
     private static Task<T> NextAsync<T>(Action<Action<T>> subscribe, Func<T, bool> match)
     {
@@ -42,7 +39,7 @@ public class WatcherTests
             await FakeUsbMuxd.WriteResultAsync(s, tag, 0);
             await FakeUsbMuxd.WritePacketAsync(s, 0, Attached(3, "UDID-A", 0x12A8));
             await FakeUsbMuxd.WritePacketAsync(s, 0, Attached(4, "UDID-B", 0x12AB));
-            await Task.Delay(Timeout.InfiniteTimeSpan);
+            await FakeUsbMuxd.HoldOpenAsync(s);
         });
         var watcher = new UsbMuxWatcher(new UsbMuxClient(fake.Connector), TimeProvider.System);
         var two = NextAsync<IReadOnlyList<PhoneDevice>>(h => watcher.DevicesChanged += l => h(l), l => l.Count == 2);
@@ -72,7 +69,7 @@ public class WatcherTests
             await FakeUsbMuxd.WritePacketAsync(s, 0, Attached(3, "UDID-A", 0x12A8));
             await detach.Task;
             await FakeUsbMuxd.WritePacketAsync(s, 0, new Dictionary<string, object> { ["MessageType"] = "Detached", ["DeviceID"] = 3L });
-            await Task.Delay(Timeout.InfiniteTimeSpan);
+            await FakeUsbMuxd.HoldOpenAsync(s);
         });
         var watcher = new UsbMuxWatcher(new UsbMuxClient(fake.Connector), TimeProvider.System);
         var one = NextAsync<IReadOnlyList<PhoneDevice>>(h => watcher.DevicesChanged += l => h(l), l => l.Count == 1);
@@ -88,7 +85,7 @@ public class WatcherTests
     [Fact]
     public async Task UsbMuxWatcher_NothingListening_ReportsNotInstalled()
     {
-        var connector = ByteStreamConnector.Tcp("127.0.0.1", UnusedPort());
+        var connector = Refused;
         var watcher = new UsbMuxWatcher(new UsbMuxClient(connector), new FakeTimeProvider());
         var status = NextAsync<WatchStatus>(h => watcher.StatusChanged += h, s => s.State == WatchState.NotInstalled);
         watcher.Start();
@@ -112,11 +109,12 @@ public class WatcherTests
         var watcher = new UsbMuxWatcher(new UsbMuxClient(connector), time);
         watcher.Start();
 
-        await Poll(() => Volatile.Read(ref attempts) == 1);
-        time.Advance(TimeSpan.FromSeconds(4));
-        await Task.Delay(100);
-        Assert.Equal(1, Volatile.Read(ref attempts));
-        await Poll(() => { time.Advance(TimeSpan.FromSeconds(1)); return Volatile.Read(ref attempts) >= 2; });
+        await Poll(() => Volatile.Read(ref attempts) == 1 && time.DueIn().Count == 1);
+        Assert.Equal([TimeSpan.FromSeconds(5)], time.DueIn()); // the retry waits on the injected clock, exactly 5 s
+        time.Advance(TimeSpan.FromSeconds(5) - TimeSpan.FromMilliseconds(1));
+        Assert.Equal(1, Volatile.Read(ref attempts)); // nothing is due yet, so nothing can have run
+        time.Advance(TimeSpan.FromMilliseconds(1));
+        await Poll(() => Volatile.Read(ref attempts) == 2); // the clock is not moved again: the 5 s deadline alone brings the attempt
         await watcher.StopAsync();
     }
 
@@ -167,7 +165,7 @@ public class WatcherTests
     [Fact]
     public async Task AdbWatcher_NoAdbAndNothingAnswering_ReportsNotInstalled()
     {
-        var connector = ByteStreamConnector.Tcp("127.0.0.1", UnusedPort());
+        var connector = Refused;
         var runner = new FakeRunner();
         var watcher = new AdbWatcher(new AdbClient(connector), Locator(null), runner, new FakeTimeProvider());
         var status = NextAsync<WatchStatus>(h => watcher.StatusChanged += h, s => s.State == WatchState.NotInstalled);
@@ -183,7 +181,7 @@ public class WatcherTests
     [Fact]
     public async Task AdbWatcher_AdbInstalledButServerDown_StartsServer()
     {
-        var connector = ByteStreamConnector.Tcp("127.0.0.1", UnusedPort());
+        var connector = Refused;
         var runner = new FakeRunner();
         var watcher = new AdbWatcher(new AdbClient(connector), Locator("C:\\sdk\\platform-tools\\adb.exe"), runner, new FakeTimeProvider());
         var status = NextAsync<WatchStatus>(h => watcher.StatusChanged += h, s => s.State == WatchState.Unavailable);
@@ -226,7 +224,7 @@ public class WatcherTests
             var (_, _, _, tag, _) = await FakeUsbMuxd.ReadPacketAsync(s);
             await FakeUsbMuxd.WriteResultAsync(s, tag, 0);
             await FakeUsbMuxd.WritePacketAsync(s, 0, Attached(3, "UDID-A", 0x12A8));
-            await Task.Delay(Timeout.InfiniteTimeSpan);
+            await FakeUsbMuxd.HoldOpenAsync(s);
         });
         var watcher = new UsbMuxWatcher(new UsbMuxClient(fake.Connector), TimeProvider.System);
         var lists = new System.Collections.Concurrent.ConcurrentQueue<int>();
@@ -256,7 +254,7 @@ public class WatcherTests
         {
             var (_, _, _, tag, _) = await FakeUsbMuxd.ReadPacketAsync(s);
             await FakeUsbMuxd.WriteResultAsync(s, tag, 0);
-            await Task.Delay(Timeout.InfiniteTimeSpan);
+            await FakeUsbMuxd.HoldOpenAsync(s);
         });
         var watcher = new UsbMuxWatcher(new UsbMuxClient(fake.Connector), TimeProvider.System);
         watcher.Start();

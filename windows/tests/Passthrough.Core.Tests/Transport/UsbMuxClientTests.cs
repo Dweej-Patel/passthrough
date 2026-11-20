@@ -27,7 +27,7 @@ public class UsbMuxClientTests
                 ["MessageType"] = "Detached",
                 ["DeviceID"] = 3L,
             });
-            await Task.Delay(System.Threading.Timeout.InfiniteTimeSpan, Deadline());
+            await FakeUsbMuxd.HoldOpenAsync(s);
         });
         var client = new UsbMuxClient(fake.Connector);
         var ct = Deadline();
@@ -43,16 +43,26 @@ public class UsbMuxClientTests
         Assert.Equal(new UsbMuxEvent.Detached(3), events[1]);
     }
 
+    /// <summary>The exact Listen request body: pinned bytes, not decoded with the codec that wrote them.</summary>
+    private const string ListenBody =
+        "<?xml version=\"1.0\" encoding=\"utf-8\"?>" +
+        "<plist version=\"1.0\"><dict>" +
+        "<key>MessageType</key><string>Listen</string>" +
+        "<key>ClientVersionString</key><string>Passthrough</string>" +
+        "<key>ProgName</key><string>Passthrough</string>" +
+        "<key>kLibUSBMuxVersion</key><integer>3</integer>" +
+        "</dict></plist>";
+
     [Fact]
-    public async Task Listen_SendsVersion1PlistHeader()
+    public async Task Listen_SendsExactlyThisPacket()
     {
-        var seen = new TaskCompletionSource<(uint, uint, uint, uint, Dictionary<string, object>)>();
+        var seen = new TaskCompletionSource<(uint, uint, uint, uint, byte[])>();
         await using var fake = new FakeUsbMuxd(async s =>
         {
-            var p = await FakeUsbMuxd.ReadPacketAsync(s);
+            var p = await FakeUsbMuxd.ReadRawPacketAsync(s);
             seen.TrySetResult(p);
             await FakeUsbMuxd.WriteResultAsync(s, p.Tag, 0);
-            await Task.Delay(System.Threading.Timeout.InfiniteTimeSpan, Deadline());
+            await FakeUsbMuxd.HoldOpenAsync(s);
         });
         var client = new UsbMuxClient(fake.Connector);
         using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
@@ -62,17 +72,15 @@ public class UsbMuxClientTests
             catch (OperationCanceledException) { }
         });
 
-        var (length, version, type, tag, plist) = await seen.Task.WaitAsync(TimeSpan.FromSeconds(10));
+        var (length, version, type, tag, body) = await seen.Task.WaitAsync(TimeSpan.FromSeconds(10));
         cts.Cancel();
         await pump;
 
         Assert.Equal(1u, version);
         Assert.Equal(8u, type);
         Assert.Equal(1u, tag);
-        Assert.Equal((uint)(16 + Plist.Encode(plist).Length), length);
-        Assert.Equal("Listen", plist["MessageType"]);
-        Assert.Equal("Passthrough", plist["ClientVersionString"]);
-        Assert.Equal("Passthrough", plist["ProgName"]);
+        Assert.Equal(ListenBody, Encoding.UTF8.GetString(body));
+        Assert.Equal((uint)(16 + Encoding.UTF8.GetByteCount(ListenBody)), length);
     }
 
     [Fact]
@@ -88,7 +96,7 @@ public class UsbMuxClientTests
             await s.ReadExactlyAsync(buf);
             await s.WriteAsync(buf);
             await s.FlushAsync();
-            await Task.Delay(System.Threading.Timeout.InfiniteTimeSpan, Deadline());
+            await FakeUsbMuxd.HoldOpenAsync(s);
         });
         var client = new UsbMuxClient(fake.Connector);
 
@@ -137,7 +145,7 @@ public class UsbMuxClientTests
                 });
             await FakeUsbMuxd.WritePacketAsync(s, 0, new Dictionary<string, object> { ["MessageType"] = "Detached", ["DeviceID"] = 5L });
             await FakeUsbMuxd.WritePacketAsync(s, 0, new Dictionary<string, object> { ["MessageType"] = "Detached", ["DeviceID"] = 6L });
-            await Task.Delay(System.Threading.Timeout.InfiniteTimeSpan, Deadline());
+            await FakeUsbMuxd.HoldOpenAsync(s);
         });
         var client = new UsbMuxClient(fake.Connector);
 
@@ -158,7 +166,7 @@ public class UsbMuxClientTests
         await using var fake = new FakeUsbMuxd(async s =>
         {
             await FakeUsbMuxd.ReadPacketAsync(s);
-            await Task.Delay(System.Threading.Timeout.InfiniteTimeSpan, Deadline());
+            await FakeUsbMuxd.HoldOpenAsync(s);
         });
         var client = new UsbMuxClient(fake.Connector, TimeSpan.FromMilliseconds(200));
 
