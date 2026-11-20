@@ -77,6 +77,14 @@ these steps as written and check each one before building.
 
 ### Added
 
+* **A Windows tray app (first stage).** `windows/` holds a C# port of the host
+  side: a tray flyout that lists the iPhone or Android phone on the cable, pairs
+  with the six-digit code and shows the phone's live status. It does not carry
+  internet yet, and has no shell, screen, wireless link, VPN layer or
+  keep-awake. The phones and the wire protocol are unchanged. iPhone needs
+  Apple Devices from the Microsoft Store; Android needs platform-tools. Nothing
+  to do for existing Mac or phone builds. See [windows/README.md](windows/README.md).
+
 * **One Mac can see and control another's screen.** On the iPhone, open a
   Mac and tap *Share screen with a Mac*, pick your other Mac and confirm with
   Face ID. That Mac gets a screen-only pass and opens the screen from

@@ -1,0 +1,40 @@
+<Window
+    x:Class="Passthrough.App.SettingsWindow"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:local="using:Passthrough.App"
+    Title="Passthrough settings">
+
+    <ScrollViewer>
+        <StackPanel Padding="24" Spacing="20" MaxWidth="520" HorizontalAlignment="Left">
+            <StackPanel Spacing="8">
+                <TextBlock Text="General" Style="{StaticResource SubtitleTextBlockStyle}" />
+                <ToggleSwitch x:Name="StartAtLoginSwitch" Header="Start at login" />
+                <ToggleSwitch x:Name="AndroidSwitch" Header="Android support"
+                              OnContent="On: Android phones are listed once adb finds them"
+                              OffContent="Off: Android phones are ignored" />
+            </StackPanel>
+
+            <StackPanel Spacing="8">
+                <TextBlock Text="Paired phones" Style="{StaticResource SubtitleTextBlockStyle}" />
+                <TextBlock Text="Attached phones that are paired with this PC appear here."
+                           Opacity="0.7" TextWrapping="Wrap" />
+                <ItemsControl ItemsSource="{x:Bind ViewModel.Rows}">
+                    <ItemsControl.ItemTemplate>
+                        <DataTemplate x:DataType="local:PhoneRow">
+                            <Grid ColumnSpacing="12" Margin="0,0,0,8"
+                                  Visibility="{x:Bind ForgetVisibility, Mode=OneWay}">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="Auto" />
+                                </Grid.ColumnDefinitions>
+                                <TextBlock Text="{x:Bind Title, Mode=OneWay}" VerticalAlignment="Center" />
+                                <Button Grid.Column="1" Content="Forget pairing" Click="OnForgetClick" />
+                            </Grid>
+                        </DataTemplate>
+                    </ItemsControl.ItemTemplate>
+                </ItemsControl>
+            </StackPanel>
+        </StackPanel>
+    </ScrollViewer>
+</Window>

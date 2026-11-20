@@ -73,6 +73,18 @@ Because the phone opens every connection with its own stack, the carrier sees th
 * **Radio label.** Android files the network type (5G, LTE) under its phone permission, which it describes as making and managing calls. It is therefore opt-in from Settings; without it the label reads "Cellular".
 * **A wake lock** keeps the CPU serving while the proxy runs. It is renewed every minute and released on stop.
 
+## Windows
+
+The Windows host is being built in stages (see [the design](superpowers/specs/2026-11-19-windows-host-design.md) for the list). The first stage is in `windows/`: a tray app that finds a phone on the cable, pairs with it and shows its live status.
+
+* **Works now:** the tray flyout lists the iPhone, iPad or Android phone on the cable. Type the six-digit code the phone shows to pair. A paired phone's status (name, carrier, radio, battery, connection counts) stays live while the cable is in, and the PC reconnects by itself. With more than one phone attached, one is active and the others can be made active from the flyout. Settings can forget a phone's pairing, turn Android support off and start the app at login. An iPad is recognised but cannot pair yet.
+* **Not yet:** internet through the phone, remote shell, screen, the wireless link, the VPN layer and keep-awake. The phones are unchanged; they treat the PC as another host.
+* **Setup, iPhone:** install **Apple Devices** from the Microsoft Store. It provides the USB service the PC talks to. If it is missing, the flyout says so.
+* **Setup, Android:** install Android's **platform-tools** (adb) and turn on USB debugging on the phone. The PC looks in `ANDROID_HOME`, `ANDROID_SDK_ROOT`, `%LOCALAPPDATA%\Android\Sdk\platform-tools` and `PATH`, and starts the adb server itself when nothing answers.
+* **Where things are kept:** pairing tokens, encrypted for your Windows account only, and settings are under `%LOCALAPPDATA%\Passthrough`, with a log in `passthrough.log` there.
+
+Build and test steps, and what still needs checking on a real PC, are in [windows/README.md](../windows/README.md).
+
 ## Flow map
 
 All the apps show a live map of the route traffic takes: Mac ⟶ USB or wireless ⟶ phone ⟶ radio ⟶ (VPN) ⟶ Internet. Particles ride the wires at a speed and density that follow the current throughput (teal toward the Mac, violet away from it), the VPN node slides in with a lock over the encrypted hop when the layer is on, the Mac gets a pulsing halo while keep-awake holds it up, and the Mac–phone hop shows the live rates and names what carries it. It is one `Canvas` driven by a `TimelineView` at up to 30 fps (15 fps when idle, fully paused when nothing is connected), with stateless particle math and no per-particle views, so it costs next to nothing (`PassthroughUI/FlowMap.swift`).

@@ -1,0 +1,67 @@
+<Window
+    x:Class="Passthrough.App.FlyoutWindow"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:local="using:Passthrough.App">
+
+    <Grid Padding="16" RowSpacing="12">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="*" />
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
+        </Grid.RowDefinitions>
+
+        <TextBlock Grid.Row="0" Text="Passthrough" Style="{StaticResource SubtitleTextBlockStyle}" />
+
+        <ScrollViewer Grid.Row="1">
+            <StackPanel Spacing="12">
+                <TextBlock Text="No phone attached. Plug one in with its cable."
+                           Visibility="{x:Bind ViewModel.EmptyVisibility, Mode=OneWay}"
+                           TextWrapping="Wrap" Opacity="0.7" />
+                <ItemsControl ItemsSource="{x:Bind ViewModel.Rows}">
+                    <ItemsControl.ItemTemplate>
+                        <DataTemplate x:DataType="local:PhoneRow">
+                            <StackPanel Spacing="4" Margin="0,0,0,12">
+                                <Grid ColumnSpacing="8">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="Auto" />
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="Auto" />
+                                    </Grid.ColumnDefinitions>
+                                    <TextBlock Grid.Column="0" Text="{x:Bind Marker, Mode=OneWay}" />
+                                    <TextBlock Grid.Column="1" Text="{x:Bind Title, Mode=OneWay}" FontWeight="SemiBold" />
+                                    <TextBlock Grid.Column="2" Text="{x:Bind StateText, Mode=OneWay}" Opacity="0.7" />
+                                </Grid>
+                                <TextBlock Margin="22,0,0,0" Text="{x:Bind StatusLine, Mode=OneWay}"
+                                           Visibility="{x:Bind StatusVisibility, Mode=OneWay}" />
+                                <TextBlock Margin="22,0,0,0" Text="{x:Bind ActivityLine, Mode=OneWay}"
+                                           Visibility="{x:Bind ActivityVisibility, Mode=OneWay}" Opacity="0.7" />
+                                <TextBlock Margin="22,0,0,0" Text="{x:Bind Message, Mode=OneWay}"
+                                           Visibility="{x:Bind MessageVisibility, Mode=OneWay}" TextWrapping="Wrap" />
+                                <StackPanel Margin="22,0,0,0" Orientation="Horizontal" Spacing="8"
+                                            Visibility="{x:Bind PairVisibility, Mode=OneWay}">
+                                    <TextBox Width="120" MaxLength="6" PlaceholderText="Six-digit code"
+                                             Text="{x:Bind Code, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                                             InputScope="Number" />
+                                    <Button Content="Pair" IsEnabled="{x:Bind CanPair, Mode=OneWay}" Click="OnPairClick" />
+                                </StackPanel>
+                                <Button Margin="22,0,0,0" Content="Use this phone"
+                                        Visibility="{x:Bind UseVisibility, Mode=OneWay}" Click="OnUseClick" />
+                            </StackPanel>
+                        </DataTemplate>
+                    </ItemsControl.ItemTemplate>
+                </ItemsControl>
+            </StackPanel>
+        </ScrollViewer>
+
+        <TextBlock Grid.Row="2" Text="{x:Bind ViewModel.Hints, Mode=OneWay}"
+                   Visibility="{x:Bind ViewModel.HintsVisibility, Mode=OneWay}"
+                   TextWrapping="Wrap" Opacity="0.7" />
+
+        <Grid Grid.Row="3">
+            <HyperlinkButton Content="Settings…" HorizontalAlignment="Left" Click="OnSettingsClick" />
+            <HyperlinkButton Content="Quit" HorizontalAlignment="Right" Click="OnQuitClick" />
+        </Grid>
+    </Grid>
+</Window>
