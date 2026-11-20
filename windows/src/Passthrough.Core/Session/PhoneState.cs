@@ -3,10 +3,13 @@ namespace Passthrough.Core.Session;
 /// <summary>How an attached phone stands with this PC.</summary>
 public enum PhoneState
 {
-    /// <summary>No pairing; for the active phone, the channel is open and waits for the code shown on the phone.</summary>
+    /// <summary>
+    /// No pairing; for the active phone, it waits for the code shown on the phone (its channel open, or being reopened
+    /// at once after the phone closed an idle one or locked a code, so the code box stays up).
+    /// </summary>
     NotPaired,
 
-    /// <summary>The active phone's channel is opening, or about to be opened again.</summary>
+    /// <summary>The active phone's channel is opening, or about to be opened again (the entry's message says why it dropped).</summary>
     Connecting,
 
     /// <summary>Paired: for the active phone, proved on the open channel; for another phone, a token is stored for it.</summary>
