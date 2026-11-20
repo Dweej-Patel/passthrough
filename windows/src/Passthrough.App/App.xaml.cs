@@ -5,6 +5,7 @@ using Passthrough.App.Storage;
 using Passthrough.Core.Control;
 using Passthrough.Core.Protocol;
 using Passthrough.Core.Session;
+using Passthrough.Core.Storage;
 using Passthrough.Core.Transport;
 
 namespace Passthrough.App;
@@ -36,7 +37,7 @@ public partial class App : Application
 
         try
         {
-            var settings = new JsonSettingsStore(Path.Combine(AppFolder.Path, "settings.json"));
+            var settings = new JsonSettingsStore(PhysicalFileSystem.Instance, Path.Combine(AppFolder.Path, "settings.json"));
             var secrets = new DpapiSecretStore(Path.Combine(AppFolder.Path, "secrets"));
             var runner = new ProcessRunner();
             var locator = new AdbLocator(Environment.GetEnvironmentVariable, File.Exists, ";", "adb.exe", '\\');
