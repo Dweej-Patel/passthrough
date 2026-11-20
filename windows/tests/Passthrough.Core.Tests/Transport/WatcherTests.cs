@@ -93,7 +93,7 @@ public class WatcherTests
         var seen = await status;
         await watcher.StopAsync();
 
-        Assert.Equal("Install Apple Devices from the Microsoft Store to use an iPhone.", seen.Hint);
+        Assert.Equal(UsbMuxWatcher.NotInstalledHint, seen.Hint);
     }
 
     [Fact]

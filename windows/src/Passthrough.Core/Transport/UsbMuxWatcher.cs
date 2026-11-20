@@ -10,7 +10,7 @@ namespace Passthrough.Core.Transport;
 /// </summary>
 public sealed class UsbMuxWatcher(UsbMuxClient client, TimeProvider time) : WatcherBase(WatchTransport.UsbMux, time)
 {
-    public const string NotInstalledHint = "Install Apple Devices from the Microsoft Store to use an iPhone.";
+    public const string NotInstalledHint = "To use an iPhone, install Apple Devices from the Microsoft Store, or open it if it is installed.";
 
     private static readonly TimeSpan RetryDelay = TimeSpan.FromSeconds(5);
 
