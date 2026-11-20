@@ -1,3 +1,4 @@
+using System.ComponentModel;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Passthrough.App.Platform;
@@ -17,9 +18,29 @@ public sealed partial class SettingsWindow : Window
         StartAtLoginSwitch.IsOn = StartupRegistration.IsEnabled();
         AndroidSwitch.Toggled += OnAndroidToggled;
         StartAtLoginSwitch.Toggled += OnStartAtLoginToggled;
+
+        // The setting can change while the window is open; follow it until the window closes.
+        viewModel.PropertyChanged += OnViewModelChanged;
+        Closed += (_, _) => viewModel.PropertyChanged -= OnViewModelChanged;
     }
 
     public SessionViewModel ViewModel { get; }
+
+    /// <summary>Raised on the UI thread (the view model is only changed there).</summary>
+    private void OnViewModelChanged(object? sender, PropertyChangedEventArgs e)
+    {
+        if (e.PropertyName is not (nameof(SessionViewModel.AndroidEnabled) or "" or null)) return;
+        ShowAndroidEnabled();
+    }
+
+    /// <summary>Shows the setting as it really is, without running the toggle handler.</summary>
+    private void ShowAndroidEnabled()
+    {
+        if (AndroidSwitch.IsOn == ViewModel.AndroidEnabled) return;
+        AndroidSwitch.Toggled -= OnAndroidToggled;
+        AndroidSwitch.IsOn = ViewModel.AndroidEnabled;
+        AndroidSwitch.Toggled += OnAndroidToggled;
+    }
 
     private async void OnAndroidToggled(object sender, RoutedEventArgs e)
     {
@@ -32,10 +53,7 @@ public sealed partial class SettingsWindow : Window
         catch (Exception ex)
         {
             LogFile.Error(ex);
-            // Show the setting as it really is, without running this handler again.
-            AndroidSwitch.Toggled -= OnAndroidToggled;
-            AndroidSwitch.IsOn = ViewModel.AndroidEnabled;
-            AndroidSwitch.Toggled += OnAndroidToggled;
+            ShowAndroidEnabled();
             ShowError("Could not change Android support. See the log for details.");
         }
     }
