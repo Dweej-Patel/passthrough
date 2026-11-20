@@ -769,6 +769,49 @@ public class HostSessionTests
     }
 
     [Fact]
+    public async Task Snapshots_DoNotReadTheSlots_EachTime()
+    {
+        await using var androidPhone = new FakePhone { Token = PhoneToken };
+        await using var iPhonePhone = new FakePhone();
+        var secrets = new FailingSecretStore(failGetSlot: "token.iphone.00008110-AAAA");
+        await using var h = new Harness(secrets: secrets);
+        h.Secrets.Set(AndroidSlot, PhoneToken);
+        await h.Session.StartAsync();
+        var android = Android(androidPhone);
+        var iPhone = IPhone(iPhonePhone);
+        h.Adb.Attach(android);
+        h.Usb.Attach(iPhone);
+        await h.WaitState(s => Entry(s, android) is { State: PhoneState.Paired, Status: not null, HasPairing: true } && Entry(s, iPhone) is { HasPairing: false });
+        var gets = secrets.Gets;
+        var errors = h.Errors.Count;
+
+        for (var i = 0; i < 10; i++) h.Usb.SetStatus(new WatchStatus(i % 2 == 0 ? WatchState.Watching : WatchState.Starting));
+        await h.WaitState(s => s.UsbMux.State == WatchState.Starting);
+
+        Assert.Equal(gets, secrets.Gets); // one read per slot, not one per snapshot
+        Assert.Equal(errors, h.Errors.Count); // and an unreadable slot is reported once, not on every snapshot
+        Assert.Equal(1, errors);
+    }
+
+    [Fact]
+    public async Task Pairing_ThenForget_HasPairingFollows()
+    {
+        await using var phone = new FakePhone { IssuedToken = PhoneToken };
+        var secrets = new FailingSecretStore();
+        await using var h = new Harness(secrets: secrets);
+        await h.Session.StartAsync();
+        var android = Android(phone);
+        h.Adb.Attach(android);
+        await h.WaitState(s => Entry(s, android) is { State: PhoneState.NotPaired, HasPairing: false });
+
+        await h.Submit(android, phone.Code);
+        await h.WaitState(s => Entry(s, android) is { State: PhoneState.Paired, HasPairing: true });
+
+        await h.Session.ForgetAsync(android.Id);
+        await h.WaitState(s => Entry(s, android) is { State: PhoneState.NotPaired, HasPairing: false });
+    }
+
+    [Fact]
     public async Task SlotReadFailure_CountsAsNotPaired_LoopSurvives()
     {
         await using var androidPhone = new FakePhone { IssuedToken = PhoneToken };

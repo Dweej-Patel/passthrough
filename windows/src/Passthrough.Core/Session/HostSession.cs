@@ -46,6 +46,11 @@ public sealed class HostSession : IAsyncDisposable
     /// <summary>Each attached phone's attachment number (see <see cref="PhoneEntry.Attachment"/>).</summary>
     private readonly Dictionary<string, long> _attachments = [];
     private long _attachSeq;
+    /// <summary>
+    /// Whether each slot holds a well-formed token, as last read: a snapshot reads none, so the store (a file read and
+    /// a DPAPI call on Windows) is touched on attach, on open and when the session itself writes or deletes the slot.
+    /// </summary>
+    private readonly Dictionary<string, bool> _hasToken = [];
     private readonly List<Task> _readers = [];
     private string? _clientId;
     private bool _started;
@@ -168,6 +173,7 @@ public sealed class HostSession : IAsyncDisposable
     {
         if (_devices.FirstOrDefault(d => d.Id == phoneId) is not { } device) return;
         _secrets.Delete(device.PairingSlot);
+        _hasToken[device.PairingSlot] = false;
         if (!_closed && device.Equals(_active)) await ActivateAsync(device);
     });
 
@@ -239,6 +245,7 @@ public sealed class HostSession : IAsyncDisposable
                 {
                     _devices.Add(a.Device);
                     _attachments[a.Device.Id] = ++_attachSeq;
+                    _hasToken.Remove(a.Device.PairingSlot); // read afresh for each attachment
                 }
                 break;
             case DeviceChange.Detached d:
@@ -287,11 +294,14 @@ public sealed class HostSession : IAsyncDisposable
         ControlClient client;
         try
         {
+            var token = StoredToken(device);
+            _hasToken[device.PairingSlot] = token is not null;
             _clientId ??= HostIdentity.ClientId(_settings);
-            client = _clientFactory(device, new ControlIdentity(_clientId, _computerName, StoredToken(device)));
+            client = _clientFactory(device, new ControlIdentity(_clientId, _computerName, token));
         }
         catch (Exception e)
         {
+            _hasToken.TryAdd(device.PairingSlot, false); // the slot could not be read: counts as empty, reported once
             // The slot or the settings could not be read or written (a locked file, a full disk): nothing to retry
             // on its own, but Try again may work once the store recovers.
             ReportError(e);
@@ -332,6 +342,7 @@ public sealed class HostSession : IAsyncDisposable
                 try
                 {
                     _secrets.Set(_active!.PairingSlot, p.Token);
+                    _hasToken[_active.PairingSlot] = true;
                 }
                 catch (Exception error)
                 {
@@ -460,15 +471,19 @@ public sealed class HostSession : IAsyncDisposable
         return new PhoneEntry(d, hasToken ? PhoneState.Paired : PhoneState.NotPaired, false, null, 0, 0, 0, null, hasToken, AttachmentOf(d));
     }
 
-    /// <summary>Whether the phone's slot holds a well-formed token; a slot that cannot be read counts as empty.</summary>
+    /// <summary>Whether the phone's slot holds a well-formed token (cached, see <see cref="_hasToken"/>); a slot that cannot be read counts as empty and is reported once.</summary>
     private bool HasToken(PhoneDevice d)
     {
-        try { return StoredToken(d) is not null; }
+        if (_hasToken.TryGetValue(d.PairingSlot, out var known)) return known;
+        bool has;
+        try { has = StoredToken(d) is not null; }
         catch (Exception e)
         {
             ReportError(e);
-            return false;
+            has = false;
         }
+        _hasToken[d.PairingSlot] = has;
+        return has;
     }
 
     /// <summary>
