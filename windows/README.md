@@ -69,17 +69,21 @@ In this order:
    built against. The C# was compiled on a Mac with the XAML left out, so look
    first at the `x:Bind` code the XAML compiler generates.
 2. **It starts, or says why not.** The log starts with a line naming the app,
-   Windows and .NET versions, then where adb was found. If startup fails, a
-   message box says so and the process ends; a second launch then works.
+   Windows and .NET versions, then where adb was found. Make startup fail (for
+   example, rename `Assets\tray.ico`): a message box should name the error and
+   the process should end, so a second launch works once it is fixed. A crash
+   inside native code never reaches the app and can't be shown this way.
 3. **Apple Devices.** Install it from the Microsoft Store. Plug in an iPhone:
    it should appear in the flyout as "iPhone" with the start of its UDID.
-   Uninstall Apple Devices, or stop Apple Mobile Device Service: the flyout
-   should say to install or open it, and Android should keep working.
+   Uninstall Apple Devices, or stop Apple Mobile Device Service: with no
+   Android phone paired or plugged in, the flyout should say to install or
+   open it; either way, Android should keep working.
 4. **adb.** Put `adb.exe` in each place the locator looks, one at a time
    (`ANDROID_HOME\platform-tools`, `ANDROID_SDK_ROOT\platform-tools`,
    `%LOCALAPPDATA%\Android\Sdk\platform-tools`, a `PATH` entry) and check the
-   app finds it, without restarting it. With none present, the flyout should
-   say to install platform-tools.
+   app finds it, without restarting it, and that the log names the path. With
+   none present and no iPhone paired or plugged in, the flyout should say to
+   install platform-tools.
 5. **Secret store.** Pair a phone, quit, start again: it is still paired.
    In `%LOCALAPPDATA%\Passthrough\secrets`, check that only your user has
    access (Properties > Security) and that the `.bin` files are not readable
@@ -100,8 +104,11 @@ In this order:
    it, and the value follows it. Paired phones lists every pairing, attached or
    not, with the phone's name once it has connected; Forget pairing asks first.
 9. **A damaged settings file.** Quit, put a few bad characters at the end of
-   `settings.json`, start again: the flyout says it was reset, the file is kept
-   as `settings.json.bad`, and paired phones are still paired.
+   `settings.json`, start again: the flyout should say it was reset and the
+   file should be kept as `settings.json.bad`. Because the client id is still
+   in the damaged text, paired phones should stay paired, also after quitting
+   and starting once more. With the client id gone too, the flyout should say
+   phones may need to pair again.
 10. **Quit** ends the process within a few seconds, even with a phone attached.
 
 Problems the app reports go to `%LOCALAPPDATA%\Passthrough\passthrough.log`

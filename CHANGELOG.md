@@ -78,14 +78,15 @@ these steps as written and check each one before building.
 ### Added
 
 * **A Windows tray app (first stage).** `windows/` holds a C# port of the host
-  side: a tray flyout that lists the iPhone, iPad or Android phone on the
-  cable, pairs with the six-digit code and shows the phone's live status. Each
-  phone gets its own pairing, named after the phone; Settings lists them all,
+  side: a tray flyout that lists the phones on the cable, pairs an iPhone or an
+  Android phone with the six-digit code and shows its live status. An iPad is
+  listed and marked as not supported yet. Each phone gets its own pairing,
+  named after the phone; Settings lists them all,
   attached or not, and can forget any of them. When a phone can't be reached
   the row says why (for example that Passthrough isn't running on it) and the
   PC retries with the Mac's back-off. Failures go to a log in
-  `%LOCALAPPDATA%\Passthrough`, and the app says so and exits if it can't
-  start. It does not carry internet yet, and has no shell, screen, wireless
+  `%LOCALAPPDATA%\Passthrough`, and when starting fails with an error the app
+  shows it and exits instead of staying invisible. It does not carry internet yet, and has no shell, screen, wireless
   link, VPN layer or keep-awake. The phones and the wire protocol are
   unchanged. iPhone needs Apple Devices from the Microsoft Store; Android needs
   platform-tools; the PC needs the .NET 10 Desktop Runtime. On Windows the
