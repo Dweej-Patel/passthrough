@@ -32,14 +32,15 @@ public sealed class AdbWatcher(AdbClient client, AdbLocator locator, IProcessRun
                     Publish([.. list.Where(d => d.IsUsable).Select(d => PhoneDevice.FromAdb(d, client))]);
                     SetStatus(new WatchStatus(WatchState.Watching, HintFor(list)));
                 }
+                ReportError(new EndOfStreamException("adb ended the device watch"));
             }
             catch (OperationCanceledException) when (ct.IsCancellationRequested)
             {
                 return;
             }
-            catch (Exception)
+            catch (Exception e)
             {
-                // Falls through to the status below.
+                ReportError(e); // falls through to the status below
             }
 
             if (published) Publish([]);

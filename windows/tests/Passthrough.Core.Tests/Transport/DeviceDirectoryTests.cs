@@ -11,11 +11,13 @@ public class DeviceDirectoryTests
         public WatchStatus Status { get; set; } = new(WatchState.Idle);
         public event Action<IReadOnlyList<PhoneDevice>>? DevicesChanged;
         public event Action<WatchStatus>? StatusChanged;
+        public event Action<Exception>? Error;
         public bool Started;
         public void Start() => Started = true;
         public Task StopAsync() { Report([]); return Task.CompletedTask; }
         public void Report(params PhoneDevice[] devices) => DevicesChanged?.Invoke(devices);
         public void SetStatus(WatchStatus s) { Status = s; StatusChanged?.Invoke(s); }
+        public void Fail(Exception e) => Error?.Invoke(e);
     }
 
     private static PhoneDevice Phone(string id, WatchTransport t = WatchTransport.UsbMux) =>
@@ -201,5 +203,42 @@ public class DeviceDirectoryTests
         Assert.Equal("iPhone", PhoneKind.IPhone.Label());
         Assert.Equal("Android phone", PhoneKind.Android.Label());
         Assert.Equal("iPad", PhoneKind.IPad.Label());
+    }
+
+    [Fact]
+    public async Task DeviceDirectory_ThrowingSubscriber_DoesNotStopTheOthers()
+    {
+        var usb = new FakeWatcher(WatchTransport.UsbMux);
+        var directory = new DeviceDirectory([usb]);
+        var errors = new System.Collections.Concurrent.ConcurrentQueue<Exception>();
+        directory.Error += errors.Enqueue;
+        var seen = new System.Collections.Concurrent.ConcurrentQueue<DeviceChange>();
+        directory.Changed += _ => throw new InvalidOperationException("a broken subscriber");
+        directory.Changed += seen.Enqueue;
+
+        usb.Report(Phone("A"));
+        usb.Report();
+
+        await WaitFor(() => seen.Count == 2);
+        Assert.Equal(["Attached", "Detached"], seen.Select(c => c.GetType().Name));
+        await WaitFor(() => errors.Count == 2);
+        Assert.All(errors, e => Assert.Equal("a broken subscriber", e.Message));
+    }
+
+    [Fact]
+    public void DeviceDirectory_WatcherErrors_ReachItsErrorEventNamingTheTransport()
+    {
+        var usb = new FakeWatcher(WatchTransport.UsbMux);
+        var adb = new FakeWatcher(WatchTransport.Adb);
+        var directory = new DeviceDirectory([usb, adb]);
+        var errors = new List<Exception>();
+        directory.Error += errors.Add;
+
+        adb.Fail(new TimeoutException("adb start-server did not finish within 15 seconds"));
+
+        var e = Assert.IsType<WatcherException>(Assert.Single(errors));
+        Assert.Equal(WatchTransport.Adb, e.Transport);
+        Assert.IsType<TimeoutException>(e.InnerException);
+        Assert.Equal("Adb watcher: TimeoutException: adb start-server did not finish within 15 seconds", e.Message);
     }
 }

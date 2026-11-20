@@ -45,6 +45,7 @@ public partial class App : Application
                 new UsbMuxWatcher(new UsbMuxClient(ByteStreamConnector.Tcp("127.0.0.1", 27015)), TimeProvider.System),
                 new AdbWatcher(new AdbClient(ByteStreamConnector.Tcp("127.0.0.1", 5037)), locator, runner, TimeProvider.System),
             });
+            directory.Error += LogFile.Error; // watcher failures (adb that won't start, a daemon that falls silent), once each
 
             _session = new HostSession(
                 directory, secrets, settings, Environment.MachineName,

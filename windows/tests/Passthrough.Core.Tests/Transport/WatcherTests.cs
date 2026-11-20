@@ -317,4 +317,127 @@ public class WatcherTests
         Assert.Equal(1, Volatile.Read(ref runner.Killed));
         await watcher.StopAsync();
     }
+
+    /// <summary>A watcher whose run publishes a phone, says it is watching, then fails (a bug in a run, or a subscriber).</summary>
+    private sealed class FaultyWatcher(TimeProvider time) : WatcherBase(WatchTransport.UsbMux, time)
+    {
+        public int Runs;
+
+        protected override Task RunAsync(CancellationToken ct)
+        {
+            Interlocked.Increment(ref Runs);
+            Publish([Phone("usbmux:3")]);
+            SetStatus(new WatchStatus(WatchState.Watching));
+            throw new InvalidOperationException("the run broke");
+        }
+    }
+
+    private static PhoneDevice Phone(string id) =>
+        new(id, PhoneKind.IPhone, id, "token.iphone." + id, WatchTransport.UsbMux, (_, _) => throw new NotSupportedException());
+
+    [Fact]
+    public async Task Watcher_RunThatFaults_ClearsItsPhones_Reports_RetriesAndStopsCleanly()
+    {
+        var time = new FakeTimeProvider();
+        var watcher = new FaultyWatcher(time);
+        var lists = new System.Collections.Concurrent.ConcurrentQueue<int>();
+        var errors = new System.Collections.Concurrent.ConcurrentQueue<Exception>();
+        watcher.DevicesChanged += l => lists.Enqueue(l.Count);
+        watcher.Error += errors.Enqueue;
+        watcher.Start();
+
+        await Poll(() => watcher.Status.State == WatchState.Unavailable && time.DueIn().Count == 1);
+        Assert.Equal([1, 0], lists); // the phone it published is withdrawn
+        Assert.Equal("the run broke", Assert.Single(errors).Message);
+        time.Advance(time.DueIn()[0]);
+        await Poll(() => Volatile.Read(ref watcher.Runs) == 2); // it starts over, as a watcher does after any failure
+
+        await watcher.StopAsync().WaitAsync(Wait); // does not throw
+        Assert.Equal(WatchState.Idle, watcher.Status.State);
+        Assert.Equal(0, lists.Last());
+    }
+
+    [Fact]
+    public async Task AdbWatcher_LocatorThatThrows_ReportsAndStopDoesNotThrow()
+    {
+        var locator = new AdbLocator(_ => throw new UnauthorizedAccessException("environment unreadable"), _ => false, ";", "adb.exe");
+        var watcher = new AdbWatcher(new AdbClient(Refused), locator, new FakeRunner(), new FakeTimeProvider());
+        var error = NextAsync<Exception>(h => watcher.Error += h, _ => true);
+        watcher.Start();
+
+        Assert.IsType<UnauthorizedAccessException>(await error);
+        await watcher.StopAsync().WaitAsync(Wait);
+        Assert.Equal(WatchState.Idle, watcher.Status.State);
+    }
+
+    [Fact]
+    public async Task Watcher_SubscriberThatThrows_DoesNotReachOtherSubscribersOrTheRun()
+    {
+        await using var fake = new FakeUsbMuxd(async s =>
+        {
+            var (_, _, _, tag, _) = await FakeUsbMuxd.ReadPacketAsync(s);
+            await FakeUsbMuxd.WriteResultAsync(s, tag, 0);
+            await FakeUsbMuxd.WritePacketAsync(s, 0, Attached(3, "UDID-A", 0x12A8));
+            await FakeUsbMuxd.HoldOpenAsync(s);
+        });
+        var watcher = new UsbMuxWatcher(new UsbMuxClient(fake.Connector), new FakeTimeProvider());
+        var errors = new System.Collections.Concurrent.ConcurrentQueue<Exception>();
+        watcher.Error += errors.Enqueue;
+        watcher.DevicesChanged += _ => throw new InvalidOperationException("a broken subscriber");
+        watcher.StatusChanged += _ => throw new InvalidOperationException("a broken subscriber");
+        var one = NextAsync<IReadOnlyList<PhoneDevice>>(h => watcher.DevicesChanged += l => h(l), l => l.Count == 1);
+        watcher.Start();
+
+        await one;
+        await Poll(() => watcher.Status.State == WatchState.Watching);
+        Assert.Equal(1, fake.Accepted); // the listen was not torn down and redone
+        Assert.All(errors, e => Assert.Equal("a broken subscriber", e.Message));
+        await watcher.StopAsync();
+    }
+
+    [Fact]
+    public async Task UsbMuxWatcher_DaemonFailure_ReportedOnceUntilWatchingAgain()
+    {
+        var listens = 0;
+        await using var fake = new FakeUsbMuxd(async s =>
+        {
+            var (_, _, _, tag, _) = await FakeUsbMuxd.ReadPacketAsync(s);
+            // The first two listens are refused; the third is accepted, then dropped; the fourth is refused again.
+            var n = Interlocked.Increment(ref listens);
+            await FakeUsbMuxd.WriteResultAsync(s, tag, n == 3 ? 0 : 6);
+        });
+        var time = new FakeTimeProvider();
+        var watcher = new UsbMuxWatcher(new UsbMuxClient(fake.Connector), time);
+        var errors = new System.Collections.Concurrent.ConcurrentQueue<Exception>();
+        watcher.Error += errors.Enqueue;
+        watcher.Start();
+
+        for (var attempt = 1; attempt <= 4; attempt++)
+        {
+            await Poll(() => fake.Accepted == attempt && time.DueIn().Count == 1); // failed, waiting to retry
+            if (attempt < 4) time.Advance(time.DueIn()[0]);
+        }
+        await watcher.StopAsync();
+
+        Assert.Collection(errors,
+            e => Assert.Equal(6, Assert.IsType<UsbMuxException>(e).ResultCode), // attempts 1 and 2: once
+            e => Assert.IsType<EndOfStreamException>(e),                        // attempt 3: watching, then dropped
+            e => Assert.Equal(6, Assert.IsType<UsbMuxException>(e).ResultCode)); // attempt 4: after watching, again
+    }
+
+    [Fact]
+    public async Task AdbWatcher_StartServerThatHangs_IsReported()
+    {
+        var time = new FakeTimeProvider();
+        var runner = new HangingRunner();
+        var watcher = new AdbWatcher(new AdbClient(Refused), Locator("C:\\sdk\\platform-tools\\adb.exe"), runner, time);
+        var error = NextAsync<Exception>(h => watcher.Error += h, _ => true);
+        watcher.Start();
+
+        await Poll(() => Volatile.Read(ref runner.Runs) == 1 && time.DueIn().Count == 1);
+        time.Advance(AdbClient.ServerStartTimeout);
+
+        Assert.Equal("adb start-server did not finish within 15 seconds", Assert.IsType<TimeoutException>(await error).Message);
+        await watcher.StopAsync();
+    }
 }

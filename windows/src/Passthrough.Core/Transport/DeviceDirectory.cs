@@ -23,6 +23,7 @@ public sealed class DeviceDirectory
         {
             var transport = watcher.Transport;
             watcher.DevicesChanged += list => Update(transport, list);
+            watcher.Error += e => ReportError(new WatcherException(transport, e));
         }
         _ = Task.Run(DispatchAsync);
     }
@@ -37,8 +38,28 @@ public sealed class DeviceDirectory
 
     public IDeviceWatcher? Watcher(WatchTransport t) => _watchers.FirstOrDefault(w => w.Transport == t);
 
-    /// <summary>Fires on a background dispatcher, once per phone arriving or leaving, in order, shortly after <see cref="Devices"/> changes. A handler that throws is ignored.</summary>
+    /// <summary>
+    /// Fires on a background dispatcher, once per phone arriving or leaving, in order, shortly after <see cref="Devices"/>
+    /// changes. Each handler is called on its own: one that throws is reported through <see cref="Error"/>, and the
+    /// others still get the change.
+    /// </summary>
     public event Action<DeviceChange>? Changed;
+
+    /// <summary>
+    /// Fires with a failure absorbed so discovery could keep going, for logging: a watcher's (wrapped in a
+    /// <see cref="WatcherException"/> naming its transport, on that watcher's thread) or a <see cref="Changed"/>
+    /// handler's (on the dispatcher). A handler that throws is ignored.
+    /// </summary>
+    public event Action<Exception>? Error;
+
+    private void ReportError(Exception e)
+    {
+        foreach (var handler in Error?.GetInvocationList() ?? [])
+        {
+            try { ((Action<Exception>)handler)(e); }
+            catch (Exception) { } // a failing logger must not stop discovery
+        }
+    }
 
     public void Start()
     {
@@ -70,8 +91,14 @@ public sealed class DeviceDirectory
                 continue;
             }
             _dispatching = true;
-            try { Changed?.Invoke(change!); }
-            catch (Exception) { } // one failing handler must not stop later changes reaching the others
+            try
+            {
+                foreach (var handler in Changed?.GetInvocationList() ?? [])
+                {
+                    try { ((Action<DeviceChange>)handler)(change!); }
+                    catch (Exception e) { ReportError(e); } // one failing handler must not keep the change from the others
+                }
+            }
             finally { _dispatching = false; }
         }
     }

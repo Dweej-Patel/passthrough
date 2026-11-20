@@ -41,18 +41,21 @@ public sealed class UsbMuxWatcher(UsbMuxClient client, TimeProvider time) : Watc
                             break;
                     }
                 }
+                ReportError(new EndOfStreamException("usbmuxd ended the device watch"));
             }
             catch (OperationCanceledException) when (ct.IsCancellationRequested)
             {
                 return;
             }
-            catch (SocketException) when (!listening)
+            catch (SocketException e) when (!listening)
             {
                 refused = true; // nothing answers on its port: Apple Devices is not installed, or not running
+                ReportError(e);
             }
-            catch (Exception)
+            catch (Exception e)
             {
                 // Falls through to the retry below: a daemon that answers but fails is handled like a dropped listen.
+                ReportError(e);
             }
 
             if (devices.Count > 0) Publish([]);

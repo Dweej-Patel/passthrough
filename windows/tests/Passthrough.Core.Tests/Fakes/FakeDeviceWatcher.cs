@@ -17,6 +17,8 @@ public sealed class FakeDeviceWatcher(WatchTransport transport) : IDeviceWatcher
 
     public event Action<WatchStatus>? StatusChanged;
 
+    public event Action<Exception>? Error;
+
     public int Starts => Volatile.Read(ref _starts);
 
     public int Stops => Volatile.Read(ref _stops);
@@ -41,6 +43,8 @@ public sealed class FakeDeviceWatcher(WatchTransport transport) : IDeviceWatcher
     public void Attach(PhoneDevice device) => Report([.. _devices, device]);
 
     public void Detach(PhoneDevice device) => Report([.. _devices.Where(d => !d.Equals(device))]);
+
+    public void Fail(Exception e) => Error?.Invoke(e);
 
     public void SetStatus(WatchStatus s)
     {
