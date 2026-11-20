@@ -1,14 +1,14 @@
 using System.Security.AccessControl;
 using System.Security.Cryptography;
 using System.Security.Principal;
-using System.Text;
 using Passthrough.Core.Storage;
 
 namespace Passthrough.App.Storage;
 
 /// <summary>
-/// One DPAPI-protected file per slot (<c>&lt;folder&gt;\&lt;slot&gt;.bin</c>), readable only by the current Windows user.
-/// Slot names are already file-safe (letters, digits, <c>-</c>, <c>_</c>, <c>.</c>).
+/// One DPAPI-protected file per slot (<c>&lt;folder&gt;\&lt;hash of slot&gt;.bin</c>, see <see cref="SecretFile"/>),
+/// readable only by the current Windows user. The file holds the slot name beside the secret, so slots can be listed
+/// and a file is used only for its own slot.
 /// </summary>
 public sealed class DpapiSecretStore : ISecretStore
 {
@@ -27,16 +27,7 @@ public sealed class DpapiSecretStore : ISecretStore
         {
             var path = PathFor(slot);
             if (!File.Exists(path)) return null;
-            try
-            {
-                var plain = ProtectedData.Unprotect(File.ReadAllBytes(path), null, DataProtectionScope.CurrentUser);
-                return Encoding.UTF8.GetString(plain);
-            }
-            catch (CryptographicException)
-            {
-                // Written by another Windows user or another install: unreadable here, so the phone counts as unpaired.
-                return null;
-            }
+            return Read(path) is { } record && record.Slot == slot ? record.Value : null;
         }
     }
 
@@ -47,7 +38,7 @@ public sealed class DpapiSecretStore : ISecretStore
             EnsureFolder();
             var path = PathFor(slot);
             var temp = path + ".tmp";
-            File.WriteAllBytes(temp, ProtectedData.Protect(Encoding.UTF8.GetBytes(value), null, DataProtectionScope.CurrentUser));
+            File.WriteAllBytes(temp, ProtectedData.Protect(SecretFile.Encode(slot, value), null, DataProtectionScope.CurrentUser));
             File.Move(temp, path, overwrite: true);
         }
     }
@@ -60,7 +51,41 @@ public sealed class DpapiSecretStore : ISecretStore
         }
     }
 
-    private string PathFor(string slot) => Path.Combine(_folder, slot + ".bin");
+    public IReadOnlyList<string> Slots()
+    {
+        lock (_gate)
+        {
+            if (!Directory.Exists(_folder)) return [];
+            var slots = new List<string>();
+            foreach (var path in Directory.EnumerateFiles(_folder, "*.bin"))
+            {
+                try
+                {
+                    if (Read(path) is { } record && string.Equals(Path.GetFileName(path), SecretFile.FileName(record.Slot), StringComparison.OrdinalIgnoreCase)) slots.Add(record.Slot);
+                }
+                catch (IOException) { } // one unreadable file must not hide the others
+                catch (UnauthorizedAccessException) { }
+            }
+            slots.Sort(StringComparer.Ordinal);
+            return slots;
+        }
+    }
+
+    /// <summary>The slot and secret a file holds; null when it is not this user's (another Windows user or install) or not a secret file.</summary>
+    private static (string Slot, string Value)? Read(string path)
+    {
+        try
+        {
+            return SecretFile.Decode(ProtectedData.Unprotect(File.ReadAllBytes(path), null, DataProtectionScope.CurrentUser));
+        }
+        catch (CryptographicException)
+        {
+            // Written by another Windows user or another install: unreadable here, so the phone counts as unpaired.
+            return null;
+        }
+    }
+
+    private string PathFor(string slot) => Path.Combine(_folder, SecretFile.FileName(slot));
 
     /// <summary>Creates the folder and limits it to the current user: no inherited rules, one full-control rule.</summary>
     private void EnsureFolder()

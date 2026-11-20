@@ -10,4 +10,7 @@ public interface ISecretStore
 
     /// <summary>Removes the secret; does nothing when there is none.</summary>
     void Delete(string slot);
+
+    /// <summary>Every slot that holds a secret this store can read, sorted ordinally.</summary>
+    IReadOnlyList<string> Slots();
 }

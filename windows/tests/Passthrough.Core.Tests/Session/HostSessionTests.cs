@@ -70,6 +70,8 @@ public class HostSessionTests
         }
 
         public void Delete(string slot) => _inner.Delete(slot);
+
+        public IReadOnlyList<string> Slots() => _inner.Slots();
     }
 
     private static PhoneDevice Android(FakePhone phone) =>

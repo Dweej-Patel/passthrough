@@ -20,4 +20,9 @@ public sealed class MemorySecretStore : ISecretStore
     {
         lock (_gate) _values.Remove(slot);
     }
+
+    public IReadOnlyList<string> Slots()
+    {
+        lock (_gate) return [.. _values.Keys.Order(StringComparer.Ordinal)];
+    }
 }
