@@ -135,7 +135,7 @@ public sealed class UsbMuxClient(StreamConnector connect, TimeSpan? connectTimeo
         {
             return Plist.Decode(body);
         }
-        catch (Exception e) when (e is FormatException or System.Xml.XmlException)
+        catch (Exception e) when (e is FormatException or OverflowException or System.Xml.XmlException)
         {
             throw new InvalidDataException("usbmuxd sent an unexpected reply", e);
         }

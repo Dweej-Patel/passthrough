@@ -172,4 +172,38 @@ public class UsbMuxClientTests
 
         await Assert.ThrowsAsync<TimeoutException>(() => client.ConnectAsync(3, 7891, Deadline()));
     }
+
+    [Fact]
+    public async Task Listen_AttachedWithUnknownElements_StillReported()
+    {
+        const string attached = """
+            <?xml version="1.0" encoding="UTF-8"?>
+            <plist version="1.0"><dict>
+              <key>MessageType</key><string>Attached</string>
+              <key>DeviceID</key><integer>3</integer>
+              <key>Properties</key><dict>
+                <key>ConnectionType</key><string>USB</string>
+                <key>ProductID</key><integer>4776</integer>
+                <key>SerialNumber</key><string>UDID-A</string>
+                <key>LastSeen</key><date>2026-11-20T00:00:00Z</date>
+                <key>LocationID</key><integer>18446744073709551615</integer>
+              </dict>
+            </dict></plist>
+            """;
+        await using var fake = new FakeUsbMuxd(async s =>
+        {
+            var (_, _, _, tag, _) = await FakeUsbMuxd.ReadPacketAsync(s);
+            await FakeUsbMuxd.WriteResultAsync(s, tag, 0);
+            await FakeUsbMuxd.WriteRawPacketAsync(s, 0, Encoding.UTF8.GetBytes(attached));
+            await FakeUsbMuxd.HoldOpenAsync(s);
+        });
+        var client = new UsbMuxClient(fake.Connector);
+
+        await foreach (var e in client.ListenAsync(Deadline()))
+        {
+            Assert.Equal(new UsbMuxEvent.Attached(new UsbMuxDevice(3, "UDID-A", 0x12A8, "USB")), e);
+            return;
+        }
+        Assert.Fail("the listen ended without an event");
+    }
 }

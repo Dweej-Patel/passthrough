@@ -103,4 +103,59 @@ public class PlistTests
 
         Assert.Throws<FormatException>(() => Plist.Decode(Encoding.UTF8.GetBytes(xml)));
     }
+
+    [Fact]
+    public void Plist_UnknownElementsAndHugeIntegers_AreSkippedNotFatal()
+    {
+        const string xml = """
+            <plist version="1.0"><dict>
+              <key>MessageType</key><string>Attached</string>
+              <key>When</key><date>2026-11-20T00:00:00Z</date>
+              <key>Uid</key><uid>7</uid>
+              <key>Huge</key><integer>18446744073709551615</integer>
+              <key>List</key><array><string>a</string><date>2026-11-20T00:00:00Z</date><integer>99999999999999999999</integer><integer>2</integer></array>
+              <key>DeviceID</key><integer>3</integer>
+            </dict></plist>
+            """;
+
+        var d = Plist.Decode(Encoding.UTF8.GetBytes(xml));
+
+        Assert.Equal("Attached", d["MessageType"]);
+        Assert.Equal(3L, d["DeviceID"]);
+        Assert.False(d.ContainsKey("When"));
+        Assert.False(d.ContainsKey("Uid"));
+        Assert.False(d.ContainsKey("Huge"));
+        Assert.Equal(new List<object> { "a", 2L }, (List<object>)d["List"]);
+    }
+
+    [Fact]
+    public void Plist_NestingBeyondTheLimit_IsRefused()
+    {
+        var depth = Plist.MaxDepth + 1;
+        var xml = "<plist version=\"1.0\"><dict><key>a</key>" + string.Concat(Enumerable.Repeat("<array>", depth - 1)) +
+                  string.Concat(Enumerable.Repeat("</array>", depth - 1)) + "</dict></plist>";
+
+        Assert.Throws<FormatException>(() => Plist.Decode(Encoding.UTF8.GetBytes(xml)));
+    }
+
+    [Fact]
+    public void Plist_NestingAtTheLimit_IsRead()
+    {
+        var depth = Plist.MaxDepth;
+        var xml = "<plist version=\"1.0\"><dict><key>a</key>" + string.Concat(Enumerable.Repeat("<array>", depth - 1)) +
+                  string.Concat(Enumerable.Repeat("</array>", depth - 1)) + "</dict></plist>";
+
+        Assert.True(Plist.Decode(Encoding.UTF8.GetBytes(xml)).ContainsKey("a"));
+    }
+
+    [Fact]
+    public void Plist_HugeNestingInOnePacket_IsRefusedWithoutExhaustingTheStack()
+    {
+        // About 900 KB, under usbmux's 1 MB packet cap: deep enough to overflow the stack of a recursive decoder.
+        const int depth = 100_000;
+        var xml = "<plist version=\"1.0\"><dict><key>a</key>" + string.Concat(Enumerable.Repeat("<array>", depth)) +
+                  string.Concat(Enumerable.Repeat("</array>", depth)) + "</dict></plist>";
+
+        Assert.Throws<FormatException>(() => Plist.Decode(Encoding.UTF8.GetBytes(xml)));
+    }
 }
