@@ -54,10 +54,20 @@ public class PhoneRowModelTests
     }
 
     [Fact]
-    public void Title_NamesTheKind_ForAndroidAndIPad()
+    public void Title_NamesTheKind_ForAnIPad()
     {
-        Assert.Equal(("Android phone", "Pixel 8"), Pair(PhoneRowModel.From(Entry(Android, PhoneState.NotPaired))));
         Assert.Equal(("iPad", "00008027…"), Pair(PhoneRowModel.From(Entry(IPad, PhoneState.RemoteOnlyLater, active: false))));
+        static (string, string) Pair(PhoneRowModel m) => (m.Title, m.Detail);
+    }
+
+    [Fact]
+    public void Android_TheSerialIsTheId_TheModelNamesItUntilThePhoneDoes()
+    {
+        var noModel = new PhoneDevice("adb:R58M123", PhoneKind.Android, "R58M123", "token.android.R58M123",
+            WatchTransport.Adb, (_, _) => throw new InvalidOperationException());
+        Assert.Equal(("Pixel 8", "Android phone · R58M123"), Pair(PhoneRowModel.From(Entry(Android, PhoneState.NotPaired))));
+        Assert.Equal(("Dee's Pixel", "Android phone · R58M123"), Pair(PhoneRowModel.From(Entry(Android, PhoneState.Paired, active: false, hasPairing: true, savedName: "Dee's Pixel"))));
+        Assert.Equal(("Android phone", "R58M123"), Pair(PhoneRowModel.From(Entry(noModel, PhoneState.NotPaired))));
         static (string, string) Pair(PhoneRowModel m) => (m.Title, m.Detail);
     }
 

@@ -18,10 +18,10 @@ public sealed record PhoneRowModel
     /// <summary>"●" for the active phone, "○" for the others.</summary>
     public required string Marker { get; init; }
 
-    /// <summary>The phone's own name (live, else the one saved when it was last paired), else its kind: "iPhone", "Android phone", "iPad".</summary>
+    /// <summary>The phone's own name (live, else the one saved when it was last paired), else an Android phone's model, else its kind: "iPhone", "Android phone", "iPad".</summary>
     public required string Title { get; init; }
 
-    /// <summary>The short hardware id, after the kind when the title is a name: "iPhone · 00008110…".</summary>
+    /// <summary>The hardware id (an iPhone's or iPad's UDID prefix, an Android serial), after the kind when the title is a name: "iPhone · 00008110…".</summary>
     public required string Detail { get; init; }
 
     public required string StateText { get; init; }
@@ -57,7 +57,12 @@ public sealed record PhoneRowModel
     public static PhoneRowModel From(PhoneEntry e)
     {
         var kind = e.Device.Kind.Label();
-        var name = NonEmpty(e.Status?.DeviceName) ?? NonEmpty(e.SavedName);
+        // Android: the serial identifies the phone and the model names it until the phone says its own name. iPhone and
+        // iPad: the UDID prefix is the label.
+        var android = e.Device.Transport == WatchTransport.Adb && e.Device.Id.StartsWith("adb:", StringComparison.Ordinal);
+        var id = android ? e.Device.Id["adb:".Length..] : e.Device.Label;
+        var model = android && e.Device.Label != id ? NonEmpty(e.Device.Label) : null;
+        var name = NonEmpty(e.Status?.DeviceName) ?? NonEmpty(e.SavedName) ?? model;
         var unpaired = e.State == PhoneState.NotPaired || (e.State == PhoneState.Connecting && !e.HasPairing);
         return new PhoneRowModel
         {
@@ -65,7 +70,7 @@ public sealed record PhoneRowModel
             Attachment = e.Attachment,
             Marker = e.IsActive ? "●" : "○",
             Title = name ?? kind,
-            Detail = name is null ? e.Device.Label : $"{kind} · {e.Device.Label}",
+            Detail = name is null ? id : $"{kind} · {id}",
             StateText = e.State switch
             {
                 PhoneState.NotPaired => "Not paired",

@@ -16,20 +16,23 @@ public static class WatcherHints
 
     /// <summary>
     /// A watcher's own hint (install, allow USB debugging), else a line for an <see cref="WatchState.Unavailable"/>
-    /// watcher. An install hint is left out while a phone of the other kind is attached: someone using only an iPhone
-    /// isn't told to install adb, and the reverse.
+    /// watcher. An install hint is left out while a phone of the other kind is attached, or while this PC holds a pairing
+    /// for one (<paramref name="pairedSlots"/>, attached or not): someone using only an iPhone isn't told to install adb,
+    /// and the reverse, even with the phone unplugged.
     /// </summary>
-    public static IReadOnlyList<string> For(SessionState state)
+    public static IReadOnlyList<string> For(SessionState state, IReadOnlyCollection<string> pairedSlots)
     {
+        var applePaired = pairedSlots.Any(s => s.StartsWith("token.iphone.", StringComparison.Ordinal) || s.StartsWith("token.ipad.", StringComparison.Ordinal));
+        var androidPaired = pairedSlots.Any(s => s.StartsWith("token.android.", StringComparison.Ordinal));
         var hints = new List<string>();
-        Add(hints, state, WatchTransport.UsbMux, state.UsbMux, UsbMuxUnavailable);
-        Add(hints, state, WatchTransport.Adb, state.Adb, AdbUnavailable);
+        Add(hints, state, WatchTransport.UsbMux, state.UsbMux, UsbMuxUnavailable, otherKindPaired: androidPaired);
+        Add(hints, state, WatchTransport.Adb, state.Adb, AdbUnavailable, otherKindPaired: applePaired);
         return hints;
     }
 
-    private static void Add(List<string> hints, SessionState state, WatchTransport transport, WatchStatus status, string unavailable)
+    private static void Add(List<string> hints, SessionState state, WatchTransport transport, WatchStatus status, string unavailable, bool otherKindPaired)
     {
-        if (status.State == WatchState.NotInstalled && state.Phones.Any(p => p.Device.Transport != transport)) return;
+        if (status.State == WatchState.NotInstalled && (otherKindPaired || state.Phones.Any(p => p.Device.Transport != transport))) return;
         if (!string.IsNullOrEmpty(status.Hint)) hints.Add(status.Hint);
         else if (status.State == WatchState.Unavailable) hints.Add(unavailable);
     }

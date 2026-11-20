@@ -21,36 +21,53 @@ public class WatcherHintsTests
 
     [Fact]
     public void Watching_WithoutAHint_SaysNothing() =>
-        Assert.Empty(WatcherHints.For(State(new(WatchState.Watching), new(WatchState.Starting))));
+        Assert.Empty(WatcherHints.For(State(new(WatchState.Watching), new(WatchState.Starting)), []));
 
     [Fact]
     public void NothingAttached_BothInstallHints()
     {
-        Assert.Equal([UsbMuxWatcher.NotInstalledHint, AdbWatcher.NotInstalledHint], WatcherHints.For(State(UsbMissing, AdbMissing)));
+        Assert.Equal([UsbMuxWatcher.NotInstalledHint, AdbWatcher.NotInstalledHint], WatcherHints.For(State(UsbMissing, AdbMissing), []));
     }
 
     [Fact]
     public void AnInstallHint_IsDropped_WhileAPhoneOfTheOtherKindIsAttached()
     {
-        Assert.Equal([UsbMuxWatcher.NotInstalledHint], WatcherHints.For(State(UsbMissing, AdbMissing, IPhone)));
-        Assert.Equal([AdbWatcher.NotInstalledHint], WatcherHints.For(State(UsbMissing, AdbMissing, Android)));
+        Assert.Equal([UsbMuxWatcher.NotInstalledHint], WatcherHints.For(State(UsbMissing, AdbMissing, IPhone), []));
+        Assert.Equal([AdbWatcher.NotInstalledHint], WatcherHints.For(State(UsbMissing, AdbMissing, Android), []));
     }
 
     [Fact]
     public void Unavailable_HasALineForEachTransport()
     {
-        var hints = WatcherHints.For(State(new(WatchState.Unavailable), new(WatchState.Unavailable), IPhone, Android));
+        var hints = WatcherHints.For(State(new(WatchState.Unavailable), new(WatchState.Unavailable), IPhone, Android), []);
         Assert.Equal([WatcherHints.UsbMuxUnavailable, WatcherHints.AdbUnavailable], hints);
     }
 
     [Fact]
     public void AWatchersOwnHint_IsShown()
     {
-        var hints = WatcherHints.For(State(new(WatchState.Watching), new(WatchState.Watching, AdbWatcher.UnauthorizedHint), IPhone));
+        var hints = WatcherHints.For(State(new(WatchState.Watching), new(WatchState.Watching, AdbWatcher.UnauthorizedHint), IPhone), []);
         Assert.Equal([AdbWatcher.UnauthorizedHint], hints);
     }
 
     [Fact]
     public void UsbMuxInstallHint_CoversAppleDevicesInstalledButNotRunning() =>
         Assert.Contains("open", UsbMuxWatcher.NotInstalledHint);
+
+    [Fact]
+    public void AnInstallHint_IsDropped_WhileAPairingForTheOtherKindIsStored_EvenUnplugged()
+    {
+        Assert.Equal([UsbMuxWatcher.NotInstalledHint], WatcherHints.For(State(UsbMissing, AdbMissing), ["token.iphone.00008110-AAAA"]));
+        Assert.Equal([UsbMuxWatcher.NotInstalledHint], WatcherHints.For(State(UsbMissing, AdbMissing), ["token.ipad.00008027-BBBB"]));
+        Assert.Equal([AdbWatcher.NotInstalledHint], WatcherHints.For(State(UsbMissing, AdbMissing), ["token.android.R58"]));
+        Assert.Empty(WatcherHints.For(State(UsbMissing, AdbMissing), ["token.android.R58", "token.iphone.A"]));
+    }
+
+    [Fact]
+    public void AStoredPairing_DoesNotHideHintsThatAreNotAboutInstalling()
+    {
+        var hints = WatcherHints.For(State(new(WatchState.Unavailable), new(WatchState.Watching, AdbWatcher.UnauthorizedHint)),
+            ["token.android.R58", "token.iphone.A"]);
+        Assert.Equal([WatcherHints.UsbMuxUnavailable, AdbWatcher.UnauthorizedHint], hints);
+    }
 }

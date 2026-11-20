@@ -1,6 +1,7 @@
 using System.Collections.ObjectModel;
 using Microsoft.UI.Dispatching;
 using Microsoft.UI.Xaml;
+using Passthrough.App.Platform;
 using Passthrough.Core.Presentation;
 using Passthrough.Core.Session;
 using Passthrough.Core.Storage;
@@ -22,6 +23,9 @@ public sealed class SessionViewModel : ObservableBase
     private string _hints = "";
     private string _pairingsKey = "";
     private bool _androidEnabled;
+    private SessionState _state;
+    /// <summary>The slots this PC holds a pairing in, attached or not, as last read; they decide which install hints show.</summary>
+    private IReadOnlyList<string> _pairedSlots = [];
 
     /// <param name="notice">A line to show above the watcher hints for the whole run (the settings file was damaged), or null.</param>
     public SessionViewModel(HostSession session, ISettingsStore settings, DispatcherQueue ui, bool androidEnabled, string? notice)
@@ -31,8 +35,10 @@ public sealed class SessionViewModel : ObservableBase
         _ui = ui;
         _androidEnabled = androidEnabled;
         _notice = notice;
+        _state = _session.State;
         _session.StateChanged += state => _ui.TryEnqueue(() => Apply(state));
         Apply(_session.State);
+        RefreshPairedSlots();
     }
 
     public ObservableCollection<PhoneRow> Rows { get; } = new();
@@ -68,7 +74,11 @@ public sealed class SessionViewModel : ObservableBase
     public async Task<IReadOnlyList<PairedPhone>> PairedPhonesAsync() =>
         PairedPhone.List(await _session.PairedSlotsAsync(), slot => DeviceNames.Get(_settings, slot));
 
-    public Task ForgetSlotAsync(string slot) => _session.ForgetSlotAsync(slot);
+    public async Task ForgetSlotAsync(string slot)
+    {
+        await _session.ForgetSlotAsync(slot);
+        RefreshPairedSlots(); // the phone may not be attached, so no state change would say so
+    }
 
     /// <summary>Changes the setting; <see cref="AndroidEnabled"/> follows only once the session has accepted it.</summary>
     public async Task SetAndroidEnabledAsync(bool on)
@@ -79,17 +89,37 @@ public sealed class SessionViewModel : ObservableBase
 
     private void Apply(SessionState state)
     {
+        _state = state;
         RowList.Reconcile(Rows, state.Phones, r => r.Id, e => new PhoneRow(e), (r, e) => r.Update(e));
         Raise(nameof(EmptyVisibility));
-
-        var hints = new List<string>();
-        if (_notice is not null) hints.Add(_notice);
-        hints.AddRange(WatcherHints.For(state));
-        Hints = string.Join(Environment.NewLine, hints);
+        ShowHints();
 
         var key = string.Join("\n", state.Phones.Select(p => $"{p.Device.PairingSlot}|{p.HasPairing}|{p.SavedName}"));
         if (key == _pairingsKey) return;
         _pairingsKey = key;
         PairingsChanged?.Invoke();
+        RefreshPairedSlots();
+    }
+
+    private void ShowHints()
+    {
+        var hints = new List<string>();
+        if (_notice is not null) hints.Add(_notice);
+        hints.AddRange(WatcherHints.For(_state, _pairedSlots));
+        Hints = string.Join(Environment.NewLine, hints);
+    }
+
+    /// <summary>Reads the stored pairings again (on the UI thread once read) and redoes the hints.</summary>
+    private async void RefreshPairedSlots()
+    {
+        try
+        {
+            _pairedSlots = await _session.PairedSlotsAsync();
+            ShowHints();
+        }
+        catch (Exception e)
+        {
+            LogFile.Error(e);
+        }
     }
 }
