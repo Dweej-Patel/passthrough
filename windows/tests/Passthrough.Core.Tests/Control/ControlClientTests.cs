@@ -305,19 +305,20 @@ public class ControlClientTests
     public async Task DelayedWelcome_NoPingBeforeProof_BadProofStillSendsNothing()
     {
         var time = new FakeTimeProvider();
-        var tap = new ReadTap();
         var welcomeGate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         await using var phone = new FakePhone { Token = PhoneToken, BadProof = true, WelcomeGate = welcomeGate.Task };
-        await using var client = TappedClient(phone, PhoneToken, time, tap);
+        await using var client = Client(phone, PhoneToken, time);
 
         await client.StartAsync(CancellationToken.None);
         await WaitUntilAsync(() => phone.Transcript.Contains("recv hello") && time.DueIn().Count == 1); // the heartbeat is armed
         time.Advance(TimeSpan.FromSeconds(6)); // a heartbeat tick falls inside the handshake
+        // Anything the tick queued is written before the welcome is let through, so a wrongly queued ping cannot lose
+        // a race with the proof failure (which cancels the writer): it is on the wire, and the phone reads it below.
+        await WaitUntilAsync(() => client.Unwritten == 0);
         welcomeGate.SetResult();
 
         // The client handles the welcome and its bad proof, then ends: its last event is Disconnected, and once
         // disposed its writer has finished, so whatever it wrote is on the wire before the phone sees the close.
-        await WaitUntilAsync(() => phone.LinesSent >= 1 && tap.LinesHandled >= phone.LinesSent);
         var error = Assert.IsType<ControlException>(await DisconnectErrorAsync(client));
         Assert.Equal(ControlErrorKind.ProofFailed, error.Kind);
         await client.DisposeAsync();

@@ -28,6 +28,8 @@ public sealed class ControlClient(
     private readonly Channel<ControlEnvelope> _outgoing = Channel.CreateUnbounded<ControlEnvelope>(new UnboundedChannelOptions { SingleReader = true });
     private readonly CancellationTokenSource _stop = new();
     private readonly byte[] _macNonce = ControlAuth.Nonce();
+    /// <summary>Messages queued and not yet written and flushed to the stream; see <see cref="Unwritten"/>.</summary>
+    private int _unwritten;
 
     /// <summary>Guards every field below; events and outgoing messages are queued under it, so their order is the order of decisions.</summary>
     private readonly Lock _gate = new();
@@ -202,7 +204,10 @@ public sealed class ControlClient(
         try
         {
             await foreach (var m in _outgoing.Reader.ReadAllAsync(_stop.Token).ConfigureAwait(false))
+            {
                 await channel.WriteAsync(m, _stop.Token).ConfigureAwait(false);
+                Interlocked.Decrement(ref _unwritten);
+            }
         }
         catch (Exception e)
         {
@@ -328,7 +333,17 @@ public sealed class ControlClient(
         Send(new ControlEnvelope(ControlEnvelope.Pair) { ClientID = identity.ClientId, Name = identity.Name, Code = code });
     }
 
-    private void Send(ControlEnvelope m) => _outgoing.Writer.TryWrite(m);
+    private void Send(ControlEnvelope m)
+    {
+        Interlocked.Increment(ref _unwritten);
+        if (!_outgoing.Writer.TryWrite(m)) Interlocked.Decrement(ref _unwritten);
+    }
+
+    /// <summary>
+    /// For tests: how many queued messages the writer has not yet written and flushed. Zero means nothing this client
+    /// decided to send is still on its way to the stream, so a test can tell "not sent" from "not sent yet".
+    /// </summary>
+    internal int Unwritten => Volatile.Read(ref _unwritten);
 
     private void Emit(ControlEvent e)
     {
