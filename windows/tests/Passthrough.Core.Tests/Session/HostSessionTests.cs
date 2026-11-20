@@ -660,6 +660,27 @@ public class HostSessionTests
     }
 
     [Fact]
+    public async Task Forget_SlotUnreadable_StillDeletes_AndReopensAChannelThatUsedIt()
+    {
+        await using var phone = new FakePhone { Token = PhoneToken };
+        var secrets = new FailingSecretStore(failGetSlot: AndroidSlot, failGetOnlyWhenStored: true) { Healed = true };
+        await using var h = new Harness(secrets: secrets);
+        h.Secrets.Set(AndroidSlot, PhoneToken);
+        await h.Session.StartAsync();
+        var android = Android(phone);
+        h.Adb.Attach(android);
+        await h.WaitState(s => Entry(s, android) is { State: PhoneState.Paired, HasPairing: true });
+        secrets.Healed = false; // the file is locked now: reading it fails, deleting it works
+
+        await h.Session.ForgetAsync(android.Id);
+
+        Assert.DoesNotContain(AndroidSlot, secrets.Slots());
+        await h.WaitState(s => Entry(s, android) is { State: PhoneState.NotPaired, HasPairing: false } && h.Clients.Count == 2);
+        Assert.Null(h.Client(1).Identity.Token);
+        Assert.Empty(h.Errors);
+    }
+
+    [Fact]
     public async Task Forget_Twice_IsNotAnError_AndChangesNothingMore()
     {
         await using var phone = new FakePhone { Token = PhoneToken };

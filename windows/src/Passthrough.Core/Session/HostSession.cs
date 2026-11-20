@@ -75,6 +75,8 @@ public sealed class HostSession : IAsyncDisposable
     private string? _lastLogged;
     /// <summary>When the current channel was opened (a <see cref="TimeProvider"/> timestamp).</summary>
     private long _openedAt;
+    /// <summary>The current channel uses a credential Forget removes: opened with a stored token, or paired on it.</summary>
+    private bool _channelHasCredential;
 
     public HostSession(DeviceDirectory directory, ISecretStore secrets, ISettingsStore settings, string computerName,
         Func<PhoneDevice, ControlIdentity, ControlClient> clientFactory, TimeProvider time)
@@ -197,11 +199,12 @@ public sealed class HostSession : IAsyncDisposable
 
     private async Task ForgetAsyncCore(string slot)
     {
-        var held = _secrets.Get(slot) is not null;
-        _secrets.Delete(slot);
+        _secrets.Delete(slot); // never read first: a slot that cannot be read can still be deleted
         _hasToken[slot] = false;
-        // Only a channel that was opened with this token needs reopening; an unpaired one is left alone.
-        if (held && !_closed && _active is { } active && active.PairingSlot == slot) await ActivateAsync(active);
+        // Reopen the active phone's channel only if it uses a credential (opened with a token, or paired on it), or if
+        // none is open (waiting or failed); an unpaired channel is left alone, so a second Forget changes nothing.
+        if (!_closed && _active is { } active && active.PairingSlot == slot && (_channelHasCredential || _client is null))
+            await ActivateAsync(active);
     }
 
     /// <summary>Remembers the choice; off stops the adb watcher (its phones leave), on starts it again.</summary>
@@ -340,6 +343,7 @@ public sealed class HostSession : IAsyncDisposable
         }
         _client = client;
         _openedAt = _time.GetTimestamp();
+        _channelHasCredential = _hasToken[device.PairingSlot];
         if (!keepState) _activeState = PhoneState.Connecting;
         ClearStatus();
         _readers.RemoveAll(t => t.IsCompleted);
@@ -370,6 +374,7 @@ public sealed class HostSession : IAsyncDisposable
                 {
                     _secrets.Set(_active!.PairingSlot, p.Token);
                     _hasToken[_active.PairingSlot] = true;
+                    _channelHasCredential = true;
                 }
                 catch (Exception error)
                 {
