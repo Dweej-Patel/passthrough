@@ -1,0 +1,317 @@
+using System.Threading.Channels;
+using Passthrough.Core.Control;
+using Passthrough.Core.Protocol;
+using Passthrough.Core.Storage;
+using Passthrough.Core.Transport;
+
+namespace Passthrough.Core.Session;
+
+/// <summary>
+/// The heart of the app (port of the device, pairing and reconnect parts of SessionCoordinator.swift): follows the
+/// attached phones, keeps one control channel open to the active phone, pairs it with a code, reconnects it, and
+/// forgets pairings.
+/// <para>
+/// Every state change runs as one work item on a single loop, in order: public calls, directory changes, watcher
+/// status changes, every client's events and the reconnect timer all queue there, so nothing interleaves. Events
+/// from a client that is no longer current are dropped.
+/// </para>
+/// </summary>
+public sealed class HostSession : IAsyncDisposable
+{
+    /// <summary>How long after a channel drops the active phone is tried again.</summary>
+    public static readonly TimeSpan ReconnectDelay = TimeSpan.FromSeconds(2);
+
+    private const string AndroidEnabledKey = "androidEnabled";
+    private const string IPadMessage = "Pairs once Remote shell is available.";
+
+    private readonly DeviceDirectory _directory;
+    private readonly ISecretStore _secrets;
+    private readonly ISettingsStore _settings;
+    private readonly string _computerName;
+    private readonly Func<PhoneDevice, ControlIdentity, ControlClient> _clientFactory;
+    private readonly TimeProvider _time;
+    private readonly Channel<(Func<Task> Work, TaskCompletionSource? Done)> _work =
+        Channel.CreateUnbounded<(Func<Task>, TaskCompletionSource?)>(new UnboundedChannelOptions { SingleReader = true });
+    private readonly Task _loop;
+    private int _disposed;
+    private volatile SessionState _state = new([], new WatchStatus(WatchState.Idle), new WatchStatus(WatchState.Idle));
+
+    // Everything below is touched only by work items on the loop.
+    private readonly List<PhoneDevice> _devices = [];
+    private readonly List<Task> _readers = [];
+    private string? _clientId;
+    private bool _started;
+    private bool _closed;
+    private PhoneDevice? _active;
+    private ControlClient? _client;
+    private PhoneState _activeState;
+    private DeviceStatus? _status;
+    private long _rx;
+    private long _tx;
+    private int _connections;
+    private string? _message;
+    /// <summary>The active phone's channel failed for good (failed proof, other version): no reconnect until it is re-attached or made active.</summary>
+    private bool _held;
+    private ITimer? _reconnect;
+    private long _reconnectSeq;
+
+    public HostSession(DeviceDirectory directory, ISecretStore secrets, ISettingsStore settings, string computerName,
+        Func<PhoneDevice, ControlIdentity, ControlClient> clientFactory, TimeProvider time)
+    {
+        _directory = directory;
+        _secrets = secrets;
+        _settings = settings;
+        _computerName = computerName;
+        _clientFactory = clientFactory;
+        _time = time;
+        _loop = Task.Run(RunLoopAsync);
+        // Both fire on background threads; never block them, just queue.
+        _directory.Changed += change => Post(() => OnDeviceChangeAsync(change));
+        foreach (var watcher in _directory.Watchers) watcher.StatusChanged += _ => Post(() => Task.CompletedTask);
+    }
+
+    /// <summary>The latest snapshot.</summary>
+    public SessionState State => _state;
+
+    /// <summary>
+    /// Fires with a fresh snapshot after each change, on the session's background loop. A handler must not wait for a
+    /// session call to finish (that call waits for the loop); marshal to the UI thread and return.
+    /// </summary>
+    public event Action<SessionState>? StateChanged;
+
+    private bool AndroidEnabled => _settings.Get(AndroidEnabledKey) != "false";
+
+    /// <summary>Starts the watchers (adb only when Android is enabled).</summary>
+    public Task StartAsync() => RunAsync(() =>
+    {
+        if (_started || _closed) return Task.CompletedTask;
+        _started = true;
+        foreach (var watcher in _directory.Watchers)
+            if (watcher.Transport != WatchTransport.Adb || AndroidEnabled) watcher.Start();
+        return Task.CompletedTask;
+    });
+
+    /// <summary>Moves the control channel to an attached phone that can carry the PC's internet; tries again a phone whose channel failed.</summary>
+    public Task MakeActiveAsync(string phoneId) => RunAsync(async () =>
+    {
+        if (_closed || _devices.FirstOrDefault(d => d.Id == phoneId) is not { CanRoute: true } device) return;
+        if (device.Equals(_active) && _client is not null) return;
+        await ActivateAsync(device);
+    });
+
+    /// <summary>Sends the six-digit code shown on the active phone (held until its welcome when the channel is still opening).</summary>
+    public Task SubmitCodeAsync(string code) => RunAsync(async () =>
+    {
+        if (_client is null || _activeState is not (PhoneState.Connecting or PhoneState.NotPaired)) return;
+        _activeState = PhoneState.Pairing;
+        _message = null;
+        await _client.SubmitCodeAsync(code);
+    });
+
+    /// <summary>Deletes the phone's stored token; when it is the active phone, closes its channel and opens a fresh one, which asks to pair.</summary>
+    public Task ForgetAsync(string phoneId) => RunAsync(async () =>
+    {
+        if (_devices.FirstOrDefault(d => d.Id == phoneId) is not { } device) return;
+        _secrets.Delete(device.PairingSlot);
+        if (!_closed && device.Equals(_active)) await ActivateAsync(device);
+    });
+
+    /// <summary>Remembers the choice; off stops the adb watcher (its phones leave), on starts it again.</summary>
+    public Task SetAndroidEnabledAsync(bool on) => RunAsync(async () =>
+    {
+        _settings.Set(AndroidEnabledKey, on ? "true" : "false");
+        if (_closed || _directory.Watcher(WatchTransport.Adb) is not { } adb) return;
+        if (!on) await adb.StopAsync();
+        else if (_started) adb.Start();
+    });
+
+    /// <summary>Closes the active phone's channel and stops the directory; later calls do nothing.</summary>
+    public async ValueTask DisposeAsync()
+    {
+        if (Interlocked.Exchange(ref _disposed, 1) != 0) return;
+        // Closed first, so phones leaving as the watchers stop do not open a channel to another one.
+        await RunAsync(async () =>
+        {
+            _closed = true;
+            await DropActiveAsync();
+        });
+        await _directory.StopAsync();
+        _work.Writer.TryComplete();
+        await _loop;
+        await Task.WhenAll(_readers); // the loop is over: nothing else touches the list
+    }
+
+    private async Task RunLoopAsync()
+    {
+        await foreach (var (work, done) in _work.Reader.ReadAllAsync())
+        {
+            Exception? error = null;
+            try { await work(); }
+            catch (Exception e) { error = e; } // a failing store or factory must not stop the loop
+            Publish();
+            if (error is null) done?.TrySetResult();
+            else done?.TrySetException(error);
+        }
+    }
+
+    /// <summary>Queues work and waits for it (and for the state it produced) to be done. After disposal it does nothing.</summary>
+    private Task RunAsync(Func<Task> work)
+    {
+        var done = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        return _work.Writer.TryWrite((work, done)) ? done.Task : Task.CompletedTask;
+    }
+
+    /// <summary>Queues work without waiting; safe from any thread, never blocks.</summary>
+    private void Post(Func<Task> work) => _work.Writer.TryWrite((work, null));
+
+    private async Task OnDeviceChangeAsync(DeviceChange change)
+    {
+        if (_closed) return;
+        switch (change)
+        {
+            case DeviceChange.Attached a:
+                if (!_devices.Contains(a.Device)) _devices.Add(a.Device);
+                break;
+            case DeviceChange.Detached d:
+                _devices.Remove(d.Device);
+                if (d.Device.Equals(_active)) await DropActiveAsync();
+                break;
+        }
+        // The active phone stays while attached; otherwise the first one that can carry the PC's internet.
+        if (_active is null && _devices.FirstOrDefault(d => d.CanRoute) is { } best) await ActivateAsync(best);
+    }
+
+    private async Task ActivateAsync(PhoneDevice device)
+    {
+        await DropActiveAsync();
+        _active = device;
+        OpenClient();
+    }
+
+    /// <summary>Closes the active phone's channel, cancels a pending reconnect, and leaves no phone active.</summary>
+    private async Task DropActiveAsync()
+    {
+        CancelReconnect();
+        var client = _client;
+        _client = null;
+        _active = null;
+        _held = false;
+        _activeState = PhoneState.Connecting;
+        ClearStatus();
+        _message = null;
+        if (client is not null) await client.DisposeAsync();
+    }
+
+    /// <summary>Opens a channel to the active phone with whatever token its slot holds. Keeps the message (a pairing failure stays shown across a reconnect).</summary>
+    private void OpenClient()
+    {
+        CancelReconnect();
+        var device = _active!;
+        _clientId ??= HostIdentity.ClientId(_settings);
+        var client = _clientFactory(device, new ControlIdentity(_clientId, _computerName, _secrets.Get(device.PairingSlot)));
+        _client = client;
+        _activeState = PhoneState.Connecting;
+        ClearStatus();
+        _readers.RemoveAll(t => t.IsCompleted);
+        _readers.Add(Task.Run(async () =>
+        {
+            await foreach (var e in client.Events.ReadAllAsync()) Post(() => OnClientEventAsync(client, e));
+        }));
+        _ = client.StartAsync(CancellationToken.None); // never faults; a failed open arrives as Disconnected
+    }
+
+    private async Task OnClientEventAsync(ControlClient client, ControlEvent e)
+    {
+        if (!ReferenceEquals(client, _client)) return; // a channel closed since: its events no longer count
+        switch (e)
+        {
+            case ControlEvent.Welcomed { Paired: true }:
+                _activeState = PhoneState.Paired;
+                _message = null;
+                break;
+            case ControlEvent.Welcomed:
+                if (_activeState != PhoneState.Pairing) _activeState = PhoneState.NotPaired; // a code may already be on its way
+                break;
+            case ControlEvent.PairedWith p:
+                _secrets.Set(_active!.PairingSlot, p.Token);
+                _activeState = PhoneState.Paired;
+                _message = null;
+                break;
+            case ControlEvent.PairingFailed f:
+                if (_activeState == PhoneState.Pairing) _activeState = PhoneState.NotPaired;
+                _message = Describe(f.Reason);
+                break;
+            case ControlEvent.StatusUpdate s:
+                _activeState = PhoneState.Paired; // status flows only on a proved channel
+                (_status, _rx, _tx, _connections) = (s.Status, s.Rx, s.Tx, s.Active);
+                break;
+            case ControlEvent.Disconnected d:
+                _client = null;
+                ClearStatus();
+                if (d.Error is ControlException failure)
+                {
+                    // Retrying cannot fix a failed proof or another version; the stored token stays.
+                    _activeState = PhoneState.Failed;
+                    _message = failure.Message;
+                    _held = true;
+                }
+                else
+                {
+                    _activeState = PhoneState.Connecting;
+                    ScheduleReconnect();
+                }
+                await client.DisposeAsync(); // already over; this just waits for its background work
+                break;
+        }
+    }
+
+    private void ScheduleReconnect()
+    {
+        CancelReconnect();
+        var seq = _reconnectSeq;
+        _reconnect = _time.CreateTimer(_ => Post(() =>
+        {
+            if (seq == _reconnectSeq && !_closed && !_held && _active is not null && _client is null) OpenClient();
+            return Task.CompletedTask;
+        }), null, ReconnectDelay, Timeout.InfiniteTimeSpan);
+    }
+
+    private void CancelReconnect()
+    {
+        _reconnectSeq++;
+        _reconnect?.Dispose();
+        _reconnect = null;
+    }
+
+    private void ClearStatus() => (_status, _rx, _tx, _connections) = (null, 0, 0, 0);
+
+    private static string Describe(PairingFailure reason) => reason switch
+    {
+        PairingFailure.Expired => "The code expired. Show a new code on the phone.",
+        PairingFailure.Locked => "Too many wrong codes. Try again.",
+        PairingFailure.CodeWithdrawn => "The phone withdrew that code after too many wrong guesses. Show a new code on the phone.",
+        _ => "That code didn't match. Check the code on the phone and try again.",
+    };
+
+    /// <summary>Builds the snapshot and raises <see cref="StateChanged"/> when it differs from the last one.</summary>
+    private void Publish()
+    {
+        if (_closed) return;
+        var next = new SessionState([.. _devices.Select(EntryFor)], WatcherStatus(WatchTransport.UsbMux), WatcherStatus(WatchTransport.Adb));
+        var last = _state;
+        if (last.UsbMux == next.UsbMux && last.Adb == next.Adb && last.Phones.SequenceEqual(next.Phones)) return;
+        _state = next;
+        try { StateChanged?.Invoke(next); }
+        catch (Exception) { } // a failing subscriber must not stop the session
+    }
+
+    private PhoneEntry EntryFor(PhoneDevice d)
+    {
+        if (!d.CanRoute) return new PhoneEntry(d, PhoneState.RemoteOnlyLater, false, null, 0, 0, 0, IPadMessage);
+        if (d.Equals(_active)) return new PhoneEntry(d, _activeState, true, _status, _rx, _tx, _connections, _message);
+        var paired = _secrets.Get(d.PairingSlot) is not null;
+        return new PhoneEntry(d, paired ? PhoneState.Paired : PhoneState.NotPaired, false, null, 0, 0, 0, null);
+    }
+
+    private WatchStatus WatcherStatus(WatchTransport t) => _directory.Watcher(t)?.Status ?? new WatchStatus(WatchState.Idle);
+}
