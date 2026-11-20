@@ -168,14 +168,31 @@ public sealed class HostSession : IAsyncDisposable
         return true;
     });
 
-    /// <summary>Deletes the phone's stored token; when it is the active phone, closes its channel and opens a fresh one, which asks to pair.</summary>
-    public Task ForgetAsync(string phoneId) => RunAsync(async () =>
+    /// <summary>Deletes an attached phone's stored token (see <see cref="ForgetSlotAsync"/>); nothing for a phone that is not attached.</summary>
+    public Task ForgetAsync(string phoneId) => RunAsync(() =>
     {
-        if (_devices.FirstOrDefault(d => d.Id == phoneId) is not { } device) return;
-        _secrets.Delete(device.PairingSlot);
-        _hasToken[device.PairingSlot] = false;
-        if (!_closed && device.Equals(_active)) await ActivateAsync(device);
+        if (_devices.FirstOrDefault(d => d.Id == phoneId) is { } device) return ForgetAsyncCore(device.PairingSlot);
+        return Task.CompletedTask;
     });
+
+    /// <summary>
+    /// Deletes the token in a slot, whether or not its phone is attached (a phone sold or lost). When it is the
+    /// active phone's, closes its channel and opens a fresh one, which asks to pair. Forgetting a slot that holds
+    /// nothing does nothing, so a second Forget is not an error.
+    /// </summary>
+    public Task ForgetSlotAsync(string pairingSlot) => RunAsync(() => ForgetAsyncCore(pairingSlot));
+
+    /// <summary>The slots this PC holds a pairing token in, attached or not, sorted (empty after disposal).</summary>
+    public async Task<IReadOnlyList<string>> PairedSlotsAsync() => await RunAsync(() => Task.FromResult(_secrets.Slots())) ?? [];
+
+    private async Task ForgetAsyncCore(string slot)
+    {
+        var held = _secrets.Get(slot) is not null;
+        _secrets.Delete(slot);
+        _hasToken[slot] = false;
+        // Only a channel that was opened with this token needs reopening; an unpaired one is left alone.
+        if (held && !_closed && _active is { } active && active.PairingSlot == slot) await ActivateAsync(active);
+    }
 
     /// <summary>Remembers the choice; off stops the adb watcher (its phones leave), on starts it again.</summary>
     public Task SetAndroidEnabledAsync(bool on) => RunAsync(async () =>

@@ -591,6 +591,62 @@ public class HostSessionTests
     }
 
     [Fact]
+    public async Task ForgetSlot_PhoneNotAttached_DeletesTheToken()
+    {
+        // A phone that was sold or lost can still be forgotten.
+        await using var h = new Harness();
+        h.Secrets.Set("token.iphone.GONE", PhoneToken);
+        h.Secrets.Set(AndroidSlot, PhoneToken);
+        await h.Session.StartAsync();
+
+        Assert.Equal([AndroidSlot, "token.iphone.GONE"], await h.Session.PairedSlotsAsync());
+        await h.Session.ForgetSlotAsync("token.iphone.GONE");
+
+        Assert.Null(h.Secrets.Get("token.iphone.GONE"));
+        Assert.Equal([AndroidSlot], await h.Session.PairedSlotsAsync());
+        Assert.Empty(h.Errors);
+    }
+
+    [Fact]
+    public async Task ForgetSlot_OfTheActivePhone_ReopensItUnpaired()
+    {
+        await using var phone = new FakePhone { Token = PhoneToken };
+        await using var h = new Harness();
+        h.Secrets.Set(AndroidSlot, PhoneToken);
+        await h.Session.StartAsync();
+        var android = Android(phone);
+        h.Adb.Attach(android);
+        await h.WaitState(s => Entry(s, android) is { State: PhoneState.Paired, HasPairing: true });
+
+        await h.Session.ForgetSlotAsync(AndroidSlot);
+
+        await h.WaitState(s => Entry(s, android) is { State: PhoneState.NotPaired, HasPairing: false } && h.Clients.Count == 2);
+        Assert.Null(h.Client(1).Identity.Token);
+    }
+
+    [Fact]
+    public async Task Forget_Twice_IsNotAnError_AndChangesNothingMore()
+    {
+        await using var phone = new FakePhone { Token = PhoneToken };
+        await using var h = new Harness();
+        h.Secrets.Set(AndroidSlot, PhoneToken);
+        await h.Session.StartAsync();
+        var android = Android(phone);
+        h.Adb.Attach(android);
+        await h.WaitState(s => Entry(s, android) is { State: PhoneState.Paired, HasPairing: true });
+
+        await h.Session.ForgetAsync(android.Id);
+        await h.WaitState(s => Entry(s, android) is { State: PhoneState.NotPaired } && h.Clients.Count == 2);
+        await h.Session.ForgetAsync(android.Id);
+        await h.Session.ForgetSlotAsync(AndroidSlot);
+        await h.Session.ForgetAsync("adb:NOT-ATTACHED");
+
+        Assert.Equal(2, h.Clients.Count); // the unpaired channel was left alone
+        Assert.Equal(PhoneState.NotPaired, Entry(h.Session.State, android)!.State);
+        Assert.Empty(h.Errors);
+    }
+
+    [Fact]
     public async Task AndroidDisabled_StopsAdbWatcher()
     {
         await using var phone = new FakePhone();
