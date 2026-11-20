@@ -305,18 +305,22 @@ public class ControlClientTests
     public async Task DelayedWelcome_NoPingBeforeProof_BadProofStillSendsNothing()
     {
         var time = new FakeTimeProvider();
+        var tap = new ReadTap();
         var welcomeGate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         await using var phone = new FakePhone { Token = PhoneToken, BadProof = true, WelcomeGate = welcomeGate.Task };
-        await using var client = Client(phone, PhoneToken, time);
+        await using var client = TappedClient(phone, PhoneToken, time, tap);
 
         await client.StartAsync(CancellationToken.None);
-        await WaitUntilAsync(() => phone.Transcript.Contains("recv hello"));
+        await WaitUntilAsync(() => phone.Transcript.Contains("recv hello") && time.DueIn().Count == 1); // the heartbeat is armed
         time.Advance(TimeSpan.FromSeconds(6)); // a heartbeat tick falls inside the handshake
-        await Task.Delay(100); // give a wrongly queued ping time to reach the wire
         welcomeGate.SetResult();
 
+        // The client handles the welcome and its bad proof, then ends: its last event is Disconnected, and once
+        // disposed its writer has finished, so whatever it wrote is on the wire before the phone sees the close.
+        await WaitUntilAsync(() => phone.LinesSent >= 1 && tap.LinesHandled >= phone.LinesSent);
         var error = Assert.IsType<ControlException>(await DisconnectErrorAsync(client));
         Assert.Equal(ControlErrorKind.ProofFailed, error.Kind);
+        await client.DisposeAsync();
         await phone.WaitClosedAsync();
         Assert.Equal(new[] { ControlEnvelope.Hello }, phone.Received.Select(m => m.T));
     }
