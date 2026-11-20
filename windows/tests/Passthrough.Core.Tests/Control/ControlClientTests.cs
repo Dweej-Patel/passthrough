@@ -14,6 +14,13 @@ public class ControlClientTests
     private static ControlClient Client(FakePhone phone, string? token, TimeProvider? time = null) =>
         new(phone.Open, new ControlIdentity(ClientId, PcName, token), "iPhone", time ?? new FakeTimeProvider());
 
+    /// <summary>A client whose reads go through <paramref name="tap"/>, so a test can wait for it to handle what the phone sent.</summary>
+    private static ControlClient TappedClient(FakePhone phone, string? token, TimeProvider time, ReadTap tap) =>
+        new(tap.Wrap(phone.Open), new ControlIdentity(ClientId, PcName, token), "iPhone", time);
+
+    /// <summary>Waits until the client has handled every line the phone has sent so far.</summary>
+    private static Task HandledAllSentAsync(FakePhone phone, ReadTap tap) => WaitUntilAsync(() => tap.LinesHandled >= phone.LinesSent);
+
     private static async Task<ControlEvent> NextAsync(ControlClient client)
     {
         using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(10));
@@ -360,8 +367,10 @@ public class ControlClientTests
     }
 
     [Fact]
-    public async Task Silent_DisconnectsAfter20Seconds()
+    public async Task Silent_PingsEveryFiveSeconds_DisconnectsAtExactlyTwenty()
     {
+        // protocol/README.md: "Heartbeat every 5 s; the Mac gives up after 20 s of silence." Checked by behaviour
+        // against the README's numbers, not against the constants.
         var time = new FakeTimeProvider();
         await using var phone = new FakePhone { Token = PhoneToken, SilentAfterStatus = true };
         await using var client = Client(phone, PhoneToken, time);
@@ -369,8 +378,12 @@ public class ControlClientTests
         await client.StartAsync(CancellationToken.None);
         Assert.Equal(new ControlEvent.Welcomed(true), await NextAsync(client));
         Assert.IsType<ControlEvent.StatusUpdate>(await NextAsync(client));
+        Assert.Equal([TimeSpan.FromSeconds(5)], time.DueIn());
 
-        time.Advance(TimeSpan.FromSeconds(21));
+        time.Advance(TimeSpan.FromSeconds(20) - TimeSpan.FromMilliseconds(1));
+        Assert.False(client.Events.TryRead(out _)); // the beats ran inside Advance: still connected at 19.999 s
+        await WaitUntilAsync(() => phone.Received.Count(m => m.T == ControlEnvelope.Ping) == 3); // at 5, 10 and 15 s
+        time.Advance(TimeSpan.FromMilliseconds(1));
 
         Assert.IsType<TimeoutException>(await DisconnectErrorAsync(client));
     }
@@ -379,19 +392,21 @@ public class ControlClientTests
     public async Task OnlyUnknownMessages_DisconnectsAfter20Seconds()
     {
         var time = new FakeTimeProvider();
+        var tap = new ReadTap();
         await using var phone = new FakePhone { Token = PhoneToken, ChattersInsteadOfPong = true };
-        await using var client = Client(phone, PhoneToken, time);
+        await using var client = TappedClient(phone, PhoneToken, time, tap);
 
         await client.StartAsync(CancellationToken.None);
         Assert.Equal(new ControlEvent.Welcomed(true), await NextAsync(client));
         Assert.IsType<ControlEvent.StatusUpdate>(await NextAsync(client));
 
-        // Each ping is answered with a message of an unknown type, which is not an answer.
+        // Each ping is answered with a message of an unknown type, which is not an answer. The client handles each
+        // one before the clock moves on, so a client that wrongly counted it would have reset its silence by then.
         for (var i = 1; i <= 3; i++)
         {
             time.Advance(TimeSpan.FromSeconds(5));
             await WaitUntilAsync(() => phone.Transcript.Count(l => l == "sent chatter") >= i);
-            await Task.Delay(50); // let the client read it before the clock moves on
+            await HandledAllSentAsync(phone, tap);
         }
         time.Advance(TimeSpan.FromSeconds(5));
 
@@ -402,19 +417,21 @@ public class ControlClientTests
     public async Task Answering_StaysConnectedPast20Seconds()
     {
         var time = new FakeTimeProvider();
+        var tap = new ReadTap();
         await using var phone = new FakePhone { Token = PhoneToken };
-        await using var client = Client(phone, PhoneToken, time);
+        await using var client = TappedClient(phone, PhoneToken, time, tap);
 
         await client.StartAsync(CancellationToken.None);
         Assert.Equal(new ControlEvent.Welcomed(true), await NextAsync(client));
         Assert.IsType<ControlEvent.StatusUpdate>(await NextAsync(client));
 
-        // Each step lets a ping go out and its pong come back before the clock moves on.
+        // Each step lets a ping go out and the client handle its pong before the clock moves on.
         for (var i = 0; i < 6; i++)
         {
             var pongs = phone.Transcript.Count(l => l == "sent pong");
             time.Advance(TimeSpan.FromSeconds(5));
             await WaitUntilAsync(() => phone.Transcript.Count(l => l == "sent pong") > pongs);
+            await HandledAllSentAsync(phone, tap);
         }
 
         Assert.False(client.Events.Completion.IsCompleted);

@@ -17,9 +17,8 @@ public class FixtureTests
         Assert.Equal(ProtocolConstants.ControlPort, Fx.GetProperty("ports").GetProperty("control").GetInt32());
         Assert.Equal(Fx.GetProperty("pairingCodeLifetimeSeconds").GetDouble(), ProtocolConstants.PairingCodeLifetime.TotalSeconds);
         Assert.Equal(Fx.GetProperty("unauthenticatedTimeoutSeconds").GetDouble(), ProtocolConstants.UnauthenticatedTimeout.TotalSeconds);
-        Assert.Equal(5, ProtocolConstants.PingInterval.TotalSeconds);
-        Assert.Equal(20, ProtocolConstants.SilenceLimit.TotalSeconds);
-        Assert.Equal(262144, ProtocolConstants.MaxLineBytes);
+        // The heartbeat and the line cap are not in fixtures.json; they are checked by behaviour against
+        // protocol/README.md in ControlClientTests.Silent_PingsEveryFiveSeconds_DisconnectsAtExactlyTwenty and LineChannelTests.
     }
 
     [Fact]

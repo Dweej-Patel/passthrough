@@ -63,6 +63,12 @@ public class HostSessionTests
             await WaitFor(() => Clients.Count == clientsAfter);
         }
 
+        /// <summary>
+        /// Returns once every piece of work queued on the session so far has run: a timer that fired during an
+        /// <c>Advance</c> queued its work before this call, so a negative check after it is decided, not timed.
+        /// </summary>
+        public Task Settle() => Session.PairedSlotsAsync();
+
         /// <summary>Submits a code to <paramref name="device"/> as the flyout does: addressed by its id and current attachment.</summary>
         public Task<bool> Submit(PhoneDevice device, string code) =>
             Session.SubmitCodeAsync(device.Id, Entry(Session.State, device)!.Attachment, code);
@@ -286,7 +292,7 @@ public class HostSessionTests
         Assert.True(Entry(s, android)!.HasPairing);
 
         h.Time.Advance(TimeSpan.FromSeconds(10));
-        await Task.Delay(200);
+        await h.Settle();
         Assert.Single(h.Clients);
         Assert.Equal(PhoneState.Failed, Entry(h.Session.State, android)!.State);
         Assert.Equal(PhoneToken, h.Secrets.Get(AndroidSlot));
@@ -360,7 +366,7 @@ public class HostSessionTests
         gate.SetResult();
         await phone.WaitClosedAsync();
         h.Time.Advance(TimeSpan.FromSeconds(10));
-        await Task.Delay(200);
+        await h.Settle();
         Assert.Single(h.Clients);
         Assert.Empty(h.Session.State.Phones);
         Assert.Null(h.Secrets.Get(AndroidSlot));
@@ -387,7 +393,7 @@ public class HostSessionTests
         Assert.Null(Entry(h.Session.State, android)!.Status);
 
         h.Time.Advance(TimeSpan.FromSeconds(1.9));
-        await Task.Delay(200);
+        await h.Settle();
         Assert.Single(h.Clients);
 
         h.Time.Advance(TimeSpan.FromSeconds(0.1));
@@ -758,7 +764,7 @@ public class HostSessionTests
         await h.Client(0).Client.Events.Completion.WaitAsync(TimeSpan.FromSeconds(10));
         await phone.WaitClosedAsync();
         h.Time.Advance(TimeSpan.FromSeconds(10));
-        await Task.Delay(200);
+        await h.Settle();
         Assert.Single(h.Clients);
         Assert.Equal(new PhoneEntry(android, PhoneState.Failed, true, null, 0, 0, 0, "Couldn't save the pairing on this PC. Try pairing again.", false,
             Entry(h.Session.State, android)!.Attachment), Entry(h.Session.State, android));
@@ -781,7 +787,7 @@ public class HostSessionTests
         await h.Submit(android, phone.Code);
         await h.WaitState(s => Entry(s, android) is { State: PhoneState.Failed });
         h.Time.Advance(TimeSpan.FromSeconds(10));
-        await Task.Delay(200);
+        await h.Settle();
         Assert.Single(h.Clients);
 
         await h.Session.RetryAsync(android.Id);
@@ -848,7 +854,7 @@ public class HostSessionTests
         Assert.Equal("Couldn't read this PC's saved pairings or settings. Try again.", Entry(s, android)!.Message);
         Assert.Contains(h.Errors, e => e is IOException);
         h.Time.Advance(TimeSpan.FromSeconds(60));
-        await Task.Delay(200);
+        await h.Settle();
         Assert.Empty(h.Clients);
         Assert.Equal(PhoneState.Failed, Entry(h.Session.State, android)!.State);
         secrets.Healed = true;

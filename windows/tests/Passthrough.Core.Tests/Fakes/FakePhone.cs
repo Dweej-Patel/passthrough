@@ -132,6 +132,12 @@ public sealed class FakePhone : IAsyncDisposable
         get { lock (_received) return [.. _received]; }
     }
 
+    /// <summary>Envelopes this phone has sent or is sending (each is one line; counted before it is written).</summary>
+    public int LinesSent
+    {
+        get { lock (_received) return _transcript.Count(l => l.StartsWith("sent ", StringComparison.Ordinal)); }
+    }
+
     /// <summary>"recv hello", "sent welcome", ... in the order they happened.</summary>
     public IReadOnlyList<string> Transcript
     {
