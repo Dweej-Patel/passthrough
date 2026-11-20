@@ -43,7 +43,10 @@ public sealed class ControlClient(
     private bool _settled;
     /// <summary>The phone proved the pairing (or paired here).</summary>
     private bool _authenticated;
-    /// <summary>A <c>pair</c> has been written and is unanswered: the one time a <c>paired</c> counts.</summary>
+    /// <summary>
+    /// A <c>pair</c> is out and unanswered: the one time a <c>paired</c> counts. Set under the lock as the pair is
+    /// queued (the reader decides under the same lock); cleared by its answer (paired or error) and on disconnect.
+    /// </summary>
     private bool _pairing;
     /// <summary>A code entered before the phone's welcome; sent once it arrives.</summary>
     private string? _pendingCode;
@@ -189,12 +192,7 @@ public sealed class ControlClient(
         try
         {
             await foreach (var m in _outgoing.Reader.ReadAllAsync(_stop.Token).ConfigureAwait(false))
-            {
                 await channel.WriteAsync(m, _stop.Token).ConfigureAwait(false);
-                // Only a pair that is on the wire can be answered: a paired read before this point is not ours.
-                if (m.T == ControlEnvelope.Pair)
-                    lock (_gate) _pairing = true;
-            }
         }
         catch (Exception e)
         {
@@ -304,6 +302,7 @@ public sealed class ControlClient(
 
     private void SendPair(string code)
     {
+        _pairing = true;
         Send(new ControlEnvelope(ControlEnvelope.Pair) { ClientID = identity.ClientId, Name = identity.Name, Code = code });
     }
 
@@ -320,6 +319,7 @@ public sealed class ControlClient(
         if (_closed) return;
         Emit(new ControlEvent.Disconnected(error));
         _closed = true;
+        _pairing = false;
         _events.Writer.TryComplete();
         _outgoing.Writer.TryComplete();
         _heartbeat?.Dispose();

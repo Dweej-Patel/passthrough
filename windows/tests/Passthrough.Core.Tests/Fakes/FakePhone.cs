@@ -86,6 +86,12 @@ public sealed class FakePhone : IAsyncDisposable
     /// <summary>Close right after <see cref="GarbageAfterHello"/> instead of holding the connection open.</summary>
     public bool CloseAfterGarbage { get; init; }
 
+    /// <summary>
+    /// After answering a wrong code with <c>bad_code</c>, also send a <c>paired</c> carrying this token, then another
+    /// <c>error bad_code</c> as a marker that the PC has read it.
+    /// </summary>
+    public string? PairedAfterErrorToken { get; init; }
+
     /// <summary>Wrong guesses against the current code from earlier connections (the tenth withdraws it).</summary>
     public int PriorWrongGuesses { get; init; }
 
@@ -213,6 +219,11 @@ public sealed class FakePhone : IAsyncDisposable
                     else
                     {
                         await SendAsync(s, new ControlEnvelope(ControlEnvelope.Error) { Reason = PairingFailure.BadCode.ToWire() });
+                        if (PairedAfterErrorToken is not null)
+                        {
+                            await SendAsync(s, new ControlEnvelope(ControlEnvelope.Paired) { Token = PairedAfterErrorToken });
+                            await SendAsync(s, new ControlEnvelope(ControlEnvelope.Error) { Reason = PairingFailure.BadCode.ToWire() });
+                        }
                     }
                     break;
                 case ControlEnvelope.Ping:

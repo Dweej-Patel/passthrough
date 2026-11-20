@@ -159,25 +159,51 @@ public class ControlClientTests
     }
 
     [Fact]
-    public async Task UnsolicitedPaired_BeforeOurPairIsWritten_Ignored()
+    public async Task UnsolicitedPaired_NoPairSubmitted_Ignored()
     {
-        // The code is entered before the welcome, so the pair is queued the moment the welcome is read; its write
-        // is held off the wire while the phone plants a paired (then a bad_code marker) right behind the welcome.
-        var welcomeGate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-        await using var phone = new FakePhone { WelcomeGate = welcomeGate.Task, UnsolicitedPairedToken = "planted-token", IssuedToken = "real-token" };
-        GatedStream? gated = null;
-        await using var client = new ControlClient(
-            async ct => gated = new GatedStream(await phone.Open(ct), b => b.Span.IndexOf("\"t\":\"pair\""u8) >= 0),
-            new ControlIdentity(ClientId, PcName, null), "iPhone", new FakeTimeProvider());
+        // The phone plants a paired right behind its welcome, then a bad_code marker: by the time the marker is
+        // reported the planted paired has been read, and no pair was ever submitted.
+        await using var phone = new FakePhone { UnsolicitedPairedToken = "planted-token" };
+        await using var client = Client(phone, token: null);
 
         await client.StartAsync(CancellationToken.None);
-        await client.SubmitCodeAsync("042917");
-        welcomeGate.SetResult();
 
         Assert.Equal(new ControlEvent.Welcomed(false), await NextAsync(client));
-        Assert.Equal(new ControlEvent.PairingFailed(PairingFailure.BadCode), await NextAsync(client)); // the planted paired was read and ignored
-        gated!.Release();
-        Assert.Equal(new ControlEvent.PairedWith("real-token"), await NextAsync(client));
+        Assert.Equal(new ControlEvent.PairingFailed(PairingFailure.BadCode), await NextAsync(client));
+        await client.DisposeAsync();
+        Assert.Equal([new ControlEvent.Disconnected(null)], await RestAsync(client));
+    }
+
+    [Fact]
+    public async Task ImmediatePairedAnswer_AlwaysAccepted()
+    {
+        // The fake answers pair the moment it reads it: the answer must never be lost to a race with the writer.
+        for (var i = 0; i < 50; i++)
+        {
+            await using var phone = new FakePhone { IssuedToken = "real-token" };
+            await using var client = Client(phone, token: null);
+
+            await client.StartAsync(CancellationToken.None);
+            Assert.Equal(new ControlEvent.Welcomed(false), await NextAsync(client));
+            await client.SubmitCodeAsync("042917");
+
+            Assert.Equal(new ControlEvent.PairedWith("real-token"), await NextAsync(client));
+        }
+    }
+
+    [Fact]
+    public async Task PairedAfterError_Ignored()
+    {
+        // A wrong code is answered bad_code, then a paired nobody asked for, then a bad_code marker.
+        await using var phone = new FakePhone { PairedAfterErrorToken = "planted-token" };
+        await using var client = Client(phone, token: null);
+
+        await client.StartAsync(CancellationToken.None);
+        Assert.Equal(new ControlEvent.Welcomed(false), await NextAsync(client));
+        await client.SubmitCodeAsync("000000");
+
+        Assert.Equal(new ControlEvent.PairingFailed(PairingFailure.BadCode), await NextAsync(client));
+        Assert.Equal(new ControlEvent.PairingFailed(PairingFailure.BadCode), await NextAsync(client)); // the marker: the paired between was ignored
     }
 
     [Fact]
