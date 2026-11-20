@@ -2,32 +2,97 @@ using System.Globalization;
 using System.Numerics;
 using System.Text;
 using System.Xml;
-using System.Xml.Linq;
 
 namespace Passthrough.Core.Transport;
 
 /// <summary>
-/// Minimal XML property list codec: dict, string, integer (long), real (double), true/false, data (byte[]), array (List of
-/// object). Other elements, and integers beyond <see cref="long"/>, are left out when decoding.
+/// Minimal XML property list codec: dict, string, integer (long), real (double, decode only), true/false, data
+/// (byte[]), array (List of object). Encodes byte for byte as Apple's PropertyListSerialization does in XML format
+/// (what USBMuxClient.swift and Apple's own usbmuxd clients send). Other elements, and integers beyond
+/// <see cref="long"/>, are left out when decoding.
 /// </summary>
 public static class Plist
 {
     /// <summary>The deepest nesting of containers read (the root dict is level 1); usbmuxd's messages use three.</summary>
     public const int MaxDepth = 32;
 
-    public static byte[] Encode(IDictionary<string, object> dict)
-    {
-        var root = new XElement("plist", new XAttribute("version", "1.0"), EncodeDict(dict));
-        var doc = new XDocument(new XDeclaration("1.0", "UTF-8", null), root);
-        using var ms = new MemoryStream();
-        using (var w = XmlWriter.Create(ms, new XmlWriterSettings { Encoding = new UTF8Encoding(false), Indent = false }))
-            doc.Save(w);
-        return ms.ToArray();
-    }
+    private const string Header =
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n" +
+        "<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n" +
+        "<plist version=\"1.0\">\n";
 
     /// <summary>
-    /// Reads a plist whose top value is a dict. Streams through the XML (no document tree), so a deeply nested packet
-    /// is refused at <see cref="MaxDepth"/> without being built first.
+    /// CoreFoundation's XML layout: one element per line, indented with tabs; dict keys in ordinal (UTF-16) order;
+    /// empty containers as <c>&lt;array/&gt;</c>; only <c>&amp;</c>, <c>&lt;</c> and <c>&gt;</c> escaped; data as
+    /// base64 lines indented with at most eight tabs, each line 76 − 8 × tabs characters.
+    /// </summary>
+    public static byte[] Encode(IDictionary<string, object> dict)
+    {
+        var sb = new StringBuilder(Header);
+        AppendValue(sb, dict, 0);
+        sb.Append("</plist>\n");
+        return new UTF8Encoding(false).GetBytes(sb.ToString());
+    }
+
+    private static void AppendValue(StringBuilder sb, object value, int indent)
+    {
+        sb.Append('\t', indent);
+        switch (value)
+        {
+            case string s:
+                sb.Append("<string>").Append(Escape(s)).Append("</string>\n");
+                break;
+            case bool b:
+                sb.Append(b ? "<true/>\n" : "<false/>\n");
+                break;
+            case int or long or short or byte or uint or ushort:
+                sb.Append("<integer>").Append(Convert.ToInt64(value, CultureInfo.InvariantCulture).ToString(CultureInfo.InvariantCulture)).Append("</integer>\n");
+                break;
+            case byte[] d:
+                sb.Append("<data>\n");
+                var tabs = Math.Min(indent, 8);
+                var width = 76 - 8 * tabs;
+                var text = Convert.ToBase64String(d);
+                for (var i = 0; i < text.Length; i += width)
+                    sb.Append('\t', tabs).Append(text, i, Math.Min(width, text.Length - i)).Append('\n');
+                sb.Append('\t', indent).Append("</data>\n");
+                break;
+            case IDictionary<string, object> d:
+                if (d.Count == 0)
+                {
+                    sb.Append("<dict/>\n");
+                    break;
+                }
+                sb.Append("<dict>\n");
+                foreach (var key in d.Keys.Order(StringComparer.Ordinal))
+                {
+                    sb.Append('\t', indent + 1).Append("<key>").Append(Escape(key)).Append("</key>\n");
+                    AppendValue(sb, d[key], indent + 1);
+                }
+                sb.Append('\t', indent).Append("</dict>\n");
+                break;
+            case IEnumerable<object> a:
+                var items = a.ToList();
+                if (items.Count == 0)
+                {
+                    sb.Append("<array/>\n");
+                    break;
+                }
+                sb.Append("<array>\n");
+                foreach (var item in items) AppendValue(sb, item, indent + 1);
+                sb.Append('\t', indent).Append("</array>\n");
+                break;
+            default:
+                throw new ArgumentException($"Unsupported plist value type {value.GetType()}");
+        }
+    }
+
+    private static string Escape(string s) => s.Replace("&", "&amp;").Replace("<", "&lt;").Replace(">", "&gt;");
+
+    /// <summary>
+    /// Reads a plist whose top value is a dict, and nothing after it. Streams through the XML (no document tree), so a
+    /// deeply nested packet is refused at <see cref="MaxDepth"/> without being built first. Anything malformed is a
+    /// <see cref="FormatException"/>.
     /// </summary>
     public static Dictionary<string, object> Decode(ReadOnlySpan<byte> xml)
     {
@@ -40,38 +105,32 @@ public static class Plist
             IgnoreProcessingInstructions = true,
             IgnoreWhitespace = true,
         };
-        using var reader = XmlReader.Create(ms, settings);
-        if (reader.MoveToContent() != XmlNodeType.Element || reader.IsEmptyElement) throw new FormatException("Empty plist");
-        reader.Read(); // into <plist>
-        while (reader.NodeType != XmlNodeType.Element)
+        try
         {
-            if (reader.NodeType is XmlNodeType.EndElement or XmlNodeType.None) throw new FormatException("Empty plist");
-            reader.Read();
+            using var reader = XmlReader.Create(ms, settings);
+            if (reader.MoveToContent() != XmlNodeType.Element || reader.IsEmptyElement) throw new FormatException("Empty plist");
+            reader.Read(); // into <plist>
+            while (reader.NodeType != XmlNodeType.Element)
+            {
+                if (reader.NodeType is XmlNodeType.EndElement or XmlNodeType.None) throw new FormatException("Empty plist");
+                reader.Read();
+            }
+            var top = DecodeValue(reader, 1) as Dictionary<string, object> ?? throw new FormatException("Plist root is not a dict");
+            // Then the root's end tag, and the end of the input: no second value, no second root, no trailing text.
+            while (reader.NodeType is not (XmlNodeType.EndElement or XmlNodeType.Element or XmlNodeType.None)) reader.Read();
+            if (reader.NodeType != XmlNodeType.EndElement) throw new FormatException("Plist has more than one top value");
+            while (reader.Read())
+            {
+                if (reader.NodeType is not (XmlNodeType.Whitespace or XmlNodeType.Comment or XmlNodeType.ProcessingInstruction))
+                    throw new FormatException("Plist has something after its end");
+            }
+            return top;
         }
-        return DecodeValue(reader, 1) as Dictionary<string, object> ?? throw new FormatException("Plist root is not a dict");
-    }
-
-    private static XElement EncodeDict(IDictionary<string, object> dict)
-    {
-        var e = new XElement("dict");
-        foreach (var (k, v) in dict)
+        catch (XmlException e)
         {
-            e.Add(new XElement("key", k));
-            e.Add(EncodeValue(v));
+            throw new FormatException("Plist is not well-formed XML", e);
         }
-        return e;
     }
-
-    private static XElement EncodeValue(object value) => value switch
-    {
-        string s => new XElement("string", s),
-        bool b => new XElement(b ? "true" : "false"),
-        int or long or short or byte or uint or ushort => new XElement("integer", Convert.ToInt64(value, CultureInfo.InvariantCulture).ToString(CultureInfo.InvariantCulture)),
-        byte[] d => new XElement("data", Convert.ToBase64String(d)),
-        IDictionary<string, object> d => EncodeDict(d),
-        IEnumerable<object> a => new XElement("array", a.Select(EncodeValue)),
-        _ => throw new ArgumentException($"Unsupported plist value type {value.GetType()}"),
-    };
 
     /// <summary>
     /// One value, from its start tag to just past its end tag; <see cref="Skipped"/> for an element this codec does not
@@ -85,8 +144,8 @@ public static class Plist
             case "string": return reader.ReadElementContentAsString();
             case "integer": return DecodeInteger(reader.ReadElementContentAsString().Trim());
             case "real": return double.Parse(reader.ReadElementContentAsString().Trim(), CultureInfo.InvariantCulture);
-            case "true": reader.Skip(); return true;
-            case "false": reader.Skip(); return false;
+            case "true": SkipElement(reader, depth); return true;
+            case "false": SkipElement(reader, depth); return false;
             case "data": return Convert.FromBase64String(reader.ReadElementContentAsString());
             case "array":
                 CheckDepth(depth);
@@ -116,8 +175,44 @@ public static class Plist
                 if (key is not null) throw new FormatException("Dict has a key without a value");
                 return dict;
             default:
-                reader.Skip();
+                SkipElement(reader, depth);
                 return Skipped;
+        }
+    }
+
+    /// <summary>
+    /// Moves past an element this codec does not read, from its start tag to just past its end tag, without recursion.
+    /// Nothing nested in it may sit deeper than <see cref="MaxDepth"/>, the limit a container read here obeys (the
+    /// skipped element is at <paramref name="depth"/>, its children one deeper).
+    /// </summary>
+    private static void SkipElement(XmlReader reader, int depth)
+    {
+        if (reader.IsEmptyElement)
+        {
+            reader.Read();
+            return;
+        }
+        reader.Read();
+        var level = 1; // the level, below the skipped element, of the node the reader is on
+        while (true)
+        {
+            switch (reader.NodeType)
+            {
+                case XmlNodeType.Element:
+                    CheckDepth(depth + level);
+                    if (!reader.IsEmptyElement) level++;
+                    break;
+                case XmlNodeType.EndElement:
+                    if (--level == 0)
+                    {
+                        reader.Read();
+                        return;
+                    }
+                    break;
+                case XmlNodeType.None:
+                    throw new FormatException("Plist ends inside an element");
+            }
+            reader.Read();
         }
     }
 

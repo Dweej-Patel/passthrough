@@ -43,16 +43,6 @@ public class UsbMuxClientTests
         Assert.Equal(new UsbMuxEvent.Detached(3), events[1]);
     }
 
-    /// <summary>The exact Listen request body: pinned bytes, not decoded with the codec that wrote them.</summary>
-    private const string ListenBody =
-        "<?xml version=\"1.0\" encoding=\"utf-8\"?>" +
-        "<plist version=\"1.0\"><dict>" +
-        "<key>MessageType</key><string>Listen</string>" +
-        "<key>ClientVersionString</key><string>Passthrough</string>" +
-        "<key>ProgName</key><string>Passthrough</string>" +
-        "<key>kLibUSBMuxVersion</key><integer>3</integer>" +
-        "</dict></plist>";
-
     [Fact]
     public async Task Listen_SendsExactlyThisPacket()
     {
@@ -79,18 +69,20 @@ public class UsbMuxClientTests
         Assert.Equal(1u, version);
         Assert.Equal(8u, type);
         Assert.Equal(1u, tag);
-        Assert.Equal(ListenBody, Encoding.UTF8.GetString(body));
-        Assert.Equal((uint)(16 + Encoding.UTF8.GetByteCount(ListenBody)), length);
+        Assert.Equal(ApplePlists.Listen, Encoding.UTF8.GetString(body)); // what USBMuxClient.swift sends, byte for byte
+        Assert.Equal((uint)(16 + Encoding.UTF8.GetByteCount(ApplePlists.Listen)), length);
     }
 
     [Fact]
     public async Task Connect_SendsPortInNetworkOrderAndReturnsStream()
     {
         var seen = new TaskCompletionSource<Dictionary<string, object>>();
+        var raw = new TaskCompletionSource<byte[]>();
         await using var fake = new FakeUsbMuxd(async s =>
         {
-            var p = await FakeUsbMuxd.ReadPacketAsync(s);
-            seen.TrySetResult(p.Plist);
+            var p = await FakeUsbMuxd.ReadRawPacketAsync(s);
+            raw.TrySetResult(p.Body);
+            seen.TrySetResult(Plist.Decode(p.Body));
             await FakeUsbMuxd.WriteResultAsync(s, p.Tag, 0);
             var buf = new byte[2];
             await s.ReadExactlyAsync(buf);
@@ -111,6 +103,7 @@ public class UsbMuxClientTests
         Assert.Equal(3L, msg["DeviceID"]);
         // 7891 = 0x1ED3; usbmuxd wants the 16-bit byte swap, 0xD31E. (The brief said 0x931E, a typo.)
         Assert.Equal(0xD31EL, msg["PortNumber"]);
+        Assert.Equal(ApplePlists.Connect, Encoding.UTF8.GetString(await raw.Task)); // what USBMuxClient.swift sends, byte for byte
         Assert.Equal("hi", Encoding.ASCII.GetString(echo));
     }
 
@@ -279,5 +272,19 @@ public class UsbMuxClientTests
 
         var e = await Assert.ThrowsAsync<UsbMuxException>(() => DrainAsync(new UsbMuxClient(fake.Connector)));
         Assert.Equal(6, e.ResultCode);
+    }
+
+    [Fact]
+    public async Task Listen_DeeplyNestedPacket_IsRefusedAsBadData()
+    {
+        await using var fake = new FakeUsbMuxd(async s =>
+        {
+            var (_, _, _, tag, _) = await FakeUsbMuxd.ReadPacketAsync(s);
+            await FakeUsbMuxd.WriteResultAsync(s, tag, 0);
+            await FakeUsbMuxd.WriteRawPacketAsync(s, 0, PlistTests.Nested(65_000)); // one packet under the 1 MiB cap
+            await FakeUsbMuxd.HoldOpenAsync(s);
+        });
+
+        await Assert.ThrowsAsync<InvalidDataException>(() => DrainAsync(new UsbMuxClient(fake.Connector)));
     }
 }

@@ -33,33 +33,87 @@ public class PlistTests
         Assert.Equal("v", ((Dictionary<string, object>)arr[3])["k"]);
     }
 
-    [Fact]
-    public void Plist_EncodesExactlyThisXml()
+    private static Dictionary<string, object> Request(params (string Key, object Value)[] fields)
     {
-        // Pinned bytes: a change in what the encoder emits (declaration, escaping, element names, order) shows here.
+        var d = new Dictionary<string, object>();
+        foreach (var (k, v) in fields) d[k] = v;
+        // What UsbMuxClient adds to every request, after the message's own fields (insertion order must not matter).
+        d["ClientVersionString"] = "Passthrough";
+        d["ProgName"] = "Passthrough";
+        d["kLibUSBMuxVersion"] = 3L;
+        return d;
+    }
+
+    [Fact]
+    public void Plist_EncodesListenAsPropertyListSerializationDoes()
+    {
+        Assert.Equal(ApplePlists.Listen, Encoding.UTF8.GetString(Plist.Encode(Request(("MessageType", "Listen")))));
+    }
+
+    [Fact]
+    public void Plist_EncodesConnectAsPropertyListSerializationDoes()
+    {
+        Assert.Equal(ApplePlists.Connect,
+            Encoding.UTF8.GetString(Plist.Encode(Request(("MessageType", "Connect"), ("DeviceID", 3L), ("PortNumber", 0xD31EL)))));
+    }
+
+    [Fact]
+    public void Plist_EncodesEveryTypeAsPropertyListSerializationDoes()
+    {
         var dict = new Dictionary<string, object>
         {
-            ["MessageType"] = "Connect",
-            ["DeviceID"] = 3L,
-            ["PortNumber"] = 0xD31EL,
-            ["s"] = "a<b>&",
+            ["s"] = "a<b>&\"'",
             ["t"] = true,
             ["f"] = false,
             ["d"] = new byte[] { 0, 1, 255 },
-            ["a"] = new List<object> { "x", 2L },
+            ["a"] = new List<object> { "x", 2L, new Dictionary<string, object> { ["k"] = "v" }, new List<object>(), new Dictionary<string, object>() },
+            ["B"] = "upper",
+            ["_u"] = "under",
+            ["a2"] = "",
+            ["Z"] = -5L,
+            ["MessageType"] = "Connect",
+            ["DeviceID"] = 3L,
+            ["PortNumber"] = 0xD31EL,
         };
 
-        Assert.Equal(
-            "<?xml version=\"1.0\" encoding=\"utf-8\"?><plist version=\"1.0\"><dict>" +
-            "<key>MessageType</key><string>Connect</string>" +
-            "<key>DeviceID</key><integer>3</integer>" +
-            "<key>PortNumber</key><integer>54046</integer>" +
-            "<key>s</key><string>a&lt;b&gt;&amp;</string>" +
-            "<key>t</key><true /><key>f</key><false />" +
-            "<key>d</key><data>AAH/</data>" +
-            "<key>a</key><array><string>x</string><integer>2</integer></array>" +
-            "</dict></plist>",
-            Encoding.UTF8.GetString(Plist.Encode(dict)));
+        Assert.Equal(ApplePlists.AllTypes, Encoding.UTF8.GetString(Plist.Encode(dict)));
+    }
+
+    [Fact]
+    public void Plist_EncodesDataAndUnicodeAsPropertyListSerializationDoes()
+    {
+        var dict = new Dictionary<string, object>
+        {
+            ["z"] = Array.Empty<byte>(),
+            ["n"] = new Dictionary<string, object> { ["u"] = "é→😀", ["e"] = new byte[] { 1, 2, 3 } },
+            ["d"] = Enumerable.Range(0, 100).Select(i => (byte)i).ToArray(),
+        };
+
+        Assert.Equal(ApplePlists.Data, Encoding.UTF8.GetString(Plist.Encode(dict)));
+    }
+
+    [Fact]
+    public void Plist_WrapsDataByIndentAsPropertyListSerializationDoes()
+    {
+        var data = Enumerable.Range(0, 120).Select(i => (byte)i).ToArray();
+        object deep = data;
+        for (var i = 0; i < 9; i++) deep = new List<object> { deep };
+        var dict = new Dictionary<string, object> { ["l1"] = data, ["l2"] = new Dictionary<string, object> { ["x"] = data }, ["l11"] = deep };
+
+        Assert.Equal(ApplePlists.DataWrap, Encoding.UTF8.GetString(Plist.Encode(dict)));
+    }
+
+    [Fact]
+    public void Plist_AppleOutput_DecodesBack()
+    {
+        var d = Plist.Decode(Encoding.UTF8.GetBytes(ApplePlists.AllTypes));
+
+        Assert.Equal("a<b>&\"'", d["s"]);
+        Assert.Equal(new byte[] { 0, 1, 255 }, (byte[])d["d"]);
+        Assert.Equal(true, d["t"]);
+        Assert.Equal(-5L, d["Z"]);
+        Assert.Equal(5, ((List<object>)d["a"]).Count);
+        Assert.Equal(Enumerable.Range(0, 100).Select(i => (byte)i), (byte[])Plist.Decode(Encoding.UTF8.GetBytes(ApplePlists.Data))["d"]);
     }
 
     [Fact]
@@ -148,14 +202,65 @@ public class PlistTests
         Assert.True(Plist.Decode(Encoding.UTF8.GetBytes(xml)).ContainsKey("a"));
     }
 
+    /// <summary>Under usbmux's 1 MiB packet cap (less its 16-byte header), as a daemon could really send it.</summary>
+    private const int MaxBody = (1 << 20) - 16 - 1;
+
+    /// <summary>A dict holding <paramref name="depth"/> nested arrays, wrapped in <paramref name="wrapper"/> when given.</summary>
+    internal static byte[] Nested(int depth, string? wrapper = null)
+    {
+        var inner = string.Concat(Enumerable.Repeat("<array>", depth)) + string.Concat(Enumerable.Repeat("</array>", depth));
+        if (wrapper is not null) inner = $"<{wrapper}>{inner}</{wrapper}>";
+        var bytes = Encoding.UTF8.GetBytes("<plist version=\"1.0\"><dict><key>a</key>" + inner + "</dict></plist>");
+        Assert.True(bytes.Length <= MaxBody, $"{bytes.Length} bytes would not fit in one usbmux packet");
+        return bytes;
+    }
+
     [Fact]
     public void Plist_HugeNestingInOnePacket_IsRefusedWithoutExhaustingTheStack()
     {
-        // About 900 KB, under usbmux's 1 MB packet cap: deep enough to overflow the stack of a recursive decoder.
-        const int depth = 100_000;
-        var xml = "<plist version=\"1.0\"><dict><key>a</key>" + string.Concat(Enumerable.Repeat("<array>", depth)) +
-                  string.Concat(Enumerable.Repeat("</array>", depth)) + "</dict></plist>";
+        // 65,000 levels in about 975 KB: deep enough to overflow the stack of a recursive decoder.
+        Assert.Throws<FormatException>(() => Plist.Decode(Nested(65_000)));
+    }
 
+    [Theory]
+    [InlineData("date")]
+    [InlineData("uid")]
+    [InlineData("true")]
+    [InlineData("false")]
+    public void Plist_ContainersInsideASkippedElement_AreDepthLimitedToo(string wrapper)
+    {
+        Assert.Throws<FormatException>(() => Plist.Decode(Nested(40_000, wrapper)));
+    }
+
+    [Fact]
+    public void Plist_SkippedElement_NestingWithinTheLimit_IsSkipped()
+    {
+        // The skipped element sits at level 2 (inside the root dict); its containers may go down to the limit.
+        var d = Plist.Decode(Nested(Plist.MaxDepth - 2, "date"));
+
+        Assert.Empty(d);
+    }
+
+    [Fact]
+    public void Plist_SkippedElement_NestingOneBeyondTheLimit_IsRefused()
+    {
+        Assert.Throws<FormatException>(() => Plist.Decode(Nested(Plist.MaxDepth - 1, "date")));
+    }
+
+    [Theory]
+    [InlineData("<plist version=\"1.0\"><dict/></plist><plist version=\"1.0\"><dict/></plist>")] // a second root
+    [InlineData("<plist version=\"1.0\"><dict/></plist>junk")]                                     // text after the root
+    [InlineData("<plist version=\"1.0\"><dict/><dict/></plist>")]                                  // a second top value
+    [InlineData("<plist version=\"1.0\"><dict/><string>x</string></plist>")]
+    [InlineData("<plist version=\"1.0\"><dict/>")]                                                 // no </plist>
+    public void Plist_AnythingAfterTheTopDict_IsRefused(string xml)
+    {
         Assert.Throws<FormatException>(() => Plist.Decode(Encoding.UTF8.GetBytes(xml)));
+    }
+
+    [Fact]
+    public void Plist_WhitespaceAndCommentsAfterTheRoot_AreFine()
+    {
+        Assert.Empty(Plist.Decode(Encoding.UTF8.GetBytes("<plist version=\"1.0\"><dict/></plist>\n<!-- end -->\n")));
     }
 }
