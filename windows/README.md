@@ -1,9 +1,8 @@
 # Passthrough for Windows
 
 The Windows host, first stage: a tray app that finds a phone on the cable, pairs
-with it and shows its live status. It does not carry internet yet. The design,
-and the stages that follow, are in
-[docs/superpowers/specs/2026-11-19-windows-host-design.md](../docs/superpowers/specs/2026-11-19-windows-host-design.md).
+with it and shows its live status. It does not carry internet yet. The stages
+that follow are in the [roadmap](#roadmap) below.
 
 ```
 windows/
@@ -11,6 +10,19 @@ windows/
   src/Passthrough.App/           WinUI 3 tray app, unpackaged, x64
   tests/Passthrough.Core.Tests/  xUnit
 ```
+
+## Roadmap
+
+The Windows host is built in seven projects, in this order; each gets its own
+design and plan when it starts.
+
+1. **Foundation** (this stage): the solution, Core and its tests, phones over USB, pairing, the control channel, the tray app.
+2. **Remote shell from anywhere**: ConPTY sessions, the TLS listener, the built-in iroh endpoint, shell grants over the cable, session recording.
+3. **Screen**: Desktop Duplication capture, H.264/HEVC through Media Foundation, input injection, sound and microphone.
+4. **Internet through the phone**: a LocalSystem service, Wintun, hev-socks5-tunnel, routes and DNS, the SOCKS forwarder, top apps, the flow map.
+5. **Wireless link**.
+6. **VPN layer and kill switch**: WireGuard and OpenVPN, with the Windows Filtering Platform in place of pf.
+7. **The rest**: keep-awake, notifications, terminals started on the PC shown on the phone, and anything still left.
 
 ## Build
 

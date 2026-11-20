@@ -75,7 +75,7 @@ Because the phone opens every connection with its own stack, the carrier sees th
 
 ## Windows
 
-The Windows host is being built in stages (see [the design](superpowers/specs/2026-11-19-windows-host-design.md) for the list). The first stage is in `windows/`: a tray app that finds a phone on the cable, pairs with it and shows its live status.
+The Windows host is being built in stages (see [the roadmap](../windows/README.md#roadmap) for the list). The first stage is in `windows/`: a tray app that finds a phone on the cable, pairs with it and shows its live status.
 
 * **Works now:** the tray flyout lists the iPhone, iPad or Android phone on the cable. Type the six-digit code the phone shows to pair. A paired phone's status (name, carrier, radio, battery, connection counts) stays live while the cable is in, and the PC reconnects by itself. With more than one phone attached, one is active and the others can be made active from the flyout. Settings can forget a phone's pairing, turn Android support off and start the app at login. An iPad is recognised but cannot pair yet.
 * **Not yet:** internet through the phone, remote shell, screen, the wireless link, the VPN layer and keep-awake. The phones are unchanged; they treat the PC as another host.
