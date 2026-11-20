@@ -30,10 +30,23 @@ public sealed partial class JsonSettingsStore : ISettingsStore
     private readonly Lock _gate = new();
     private readonly Dictionary<string, string> _values;
     private readonly bool _readOnly;
+    private readonly Action<TimeSpan> _wait;
 
-    /// <summary>Reads the file. A file that exists but cannot be read throws, so startup can say so.</summary>
-    public JsonSettingsStore(IFileSystem files, string path)
+    /// <summary>
+    /// Reads the file. A file that exists but cannot be read throws, so startup can say so; so does a <c>.bad</c> copy
+    /// that exists but stays unreadable while the file is missing.
+    /// </summary>
+    /// <summary>How many times a <c>.bad</c> copy that exists but can't be read is tried (a sharing violation is often brief).</summary>
+    public const int BackupReadAttempts = 3;
+
+    /// <summary>The pause between those tries.</summary>
+    public static readonly TimeSpan BackupRetryDelay = TimeSpan.FromMilliseconds(200);
+
+    /// <param name="wait">Pauses between reads of an unreadable <c>.bad</c> copy (default: <see cref="Thread.Sleep(TimeSpan)"/>); tests pass their own.</param>
+    /// <exception cref="SettingsBackupUnreadableException">The settings are missing and their <c>.bad</c> copy exists but stays unreadable.</exception>
+    public JsonSettingsStore(IFileSystem files, string path, Action<TimeSpan>? wait = null)
     {
+        _wait = wait ?? Thread.Sleep;
         _files = files;
         _path = path;
         _values = [];
@@ -109,11 +122,24 @@ public sealed partial class JsonSettingsStore : ISettingsStore
         catch (Exception e) when (e is IOException or UnauthorizedAccessException) { } // the .bad copy is still there
     }
 
-    /// <summary>What can be recovered from the .bad copy; nothing when there is none or it can't be read (only settings.json must be readable).</summary>
+    /// <summary>
+    /// What can be recovered from the .bad copy; nothing when there is none. One that exists but can't be read is tried
+    /// <see cref="BackupReadAttempts"/> times; then <see cref="SettingsBackupUnreadableException"/>, never an empty start
+    /// that would give the PC a new client id.
+    /// </summary>
     private Dictionary<string, string> ReadBad(string bad)
     {
-        try { return _files.FileExists(bad) ? Salvage(_files.ReadAllText(bad)) : []; }
-        catch (Exception e) when (e is IOException or UnauthorizedAccessException) { return []; }
+        if (!_files.FileExists(bad)) return [];
+        for (var attempt = 1; ; attempt++)
+        {
+            try { return Salvage(_files.ReadAllText(bad)); }
+            catch (Exception e) when (e is IOException or UnauthorizedAccessException)
+            {
+                if (e is FileNotFoundException or DirectoryNotFoundException) return []; // gone meanwhile: missing, not unreadable
+                if (attempt >= BackupReadAttempts) throw new SettingsBackupUnreadableException(bad, e);
+                _wait(BackupRetryDelay);
+            }
+        }
     }
 
     /// <summary>What can be kept from a damaged file: the client id, when one is in its text.</summary>

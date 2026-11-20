@@ -189,18 +189,60 @@ public class JsonSettingsStoreTests
     }
 
     [Fact]
-    public void BadCopy_ThatCannotBeRead_AtTheNextLaunch_StartsEmptyWithoutThrowing()
+    public void BadCopy_ThatStaysUnreadable_FailsStartupVisibly_AfterAFewTries_AndTouchesNothing()
+    {
+        var fs = new MemoryFileSystem();
+        var bad = $$"""{"clientID":"{{ClientId}}",""";
+        fs.Files[Path + ".bad"] = bad;
+        var reads = 0;
+        fs.Fail = (op, path) => op == "read" && path == Path + ".bad" && ++reads > 0 ? new IOException("The process cannot access the file because it is being used by another process.") : null;
+        var waits = new List<TimeSpan>();
+
+        var e = Assert.Throws<SettingsBackupUnreadableException>(() => new JsonSettingsStore(fs, Path, waits.Add));
+
+        Assert.Equal(Path + ".bad", e.Path);
+        Assert.Equal($"Passthrough couldn't read its saved settings backup at {Path}.bad. Close anything using it and start Passthrough again.", e.Message);
+        Assert.IsType<IOException>(e.InnerException);
+        Assert.Equal(JsonSettingsStore.BackupReadAttempts, reads);
+        Assert.Equal(Enumerable.Repeat(JsonSettingsStore.BackupRetryDelay, JsonSettingsStore.BackupReadAttempts - 1), waits);
+        Assert.False(fs.FileExists(Path)); // no fresh settings that would mint a new client id
+        Assert.Equal(bad, fs.Files[Path + ".bad"]);
+    }
+
+    [Fact]
+    public void BadCopy_ReadableOnARetry_KeepsTheIdentity()
     {
         var fs = new MemoryFileSystem();
         fs.Files[Path + ".bad"] = $$"""{"clientID":"{{ClientId}}",""";
-        fs.Fail = (op, path) => op == "read" && path == Path + ".bad" ? new IOException("The process cannot access the file") : null;
+        var reads = 0;
+        fs.Fail = (op, path) => op == "read" && path == Path + ".bad" && ++reads < JsonSettingsStore.BackupReadAttempts ? new IOException("in use") : null;
 
-        var store = new JsonSettingsStore(fs, Path);
+        var store = new JsonSettingsStore(fs, Path, _ => { });
 
+        Assert.Equal(ClientId, store.Get("clientID"));
+        Assert.Equal(ClientId, JsonSerializer.Deserialize<Dictionary<string, string>>(fs.Files[Path])!["clientID"]);
+    }
+
+    [Fact]
+    public void BadCopy_UnreadableAtOneLaunch_TheIdentityIsKeptOnceItIsReadable()
+    {
+        var fs = new MemoryFileSystem();
+        fs.Files[Path + ".bad"] = $$"""{"clientID":"{{ClientId}}",""";
+        fs.Fail = (op, path) => op == "read" && path == Path + ".bad" ? new UnauthorizedAccessException("denied") : null;
+        Assert.Throws<SettingsBackupUnreadableException>(() => new JsonSettingsStore(fs, Path, _ => { }));
+
+        fs.Fail = (_, _) => null; // whatever held it let go
+        var store = new JsonSettingsStore(fs, Path, _ => { });
+
+        Assert.Equal((ClientId, JsonSettingsStore.DamagedNotice), (store.Get("clientID"), store.Notice));
+    }
+
+    [Fact]
+    public void NoSettingsAndNoBadCopy_StartsEmpty_WithoutWaiting()
+    {
+        var waits = new List<TimeSpan>();
+        var store = new JsonSettingsStore(new MemoryFileSystem(), Path, waits.Add);
         Assert.Null(store.Get("clientID"));
-        Assert.Null(store.Notice);
-        Assert.False(fs.FileExists(Path));
-        store.Set("androidEnabled", "true"); // settings still work
-        Assert.Equal("true", new JsonSettingsStore(fs, Path).Get("androidEnabled"));
+        Assert.Empty(waits);
     }
 }
