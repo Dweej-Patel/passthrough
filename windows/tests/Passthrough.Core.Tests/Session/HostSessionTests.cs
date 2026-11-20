@@ -19,18 +19,21 @@ public class HostSessionTests
     {
         public readonly FakeDeviceWatcher Usb = new(WatchTransport.UsbMux);
         public readonly FakeDeviceWatcher Adb = new(WatchTransport.Adb);
-        public readonly MemorySecretStore Secrets = new();
+        public readonly ISecretStore Secrets;
         public readonly MemorySettingsStore Settings;
         public readonly FakeTimeProvider Time = new();
         public readonly ConcurrentQueue<(PhoneDevice Device, ControlIdentity Identity, ControlClient Client)> Clients = new();
         public readonly ConcurrentQueue<SessionState> History = new();
+        public readonly ConcurrentQueue<Exception> Errors = new();
         public readonly HostSession Session;
 
-        public Harness(MemorySettingsStore? settings = null)
+        public Harness(MemorySettingsStore? settings = null, ISecretStore? secrets = null)
         {
             Settings = settings ?? new MemorySettingsStore();
+            Secrets = secrets ?? new MemorySecretStore();
             Session = new HostSession(new DeviceDirectory([Usb, Adb]), Secrets, Settings, "TEST-PC", Factory, Time);
             Session.StateChanged += History.Enqueue;
+            Session.Error += Errors.Enqueue;
         }
 
         private ControlClient Factory(PhoneDevice device, ControlIdentity identity)
@@ -49,6 +52,23 @@ public class HostSessionTests
         }
 
         public ValueTask DisposeAsync() => Session.DisposeAsync();
+    }
+
+    /// <summary>A secret store that fails: on every Set, or on Get for one slot.</summary>
+    private sealed class FailingSecretStore(bool failSet = false, string? failGetSlot = null) : ISecretStore
+    {
+        private readonly MemorySecretStore _inner = new();
+
+        public string? Get(string slot) =>
+            slot == failGetSlot ? throw new IOException("the credential store is unavailable") : _inner.Get(slot);
+
+        public void Set(string slot, string value)
+        {
+            if (failSet) throw new IOException("the credential store is unavailable");
+            _inner.Set(slot, value);
+        }
+
+        public void Delete(string slot) => _inner.Delete(slot);
     }
 
     private static PhoneDevice Android(FakePhone phone) =>
@@ -312,6 +332,65 @@ public class HostSessionTests
 
             Assert.Equal("true", settings.Get("androidEnabled"));
             Assert.Equal(1, h.Adb.Starts);
+        }
+    }
+
+    [Fact]
+    public async Task TokenSaveFailure_FailsAndHoldsOff()
+    {
+        await using var phone = new FakePhone { IssuedToken = PhoneToken };
+        await using var h = new Harness(secrets: new FailingSecretStore(failSet: true));
+        await h.Session.StartAsync();
+        var android = Android(phone);
+        h.Adb.Attach(android);
+        await h.WaitState(s => Entry(s, android) is { State: PhoneState.NotPaired });
+
+        await h.Session.SubmitCodeAsync(phone.Code);
+
+        var s = await h.WaitState(s => Entry(s, android) is { State: PhoneState.Failed });
+        Assert.Equal("Couldn't save the pairing on this PC. Try pairing again.", Entry(s, android)!.Message);
+        Assert.IsType<IOException>(Assert.Single(h.Errors));
+        // The channel is closed: the status the phone sends after pairing never lands, and nothing reconnects.
+        await h.Client(0).Client.Events.Completion.WaitAsync(TimeSpan.FromSeconds(10));
+        await phone.WaitClosedAsync();
+        h.Time.Advance(TimeSpan.FromSeconds(10));
+        await Task.Delay(200);
+        Assert.Single(h.Clients);
+        Assert.Equal(new PhoneEntry(android, PhoneState.Failed, true, null, 0, 0, 0, "Couldn't save the pairing on this PC. Try pairing again."),
+            Entry(h.Session.State, android));
+        Assert.DoesNotContain(h.History, st => Entry(st, android) is { State: PhoneState.Paired });
+
+        // Made active again: one more try.
+        await h.Session.MakeActiveAsync(android.Id);
+        await h.WaitState(s => Entry(s, android) is { State: PhoneState.NotPaired } && h.Clients.Count == 2);
+    }
+
+    [Fact]
+    public async Task SlotReadFailure_CountsAsNotPaired_LoopSurvives()
+    {
+        await using var androidPhone = new FakePhone { IssuedToken = PhoneToken };
+        await using var iPhonePhone = new FakePhone();
+        var h = new Harness(secrets: new FailingSecretStore(failGetSlot: "token.iphone.00008110-AAAA"));
+        try
+        {
+            await h.Session.StartAsync();
+            var android = Android(androidPhone);
+            var iPhone = IPhone(iPhonePhone);
+            h.Adb.Attach(android);
+            h.Usb.Attach(iPhone);
+
+            var s = await h.WaitState(s => Entry(s, android) is { IsActive: true, State: PhoneState.NotPaired } && Entry(s, iPhone) is not null);
+            Assert.Equal(PhoneState.NotPaired, Entry(s, iPhone)!.State);
+            Assert.NotEmpty(h.Errors);
+
+            // Later calls still run and complete.
+            await h.Session.SubmitCodeAsync(androidPhone.Code).WaitAsync(TimeSpan.FromSeconds(10));
+            await h.WaitState(s => Entry(s, android) is { State: PhoneState.Paired, Status: not null });
+            await h.Session.SetAndroidEnabledAsync(true).WaitAsync(TimeSpan.FromSeconds(10));
+        }
+        finally
+        {
+            await h.DisposeAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(10));
         }
     }
 }

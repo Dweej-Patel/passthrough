@@ -23,6 +23,7 @@ public sealed class HostSession : IAsyncDisposable
 
     private const string AndroidEnabledKey = "androidEnabled";
     private const string IPadMessage = "Pairs once Remote shell is available.";
+    private const string SaveFailedMessage = "Couldn't save the pairing on this PC. Try pairing again.";
 
     private readonly DeviceDirectory _directory;
     private readonly ISecretStore _secrets;
@@ -50,7 +51,7 @@ public sealed class HostSession : IAsyncDisposable
     private long _tx;
     private int _connections;
     private string? _message;
-    /// <summary>The active phone's channel failed for good (failed proof, other version): no reconnect until it is re-attached or made active.</summary>
+    /// <summary>The active phone's channel failed for good (failed proof, other version, token not saved): no reconnect until it is re-attached or made active.</summary>
     private bool _held;
     private ITimer? _reconnect;
     private long _reconnectSeq;
@@ -78,6 +79,12 @@ public sealed class HostSession : IAsyncDisposable
     /// session call to finish (that call waits for the loop); marshal to the UI thread and return.
     /// </summary>
     public event Action<SessionState>? StateChanged;
+
+    /// <summary>
+    /// Fires, on the session's background loop, with an exception the session absorbed so it could keep going
+    /// (a store or client factory failing in background work, a slot that could not be read). For logging.
+    /// </summary>
+    public event Action<Exception>? Error;
 
     private bool AndroidEnabled => _settings.Get(AndroidEnabledKey) != "false";
 
@@ -148,9 +155,11 @@ public sealed class HostSession : IAsyncDisposable
             Exception? error = null;
             try { await work(); }
             catch (Exception e) { error = e; } // a failing store or factory must not stop the loop
-            Publish();
+            try { Publish(); }
+            catch (Exception e) { ReportError(e); } // nor a failing snapshot: every item still completes
             if (error is null) done?.TrySetResult();
-            else done?.TrySetException(error);
+            else if (done is not null) done.TrySetException(error); // the caller sees it
+            else ReportError(error); // nobody waits for background work: report it
         }
     }
 
@@ -233,7 +242,22 @@ public sealed class HostSession : IAsyncDisposable
                 if (_activeState != PhoneState.Pairing) _activeState = PhoneState.NotPaired; // a code may already be on its way
                 break;
             case ControlEvent.PairedWith p:
-                _secrets.Set(_active!.PairingSlot, p.Token);
+                try
+                {
+                    _secrets.Set(_active!.PairingSlot, p.Token);
+                }
+                catch (Exception error)
+                {
+                    // Unsaved, the pairing is lost on the next channel: say so, and stop here, as for a failed proof.
+                    ReportError(error);
+                    _client = null; // its status and disconnect no longer count
+                    ClearStatus();
+                    _activeState = PhoneState.Failed;
+                    _message = SaveFailedMessage;
+                    _held = true;
+                    await client.DisposeAsync();
+                    break;
+                }
                 _activeState = PhoneState.Paired;
                 _message = null;
                 break;
@@ -309,8 +333,24 @@ public sealed class HostSession : IAsyncDisposable
     {
         if (!d.CanRoute) return new PhoneEntry(d, PhoneState.RemoteOnlyLater, false, null, 0, 0, 0, IPadMessage);
         if (d.Equals(_active)) return new PhoneEntry(d, _activeState, true, _status, _rx, _tx, _connections, _message);
-        var paired = _secrets.Get(d.PairingSlot) is not null;
-        return new PhoneEntry(d, paired ? PhoneState.Paired : PhoneState.NotPaired, false, null, 0, 0, 0, null);
+        return new PhoneEntry(d, HasToken(d) ? PhoneState.Paired : PhoneState.NotPaired, false, null, 0, 0, 0, null);
+    }
+
+    /// <summary>Whether the phone's slot holds a token; a slot that cannot be read counts as empty.</summary>
+    private bool HasToken(PhoneDevice d)
+    {
+        try { return _secrets.Get(d.PairingSlot) is not null; }
+        catch (Exception e)
+        {
+            ReportError(e);
+            return false;
+        }
+    }
+
+    private void ReportError(Exception e)
+    {
+        try { Error?.Invoke(e); }
+        catch (Exception) { } // a failing logger must not stop the session
     }
 
     private WatchStatus WatcherStatus(WatchTransport t) => _directory.Watcher(t)?.Status ?? new WatchStatus(WatchState.Idle);
