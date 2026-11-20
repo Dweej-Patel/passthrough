@@ -11,7 +11,7 @@ public sealed class UsbMuxClient(StreamConnector connect, TimeSpan? connectTimeo
     private const int HeaderSize = 16;
     private const int MaxPacket = 1 << 20;
 
-    public async IAsyncEnumerable<UsbMuxEvent> ListenAsync([EnumeratorCancellation] CancellationToken ct)
+    public async IAsyncEnumerable<UsbMuxEvent> ListenAsync([EnumeratorCancellation] CancellationToken ct, Action? onListening = null)
     {
         var usbDevices = new HashSet<int>();
         var stream = await connect(ct);
@@ -27,6 +27,7 @@ public sealed class UsbMuxClient(StreamConnector connect, TimeSpan? connectTimeo
                 {
                     case "Result":
                         CheckResult(message);
+                        onListening?.Invoke();
                         break;
                     case "Attached" when message.GetValueOrDefault("DeviceID") is long id
                                          && message.GetValueOrDefault("Properties") is Dictionary<string, object> props:
