@@ -32,16 +32,17 @@ public sealed partial class JsonSettingsStore : ISettingsStore
     private readonly bool _readOnly;
     private readonly Action<TimeSpan> _wait;
 
-    /// <summary>
-    /// Reads the file. A file that exists but cannot be read throws, so startup can say so; so does a <c>.bad</c> copy
-    /// that exists but stays unreadable while the file is missing.
-    /// </summary>
     /// <summary>How many times a <c>.bad</c> copy that exists but can't be read is tried (a sharing violation is often brief).</summary>
     public const int BackupReadAttempts = 3;
 
     /// <summary>The pause between those tries.</summary>
     public static readonly TimeSpan BackupRetryDelay = TimeSpan.FromMilliseconds(200);
 
+    /// <summary>
+    /// Reads the file. Only "not found" counts as no file (an existence check can't tell a missing file from one it may
+    /// not look at); a file that exists but cannot be read throws, so startup can say so, and so does a <c>.bad</c> copy
+    /// that stays unreadable while the file is missing.
+    /// </summary>
     /// <param name="wait">Pauses between reads of an unreadable <c>.bad</c> copy (default: <see cref="Thread.Sleep(TimeSpan)"/>); tests pass their own.</param>
     /// <exception cref="SettingsBackupUnreadableException">The settings are missing and their <c>.bad</c> copy exists but stays unreadable.</exception>
     public JsonSettingsStore(IFileSystem files, string path, Action<TimeSpan>? wait = null)
@@ -51,7 +52,7 @@ public sealed partial class JsonSettingsStore : ISettingsStore
         _path = path;
         _values = [];
         var bad = path + ".bad";
-        if (!files.FileExists(path))
+        if (ReadIfPresent(path) is not { } text)
         {
             // No settings, but a damaged copy whose recovered values could not be saved last time: recover them again.
             if (ReadBad(bad) is { Count: > 0 } again)
@@ -62,7 +63,6 @@ public sealed partial class JsonSettingsStore : ISettingsStore
             }
             return;
         }
-        var text = files.ReadAllText(path);
         if (Parse(text) is { } values)
         {
             _values = values;
@@ -129,17 +129,22 @@ public sealed partial class JsonSettingsStore : ISettingsStore
     /// </summary>
     private Dictionary<string, string> ReadBad(string bad)
     {
-        if (!_files.FileExists(bad)) return [];
         for (var attempt = 1; ; attempt++)
         {
-            try { return Salvage(_files.ReadAllText(bad)); }
-            catch (Exception e) when (e is IOException or UnauthorizedAccessException)
+            try { return ReadIfPresent(bad) is { } text ? Salvage(text) : []; }
+            catch (Exception e)
             {
-                if (e is FileNotFoundException or DirectoryNotFoundException) return []; // gone meanwhile: missing, not unreadable
                 if (attempt >= BackupReadAttempts) throw new SettingsBackupUnreadableException(bad, e);
                 _wait(BackupRetryDelay);
             }
         }
+    }
+
+    /// <summary>The file's text, or null when it is not there; any other failure (denied, in use) is thrown.</summary>
+    private string? ReadIfPresent(string file)
+    {
+        try { return _files.ReadAllText(file); }
+        catch (Exception e) when (e is FileNotFoundException or DirectoryNotFoundException) { return null; }
     }
 
     /// <summary>What can be kept from a damaged file: the client id, when one is in its text.</summary>

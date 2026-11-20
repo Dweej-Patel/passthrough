@@ -13,7 +13,13 @@ public sealed class MemoryFileSystem : IFileSystem
     public readonly ConcurrentQueue<string> Operations = new();
     public Func<string, string, Exception?> Fail = (_, _) => null;
 
-    public bool FileExists(string path) => Files.ContainsKey(path);
+    /// <summary>
+    /// Paths that exist but for which <see cref="FileExists"/> says false, as <c>File.Exists</c> does when it is denied
+    /// access or hits another IO error; pair with <see cref="Fail"/> on "read" to make reading them throw.
+    /// </summary>
+    public readonly ConcurrentDictionary<string, bool> HiddenFromExists = new();
+
+    public bool FileExists(string path) => Files.ContainsKey(path) && !HiddenFromExists.ContainsKey(path);
 
     public string ReadAllText(string path)
     {

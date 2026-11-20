@@ -245,4 +245,33 @@ public class JsonSettingsStoreTests
         Assert.Null(store.Get("clientID"));
         Assert.Empty(waits);
     }
+
+    [Fact]
+    public void BadCopy_ThatExistsButExistsSaysNo_AndCannotBeRead_FailsVisibly()
+    {
+        // File.Exists returns false when access is denied; the file is still there and still holds the client id.
+        var fs = new MemoryFileSystem();
+        fs.Files[Path + ".bad"] = $$"""{"clientID":"{{ClientId}}",""";
+        fs.HiddenFromExists[Path + ".bad"] = true;
+        var reads = 0;
+        fs.Fail = (op, path) => op == "read" && path == Path + ".bad" && ++reads > 0 ? new UnauthorizedAccessException("Access to the path is denied.") : null;
+
+        var e = Assert.Throws<SettingsBackupUnreadableException>(() => new JsonSettingsStore(fs, Path, _ => { }));
+
+        Assert.IsType<UnauthorizedAccessException>(e.InnerException);
+        Assert.Equal(JsonSettingsStore.BackupReadAttempts, reads);
+        Assert.False(fs.Files.ContainsKey(Path));
+    }
+
+    [Fact]
+    public void Settings_ThatExistButExistsSaysNo_AndCannotBeRead_FailStartup_NotAnEmptyStart()
+    {
+        var fs = new MemoryFileSystem();
+        fs.Files[Path] = $$"""{"clientID":"{{ClientId}}"}""";
+        fs.HiddenFromExists[Path] = true;
+        fs.Fail = (op, path) => op == "read" && path == Path ? new UnauthorizedAccessException("Access to the path is denied.") : null;
+
+        Assert.Throws<UnauthorizedAccessException>(() => new JsonSettingsStore(fs, Path, _ => { }));
+        Assert.Equal($$"""{"clientID":"{{ClientId}}"}""", fs.Files[Path]);
+    }
 }
