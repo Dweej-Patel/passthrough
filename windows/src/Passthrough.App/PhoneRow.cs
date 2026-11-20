@@ -47,15 +47,13 @@ public sealed class PhoneRow : ObservableBase
         }
     }
 
-    /// <summary>Connections and rates, for the active phone once it is paired.</summary>
+    /// <summary>Connections and the bytes carried so far (the phone reports running totals), for the active phone once it is paired.</summary>
     public string ActivityLine
     {
         get
         {
             if (!_entry.IsActive || _entry.State != PhoneState.Paired) return "";
-            var down = Format.Rate(_entry.Rx);
-            var up = Format.Rate(_entry.Tx);
-            return $"{_entry.Active} connections · ↓ {down.Value} {down.Unit} · ↑ {up.Value} {up.Unit}";
+            return $"{_entry.Active} connections · ↓ {Format.Bytes(_entry.Rx)} ↑ {Format.Bytes(_entry.Tx)}";
         }
     }
 
