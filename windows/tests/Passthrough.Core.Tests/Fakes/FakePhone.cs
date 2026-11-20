@@ -68,10 +68,16 @@ public sealed class FakePhone : IAsyncDisposable
     /// <summary>After the first <c>status</c>, answer nothing (no <c>pong</c>) but keep the connection open.</summary>
     public bool SilentAfterStatus { get; init; }
 
+    /// <summary>After the first <c>status</c>, answer each <c>ping</c> with a message of an unknown type instead of <c>pong</c>.</summary>
+    public bool ChattersInsteadOfPong { get; init; }
+
     /// <summary>After the first <c>status</c>, send <c>goodbye</c> and close.</summary>
     public bool GoodbyeAfterStatus { get; init; }
 
-    /// <summary>Right after <c>welcome</c>, send a <c>paired</c> the PC never asked for, carrying this token.</summary>
+    /// <summary>
+    /// Right after <c>welcome</c>, send a <c>paired</c> the PC never asked for, carrying this token, then an
+    /// <c>error bad_code</c> as a marker: once the PC reports that failure, it has read the planted <c>paired</c>.
+    /// </summary>
     public string? UnsolicitedPairedToken { get; init; }
 
     /// <summary>Instead of a <c>welcome</c>, write these bytes after <c>hello</c> and hold the connection open.</summary>
@@ -157,9 +163,13 @@ public sealed class FakePhone : IAsyncDisposable
         await SendAsync(s, welcome);
 
         if (UnsolicitedPairedToken is not null)
+        {
             await SendAsync(s, new ControlEnvelope(ControlEnvelope.Paired) { Token = UnsolicitedPairedToken });
+            await SendAsync(s, new ControlEnvelope(ControlEnvelope.Error) { Reason = PairingFailure.BadCode.ToWire() });
+        }
 
         var silent = false;
+        var chatter = false;
         var wrongHere = 0;
         while (await ReceiveAsync(lines) is { } m)
         {
@@ -174,6 +184,7 @@ public sealed class FakePhone : IAsyncDisposable
                     }
                     if (!await SendStatusAsync(s)) return;
                     silent = SilentAfterStatus;
+                    chatter = ChattersInsteadOfPong;
                     break;
                 case ControlEnvelope.Pair:
                     if (m.Code == Code && m.ClientID == hello.ClientID)
@@ -205,7 +216,8 @@ public sealed class FakePhone : IAsyncDisposable
                     }
                     break;
                 case ControlEnvelope.Ping:
-                    if (!silent) await SendAsync(s, new ControlEnvelope(ControlEnvelope.Pong));
+                    if (chatter) await SendAsync(s, new ControlEnvelope("chatter"));
+                    else if (!silent) await SendAsync(s, new ControlEnvelope(ControlEnvelope.Pong));
                     break;
             }
         }

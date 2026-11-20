@@ -159,18 +159,60 @@ public class ControlClientTests
     }
 
     [Fact]
-    public async Task UnsolicitedPaired_Ignored()
+    public async Task UnsolicitedPaired_BeforeOurPairIsWritten_Ignored()
     {
-        await using var phone = new FakePhone { UnsolicitedPairedToken = "planted-token", IssuedToken = "real-token" };
-        await using var client = Client(phone, token: null);
+        // The code is entered before the welcome, so the pair is queued the moment the welcome is read; its write
+        // is held off the wire while the phone plants a paired (then a bad_code marker) right behind the welcome.
+        var welcomeGate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        await using var phone = new FakePhone { WelcomeGate = welcomeGate.Task, UnsolicitedPairedToken = "planted-token", IssuedToken = "real-token" };
+        GatedStream? gated = null;
+        await using var client = new ControlClient(
+            async ct => gated = new GatedStream(await phone.Open(ct), b => b.Span.IndexOf("\"t\":\"pair\""u8) >= 0),
+            new ControlIdentity(ClientId, PcName, null), "iPhone", new FakeTimeProvider());
 
         await client.StartAsync(CancellationToken.None);
-        Assert.Equal(new ControlEvent.Welcomed(false), await NextAsync(client));
         await client.SubmitCodeAsync("042917");
+        welcomeGate.SetResult();
 
-        // The planted paired is on the wire before the real answer; the first PairedWith must be the real one.
+        Assert.Equal(new ControlEvent.Welcomed(false), await NextAsync(client));
+        Assert.Equal(new ControlEvent.PairingFailed(PairingFailure.BadCode), await NextAsync(client)); // the planted paired was read and ignored
+        gated!.Release();
         Assert.Equal(new ControlEvent.PairedWith("real-token"), await NextAsync(client));
-        Assert.Equal(["recv hello", "sent welcome", "sent paired"], phone.Transcript.Take(3));
+    }
+
+    [Fact]
+    public async Task DelayedWelcome_NoPingBeforeProof_BadProofStillSendsNothing()
+    {
+        var time = new FakeTimeProvider();
+        var welcomeGate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        await using var phone = new FakePhone { Token = PhoneToken, BadProof = true, WelcomeGate = welcomeGate.Task };
+        await using var client = Client(phone, PhoneToken, time);
+
+        await client.StartAsync(CancellationToken.None);
+        await WaitUntilAsync(() => phone.Transcript.Contains("recv hello"));
+        time.Advance(TimeSpan.FromSeconds(6)); // a heartbeat tick falls inside the handshake
+        await Task.Delay(100); // give a wrongly queued ping time to reach the wire
+        welcomeGate.SetResult();
+
+        var error = Assert.IsType<ControlException>(await DisconnectErrorAsync(client));
+        Assert.Equal(ControlErrorKind.ProofFailed, error.Kind);
+        await phone.WaitClosedAsync();
+        Assert.Equal(new[] { ControlEnvelope.Hello }, phone.Received.Select(m => m.T));
+    }
+
+    [Fact]
+    public async Task NoWelcome_DisconnectsAfter20Seconds()
+    {
+        var time = new FakeTimeProvider();
+        var welcomeGate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        await using var phone = new FakePhone { WelcomeGate = welcomeGate.Task };
+        await using var client = Client(phone, PhoneToken, time);
+
+        await client.StartAsync(CancellationToken.None);
+        time.Advance(TimeSpan.FromSeconds(21));
+
+        Assert.IsType<TimeoutException>(await DisconnectErrorAsync(client));
+        welcomeGate.SetResult();
     }
 
     [Fact]
@@ -215,6 +257,29 @@ public class ControlClientTests
         Assert.IsType<ControlEvent.StatusUpdate>(await NextAsync(client));
 
         time.Advance(TimeSpan.FromSeconds(21));
+
+        Assert.IsType<TimeoutException>(await DisconnectErrorAsync(client));
+    }
+
+    [Fact]
+    public async Task OnlyUnknownMessages_DisconnectsAfter20Seconds()
+    {
+        var time = new FakeTimeProvider();
+        await using var phone = new FakePhone { Token = PhoneToken, ChattersInsteadOfPong = true };
+        await using var client = Client(phone, PhoneToken, time);
+
+        await client.StartAsync(CancellationToken.None);
+        Assert.Equal(new ControlEvent.Welcomed(true), await NextAsync(client));
+        Assert.IsType<ControlEvent.StatusUpdate>(await NextAsync(client));
+
+        // Each ping is answered with a message of an unknown type, which is not an answer.
+        for (var i = 1; i <= 3; i++)
+        {
+            time.Advance(TimeSpan.FromSeconds(5));
+            await WaitUntilAsync(() => phone.Transcript.Count(l => l == "sent chatter") >= i);
+            await Task.Delay(50); // let the client read it before the clock moves on
+        }
+        time.Advance(TimeSpan.FromSeconds(5));
 
         Assert.IsType<TimeoutException>(await DisconnectErrorAsync(client));
     }
@@ -306,7 +371,7 @@ public class ControlClientTests
     }
 
     [Fact]
-    public async Task Dispose_CompletesEventsAndClosesConnection()
+    public async Task Dispose_EndsWithOneDisconnectedAndClosesConnection()
     {
         await using var phone = new FakePhone { Token = PhoneToken };
         var client = Client(phone, PhoneToken);
@@ -314,9 +379,58 @@ public class ControlClientTests
         Assert.Equal(new ControlEvent.Welcomed(true), await NextAsync(client));
 
         await client.DisposeAsync();
+        await client.DisposeAsync(); // a second dispose adds nothing
 
         await phone.WaitClosedAsync();
-        await RestAsync(client); // completes rather than hanging
+        var events = await RestAsync(client);
+        Assert.Equal(new ControlEvent.Disconnected(null), events[^1]);
+        Assert.Single(events, e => e is ControlEvent.Disconnected);
+    }
+
+    [Fact]
+    public async Task Dispose_WhileOpening_CancelsTheOpen()
+    {
+        var opening = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var cancelled = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var client = new ControlClient(async ct =>
+        {
+            opening.SetResult();
+            try { await Task.Delay(Timeout.Infinite, ct); }
+            catch (OperationCanceledException) { cancelled.SetResult(); throw; }
+            throw new InvalidOperationException("unreachable");
+        }, new ControlIdentity(ClientId, PcName, null), "iPhone", new FakeTimeProvider());
+
+        var start = client.StartAsync(CancellationToken.None);
+        await opening.Task;
+        await client.DisposeAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(5));
+        await start.WaitAsync(TimeSpan.FromSeconds(5));
+
+        await cancelled.Task.WaitAsync(TimeSpan.FromSeconds(5)); // the open saw the cancellation
+        var events = await RestAsync(client);
+        Assert.Equal(new ControlEvent.Disconnected(null), Assert.Single(events));
+    }
+
+    [Fact]
+    public async Task Dispose_WhileOpening_StreamThatAppearsLaterIsDisposed()
+    {
+        var opening = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var gate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var stream = new GatedStream(new MemoryStream(), _ => false);
+        var client = new ControlClient(async _ =>
+        {
+            opening.SetResult();
+            await gate.Task; // ignores cancellation
+            return stream;
+        }, new ControlIdentity(ClientId, PcName, null), "iPhone", new FakeTimeProvider());
+
+        var start = client.StartAsync(CancellationToken.None);
+        await opening.Task;
+        await client.DisposeAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(5));
+        await start.WaitAsync(TimeSpan.FromSeconds(5));
+        gate.SetResult();
+
+        await WaitUntilAsync(() => stream.IsDisposed);
+        Assert.Equal(new ControlEvent.Disconnected(null), Assert.Single(await RestAsync(client)));
     }
 
     private static async Task WaitUntilAsync(Func<bool> condition)

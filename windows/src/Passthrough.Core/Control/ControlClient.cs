@@ -14,8 +14,8 @@ namespace Passthrough.Core.Control;
 /// <para>
 /// Every way the channel ends (the phone closing it, a read or write failure, garbage on the wire, a failed
 /// proof, a version mismatch, silence) is reported as exactly one <see cref="ControlEvent.Disconnected"/>, the
-/// last event, after which <see cref="Events"/> completes. <see cref="DisposeAsync"/> ends it without one (the
-/// owner asked) and completes <see cref="Events"/>. Nothing is thrown from the background reader.
+/// last event, after which <see cref="Events"/> completes; <see cref="DisposeAsync"/> ends it with
+/// <c>Disconnected(null)</c>. Nothing is thrown from the background reader.
 /// </para>
 /// </summary>
 public sealed class ControlClient(
@@ -34,12 +34,16 @@ public sealed class ControlClient(
     private bool _started;
     private bool _closed;
     private ITimer? _heartbeat;
+    private Task _opening = Task.CompletedTask;
     private Task _running = Task.CompletedTask;
+    /// <summary>When the phone last answered (welcome, pong, status, paired, error); silence is counted from it.</summary>
     private long _lastHeard;
     private bool _welcomed;
+    /// <summary>The handshake is over (proved, or welcomed unpaired): pings may go out.</summary>
+    private bool _settled;
     /// <summary>The phone proved the pairing (or paired here).</summary>
     private bool _authenticated;
-    /// <summary>A <c>pair</c> is out and unanswered: the one time a <c>paired</c> counts.</summary>
+    /// <summary>A <c>pair</c> has been written and is unanswered: the one time a <c>paired</c> counts.</summary>
     private bool _pairing;
     /// <summary>A code entered before the phone's welcome; sent once it arrives.</summary>
     private string? _pendingCode;
@@ -48,25 +52,52 @@ public sealed class ControlClient(
 
     /// <summary>
     /// Opens the stream and says hello; the rest runs in the background and is reported through <see cref="Events"/>.
-    /// A failure to open is reported as <see cref="ControlEvent.Disconnected"/>, not thrown. Call once.
+    /// A failure to open is reported as <see cref="ControlEvent.Disconnected"/>, not thrown. Disposing the client
+    /// cancels an open in progress. Call once.
     /// </summary>
-    public async Task StartAsync(CancellationToken ct)
+    public Task StartAsync(CancellationToken ct)
     {
         lock (_gate)
         {
             ObjectDisposedException.ThrowIf(_closed && !_started, this);
             if (_started) throw new InvalidOperationException("The control client is already started");
             _started = true;
+            _opening = Task.Run(() => OpenAsync(ct)); // never faults
+            return _opening;
         }
+    }
+
+    private async Task OpenAsync(CancellationToken ct)
+    {
+        var linked = CancellationTokenSource.CreateLinkedTokenSource(ct, _stop.Token);
+        Task<Stream> pending;
+        try
+        {
+            pending = open(linked.Token);
+        }
+        catch (Exception e)
+        {
+            linked.Dispose();
+            lock (_gate) Finish(e);
+            return;
+        }
+        _ = pending.ContinueWith(_ => linked.Dispose(), CancellationToken.None,
+            TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
 
         Stream stream;
         try
         {
-            stream = await open(ct).ConfigureAwait(false);
+            stream = await pending.WaitAsync(_stop.Token).ConfigureAwait(false);
         }
         catch (Exception e)
         {
-            lock (_gate) Finish(e);
+            // We gave up on the open (disposed, or it failed); a stream it yields, now or later, is never used.
+            _ = pending.ContinueWith(t =>
+            {
+                if (t.IsCompletedSuccessfully) t.Result.Dispose();
+                _ = t.Exception; // observed
+            }, CancellationToken.None, TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
+            lock (_gate) Finish(e); // after a dispose this does nothing
             return;
         }
 
@@ -75,21 +106,28 @@ public sealed class ControlClient(
         {
             if (!_closed)
             {
-                _lastHeard = time.GetTimestamp();
-                Send(new ControlEnvelope(ControlEnvelope.Hello)
-                {
-                    ProtocolVersion = ProtocolConstants.Version,
-                    ClientID = identity.ClientId,
-                    Name = identity.Name,
-                    Nonce = Convert.ToBase64String(_macNonce),
-                    Via = "usb",
-                });
-                _heartbeat = time.CreateTimer(_ => Beat(), null, ProtocolConstants.PingInterval, ProtocolConstants.PingInterval);
-                _running = RunAsync(channel);
+                StartChannel(channel);
                 return;
             }
         }
-        await channel.DisposeAsync().ConfigureAwait(false); // disposed while opening
+        await channel.DisposeAsync().ConfigureAwait(false); // disposed just as the open finished
+    }
+
+    /// <summary>Says hello and starts the heartbeat and the background loops. Called under the lock.</summary>
+    private void StartChannel(LineChannel channel)
+    {
+        _lastHeard = time.GetTimestamp();
+        Send(new ControlEnvelope(ControlEnvelope.Hello)
+        {
+            ProtocolVersion = ProtocolConstants.Version,
+            ClientID = identity.ClientId,
+            Name = identity.Name,
+            Nonce = Convert.ToBase64String(_macNonce),
+            Via = "usb",
+        });
+        // Silence counts from here; pings wait for the handshake to settle.
+        _heartbeat = time.CreateTimer(_ => Beat(), null, ProtocolConstants.PingInterval, ProtocolConstants.PingInterval);
+        _running = RunAsync(channel);
     }
 
     /// <summary>Sends the six-digit code shown on the phone; held until the phone's welcome if it comes first.</summary>
@@ -104,15 +142,21 @@ public sealed class ControlClient(
         return Task.CompletedTask;
     }
 
-    /// <summary>Closes the channel without a <see cref="ControlEvent.Disconnected"/>, completes <see cref="Events"/>, and waits for the background work to end.</summary>
+    /// <summary>
+    /// Closes the channel (reporting <see cref="ControlEvent.Disconnected"/> with no error, unless it already ended),
+    /// cancels an open in progress, and waits for the background work to end.
+    /// </summary>
     public async ValueTask DisposeAsync()
     {
-        Task running;
+        Task opening;
         lock (_gate)
         {
-            Finish(null, silent: true);
-            running = _running;
+            Finish(null);
+            opening = _opening;
         }
+        await opening.ConfigureAwait(false);
+        Task running;
+        lock (_gate) running = _running; // final once the open is over
         await running.ConfigureAwait(false);
     }
 
@@ -145,7 +189,12 @@ public sealed class ControlClient(
         try
         {
             await foreach (var m in _outgoing.Reader.ReadAllAsync(_stop.Token).ConfigureAwait(false))
+            {
                 await channel.WriteAsync(m, _stop.Token).ConfigureAwait(false);
+                // Only a pair that is on the wire can be answered: a paired read before this point is not ours.
+                if (m.T == ControlEnvelope.Pair)
+                    lock (_gate) _pairing = true;
+            }
         }
         catch (Exception e)
         {
@@ -163,7 +212,8 @@ public sealed class ControlClient(
                 Finish(new TimeoutException("The phone stopped responding"));
                 return;
             }
-            Send(new ControlEnvelope(ControlEnvelope.Ping));
+            // Nothing goes out between hello and the phone's proof but our own proof.
+            if (_settled) Send(new ControlEnvelope(ControlEnvelope.Ping));
         }
     }
 
@@ -171,7 +221,9 @@ public sealed class ControlClient(
     private void Handle(ControlEnvelope m)
     {
         if (_closed) return;
-        _lastHeard = time.GetTimestamp();
+        // Only answers count as the phone being there: anything else could be sent forever without listening.
+        if (m.T is ControlEnvelope.Welcome or ControlEnvelope.Pong or ControlEnvelope.Status or ControlEnvelope.Paired or ControlEnvelope.Error)
+            _lastHeard = time.GetTimestamp();
         switch (m.T)
         {
             case ControlEnvelope.Welcome:
@@ -241,6 +293,7 @@ public sealed class ControlClient(
             _authenticated = true;
             paired = true;
         }
+        _settled = true;
         Emit(new ControlEvent.Welcomed(paired));
         if (!paired && _pendingCode is { } code)
         {
@@ -251,7 +304,6 @@ public sealed class ControlClient(
 
     private void SendPair(string code)
     {
-        _pairing = true;
         Send(new ControlEnvelope(ControlEnvelope.Pair) { ClientID = identity.ClientId, Name = identity.Name, Code = code });
     }
 
@@ -262,11 +314,11 @@ public sealed class ControlClient(
         if (!_closed) _events.Writer.TryWrite(e);
     }
 
-    /// <summary>Ends the channel once: stops the heartbeat and the background loops, reports why unless <paramref name="silent"/>, and completes <see cref="Events"/>. Called under the lock.</summary>
-    private void Finish(Exception? error, bool silent = false)
+    /// <summary>Ends the channel once: stops the heartbeat and the background loops, reports why as the last event, and completes <see cref="Events"/>. Called under the lock.</summary>
+    private void Finish(Exception? error)
     {
         if (_closed) return;
-        if (!silent) Emit(new ControlEvent.Disconnected(error));
+        Emit(new ControlEvent.Disconnected(error));
         _closed = true;
         _events.Writer.TryComplete();
         _outgoing.Writer.TryComplete();
