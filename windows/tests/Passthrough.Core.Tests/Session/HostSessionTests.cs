@@ -25,6 +25,7 @@ public class HostSessionTests
         public readonly ConcurrentQueue<(PhoneDevice Device, ControlIdentity Identity, ControlClient Client)> Clients = new();
         public readonly ConcurrentQueue<SessionState> History = new();
         public readonly ConcurrentQueue<Exception> Errors = new();
+        public readonly ConcurrentQueue<string> Log = new();
         public readonly HostSession Session;
 
         public Harness(ISettingsStore? settings = null, ISecretStore? secrets = null)
@@ -34,6 +35,7 @@ public class HostSessionTests
             Session = new HostSession(new DeviceDirectory([Usb, Adb]), Secrets, Settings, "TEST-PC", Factory, Time);
             Session.StateChanged += History.Enqueue;
             Session.Error += Errors.Enqueue;
+            Session.Log += Log.Enqueue;
         }
 
         private ControlClient Factory(PhoneDevice device, ControlIdentity identity)
@@ -49,6 +51,16 @@ public class HostSessionTests
         {
             await WaitFor(() => done(Session.State));
             return Session.State;
+        }
+
+        /// <summary>Waits until the reconnect timer is armed for <paramref name="delay"/>, then fires it; returns once the next client exists.</summary>
+        public async Task FireReconnect(TimeSpan delay, int clientsAfter)
+        {
+            await WaitFor(() => Time.DueIn().Contains(delay));
+            Time.Advance(delay - TimeSpan.FromMilliseconds(1));
+            Assert.Equal(clientsAfter - 1, Clients.Count); // not a moment early
+            Time.Advance(TimeSpan.FromMilliseconds(1));
+            await WaitFor(() => Clients.Count == clientsAfter);
         }
 
         public ValueTask DisposeAsync() => Session.DisposeAsync();
@@ -375,6 +387,95 @@ public class HostSessionTests
         h.Time.Advance(TimeSpan.FromSeconds(0.1));
         await WaitFor(() => h.Clients.Count == 2);
         Assert.Equal(PhoneToken, h.Client(1).Identity.Token);
+    }
+
+    [Fact]
+    public void ReconnectDelay_BacksOffLikeTheMac()
+    {
+        Assert.Equal([2, 4, 6, 28, 30, 30], new[] { 1, 2, 3, 14, 15, 40 }.Select(n => HostSession.ReconnectDelay(n).TotalSeconds));
+    }
+
+    [Fact]
+    public async Task AppNotRunning_SaysSo_BacksOff_LogsOnce()
+    {
+        var android = new PhoneDevice("adb:R58M123", PhoneKind.Android, "Pixel 8", AndroidSlot, WatchTransport.Adb,
+            (_, _) => Task.FromException<Stream>(new AdbException("closed")));
+        await using var h = new Harness();
+        await h.Session.StartAsync();
+        h.Adb.Attach(android);
+
+        var s = await h.WaitState(s => Entry(s, android) is { State: PhoneState.Connecting, Message: not null });
+        Assert.Equal("Passthrough isn't running on the Android phone. Start it there, then connect.", Entry(s, android)!.Message);
+        await h.FireReconnect(TimeSpan.FromSeconds(2), clientsAfter: 2);
+        await h.FireReconnect(TimeSpan.FromSeconds(4), clientsAfter: 3);
+        await h.FireReconnect(TimeSpan.FromSeconds(6), clientsAfter: 4);
+
+        await WaitFor(() => h.Time.DueIn().Contains(TimeSpan.FromSeconds(8)));
+        var line = Assert.Single(h.Log);
+        Assert.Equal("adb:R58M123 (Android phone): channel closed: AppNotRunning; retrying", line);
+        Assert.Empty(h.Errors);
+    }
+
+    [Fact]
+    public async Task Welcome_ClearsTheReason_AndStartsTheBackOffOver()
+    {
+        // Refused twice, then Passthrough on the phone is up: it pairs, says goodbye and hangs up.
+        await using var phone = new FakePhone { Token = PhoneToken, GoodbyeAfterStatus = true };
+        var refusals = 2;
+        var android = new PhoneDevice("adb:R58M123", PhoneKind.Android, "Pixel 8", AndroidSlot, WatchTransport.Adb,
+            (port, ct) => Interlocked.Decrement(ref refusals) >= 0 ? Task.FromException<Stream>(new AdbException("closed")) : phone.Open(ct));
+        await using var h = new Harness();
+        h.Secrets.Set(AndroidSlot, PhoneToken);
+        await h.Session.StartAsync();
+        h.Adb.Attach(android);
+        await h.FireReconnect(TimeSpan.FromSeconds(2), clientsAfter: 2);
+        await h.FireReconnect(TimeSpan.FromSeconds(4), clientsAfter: 3);
+
+        await WaitFor(() => h.History.Any(st => Entry(st, android) is { State: PhoneState.Paired, Message: null }));
+        var s = await h.WaitState(s => Entry(s, android) is { State: PhoneState.Connecting, Message: not null });
+        Assert.Equal("The Android phone closed the connection.", Entry(s, android)!.Message);
+        await h.FireReconnect(TimeSpan.FromSeconds(2), clientsAfter: 4);
+        Assert.Equal(
+            ["adb:R58M123 (Android phone): channel closed: AppNotRunning; retrying", "adb:R58M123 (Android phone): channel closed: PhoneClosed; retrying"],
+            h.Log.Take(2));
+    }
+
+    [Fact]
+    public async Task UnpairedPhone_ClosesIdleChannel_ReopensAtOnce_StaysNotPaired()
+    {
+        // A phone closes an unauthenticated channel after 10 s unless a code is showing: the code box must not flap.
+        var close = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        await using var phone = new FakePhone { CloseAfterWelcomeGate = close.Task };
+        await using var h = new Harness();
+        await h.Session.StartAsync();
+        var android = Android(phone);
+        h.Adb.Attach(android);
+        await h.WaitState(s => Entry(s, android) is { State: PhoneState.NotPaired });
+
+        h.Time.Advance(TimeSpan.FromSeconds(9));
+        close.SetResult();
+
+        await WaitFor(() => h.Clients.Count == 2);
+        var s = await h.WaitState(s => Entry(s, android) is { State: PhoneState.NotPaired });
+        Assert.Null(Entry(s, android)!.Message);
+        var states = h.History.Select(st => Entry(st, android)?.State).ToList();
+        Assert.DoesNotContain(PhoneState.Connecting, states.Skip(states.IndexOf(PhoneState.NotPaired)));
+        Assert.Empty(h.Log);
+    }
+
+    [Fact]
+    public async Task UnpairedPhone_ClosesAtOnce_BacksOffInstead()
+    {
+        // Something that closes channels at once must not be reopened in a tight loop.
+        await using var phone = new FakePhone { CloseAfterWelcome = true };
+        await using var h = new Harness();
+        await h.Session.StartAsync();
+        var android = Android(phone);
+        h.Adb.Attach(android);
+
+        var s = await h.WaitState(s => Entry(s, android) is { State: PhoneState.Connecting, Message: not null });
+        Assert.Equal("The Android phone closed the connection.", Entry(s, android)!.Message);
+        await h.FireReconnect(TimeSpan.FromSeconds(2), clientsAfter: 2);
     }
 
     [Fact]

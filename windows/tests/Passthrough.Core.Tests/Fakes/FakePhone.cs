@@ -20,6 +20,7 @@ public sealed class FakePhone : IAsyncDisposable
     private readonly List<string> _transcript = [];
     private volatile bool _closing;
     private int _wrongGuesses;
+    private int _gatedClose;
 
     public FakePhone()
     {
@@ -82,6 +83,15 @@ public sealed class FakePhone : IAsyncDisposable
 
     /// <summary>Right after <c>welcome</c>, send an <c>error</c> with this reason the PC never asked for, then close.</summary>
     public string? ErrorAfterWelcome { get; init; }
+
+    /// <summary>Right after <c>welcome</c>, close the connection.</summary>
+    public bool CloseAfterWelcome { get; init; }
+
+    /// <summary>
+    /// On the first connection only: after <c>welcome</c>, read nothing until this task completes, then close cleanly
+    /// (as a phone closes an unauthenticated channel after 10 s): half-close, then drain until the PC hangs up.
+    /// </summary>
+    public Task? CloseAfterWelcomeGate { get; init; }
 
     /// <summary>Answer every <c>auth</c> with <c>error not_authenticated</c> and close, even a correct one.</summary>
     public bool RejectsAuth { get; init; }
@@ -183,6 +193,16 @@ public sealed class FakePhone : IAsyncDisposable
         if (UnsolicitedPairedToken is not null)
         {
             await SendAsync(s, new ControlEnvelope(ControlEnvelope.Paired) { Token = UnsolicitedPairedToken });
+            return;
+        }
+
+        if (CloseAfterWelcome) return;
+
+        if (CloseAfterWelcomeGate is not null && Interlocked.Exchange(ref _gatedClose, 1) == 0)
+        {
+            await CloseAfterWelcomeGate.WaitAsync(TimeSpan.FromSeconds(10));
+            ((NetworkStream)s).Socket.Shutdown(SocketShutdown.Send);
+            await HoldOpenAsync(s);
             return;
         }
 

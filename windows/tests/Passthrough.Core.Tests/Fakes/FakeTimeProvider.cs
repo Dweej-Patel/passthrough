@@ -38,6 +38,12 @@ public sealed class FakeTimeProvider : TimeProvider
         return timer;
     }
 
+    /// <summary>How long until each armed timer fires next, soonest first.</summary>
+    public IReadOnlyList<TimeSpan> DueIn()
+    {
+        lock (_gate) return [.. _timers.Where(t => t.Due is not null).Select(t => t.Due!.Value - _now).Order()];
+    }
+
     /// <summary>Moves the clock forward by <paramref name="by"/>, firing due timers in order. Callbacks run on the caller's thread.</summary>
     public void Advance(TimeSpan by)
     {

@@ -52,6 +52,7 @@ public partial class App : Application
                     ct => device.Connect(ProtocolConstants.ControlPort, ct), identity, device.Kind.Label(), TimeProvider.System),
                 TimeProvider.System);
             _session.Error += LogFile.Error;
+            _session.Log += LogFile.Write;
 
             var androidEnabled = settings.Get("androidEnabled") != "false";
             var viewModel = new SessionViewModel(_session, DispatcherQueue.GetForCurrentThread(), androidEnabled);

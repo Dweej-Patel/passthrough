@@ -18,8 +18,11 @@ namespace Passthrough.Core.Session;
 /// </summary>
 public sealed class HostSession : IAsyncDisposable
 {
-    /// <summary>How long after a channel drops the active phone is tried again.</summary>
-    public static readonly TimeSpan ReconnectDelay = TimeSpan.FromSeconds(2);
+    /// <summary>
+    /// How long after the <paramref name="failures"/>-th drop in a row the active phone is tried again: 2 s more each
+    /// time, at most 30 s, as on the Mac. The count starts over on a welcome and when a phone is made active.
+    /// </summary>
+    public static TimeSpan ReconnectDelay(int failures) => TimeSpan.FromSeconds(Math.Clamp(2 * failures, 2, 30));
 
     private const string AndroidEnabledKey = "androidEnabled";
     private const string IPadMessage = "Pairs once Remote shell is available.";
@@ -56,6 +59,14 @@ public sealed class HostSession : IAsyncDisposable
     private bool _held;
     private ITimer? _reconnect;
     private long _reconnectSeq;
+    /// <summary>Drops in a row since the last welcome; sets the back-off.</summary>
+    private int _failures;
+    /// <summary>Why the last retryable channel ended, shown while the phone is tried again; cleared by a welcome.</summary>
+    private string? _reason;
+    /// <summary>The last line logged for the active phone, so a repeat is not logged again.</summary>
+    private string? _lastLogged;
+    /// <summary>When the current channel was opened (a <see cref="TimeProvider"/> timestamp).</summary>
+    private long _openedAt;
 
     public HostSession(DeviceDirectory directory, ISecretStore secrets, ISettingsStore settings, string computerName,
         Func<PhoneDevice, ControlIdentity, ControlClient> clientFactory, TimeProvider time)
@@ -86,6 +97,13 @@ public sealed class HostSession : IAsyncDisposable
     /// (a store or client factory failing in background work, a slot that could not be read). For logging.
     /// </summary>
     public event Action<Exception>? Error;
+
+    /// <summary>
+    /// Fires, on the session's background loop, with a line for the log when the active phone's channel ends for a
+    /// new reason (a category, never phone-supplied text or a secret); the same reason again is not repeated until
+    /// the phone welcomes the PC or another phone is made active.
+    /// </summary>
+    public event Action<string>? Log;
 
     private bool AndroidEnabled => _settings.Get(AndroidEnabledKey) != "false";
 
@@ -220,6 +238,9 @@ public sealed class HostSession : IAsyncDisposable
         _activeState = PhoneState.Connecting;
         ClearStatus();
         _message = null;
+        _reason = null;
+        _failures = 0;
+        _lastLogged = null;
         if (client is not null) await client.DisposeAsync();
     }
 
@@ -250,6 +271,7 @@ public sealed class HostSession : IAsyncDisposable
             return;
         }
         _client = client;
+        _openedAt = _time.GetTimestamp();
         if (!keepState) _activeState = PhoneState.Connecting;
         ClearStatus();
         _readers.RemoveAll(t => t.IsCompleted);
@@ -265,12 +287,15 @@ public sealed class HostSession : IAsyncDisposable
         if (!ReferenceEquals(client, _client)) return; // a channel closed since: its events no longer count
         switch (e)
         {
-            case ControlEvent.Welcomed { Paired: true }:
-                _activeState = PhoneState.Paired;
-                _message = null;
-                break;
-            case ControlEvent.Welcomed:
-                if (_activeState != PhoneState.Pairing) _activeState = PhoneState.NotPaired; // a code may already be on its way
+            case ControlEvent.Welcomed w:
+                // The phone is there: the back-off and the last reason start over.
+                (_failures, _reason, _lastLogged) = (0, null, null);
+                if (w.Paired)
+                {
+                    _activeState = PhoneState.Paired;
+                    _message = null;
+                }
+                else if (_activeState != PhoneState.Pairing) _activeState = PhoneState.NotPaired; // a code may already be on its way
                 break;
             case ControlEvent.PairedWith p:
                 try
@@ -316,10 +341,24 @@ public sealed class HostSession : IAsyncDisposable
                     _activeState = PhoneState.Failed;
                     _message = failure.Message;
                     _held = true;
+                    LogClosed(failure.Kind.ToString(), retrying: false);
+                }
+                else if (d.Error is null && _activeState == PhoneState.NotPaired
+                    && _time.GetElapsedTime(_openedAt) >= ProtocolConstants.UnauthenticatedTimeout / 2)
+                {
+                    // The phone closes a channel that has not paired within 10 s unless a code is showing. The user may
+                    // still be reading the code off the phone: a fresh channel at once, and the box stays (as on the
+                    // Mac; not for a channel closed sooner, so something closing channels at once is not looped on).
+                    await client.DisposeAsync();
+                    OpenClient(keepState: true);
+                    break;
                 }
                 else
                 {
+                    var category = DisconnectReason.Classify(d.Error);
+                    _reason = DisconnectReason.Describe(category, _active!.Kind.Label());
                     _activeState = PhoneState.Connecting;
+                    LogClosed(category.ToString(), retrying: true);
                     ScheduleReconnect();
                 }
                 await client.DisposeAsync(); // already over; this just waits for its background work
@@ -330,12 +369,13 @@ public sealed class HostSession : IAsyncDisposable
     private void ScheduleReconnect()
     {
         CancelReconnect();
+        _failures++;
         var seq = _reconnectSeq;
         _reconnect = _time.CreateTimer(_ => Post(() =>
         {
             if (seq == _reconnectSeq && !_closed && !_held && _active is not null && _client is null) OpenClient();
             return Task.CompletedTask;
-        }), null, ReconnectDelay, Timeout.InfiniteTimeSpan);
+        }), null, ReconnectDelay(_failures), Timeout.InfiniteTimeSpan);
     }
 
     private void CancelReconnect()
@@ -343,6 +383,16 @@ public sealed class HostSession : IAsyncDisposable
         _reconnectSeq++;
         _reconnect?.Dispose();
         _reconnect = null;
+    }
+
+    /// <summary>Logs why the active phone's channel ended, unless that was the last line logged for it.</summary>
+    private void LogClosed(string category, bool retrying)
+    {
+        var line = $"{_active!.Id} ({_active.Kind.Label()}): channel closed: {category}" + (retrying ? "; retrying" : "");
+        if (line == _lastLogged) return;
+        _lastLogged = line;
+        try { Log?.Invoke(line); }
+        catch (Exception) { } // a failing logger must not stop the session
     }
 
     private void ClearStatus() => (_status, _rx, _tx, _connections) = (null, 0, 0, 0);
@@ -374,7 +424,7 @@ public sealed class HostSession : IAsyncDisposable
     private PhoneEntry EntryFor(PhoneDevice d)
     {
         if (!d.CanRoute) return new PhoneEntry(d, PhoneState.RemoteOnlyLater, false, null, 0, 0, 0, IPadMessage, HasToken(d));
-        if (d.Equals(_active)) return new PhoneEntry(d, _activeState, true, _status, _rx, _tx, _connections, _message, HasToken(d));
+        if (d.Equals(_active)) return new PhoneEntry(d, _activeState, true, _status, _rx, _tx, _connections, _message ?? _reason, HasToken(d));
         var hasToken = HasToken(d);
         return new PhoneEntry(d, hasToken ? PhoneState.Paired : PhoneState.NotPaired, false, null, 0, 0, 0, null, hasToken);
     }
