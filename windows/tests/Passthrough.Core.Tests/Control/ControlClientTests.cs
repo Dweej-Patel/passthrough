@@ -98,6 +98,21 @@ public class ControlClientTests
     }
 
     [Fact]
+    public async Task SubmitCode_SaysWhetherTheCodeWasTaken()
+    {
+        var gate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        await using var phone = new FakePhone { WelcomeGate = gate.Task };
+        var client = Client(phone, token: null);
+
+        await client.StartAsync(CancellationToken.None);
+        Assert.True(await client.SubmitCodeAsync("042917")); // held for the welcome
+        await client.DisposeAsync();
+        gate.SetResult();
+
+        Assert.False(await client.SubmitCodeAsync("042917")); // closed: not taken
+    }
+
+    [Fact]
     public async Task CodeBeforeWelcome_SentAfterWelcome()
     {
         var gate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);

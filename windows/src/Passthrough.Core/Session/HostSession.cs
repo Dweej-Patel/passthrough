@@ -148,25 +148,35 @@ public sealed class HostSession : IAsyncDisposable
     /// Sends the six-digit code shown on a phone, addressed by the phone's id and the <see cref="PhoneEntry.Attachment"/>
     /// of the row it was typed into, and checked when the call runs on the loop: only to that phone, still attached
     /// that same time, still active and unpaired (NotPaired, or Connecting with no stored token). A channel still
-    /// opening holds the code until its welcome; with no channel (waiting to reconnect) one is opened at once. True
-    /// when the code went (or is held) for that phone; false when it was not sent, so the caller can keep it.
+    /// opening holds the code until its welcome; with no channel (waiting to reconnect), or one that has just ended, a
+    /// fresh one is opened at once. True only when a client took the code for that phone; false when it was not
+    /// sent, so the caller can keep it.
     /// </summary>
     public Task<bool> SubmitCodeAsync(string phoneId, long attachment, string code) => RunAsync(async () =>
     {
         if (_closed || _active is not { } device || device.Id != phoneId || AttachmentOf(device) != attachment) return false;
         var unpaired = _activeState == PhoneState.NotPaired || (_activeState == PhoneState.Connecting && !HasToken(device));
         if (!unpaired) return false;
-        if (_client is null)
+        if (_client is { } current && !await current.SubmitCodeAsync(code))
         {
-            OpenClient(keepState: true);
-            if (_client is null) return false; // the store failed: the phone is Failed now, with Try again
+            // The channel has ended but its Disconnected is still queued behind this call: drop it (its events no
+            // longer count) and put the code on a fresh one, as during a back-off.
+            _client = null;
+            await current.DisposeAsync();
         }
+        else if (_client is not null) return TookCode();
+        OpenClient(keepState: true);
+        // A fresh client takes the code unless the store failed (the phone is Failed now, with Try again).
+        return _client is not null && await _client.SubmitCodeAsync(code) && TookCode();
+    });
+
+    private bool TookCode()
+    {
         _activeState = PhoneState.Pairing;
         _message = null;
         _reason = null;
-        await _client.SubmitCodeAsync(code);
         return true;
-    });
+    }
 
     /// <summary>Deletes an attached phone's stored token (see <see cref="ForgetSlotAsync"/>); nothing for a phone that is not attached.</summary>
     public Task ForgetAsync(string phoneId) => RunAsync(() =>

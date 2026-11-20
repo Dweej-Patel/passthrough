@@ -138,16 +138,20 @@ public sealed class ControlClient(
         _running = RunAsync(channel);
     }
 
-    /// <summary>Sends the six-digit code shown on the phone; held until the phone's welcome if it comes first.</summary>
-    public Task SubmitCodeAsync(string code)
+    /// <summary>
+    /// Sends the six-digit code shown on the phone; held until the phone's welcome if it comes first. True when the
+    /// code was taken (queued, or held, on an open channel, decided under the lock); false when the channel had
+    /// already ended, even if its <see cref="ControlEvent.Disconnected"/> has not been read yet.
+    /// </summary>
+    public Task<bool> SubmitCodeAsync(string code)
     {
         lock (_gate)
         {
-            if (_closed) return Task.CompletedTask;
+            if (_closed) return Task.FromResult(false);
             if (!_welcomed) _pendingCode = code;
             else SendPair(code);
         }
-        return Task.CompletedTask;
+        return Task.FromResult(true);
     }
 
     /// <summary>

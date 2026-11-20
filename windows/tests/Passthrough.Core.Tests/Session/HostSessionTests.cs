@@ -74,7 +74,7 @@ public class HostSessionTests
     /// A secret store that fails: on every Set (or only the first <paramref name="failSets"/>), or on Get for one slot
     /// until <see cref="Healed"/>. Counts Gets.
     /// </summary>
-    private sealed class FailingSecretStore(bool failSet = false, string? failGetSlot = null, int failSets = 0) : ISecretStore
+    private sealed class FailingSecretStore(bool failSet = false, string? failGetSlot = null, int failSets = 0, bool failGetOnlyWhenStored = false) : ISecretStore
     {
         private readonly MemorySecretStore _inner = new();
         private int _failSets = failSets;
@@ -84,10 +84,12 @@ public class HostSessionTests
 
         public int Gets => Volatile.Read(ref _gets);
 
+        /// <summary>With <c>failGetOnlyWhenStored</c>: a file that exists but is locked; once deleted, Get reads nothing.</summary>
         public string? Get(string slot)
         {
             Interlocked.Increment(ref _gets);
-            return slot == failGetSlot && !Healed ? throw new IOException("the credential store is unavailable") : _inner.Get(slot);
+            var fails = slot == failGetSlot && !Healed && (!failGetOnlyWhenStored || _inner.Get(slot) is not null);
+            return fails ? throw new IOException("the credential store is unavailable") : _inner.Get(slot);
         }
 
         public void Set(string slot, string value)
@@ -457,6 +459,39 @@ public class HostSessionTests
 
         await h.WaitState(s => Entry(s, android) is { State: PhoneState.Paired, Status: not null });
         Assert.Equal(2, h.Clients.Count); // no waiting out the back-off
+        Assert.Equal(PhoneToken, h.Secrets.Get(AndroidSlot));
+    }
+
+    [Fact]
+    public async Task Code_WhileTheChannelIsClosingButNotYetReported_GoesOnAFreshChannel()
+    {
+        // The client has closed, but its Disconnected is still queued behind the code: the code must not be dropped.
+        await using var phone = new FakePhone { IssuedToken = PhoneToken };
+        await using var h = new Harness();
+        await h.Session.StartAsync();
+        var android = Android(phone);
+        h.Adb.Attach(android);
+        await h.WaitState(s => Entry(s, android) is { State: PhoneState.NotPaired });
+        var block = 0;
+        using var release = new ManualResetEventSlim();
+        var blocked = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        h.Session.StateChanged += _ =>
+        {
+            if (Interlocked.Exchange(ref block, 0) != 1) return;
+            blocked.SetResult();
+            release.Wait(TimeSpan.FromSeconds(10)); // holds the session loop
+        };
+        Interlocked.Exchange(ref block, 1);
+        h.Usb.SetStatus(new WatchStatus(WatchState.Watching));
+        await blocked.Task.WaitAsync(TimeSpan.FromSeconds(10));
+
+        var submitted = h.Submit(android, phone.Code); // queued first
+        await h.Client(0).Client.DisposeAsync(); // closed; its Disconnected queues behind the code
+        release.Set();
+
+        Assert.True(await submitted.WaitAsync(TimeSpan.FromSeconds(10)));
+        await h.WaitState(s => Entry(s, android) is { State: PhoneState.Paired, Status: not null });
+        Assert.Equal(2, h.Clients.Count); // a fresh channel at once, no back-off
         Assert.Equal(PhoneToken, h.Secrets.Get(AndroidSlot));
     }
 
