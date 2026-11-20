@@ -957,4 +957,45 @@ public class HostSessionTests
             await h.DisposeAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(10));
         }
     }
+
+    [Fact]
+    public async Task PairedPhone_ItsNameIsSaved_AndNamesItOnceItIsNoLongerActive()
+    {
+        await using var androidPhone = new FakePhone { IssuedToken = PhoneToken, DeviceName = "Dee's Pixel" };
+        await using var iPhonePhone = new FakePhone();
+        await using var h = new Harness();
+        await h.Session.StartAsync();
+        var android = Android(androidPhone);
+        h.Adb.Attach(android);
+        await h.WaitState(s => Entry(s, android) is { State: PhoneState.NotPaired, SavedName: null });
+
+        await h.Submit(android, androidPhone.Code);
+        await h.WaitState(s => Entry(s, android) is { State: PhoneState.Paired, Status: not null });
+        Assert.Equal("Dee's Pixel", DeviceNames.Get(h.Settings, AndroidSlot));
+
+        var iPhone = IPhone(iPhonePhone);
+        h.Usb.Attach(iPhone);
+        await h.WaitState(s => Entry(s, iPhone) is not null);
+        await h.Session.MakeActiveAsync(iPhone.Id);
+        var s = await h.WaitState(s => Entry(s, android) is { IsActive: false });
+        Assert.Equal((PhoneState.Paired, (DeviceStatus?)null, "Dee's Pixel"), (Entry(s, android)!.State, Entry(s, android)!.Status, Entry(s, android)!.SavedName));
+    }
+
+    [Fact]
+    public async Task ForgetSlot_AlsoForgetsTheSavedName()
+    {
+        await using var phone = new FakePhone { IssuedToken = PhoneToken, DeviceName = "Dee's Pixel" };
+        await using var h = new Harness();
+        await h.Session.StartAsync();
+        var android = Android(phone);
+        h.Adb.Attach(android);
+        await h.WaitState(s => Entry(s, android) is { State: PhoneState.NotPaired });
+        await h.Submit(android, phone.Code);
+        await h.WaitState(s => Entry(s, android) is { SavedName: "Dee's Pixel" });
+
+        await h.Session.ForgetSlotAsync(AndroidSlot);
+
+        await h.WaitState(s => Entry(s, android) is { HasPairing: false, SavedName: null });
+        Assert.Null(DeviceNames.Get(h.Settings, AndroidSlot));
+    }
 }

@@ -2,7 +2,7 @@ namespace Passthrough.Core.Storage;
 
 /// <summary>
 /// Small persisted settings, as strings. Keys: <c>"clientID"</c> (see <see cref="HostIdentity"/>) and
-/// <c>"androidEnabled"</c> (<c>"true"</c> or <c>"false"</c>; absent means true).
+/// <c>"androidEnabled"</c> (<c>"true"</c> or <c>"false"</c>; absent means true), and <c>"name.&lt;slot&gt;"</c> (see <see cref="DeviceNames"/>).
 /// </summary>
 public interface ISettingsStore
 {

@@ -77,6 +77,8 @@ public sealed class HostSession : IAsyncDisposable
     private long _openedAt;
     /// <summary>The current channel uses a credential Forget removes: opened with a stored token, or paired on it.</summary>
     private bool _channelHasCredential;
+    /// <summary>The name last saved (or tried) for each slot, so a status tick does not write the settings again.</summary>
+    private readonly Dictionary<string, string> _namesSaved = [];
 
     public HostSession(DeviceDirectory directory, ISecretStore secrets, ISettingsStore settings, string computerName,
         Func<PhoneDevice, ControlIdentity, ControlClient> clientFactory, TimeProvider time)
@@ -201,6 +203,7 @@ public sealed class HostSession : IAsyncDisposable
     {
         _secrets.Delete(slot); // never read first: a slot that cannot be read can still be deleted
         _hasToken[slot] = false;
+        ForgetName(slot);
         // Reopen the active phone's channel only if it uses a credential (opened with a token, or paired on it), or if
         // none is open (waiting or failed); an unpaired channel is left alone, so a second Forget changes nothing.
         if (!_closed && _active is { } active && active.PairingSlot == slot && (_channelHasCredential || _client is null))
@@ -405,6 +408,7 @@ public sealed class HostSession : IAsyncDisposable
             case ControlEvent.StatusUpdate s:
                 _activeState = PhoneState.Paired; // status flows only on a proved channel
                 (_status, _rx, _tx, _connections) = (s.Status, s.Rx, s.Tx, s.Active);
+                SaveName(_active!.PairingSlot, s.Status.DeviceName);
                 break;
             case ControlEvent.Disconnected d:
                 _client = null;
@@ -469,6 +473,26 @@ public sealed class HostSession : IAsyncDisposable
         catch (Exception) { } // a failing logger must not stop the session
     }
 
+    /// <summary>Keeps the name a paired phone gives itself beside its pairing (see <see cref="DeviceNames"/>); a failed write is reported once.</summary>
+    private void SaveName(string slot, string? name)
+    {
+        if (string.IsNullOrWhiteSpace(name) || _namesSaved.GetValueOrDefault(slot) == name) return;
+        _namesSaved[slot] = name;
+        if (DeviceNames.Get(_settings, slot) == name) return;
+        try { _settings.Set(DeviceNames.Key(slot), name); }
+        catch (Exception e) { ReportError(e); }
+    }
+
+    private void ForgetName(string slot)
+    {
+        _namesSaved.Remove(slot);
+        try
+        {
+            if (DeviceNames.Get(_settings, slot) is not null) _settings.Set(DeviceNames.Key(slot), "");
+        }
+        catch (Exception e) { ReportError(e); } // the token is gone; a name left behind only labels nothing
+    }
+
     private void ClearStatus() => (_status, _rx, _tx, _connections) = (null, 0, 0, 0);
 
     /// <summary>The Mac's wording for a failed code (SessionCoordinator.swift), naming the device.</summary>
@@ -497,10 +521,11 @@ public sealed class HostSession : IAsyncDisposable
 
     private PhoneEntry EntryFor(PhoneDevice d)
     {
-        if (!d.CanRoute) return new PhoneEntry(d, PhoneState.RemoteOnlyLater, false, null, 0, 0, 0, IPadMessage, HasToken(d), AttachmentOf(d));
-        if (d.Equals(_active)) return new PhoneEntry(d, _activeState, true, _status, _rx, _tx, _connections, _message ?? _reason, HasToken(d), AttachmentOf(d));
+        var name = DeviceNames.Get(_settings, d.PairingSlot);
+        if (!d.CanRoute) return new PhoneEntry(d, PhoneState.RemoteOnlyLater, false, null, 0, 0, 0, IPadMessage, HasToken(d), AttachmentOf(d), name);
+        if (d.Equals(_active)) return new PhoneEntry(d, _activeState, true, _status, _rx, _tx, _connections, _message ?? _reason, HasToken(d), AttachmentOf(d), name);
         var hasToken = HasToken(d);
-        return new PhoneEntry(d, hasToken ? PhoneState.Paired : PhoneState.NotPaired, false, null, 0, 0, 0, null, hasToken, AttachmentOf(d));
+        return new PhoneEntry(d, hasToken ? PhoneState.Paired : PhoneState.NotPaired, false, null, 0, 0, 0, null, hasToken, AttachmentOf(d), name);
     }
 
     /// <summary>Whether the phone's slot holds a well-formed token (cached, see <see cref="_hasToken"/>); a slot that cannot be read counts as empty and is reported once.</summary>
