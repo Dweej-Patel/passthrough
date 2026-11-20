@@ -235,6 +235,12 @@ public sealed class ControlClient(
                 _pairing = false;
                 if (m.Token is { } token)
                 {
+                    if (!PairingToken.IsWellFormed(token))
+                    {
+                        // Not a token a phone issues: nothing on this channel can be trusted. Send nothing, end it.
+                        Finish(new ProtocolException("The phone sent a malformed pairing token."));
+                        return;
+                    }
                     _authenticated = true;
                     Emit(new ControlEvent.PairedWith(token));
                 }

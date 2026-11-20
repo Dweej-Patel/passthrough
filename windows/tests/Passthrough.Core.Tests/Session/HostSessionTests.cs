@@ -12,7 +12,7 @@ namespace Passthrough.Core.Tests.Session;
 public class HostSessionTests
 {
     private const string AndroidSlot = "token.android.R58M123";
-    private const string PhoneToken = "phone-token-BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB";
+    private const string PhoneToken = "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8";
 
     /// <summary>A session over two fake watchers, with in-memory stores, a fake clock and a client factory that records every client it makes.</summary>
     private sealed class Harness : IAsyncDisposable
@@ -221,6 +221,25 @@ public class HostSessionTests
             var retried = states.FindIndex(failed + 1, x => x == PhoneState.Connecting);
             return failed >= 0 && retried > failed && states.Skip(retried).Any(x => x == PhoneState.Failed);
         });
+    }
+
+    [Fact]
+    public async Task MalformedStoredToken_CountsAsNotPaired_SlotLeftAlone()
+    {
+        // The phone would prove a pairing with this string, so only the PC's format check keeps it from being used.
+        const string malformed = "short-token";
+        await using var phone = new FakePhone { Token = malformed };
+        await using var h = new Harness();
+        h.Secrets.Set(AndroidSlot, malformed);
+        await h.Session.StartAsync();
+        var android = Android(phone);
+        h.Adb.Attach(android);
+
+        var s = await h.WaitState(s => Entry(s, android) is { IsActive: true, State: PhoneState.NotPaired });
+        Assert.Null(h.Client(0).Identity.Token);
+        Assert.False(Entry(s, android)!.HasPairing);
+        Assert.Equal(malformed, h.Secrets.Get(AndroidSlot));
+        Assert.DoesNotContain(phone.Received, m => m.T == ControlEnvelope.Auth);
     }
 
     [Fact]

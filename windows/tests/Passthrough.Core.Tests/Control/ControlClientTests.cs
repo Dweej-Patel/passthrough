@@ -9,7 +9,7 @@ public class ControlClientTests
 {
     private const string ClientId = "6F9619FF-8B86-D011-B42D-00C04FC964FF";
     private const string PcName = "TEST-PC";
-    private const string PhoneToken = "phone-token-BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB";
+    private const string PhoneToken = "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8";
 
     private static ControlClient Client(FakePhone phone, string? token, TimeProvider? time = null) =>
         new(phone.Open, new ControlIdentity(ClientId, PcName, token), "iPhone", time ?? new FakeTimeProvider());
@@ -84,14 +84,14 @@ public class ControlClientTests
     [Fact]
     public async Task Unpaired_SubmitCode_PairsAndReturnsToken()
     {
-        await using var phone = new FakePhone { IssuedToken = "fresh-token" };
+        await using var phone = new FakePhone { IssuedToken = "fresh-token-FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF" };
         await using var client = Client(phone, token: null);
 
         await client.StartAsync(CancellationToken.None);
         Assert.Equal(new ControlEvent.Welcomed(false), await NextAsync(client));
         await client.SubmitCodeAsync("042917");
 
-        Assert.Equal(new ControlEvent.PairedWith("fresh-token"), await NextAsync(client));
+        Assert.Equal(new ControlEvent.PairedWith("fresh-token-FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF"), await NextAsync(client));
         Assert.IsType<ControlEvent.StatusUpdate>(await NextAsync(client));
         var pair = Assert.Single(phone.Received, m => m.T == ControlEnvelope.Pair);
         Assert.Equal(("042917", ClientId, PcName), (pair.Code, pair.ClientID, pair.Name));
@@ -163,7 +163,7 @@ public class ControlClientTests
     {
         // The phone plants a paired right behind its welcome, then a bad_code marker: by the time the marker is
         // reported the planted paired has been read, and no pair was ever submitted.
-        await using var phone = new FakePhone { UnsolicitedPairedToken = "planted-token" };
+        await using var phone = new FakePhone { UnsolicitedPairedToken = "planted-token-PPPPPPPPPPPPPPPPPPPPPPPPPPPPP" };
         await using var client = Client(phone, token: null);
 
         await client.StartAsync(CancellationToken.None);
@@ -180,14 +180,14 @@ public class ControlClientTests
         // The fake answers pair the moment it reads it: the answer must never be lost to a race with the writer.
         for (var i = 0; i < 50; i++)
         {
-            await using var phone = new FakePhone { IssuedToken = "real-token" };
+            await using var phone = new FakePhone { IssuedToken = "real-token-RRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRR" };
             await using var client = Client(phone, token: null);
 
             await client.StartAsync(CancellationToken.None);
             Assert.Equal(new ControlEvent.Welcomed(false), await NextAsync(client));
             await client.SubmitCodeAsync("042917");
 
-            Assert.Equal(new ControlEvent.PairedWith("real-token"), await NextAsync(client));
+            Assert.Equal(new ControlEvent.PairedWith("real-token-RRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRR"), await NextAsync(client));
         }
     }
 
@@ -195,7 +195,7 @@ public class ControlClientTests
     public async Task PairedAfterError_Ignored()
     {
         // A wrong code is answered bad_code, then a paired nobody asked for, then a bad_code marker.
-        await using var phone = new FakePhone { PairedAfterErrorToken = "planted-token" };
+        await using var phone = new FakePhone { PairedAfterErrorToken = "planted-token-PPPPPPPPPPPPPPPPPPPPPPPPPPPPP" };
         await using var client = Client(phone, token: null);
 
         await client.StartAsync(CancellationToken.None);
@@ -204,6 +204,29 @@ public class ControlClientTests
 
         Assert.Equal(new ControlEvent.PairingFailed(PairingFailure.BadCode), await NextAsync(client));
         Assert.Equal(new ControlEvent.PairingFailed(PairingFailure.BadCode), await NextAsync(client)); // the marker: the paired between was ignored
+    }
+
+    [Theory]
+    [InlineData("short-token")]
+    [InlineData("AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh+")] // 43 characters, but '+' is not URL-safe
+    public async Task MalformedPairedToken_DisconnectsWithProtocolError_SendsNothingMore(string token)
+    {
+        var time = new FakeTimeProvider();
+        await using var phone = new FakePhone { IssuedToken = token };
+        await using var client = Client(phone, token: null, time);
+
+        await client.StartAsync(CancellationToken.None);
+        Assert.Equal(new ControlEvent.Welcomed(false), await NextAsync(client));
+        await client.SubmitCodeAsync("042917");
+
+        var events = await RestAsync(client);
+        Assert.DoesNotContain(events, e => e is ControlEvent.PairedWith or ControlEvent.StatusUpdate);
+        var last = Assert.IsType<ControlEvent.Disconnected>(Assert.Single(events));
+        var error = Assert.IsType<ProtocolException>(last.Error);
+        Assert.Equal("The phone sent a malformed pairing token.", error.Message);
+        time.Advance(ProtocolConstants.PingInterval * 3);
+        await phone.WaitClosedAsync();
+        Assert.Equal(new[] { ControlEnvelope.Hello, ControlEnvelope.Pair }, phone.Received.Select(m => m.T));
     }
 
     [Fact]

@@ -211,13 +211,13 @@ public sealed class HostSession : IAsyncDisposable
         if (client is not null) await client.DisposeAsync();
     }
 
-    /// <summary>Opens a channel to the active phone with whatever token its slot holds. Keeps the message (a pairing failure stays shown across a reconnect).</summary>
+    /// <summary>Opens a channel to the active phone with the token its slot holds, if well-formed. Keeps the message (a pairing failure stays shown across a reconnect).</summary>
     private void OpenClient()
     {
         CancelReconnect();
         var device = _active!;
         _clientId ??= HostIdentity.ClientId(_settings);
-        var client = _clientFactory(device, new ControlIdentity(_clientId, _computerName, _secrets.Get(device.PairingSlot)));
+        var client = _clientFactory(device, new ControlIdentity(_clientId, _computerName, StoredToken(device)));
         _client = client;
         _activeState = PhoneState.Connecting;
         ClearStatus();
@@ -337,16 +337,23 @@ public sealed class HostSession : IAsyncDisposable
         return new PhoneEntry(d, hasToken ? PhoneState.Paired : PhoneState.NotPaired, false, null, 0, 0, 0, null, hasToken);
     }
 
-    /// <summary>Whether the phone's slot holds a token; a slot that cannot be read counts as empty.</summary>
+    /// <summary>Whether the phone's slot holds a well-formed token; a slot that cannot be read counts as empty.</summary>
     private bool HasToken(PhoneDevice d)
     {
-        try { return _secrets.Get(d.PairingSlot) is not null; }
+        try { return StoredToken(d) is not null; }
         catch (Exception e)
         {
             ReportError(e);
             return false;
         }
     }
+
+    /// <summary>
+    /// The phone's stored token, checked for format before use: anything else in the slot counts as no token (the
+    /// slot is left alone; pairing again replaces it).
+    /// </summary>
+    private string? StoredToken(PhoneDevice d) =>
+        _secrets.Get(d.PairingSlot) is { } token && PairingToken.IsWellFormed(token) ? token : null;
 
     private void ReportError(Exception e)
     {

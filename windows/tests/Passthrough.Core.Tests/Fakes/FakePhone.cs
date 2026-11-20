@@ -53,7 +53,7 @@ public sealed class FakePhone : IAsyncDisposable
     public string Code { get; init; } = "042917";
 
     /// <summary>The token a successful code pairing issues.</summary>
-    public string IssuedToken { get; init; } = "issued-token-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+    public string IssuedToken { get; init; } = "issued-token-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
 
     public string DeviceName { get; init; } = "Test Phone";
 
