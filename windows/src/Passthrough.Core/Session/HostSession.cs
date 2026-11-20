@@ -222,15 +222,19 @@ public sealed class HostSession : IAsyncDisposable
         if (client is not null) await client.DisposeAsync();
     }
 
-    /// <summary>Opens a channel to the active phone with the token its slot holds, if well-formed. Keeps the message (a pairing failure stays shown across a reconnect).</summary>
-    private void OpenClient()
+    /// <summary>
+    /// Opens a channel to the active phone with the token its slot holds, if well-formed. Keeps the message (a pairing
+    /// failure stays shown across a reconnect). <paramref name="keepState"/>: an unpaired phone stays NotPaired while the
+    /// fresh channel opens, so the code box stays up.
+    /// </summary>
+    private void OpenClient(bool keepState = false)
     {
         CancelReconnect();
         var device = _active!;
         _clientId ??= HostIdentity.ClientId(_settings);
         var client = _clientFactory(device, new ControlIdentity(_clientId, _computerName, StoredToken(device)));
         _client = client;
-        _activeState = PhoneState.Connecting;
+        if (!keepState) _activeState = PhoneState.Connecting;
         ClearStatus();
         _readers.RemoveAll(t => t.IsCompleted);
         _readers.Add(Task.Run(async () =>
@@ -274,7 +278,14 @@ public sealed class HostSession : IAsyncDisposable
                 break;
             case ControlEvent.PairingFailed f:
                 if (_activeState == PhoneState.Pairing) _activeState = PhoneState.NotPaired;
-                _message = Describe(f.Reason);
+                _message = Describe(f.Reason, _active!.Kind.Label());
+                if (f.Reason == PairingFailure.Locked)
+                {
+                    // The phone closes this channel; the code still works on a new one, so open that now (as the Mac does).
+                    _client = null;
+                    await client.DisposeAsync();
+                    OpenClient(keepState: true);
+                }
                 break;
             case ControlEvent.StatusUpdate s:
                 _activeState = PhoneState.Paired; // status flows only on a proved channel
@@ -320,12 +331,16 @@ public sealed class HostSession : IAsyncDisposable
 
     private void ClearStatus() => (_status, _rx, _tx, _connections) = (null, 0, 0, 0);
 
-    private static string Describe(PairingFailure reason) => reason switch
+    /// <summary>The Mac's wording for a failed code (SessionCoordinator.swift), naming the device.</summary>
+    private static string Describe(PairingFailure reason, string kind) => reason switch
     {
-        PairingFailure.Expired => "The code expired. Show a new code on the phone.",
-        PairingFailure.Locked => "Too many wrong codes. Try again.",
-        PairingFailure.CodeWithdrawn => "The phone withdrew that code after too many wrong guesses. Show a new code on the phone.",
-        _ => "That code didn't match. Check the code on the phone and try again.",
+        PairingFailure.Expired => $"The code expired or wasn't generated yet. Tap Pair on the {kind} and try again.",
+        PairingFailure.NotAuthenticated => "Not authenticated.",
+        PairingFailure.UnsupportedVersion => $"The {kind} app is a different version. Update both apps.",
+        PairingFailure.Locked => $"That code didn't match again. Check the digits on the {kind}, then type them once more.",
+        PairingFailure.CodeWithdrawn =>
+            $"Too many wrong codes were tried, so the {kind} withdrew that code. Tap Pair on the {kind} for a new one, then type it here.",
+        _ => $"That code didn't match. Check the digits on the {kind}.",
     };
 
     /// <summary>Builds the snapshot and raises <see cref="StateChanged"/> when it differs from the last one.</summary>

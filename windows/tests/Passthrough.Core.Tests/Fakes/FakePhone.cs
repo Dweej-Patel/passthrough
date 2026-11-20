@@ -86,6 +86,9 @@ public sealed class FakePhone : IAsyncDisposable
     /// <summary>Answer every <c>auth</c> with <c>error not_authenticated</c> and close, even a correct one.</summary>
     public bool RejectsAuth { get; init; }
 
+    /// <summary>Answer every <c>pair</c>, right or wrong, with an <c>error</c> of this reason (and keep the connection open).</summary>
+    public string? PairError { get; init; }
+
     /// <summary>Answer a right code with a <c>paired</c> that carries no token.</summary>
     public bool PairedWithoutToken { get; init; }
 
@@ -208,6 +211,11 @@ public sealed class FakePhone : IAsyncDisposable
                     chatter = ChattersInsteadOfPong;
                     break;
                 case ControlEnvelope.Pair:
+                    if (PairError is not null)
+                    {
+                        await SendAsync(s, new ControlEnvelope(ControlEnvelope.Error) { Reason = PairError });
+                        break;
+                    }
                     if (m.Code == Code && m.ClientID == hello.ClientID)
                     {
                         await SendAsync(s, new ControlEnvelope(ControlEnvelope.Paired)

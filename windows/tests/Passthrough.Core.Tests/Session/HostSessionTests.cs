@@ -172,22 +172,55 @@ public class HostSessionTests
         Assert.Equal(new ControlIdentity(h.Settings.Get("clientID")!, "TEST-PC", null), identity);
     }
 
-    [Fact]
-    public async Task PairingFailure_ShowsMessage()
+    [Theory]
+    [InlineData("bad_code", "That code didn't match. Check the digits on the Android phone.")]
+    [InlineData("expired", "The code expired or wasn't generated yet. Tap Pair on the Android phone and try again.")]
+    [InlineData("not_authenticated", "Not authenticated.")]
+    [InlineData("code_withdrawn", "Too many wrong codes were tried, so the Android phone withdrew that code. Tap Pair on the Android phone for a new one, then type it here.")]
+    [InlineData("something_new", "That code didn't match. Check the digits on the Android phone.")]
+    public async Task PairingFailure_ShowsTheMacsWording(string reason, string message)
     {
-        await using var phone = new FakePhone();
+        await using var phone = new FakePhone { PairError = reason };
         await using var h = new Harness();
         await h.Session.StartAsync();
         var android = Android(phone);
         h.Adb.Attach(android);
         await h.WaitState(s => Entry(s, android) is { State: PhoneState.NotPaired });
 
-        await h.Session.SubmitCodeAsync("000000");
+        await h.Session.SubmitCodeAsync(phone.Code);
 
         var s = await h.WaitState(s => Entry(s, android)?.Message is not null);
-        Assert.Equal("That code didn't match. Check the code on the phone and try again.", Entry(s, android)!.Message);
+        Assert.Equal(message, Entry(s, android)!.Message);
         Assert.Equal(PhoneState.NotPaired, Entry(s, android)!.State);
         Assert.Null(h.Secrets.Get(AndroidSlot));
+    }
+
+    [Fact]
+    public async Task Locked_SaysTypeItAgain_AndOpensAFreshChannelAtOnce()
+    {
+        // The phone closes a channel after three wrong codes; the code still works on a new one (as on the Mac).
+        await using var phone = new FakePhone();
+        await using var h = new Harness();
+        await h.Session.StartAsync();
+        var iPhone = IPhone(phone);
+        h.Usb.Attach(iPhone);
+        await h.WaitState(s => Entry(s, iPhone) is { State: PhoneState.NotPaired });
+        foreach (var code in new[] { "000000", "000001" })
+        {
+            await h.Session.SubmitCodeAsync(code);
+            await h.WaitState(s => Entry(s, iPhone) is { State: PhoneState.NotPaired, Message: not null });
+        }
+
+        await h.Session.SubmitCodeAsync("000002");
+
+        var s = await h.WaitState(s => Entry(s, iPhone)?.Message?.Contains("again") == true && h.Clients.Count == 2);
+        Assert.Equal("That code didn't match again. Check the digits on the iPhone, then type them once more.", Entry(s, iPhone)!.Message);
+        Assert.Equal(PhoneState.NotPaired, Entry(s, iPhone)!.State);
+        var states = h.History.Select(st => Entry(st, iPhone)?.State).ToList();
+        Assert.DoesNotContain(PhoneState.Connecting, states.Skip(states.IndexOf(PhoneState.NotPaired))); // the box never went away
+        // The right code now pairs on the fresh channel, without waiting for a reconnect.
+        await h.Session.SubmitCodeAsync(phone.Code);
+        await h.WaitState(s => Entry(s, iPhone) is { State: PhoneState.Paired, Status: not null });
     }
 
     [Fact]
