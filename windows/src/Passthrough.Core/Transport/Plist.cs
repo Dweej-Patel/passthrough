@@ -67,6 +67,7 @@ public static class Plist
     {
         var result = new Dictionary<string, object>();
         var children = e.Elements().ToList();
+        if (children.Count % 2 != 0) throw new FormatException("Dict has a key without a value");
         for (var i = 0; i + 1 < children.Count; i += 2)
         {
             if (children[i].Name.LocalName != "key") throw new FormatException("Expected <key> in dict");

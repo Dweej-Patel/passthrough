@@ -4,13 +4,16 @@ using System.Runtime.CompilerServices;
 namespace Passthrough.Core.Transport;
 
 /// <summary>Speaks the usbmuxd plist protocol so the PC can open TCP streams to ports on a USB-attached iPhone or iPad.</summary>
-public sealed class UsbMuxClient(StreamConnector connect)
+public sealed class UsbMuxClient(StreamConnector connect, TimeSpan? connectTimeout = null)
 {
+    private readonly TimeSpan _connectTimeout = connectTimeout ?? TimeSpan.FromSeconds(10);
+
     private const int HeaderSize = 16;
     private const int MaxPacket = 1 << 20;
 
     public async IAsyncEnumerable<UsbMuxEvent> ListenAsync([EnumeratorCancellation] CancellationToken ct)
     {
+        var usbDevices = new HashSet<int>();
         var stream = await connect(ct);
         try
         {
@@ -27,13 +30,19 @@ public sealed class UsbMuxClient(StreamConnector connect)
                         break;
                     case "Attached" when message.GetValueOrDefault("DeviceID") is long id
                                          && message.GetValueOrDefault("Properties") is Dictionary<string, object> props:
-                        yield return new UsbMuxEvent.Attached(new UsbMuxDevice(
+                        var device = new UsbMuxDevice(
                             (int)id,
                             props.GetValueOrDefault("SerialNumber") as string ?? "",
-                            props.GetValueOrDefault("ProductID") is long pid ? (int)pid : 0));
+                            props.GetValueOrDefault("ProductID") is long pid ? (int)pid : 0,
+                            props.GetValueOrDefault("ConnectionType") as string ?? "");
+                        // USB only: network (Wi-Fi) devices are never reported.
+                        if (!device.IsUsb) break;
+                        usbDevices.Add(device.DeviceId);
+                        yield return new UsbMuxEvent.Attached(device);
                         break;
                     case "Detached" when message.GetValueOrDefault("DeviceID") is long detachedId:
-                        yield return new UsbMuxEvent.Detached((int)detachedId);
+                        if (usbDevices.Remove((int)detachedId))
+                            yield return new UsbMuxEvent.Detached((int)detachedId);
                         break;
                 }
             }
@@ -46,6 +55,20 @@ public sealed class UsbMuxClient(StreamConnector connect)
 
     /// <summary>Opens a TCP stream to <paramref name="port"/> on the device. The returned stream is the raw connection; the caller owns it.</summary>
     public async Task<Stream> ConnectAsync(int deviceId, int port, CancellationToken ct)
+    {
+        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        timeout.CancelAfter(_connectTimeout);
+        try
+        {
+            return await ConnectCoreAsync(deviceId, port, timeout.Token);
+        }
+        catch (OperationCanceledException) when (!ct.IsCancellationRequested)
+        {
+            throw new TimeoutException("usbmuxd did not answer in time");
+        }
+    }
+
+    private async Task<Stream> ConnectCoreAsync(int deviceId, int port, CancellationToken ct)
     {
         var stream = await connect(ct);
         try

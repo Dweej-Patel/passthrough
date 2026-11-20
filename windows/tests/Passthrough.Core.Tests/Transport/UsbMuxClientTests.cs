@@ -20,7 +20,7 @@ public class UsbMuxClientTests
             {
                 ["MessageType"] = "Attached",
                 ["DeviceID"] = 3L,
-                ["Properties"] = new Dictionary<string, object> { ["SerialNumber"] = "UDID-A", ["ProductID"] = 0x12A8L },
+                ["Properties"] = new Dictionary<string, object> { ["SerialNumber"] = "UDID-A", ["ProductID"] = 0x12A8L, ["ConnectionType"] = "USB" },
             });
             await FakeUsbMuxd.WritePacketAsync(s, 0, new Dictionary<string, object>
             {
@@ -39,7 +39,7 @@ public class UsbMuxClientTests
             if (events.Count == 2) break;
         }
 
-        Assert.Equal(new UsbMuxEvent.Attached(new UsbMuxDevice(3, "UDID-A", 0x12A8)), events[0]);
+        Assert.Equal(new UsbMuxEvent.Attached(new UsbMuxDevice(3, "UDID-A", 0x12A8, "USB")), events[0]);
         Assert.Equal(new UsbMuxEvent.Detached(3), events[1]);
     }
 
@@ -119,5 +119,49 @@ public class UsbMuxClientTests
         var ex = await Assert.ThrowsAsync<UsbMuxException>(() => client.ConnectAsync(3, 7891, Deadline()));
 
         Assert.Equal(3, ex.ResultCode);
+    }
+
+    [Fact]
+    public async Task Listen_IgnoresNetworkDevices()
+    {
+        await using var fake = new FakeUsbMuxd(async s =>
+        {
+            var (_, _, _, tag, _) = await FakeUsbMuxd.ReadPacketAsync(s);
+            await FakeUsbMuxd.WriteResultAsync(s, tag, 0);
+            foreach (var (id, type) in new[] { (5L, "Network"), (6L, "USB") })
+                await FakeUsbMuxd.WritePacketAsync(s, 0, new Dictionary<string, object>
+                {
+                    ["MessageType"] = "Attached",
+                    ["DeviceID"] = id,
+                    ["Properties"] = new Dictionary<string, object> { ["SerialNumber"] = $"U{id}", ["ProductID"] = 0x12A8L, ["ConnectionType"] = type },
+                });
+            await FakeUsbMuxd.WritePacketAsync(s, 0, new Dictionary<string, object> { ["MessageType"] = "Detached", ["DeviceID"] = 5L });
+            await FakeUsbMuxd.WritePacketAsync(s, 0, new Dictionary<string, object> { ["MessageType"] = "Detached", ["DeviceID"] = 6L });
+            await Task.Delay(System.Threading.Timeout.InfiniteTimeSpan, Deadline());
+        });
+        var client = new UsbMuxClient(fake.Connector);
+
+        var events = new List<UsbMuxEvent>();
+        await foreach (var e in client.ListenAsync(Deadline()))
+        {
+            events.Add(e);
+            if (events.Count == 2) break;
+        }
+
+        Assert.Equal(new UsbMuxEvent.Attached(new UsbMuxDevice(6, "U6", 0x12A8, "USB")), events[0]);
+        Assert.Equal(new UsbMuxEvent.Detached(6), events[1]);
+    }
+
+    [Fact]
+    public async Task Connect_UnresponsiveDaemon_TimesOut()
+    {
+        await using var fake = new FakeUsbMuxd(async s =>
+        {
+            await FakeUsbMuxd.ReadPacketAsync(s);
+            await Task.Delay(System.Threading.Timeout.InfiniteTimeSpan, Deadline());
+        });
+        var client = new UsbMuxClient(fake.Connector, TimeSpan.FromMilliseconds(200));
+
+        await Assert.ThrowsAsync<TimeoutException>(() => client.ConnectAsync(3, 7891, Deadline()));
     }
 }

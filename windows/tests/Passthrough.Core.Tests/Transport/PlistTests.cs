@@ -66,4 +66,12 @@ public class PlistTests
         Assert.Equal("UDID-A", props["SerialNumber"]);
         Assert.Equal(0x12A8L, props["ProductID"]);
     }
+
+    [Fact]
+    public void Plist_DictWithTrailingKey_Throws()
+    {
+        const string xml = "<plist version=\"1.0\"><dict><key>a</key><string>x</string><key>b</key></dict></plist>";
+
+        Assert.Throws<FormatException>(() => Plist.Decode(Encoding.UTF8.GetBytes(xml)));
+    }
 }
