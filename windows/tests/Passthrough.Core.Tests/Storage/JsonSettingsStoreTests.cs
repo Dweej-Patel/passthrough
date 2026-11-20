@@ -167,4 +167,40 @@ public class JsonSettingsStoreTests
         var third = new JsonSettingsStore(fs, Path);
         Assert.Equal((ClientId, (string?)null), (third.Get("clientID"), third.Notice));
     }
+
+    [Fact]
+    public void RecoverySave_WhoseFinalRenameFails_KeepsTheNoticeAndRecoversFromTheBadCopyNextTime()
+    {
+        var fs = new MemoryFileSystem();
+        var damaged = $$"""{"clientID":"{{ClientId}}",""";
+        fs.Files[Path] = damaged;
+        fs.Fail = (op, path) => op == "move" && path == Path + ".tmp" ? new IOException("Access is denied.") : null;
+
+        var first = new JsonSettingsStore(fs, Path);
+        Assert.Equal((ClientId, JsonSettingsStore.DamagedNotice), (first.Get("clientID"), first.Notice));
+        Assert.False(fs.FileExists(Path));
+        Assert.Equal(damaged, fs.Files[Path + ".bad"]);
+
+        fs.Fail = (_, _) => null;
+        var second = new JsonSettingsStore(fs, Path);
+        Assert.Equal((ClientId, JsonSettingsStore.DamagedNotice), (second.Get("clientID"), second.Notice));
+        Assert.Equal(ClientId, JsonSerializer.Deserialize<Dictionary<string, string>>(fs.Files[Path])!["clientID"]);
+        Assert.False(fs.FileExists(Path + ".tmp"));
+    }
+
+    [Fact]
+    public void BadCopy_ThatCannotBeRead_AtTheNextLaunch_StartsEmptyWithoutThrowing()
+    {
+        var fs = new MemoryFileSystem();
+        fs.Files[Path + ".bad"] = $$"""{"clientID":"{{ClientId}}",""";
+        fs.Fail = (op, path) => op == "read" && path == Path + ".bad" ? new IOException("The process cannot access the file") : null;
+
+        var store = new JsonSettingsStore(fs, Path);
+
+        Assert.Null(store.Get("clientID"));
+        Assert.Null(store.Notice);
+        Assert.False(fs.FileExists(Path));
+        store.Set("androidEnabled", "true"); // settings still work
+        Assert.Equal("true", new JsonSettingsStore(fs, Path).Get("androidEnabled"));
+    }
 }

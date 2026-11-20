@@ -78,12 +78,16 @@ In this order:
    Uninstall Apple Devices, or stop Apple Mobile Device Service: with no
    Android phone paired or plugged in, the flyout should say to install or
    open it; either way, Android should keep working.
-4. **adb.** Put `adb.exe` in each place the locator looks, one at a time
-   (`ANDROID_HOME\platform-tools`, `ANDROID_SDK_ROOT\platform-tools`,
-   `%LOCALAPPDATA%\Android\Sdk\platform-tools`, a `PATH` entry) and check the
-   app finds it, without restarting it, and that the log names the path. With
-   none present and no iPhone paired or plugged in, the flyout should say to
-   install platform-tools.
+4. **adb.** Start with no `adb.exe` anywhere: with no iPhone paired or plugged
+   in, the flyout should say to install platform-tools. Put `adb.exe` in one
+   place the locator looks: within 30 seconds, without a restart, the app
+   should find it and the log should name the path. Then try the other places
+   one at a time (`ANDROID_HOME\platform-tools`,
+   `ANDROID_SDK_ROOT\platform-tools`,
+   `%LOCALAPPDATA%\Android\Sdk\platform-tools`, a `PATH` entry). adb is looked
+   for again only when the watcher retries or restarts, not while it is
+   tracking phones, so after each move turn Android support off and on in
+   Settings (or restart the app), then check that the log names the new path.
 5. **Secret store.** Pair a phone, quit, start again: it is still paired.
    In `%LOCALAPPDATA%\Passthrough\secrets`, check that only your user has
    access (Properties > Security) and that the `.bin` files are not readable
