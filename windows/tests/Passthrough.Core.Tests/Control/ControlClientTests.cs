@@ -564,6 +564,103 @@ public class ControlClientTests
         Assert.Equal(new ControlEvent.Disconnected(null), Assert.Single(await RestAsync(client)));
     }
 
+    private static byte[] Lines(params string[] lines) => System.Text.Encoding.UTF8.GetBytes(string.Concat(lines.Select(l => l + "\n")));
+
+    private static readonly string AnyNonce = Convert.ToBase64String(new byte[32]);
+
+    private static string UnpairedWelcome(int version = ProtocolConstants.Version) =>
+        $"{{\"t\":\"welcome\",\"protocolVersion\":{version},\"paired\":false,\"nonce\":\"{AnyNonce}\",\"deviceName\":\"Phone\"}}";
+
+    private const string StatusLine = "{\"t\":\"status\",\"deviceName\":\"Phone\",\"hosting\":\"foreground\",\"rxBytes\":1,\"txBytes\":2,\"activeConnections\":3}";
+
+    [Fact]
+    public async Task StatusAndGoodbye_BeforeTheProofs_AreIgnored()
+    {
+        var tap = new ReadTap();
+        string[] script = [StatusLine, "{\"t\":\"goodbye\"}", UnpairedWelcome(), StatusLine, "{\"t\":\"goodbye\"}"];
+        await using var phone = new FakePhone { GarbageAfterHello = Lines(script) };
+        await using var client = TappedClient(phone, token: null, new FakeTimeProvider(), tap);
+
+        await client.StartAsync(CancellationToken.None);
+        await WaitUntilAsync(() => tap.LinesHandled >= script.Length);
+
+        Assert.True(client.Events.TryRead(out var only));
+        Assert.Equal(new ControlEvent.Welcomed(false), only);
+        Assert.False(client.Events.TryRead(out _)); // no status, no goodbye: the channel is not authenticated
+    }
+
+    [Fact]
+    public async Task SecondWelcome_IsIgnored()
+    {
+        var tap = new ReadTap();
+        // The second welcome names another version: acted on, it would end the channel as incompatible.
+        string[] script = [UnpairedWelcome(), UnpairedWelcome(version: 1)];
+        await using var phone = new FakePhone { GarbageAfterHello = Lines(script) };
+        await using var client = TappedClient(phone, token: null, new FakeTimeProvider(), tap);
+
+        await client.StartAsync(CancellationToken.None);
+        await WaitUntilAsync(() => tap.LinesHandled >= script.Length);
+
+        Assert.True(client.Events.TryRead(out var only));
+        Assert.Equal(new ControlEvent.Welcomed(false), only);
+        Assert.False(client.Events.TryRead(out _));
+    }
+
+    [Fact]
+    public async Task PairedWelcome_WithANonceThatIsNot32Bytes_FailsTheProof()
+    {
+        var shortNonce = Convert.ToBase64String(new byte[16]);
+        var proof = Convert.ToBase64String(new byte[32]);
+        await using var phone = new FakePhone
+        {
+            GarbageAfterHello = Lines($"{{\"t\":\"welcome\",\"protocolVersion\":2,\"paired\":true,\"nonce\":\"{shortNonce}\",\"proof\":\"{proof}\",\"deviceName\":\"Phone\"}}"),
+        };
+        await using var client = Client(phone, PhoneToken);
+
+        await client.StartAsync(CancellationToken.None);
+
+        var error = Assert.IsType<ControlException>(await DisconnectErrorAsync(client));
+        Assert.Equal(ControlErrorKind.ProofFailed, error.Kind);
+    }
+
+    [Fact]
+    public async Task UnsupportedVersion_WithNoProtocolVersion_ThePhoneIsOlder()
+    {
+        // A phone from before version 2 says nothing of its own version.
+        await using var phone = new FakePhone { GarbageAfterHello = Lines("{\"t\":\"error\",\"reason\":\"unsupported_version\"}") };
+        await using var client = Client(phone, PhoneToken);
+
+        await client.StartAsync(CancellationToken.None);
+
+        var error = Assert.IsType<ControlException>(await DisconnectErrorAsync(client));
+        Assert.Equal(ControlErrorKind.Incompatible, error.Kind);
+        Assert.True(error.PhoneIsOlder);
+        Assert.Equal("Passthrough on the iPhone is out of date. Update it on the iPhone, then connect again.", error.Message);
+    }
+
+    /// <summary>A connection whose every write fails, as a reset socket does; reads wait (nothing arrives) until cancelled.</summary>
+    private sealed class UnwritableStream : MemoryStream
+    {
+        public override ValueTask WriteAsync(ReadOnlyMemory<byte> buffer, CancellationToken ct = default) =>
+            ValueTask.FromException(new IOException("the connection was reset"));
+
+        public override async ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken ct = default)
+        {
+            await Task.Delay(Timeout.InfiniteTimeSpan, ct);
+            return 0;
+        }
+    }
+
+    [Fact]
+    public async Task WriteFailure_DisconnectsWithThatError()
+    {
+        await using var client = new ControlClient(_ => Task.FromResult<Stream>(new UnwritableStream()), new ControlIdentity(ClientId, PcName, PhoneToken), "iPhone", new FakeTimeProvider());
+
+        await client.StartAsync(CancellationToken.None);
+
+        Assert.Equal("the connection was reset", Assert.IsType<IOException>(await DisconnectErrorAsync(client)).Message);
+    }
+
     private static async Task WaitUntilAsync(Func<bool> condition)
     {
         var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(10);

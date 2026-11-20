@@ -440,4 +440,69 @@ public class WatcherTests
         Assert.Equal("adb start-server did not finish within 15 seconds", Assert.IsType<TimeoutException>(await error).Message);
         await watcher.StopAsync();
     }
+
+    [Fact]
+    public async Task UsbMuxWatcher_ListenEnds_ClearsItsPhonesAndReportsUnavailable()
+    {
+        await using var fake = new FakeUsbMuxd(async s =>
+        {
+            var (_, _, _, tag, _) = await FakeUsbMuxd.ReadPacketAsync(s);
+            await FakeUsbMuxd.WriteResultAsync(s, tag, 0);
+            await FakeUsbMuxd.WritePacketAsync(s, 0, Attached(3, "UDID-A", 0x12A8));
+            // then usbmuxd closes the connection (Apple Devices quit)
+        });
+        var watcher = new UsbMuxWatcher(new UsbMuxClient(fake.Connector), new FakeTimeProvider());
+        var lists = new System.Collections.Concurrent.ConcurrentQueue<int>();
+        watcher.DevicesChanged += l => lists.Enqueue(l.Count);
+        var unavailable = NextAsync<WatchStatus>(h => watcher.StatusChanged += h, s => s.State == WatchState.Unavailable);
+        watcher.Start();
+
+        Assert.Equal(new WatchStatus(WatchState.Unavailable), await unavailable);
+        Assert.Equal([1, 0], lists);
+        await watcher.StopAsync();
+    }
+
+    [Fact]
+    public async Task AdbWatcher_TrackEnds_ClearsItsPhonesAndReportsUnavailable()
+    {
+        await using var fake = new FakeAdbServer(async s =>
+        {
+            if (await FakeAdbServer.ReadRequestAsync(s) != "host:track-devices-l") return;
+            await FakeAdbServer.WriteAsync(s, "OKAY");
+            await FakeAdbServer.WriteBlockAsync(s, "R58M123 device usb:1-1\n");
+            // then the adb server goes away
+        });
+        var watcher = new AdbWatcher(new AdbClient(fake.Connector), Locator("C:\\sdk\\platform-tools\\adb.exe"), new FakeRunner(), new FakeTimeProvider());
+        var lists = new System.Collections.Concurrent.ConcurrentQueue<int>();
+        watcher.DevicesChanged += l => lists.Enqueue(l.Count);
+        var unavailable = NextAsync<WatchStatus>(h => watcher.StatusChanged += h, s => s.State == WatchState.Unavailable);
+        watcher.Start();
+
+        Assert.Equal(new WatchStatus(WatchState.Unavailable), await unavailable);
+        Assert.Equal([1, 0], lists);
+        await watcher.StopAsync();
+    }
+
+    [Theory]
+    [InlineData("R58M123 offline usb:1-1\n", "The Android phone is offline to adb. Replug the cable.")]
+    [InlineData("R58M123 no permissions usb:1-1\n", "adb can't access the Android phone. Replug the cable and choose File Transfer if asked.")]
+    public async Task AdbWatcher_UnusablePhone_Hint(string block, string hint)
+    {
+        await using var fake = new FakeAdbServer(async s =>
+        {
+            if (await FakeAdbServer.ReadRequestAsync(s) != "host:track-devices-l") return;
+            await FakeAdbServer.WriteAsync(s, "OKAY");
+            await FakeAdbServer.WriteBlockAsync(s, block);
+            await FakeAdbServer.HoldOpenAsync(s);
+        });
+        var watcher = new AdbWatcher(new AdbClient(fake.Connector), Locator(null), new FakeRunner(), new FakeTimeProvider());
+        var lists = new System.Collections.Concurrent.ConcurrentQueue<int>();
+        watcher.DevicesChanged += l => lists.Enqueue(l.Count);
+        var watching = NextAsync<WatchStatus>(h => watcher.StatusChanged += h, s => s.State == WatchState.Watching);
+        watcher.Start();
+
+        Assert.Equal(new WatchStatus(WatchState.Watching, hint), await watching);
+        Assert.Equal([0], lists); // listed by adb, but not usable: no phone reported
+        await watcher.StopAsync();
+    }
 }
