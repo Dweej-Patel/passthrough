@@ -13,7 +13,8 @@ public sealed class DeviceDirectory
     private readonly List<PhoneDevice> _devices = [];
     private readonly Dictionary<string, WatchTransport> _source = [];
     private readonly IReadOnlyList<IDeviceWatcher> _watchers;
-    private static readonly AsyncLocal<bool> InHandler = new();
+    [ThreadStatic]
+    private static bool _dispatching; // true only on the dispatcher thread while it is inside a Changed handler
 
     public DeviceDirectory(IEnumerable<IDeviceWatcher> watchers)
     {
@@ -51,8 +52,9 @@ public sealed class DeviceDirectory
     /// </summary>
     public async Task StopAsync()
     {
+        var insideHandler = _dispatching; // read before any await: after one we may be on another thread
         foreach (var watcher in _watchers) await watcher.StopAsync();
-        if (InHandler.Value) return;
+        if (insideHandler) return;
         var barrier = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         _changes.Writer.TryWrite((null, barrier));
         await barrier.Task;
@@ -67,10 +69,10 @@ public sealed class DeviceDirectory
                 barrier.TrySetResult();
                 continue;
             }
-            InHandler.Value = true;
+            _dispatching = true;
             try { Changed?.Invoke(change!); }
             catch (Exception) { } // one failing handler must not stop later changes reaching the others
-            finally { InHandler.Value = false; }
+            finally { _dispatching = false; }
         }
     }
 
