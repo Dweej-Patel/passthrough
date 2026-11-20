@@ -266,4 +266,55 @@ public class WatcherTests
 
         Assert.Equal(WatchState.Idle, watcher.Status.State);
     }
+
+    [Fact]
+    public async Task UsbMuxWatcher_DaemonThatNeverAnswers_ReportsUnavailableNotStuckStarting()
+    {
+        await using var fake = new FakeUsbMuxd(async s =>
+        {
+            await FakeUsbMuxd.ReadPacketAsync(s);
+            await FakeUsbMuxd.HoldOpenAsync(s); // takes the Listen, never answers
+        });
+        var watcher = new UsbMuxWatcher(new UsbMuxClient(fake.Connector, TimeSpan.FromMilliseconds(200)), new FakeTimeProvider());
+        var status = NextAsync<WatchStatus>(h => watcher.StatusChanged += h, s => s.State != WatchState.Starting);
+        watcher.Start();
+
+        var seen = await status;
+        await watcher.StopAsync();
+
+        // Apple Devices answered the connect, so it is installed: not the install hint.
+        Assert.Equal(new WatchStatus(WatchState.Unavailable), seen);
+    }
+
+    private sealed class HangingRunner : IProcessRunner
+    {
+        public int Runs;
+        public int Killed;
+
+        public async Task<int> RunAsync(string exe, string args, CancellationToken ct)
+        {
+            Interlocked.Increment(ref Runs);
+            try { await Task.Delay(Timeout.InfiniteTimeSpan, ct); }
+            catch (OperationCanceledException) { Interlocked.Increment(ref Killed); throw; }
+            return 0;
+        }
+    }
+
+    [Fact]
+    public async Task AdbWatcher_StartServerThatHangs_KilledAfter15Seconds_ReportsUnavailable()
+    {
+        var runner = new HangingRunner();
+        var time = new FakeTimeProvider();
+        var watcher = new AdbWatcher(new AdbClient(Refused), Locator("C:\\sdk\\platform-tools\\adb.exe"), runner, time);
+        var unavailable = NextAsync<WatchStatus>(h => watcher.StatusChanged += h, s => s.State == WatchState.Unavailable);
+        watcher.Start();
+
+        await Poll(() => Volatile.Read(ref runner.Runs) == 1 && time.DueIn().Count == 1);
+        Assert.Equal(WatchState.Starting, watcher.Status.State);
+        time.Advance(AdbClient.ServerStartTimeout);
+
+        await unavailable;
+        Assert.Equal(1, Volatile.Read(ref runner.Killed));
+        await watcher.StopAsync();
+    }
 }

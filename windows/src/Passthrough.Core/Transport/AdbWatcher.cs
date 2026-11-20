@@ -25,7 +25,7 @@ public sealed class AdbWatcher(AdbClient client, AdbLocator locator, IProcessRun
                 SetStatus(new WatchStatus(WatchState.Starting));
             try
             {
-                await AdbClient.EnsureServerAsync(client, adbPath, new ThrottledRunner(this), ct);
+                await AdbClient.EnsureServerAsync(client, adbPath, new ThrottledRunner(this), Time, ct);
                 await foreach (var list in client.TrackDevicesAsync(ct))
                 {
                     published = true;

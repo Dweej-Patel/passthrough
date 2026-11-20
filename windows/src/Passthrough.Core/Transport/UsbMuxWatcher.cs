@@ -1,8 +1,12 @@
+using System.Net.Sockets;
+
 namespace Passthrough.Core.Transport;
 
 /// <summary>
-/// Watches usbmuxd (Apple Devices) for iPhones and iPads on the cable. When it cannot connect it reports
-/// <see cref="WatchState.NotInstalled"/> and retries every five seconds until stopped. Events fire on background threads.
+/// Watches usbmuxd (Apple Devices) for iPhones and iPads on the cable. When nothing answers on its port it reports
+/// <see cref="WatchState.NotInstalled"/>; when usbmuxd answers but fails (refuses, falls silent, drops the listen) it
+/// reports <see cref="WatchState.Unavailable"/>. Either way it retries every five seconds until stopped. Events fire on
+/// background threads.
 /// </summary>
 public sealed class UsbMuxWatcher(UsbMuxClient client, TimeProvider time) : WatcherBase(WatchTransport.UsbMux, time)
 {
@@ -15,6 +19,7 @@ public sealed class UsbMuxWatcher(UsbMuxClient client, TimeProvider time) : Watc
         while (!ct.IsCancellationRequested)
         {
             var listening = false;
+            var refused = false;
             var devices = new List<PhoneDevice>();
             if (Status.State == WatchState.Idle) SetStatus(new WatchStatus(WatchState.Starting));
             try
@@ -41,15 +46,19 @@ public sealed class UsbMuxWatcher(UsbMuxClient client, TimeProvider time) : Watc
             {
                 return;
             }
+            catch (SocketException) when (!listening)
+            {
+                refused = true; // nothing answers on its port: Apple Devices is not installed, or not running
+            }
             catch (Exception)
             {
-                // Falls through to the retry below: a failed connect or a dropped listen is handled the same way.
+                // Falls through to the retry below: a daemon that answers but fails is handled like a dropped listen.
             }
 
             if (devices.Count > 0) Publish([]);
-            SetStatus(listening
-                ? new WatchStatus(WatchState.Unavailable)
-                : new WatchStatus(WatchState.NotInstalled, NotInstalledHint));
+            SetStatus(refused
+                ? new WatchStatus(WatchState.NotInstalled, NotInstalledHint)
+                : new WatchStatus(WatchState.Unavailable));
             if (!await DelayAsync(RetryDelay, ct)) return;
         }
     }

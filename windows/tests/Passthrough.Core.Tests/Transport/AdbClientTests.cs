@@ -170,7 +170,7 @@ public class AdbClientTests
         });
         var runner = new RecordingRunner();
 
-        await AdbClient.EnsureServerAsync(client, "C:\\sdk\\adb.exe", runner, Deadline());
+        await AdbClient.EnsureServerAsync(client, "C:\\sdk\\adb.exe", runner, TimeProvider.System, Deadline());
 
         Assert.Equal(new[] { ("C:\\sdk\\adb.exe", "start-server") }, runner.Calls);
         Assert.Equal(2, attempts);
@@ -182,7 +182,7 @@ public class AdbClientTests
         await using var fake = new FakeAdbServer(FakeAdbServer.HoldOpenAsync);
         var runner = new RecordingRunner();
 
-        await AdbClient.EnsureServerAsync(new AdbClient(fake.Connector), "adb", runner, Deadline());
+        await AdbClient.EnsureServerAsync(new AdbClient(fake.Connector), "adb", runner, TimeProvider.System, Deadline());
 
         Assert.Empty(runner.Calls);
     }
@@ -193,7 +193,96 @@ public class AdbClientTests
         var client = new AdbClient(_ => throw new SocketException((int)SocketError.ConnectionRefused));
         var runner = new RecordingRunner();
 
-        await Assert.ThrowsAsync<SocketException>(() => AdbClient.EnsureServerAsync(client, null, runner, Deadline()));
+        await Assert.ThrowsAsync<SocketException>(() => AdbClient.EnsureServerAsync(client, null, runner, TimeProvider.System, Deadline()));
         Assert.Empty(runner.Calls);
+    }
+
+    private static readonly TimeSpan Short = TimeSpan.FromMilliseconds(200);
+
+    private static async Task DrainAsync(AdbClient client)
+    {
+        await foreach (var _ in client.TrackDevicesAsync(Deadline())) { }
+    }
+
+    [Fact]
+    public async Task Track_ServerThatNeverAnswers_TimesOut()
+    {
+        await using var fake = new FakeAdbServer(async s =>
+        {
+            await FakeAdbServer.ReadRequestAsync(s);
+            await FakeAdbServer.HoldOpenAsync(s); // takes the request, never says OKAY
+        });
+
+        await Assert.ThrowsAsync<TimeoutException>(() => DrainAsync(new AdbClient(fake.Connector, Short)));
+    }
+
+    [Fact]
+    public async Task Track_BlockThatStopsHalfway_TimesOut()
+    {
+        await using var fake = new FakeAdbServer(async s =>
+        {
+            await FakeAdbServer.ReadRequestAsync(s);
+            await FakeAdbServer.WriteAsync(s, "OKAY");
+            await FakeAdbServer.WriteAsync(s, "00"); // half a length, then nothing
+            await FakeAdbServer.HoldOpenAsync(s);
+        });
+
+        await Assert.ThrowsAsync<TimeoutException>(() => DrainAsync(new AdbClient(fake.Connector, Short)));
+    }
+
+    [Fact]
+    public async Task Track_IdleBetweenBlocks_IsNotATimeout()
+    {
+        await using var fake = new FakeAdbServer(async s =>
+        {
+            await FakeAdbServer.ReadRequestAsync(s);
+            await FakeAdbServer.WriteAsync(s, "OKAY");
+            await Task.Delay(Short * 3); // nothing plugged in for a while: an idle subscription is fine
+            await FakeAdbServer.WriteBlockAsync(s, "R58M123 device usb:1-1\n");
+            await FakeAdbServer.HoldOpenAsync(s);
+        });
+        var client = new AdbClient(fake.Connector, Short);
+
+        await foreach (var list in client.TrackDevicesAsync(Deadline()))
+        {
+            Assert.Equal("R58M123", Assert.Single(list).Serial);
+            return;
+        }
+        Assert.Fail("the track ended without a list");
+    }
+
+    /// <summary>A runner whose program never exits on its own; it ends only when cancelled, as ProcessRunner kills it.</summary>
+    private sealed class HangingRunner : IProcessRunner
+    {
+        private readonly TaskCompletionSource _started = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public Task Started => _started.Task;
+        public volatile bool Killed;
+
+        public async Task<int> RunAsync(string exe, string args, CancellationToken ct)
+        {
+            _started.TrySetResult();
+            try { await Task.Delay(Timeout.InfiniteTimeSpan, ct); }
+            catch (OperationCanceledException) { Killed = true; throw; }
+            return 0;
+        }
+    }
+
+    [Fact]
+    public async Task EnsureServer_StartServerThatHangs_IsKilledAfter15SecondsOnTheInjectedClock()
+    {
+        var client = new AdbClient(_ => throw new SocketException((int)SocketError.ConnectionRefused));
+        var runner = new HangingRunner();
+        var time = new FakeTimeProvider();
+
+        var ensure = AdbClient.EnsureServerAsync(client, "C:\\sdk\\adb.exe", runner, time, Deadline());
+        await runner.Started.WaitAsync(TimeSpan.FromSeconds(10));
+        Assert.Equal([TimeSpan.FromSeconds(15)], time.DueIn()); // the Mac's limit (ADB.swift startServer)
+        time.Advance(TimeSpan.FromSeconds(15) - TimeSpan.FromMilliseconds(1));
+        Assert.False(ensure.IsCompleted);
+        time.Advance(TimeSpan.FromMilliseconds(1));
+
+        var e = await Assert.ThrowsAsync<TimeoutException>(() => ensure.WaitAsync(TimeSpan.FromSeconds(10)));
+        Assert.Equal("adb start-server did not finish within 15 seconds", e.Message);
+        Assert.True(runner.Killed);
     }
 }

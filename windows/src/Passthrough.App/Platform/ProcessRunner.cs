@@ -21,7 +21,9 @@ public sealed class ProcessRunner : IProcessRunner
         }
         catch (OperationCanceledException)
         {
-            if (!process.HasExited) process.Kill(entireProcessTree: true);
+            // Stopped, or past Core's start-up limit (AdbClient.ServerStartTimeout): kill it.
+            try { process.Kill(entireProcessTree: true); }
+            catch (InvalidOperationException) { } // it exited just now
             throw;
         }
         return process.ExitCode;

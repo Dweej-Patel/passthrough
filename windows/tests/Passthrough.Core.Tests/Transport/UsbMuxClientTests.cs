@@ -206,4 +206,78 @@ public class UsbMuxClientTests
         }
         Assert.Fail("the listen ended without an event");
     }
+
+    private static readonly TimeSpan Short = TimeSpan.FromMilliseconds(200);
+
+    private static async Task DrainAsync(UsbMuxClient client)
+    {
+        await foreach (var _ in client.ListenAsync(Deadline())) { }
+    }
+
+    [Fact]
+    public async Task Listen_DaemonThatNeverAnswers_TimesOut()
+    {
+        await using var fake = new FakeUsbMuxd(async s =>
+        {
+            await FakeUsbMuxd.ReadPacketAsync(s);
+            await FakeUsbMuxd.HoldOpenAsync(s); // accepts the Listen, never answers it
+        });
+
+        await Assert.ThrowsAsync<TimeoutException>(() => DrainAsync(new UsbMuxClient(fake.Connector, Short)));
+    }
+
+    [Fact]
+    public async Task Listen_PacketThatStopsHalfway_TimesOut()
+    {
+        await using var fake = new FakeUsbMuxd(async s =>
+        {
+            var (_, _, _, tag, _) = await FakeUsbMuxd.ReadPacketAsync(s);
+            await FakeUsbMuxd.WriteResultAsync(s, tag, 0);
+            await s.WriteAsync(new byte[] { 200, 0, 0, 0, 1 }); // five bytes of a header, then nothing
+            await s.FlushAsync();
+            await FakeUsbMuxd.HoldOpenAsync(s);
+        });
+
+        await Assert.ThrowsAsync<TimeoutException>(() => DrainAsync(new UsbMuxClient(fake.Connector, Short)));
+    }
+
+    [Fact]
+    public async Task Listen_IdleBetweenPackets_IsNotATimeout()
+    {
+        await using var fake = new FakeUsbMuxd(async s =>
+        {
+            var (_, _, _, tag, _) = await FakeUsbMuxd.ReadPacketAsync(s);
+            await FakeUsbMuxd.WriteResultAsync(s, tag, 0);
+            await Task.Delay(Short * 3); // no phone for a while: an idle subscription is fine
+            await FakeUsbMuxd.WritePacketAsync(s, 0, new Dictionary<string, object>
+            {
+                ["MessageType"] = "Attached",
+                ["DeviceID"] = 3L,
+                ["Properties"] = new Dictionary<string, object> { ["SerialNumber"] = "UDID-A", ["ProductID"] = 0x12A8L, ["ConnectionType"] = "USB" },
+            });
+            await FakeUsbMuxd.HoldOpenAsync(s);
+        });
+        var client = new UsbMuxClient(fake.Connector, Short);
+
+        await foreach (var e in client.ListenAsync(Deadline()))
+        {
+            Assert.IsType<UsbMuxEvent.Attached>(e);
+            return;
+        }
+        Assert.Fail("the listen ended without an event");
+    }
+
+    [Fact]
+    public async Task Listen_ResultOtherThanZero_Throws()
+    {
+        await using var fake = new FakeUsbMuxd(async s =>
+        {
+            var (_, _, _, tag, _) = await FakeUsbMuxd.ReadPacketAsync(s);
+            await FakeUsbMuxd.WriteResultAsync(s, tag, 6);
+            await FakeUsbMuxd.HoldOpenAsync(s);
+        });
+
+        var e = await Assert.ThrowsAsync<UsbMuxException>(() => DrainAsync(new UsbMuxClient(fake.Connector)));
+        Assert.Equal(6, e.ResultCode);
+    }
 }
