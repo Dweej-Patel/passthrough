@@ -15,6 +15,9 @@
     <ApplicationIcon>..\Passthrough.App\Assets\app.ico</ApplicationIcon>
     <ConptyRequiresx64Host>true</ConptyRequiresx64Host>
     <InvariantGlobalization>true</InvariantGlobalization>
+    <!-- Always: so a plain build restores the same packages (and the same packages.lock.json) as the publish. -->
+    <PublishSingleFile>true</PublishSingleFile>
+    <SelfContained>true</SelfContained>
   </PropertyGroup>
 
   <ItemGroup>
