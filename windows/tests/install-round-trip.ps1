@@ -62,7 +62,9 @@ Check (@(Get-NetFirewallRule -Group 'Passthrough' -ErrorAction SilentlyContinue)
 Check (-not (Test-Path 'HKLM:\SOFTWARE\Passthrough')) 'no registry key'
 Check (-not (Test-Path $data)) 'no data folder'
 Check (-not (Test-Path $shortcut)) 'no shortcut'
-Check (-not (Test-Path 'C:\Windows\ServiceProfiles\PassthroughService')) 'no service profile'
+# The profile's hive may stay loaded until a restart; its keys must be gone now.
+$profile = 'C:\Windows\ServiceProfiles\PassthroughService'
+Check (-not (Test-Path $profile) -or -not (Get-ChildItem $profile -Recurse -File -Force -ErrorAction SilentlyContinue | Where-Object { $_.FullName -match '\\Microsoft\\(Crypto|Protect)\\' })) 'no service keys left in its profile'
 # The running exe can't delete itself: what is left of Program Files\Passthrough goes at the next restart.
 Check (-not (Test-Path $program) -or @(Get-ChildItem $program -Recurse -File).Count -le 1) 'program folder gone or queued'
 

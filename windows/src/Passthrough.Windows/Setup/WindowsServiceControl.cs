@@ -208,16 +208,29 @@ public sealed class WindowsServiceControl : IServiceControl
 
     public bool DeleteProfile()
     {
-        // The virtual account's profile: its folder (the TLS key, DPAPI's keys) and its ProfileList entry. Windows keeps
-        // a stopped service's profile loaded for a few seconds, so a refusal is tried again for up to 30 s.
+        // The virtual account's profile: its folder (the TLS key, DPAPI's keys) and its ProfileList entry. Windows can
+        // keep a stopped service's profile hive loaded for a while, so a refusal is tried again for 10 s; after that the
+        // keys inside are deleted now and what is still locked (the hive) goes at the next restart.
         for (var attempt = 0; ; attempt++)
         {
             if (Native.DeleteProfile(ServiceDefinition.Sid, null, null)) return true;
             var error = Marshal.GetLastWin32Error();
             if (error is Native.ErrorFileNotFound or Native.ErrorPathNotFound or Native.ErrorNoSuchUser or Native.ErrorInvalidParameter) return false;
-            if (attempt >= 30) throw new SetupException($"The service's profile couldn't be deleted (error {error}). Restart this PC and remove Passthrough again to finish.");
+            if (attempt >= 10) return DeleteProfileFolder();
             Thread.Sleep(1000);
         }
+    }
+
+    /// <summary>
+    /// The profile's files, deleted where they aren't locked (its keys among them), the rest queued for the next
+    /// restart. True when the folder was there.
+    /// </summary>
+    private static bool DeleteProfileFolder()
+    {
+        var folder = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Windows), "ServiceProfiles", ServiceDefinition.Name);
+        if (!Directory.Exists(folder)) return false;
+        new WindowsSecuredFiles().DeleteFolder(folder);
+        return true;
     }
 
     private static uint StartType(ServiceStart start) => start switch
