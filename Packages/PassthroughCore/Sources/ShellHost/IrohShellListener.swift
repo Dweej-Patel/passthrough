@@ -125,6 +125,36 @@ public final class IrohShellListener: @unchecked Sendable {
         set { gate.screenPassUsed.set(newValue) }
     }
 
+    /// As `ShellListener.computerKey`; here a computer's signature is bound to this endpoint's id.
+    public var computerKey: (@Sendable (String) -> Data?)? {
+        get { gate.computerKeyLookup.get() }
+        set { gate.computerKeyLookup.set(newValue) }
+    }
+
+    /// As `ShellListener.computerScopes`.
+    public var computerScopes: (@Sendable (String) -> Set<String>)? {
+        get { gate.computerScopesLookup.get() }
+        set { gate.computerScopesLookup.set(newValue) }
+    }
+
+    /// As `ShellListener.onComputerGrant`.
+    public var onComputerGrant: (@Sendable (_ phoneID: String, _ label: String, _ request: ComputerGrantRequest) -> Result<(id: String, key: Data, scopes: [String]), ShellError>)? {
+        get { gate.computerGrant.get() }
+        set { gate.computerGrant.set(newValue) }
+    }
+
+    /// As `ShellListener.onComputerPass`.
+    public var onComputerPass: (@Sendable (_ phoneID: String, _ label: String, _ pass: ShellCredential, _ scopes: [String], _ pending: [String]) -> ShellError?)? {
+        get { gate.computerPass.get() }
+        set { gate.computerPass.set(newValue) }
+    }
+
+    /// As `ShellListener.onComputerRevoke`.
+    public var onComputerRevoke: (@Sendable (_ phoneID: String, _ computerID: String) -> Bool)? {
+        get { gate.computerRevoke.get() }
+        set { gate.computerRevoke.set(newValue) }
+    }
+
     /// As `ShellListener.pushMacState()`.
     public func pushMacState() { gate.pushMacState() }
 
@@ -161,7 +191,8 @@ public final class IrohShellListener: @unchecked Sendable {
         self.host = host
         gate = ShellGate(label: "iroh-shell-listener", manager: manager, transcripts: transcripts, shellKeys: shellKeys,
                          keyConfirmed: keyConfirmed, phoneLabel: phoneLabel, macInfo: macInfo,
-                         handshakeTimeout: handshakeTimeout)
+                         handshakeTimeout: handshakeTimeout,
+                         binding: ComputerProof.binding(hex: host.endpointID).map { ShellGate.Binding(path: .iroh, hostBinding: $0) })
     }
 
     /// Starts accepting. Run one listener per endpoint.
