@@ -90,7 +90,7 @@ public class FixtureTests
             var line = m.GetProperty("line").GetString()!;
             var encoded = Encoding.UTF8.GetString(ControlEnvelope.Decode(Encoding.UTF8.GetBytes(line)).EncodeLine());
             Assert.EndsWith("\n", encoded);
-            Assert.True(JsonNode.DeepEquals(JsonNode.Parse(encoded.TrimEnd('\n')), JsonNode.Parse(line)), line);
+            Assert.True(Fixtures.JsonEqual(encoded.TrimEnd('\n'), line), line);
         }
     }
 

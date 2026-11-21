@@ -3,9 +3,10 @@
 What the Mac and a phone (iPhone or Android) say to each other, and an iPad
 and the iPhone it gets its internet from ([iPad](#ipad)). The Swift
 implementation is in `Packages/PassthroughCore`, the Kotlin one in
-`android/app/src/main/java/dev/dpatel/passthrough/core`. Both test suites read
+`android/app/src/main/java/dev/dpatel/passthrough/core`, the C# one (the
+Windows host) in `windows/src/Passthrough.Core`. All three test suites read
 [`fixtures.json`](fixtures.json); change a message, a port or a pairing rule
-there first, then make both suites pass.
+there first, then make all three pass.
 
 ## Transport
 

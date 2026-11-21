@@ -201,6 +201,11 @@ these steps as written and check each one before building.
   each Windows project's package versions and content hashes are pinned in its
   `packages.lock.json`, restored in locked mode. To change a package, see
   [windows/README.md](windows/README.md#build). Nothing changes in the apps.
+* **The Windows Core reads the remote shell protocol.** A C# port of the shell
+  envelope, its constants, the key proof and the iroh checks, tested against
+  `protocol/fixtures.json`'s `shell` section like the Swift and Kotlin suites.
+  The fixtures gain the list of error reasons and the `replaying`, `lock` and
+  `viewing` lines. Nothing on the wire changes and the PC hosts no shell yet.
 * Remote shell: coming back to a session no longer plays it back from the
   top. The phone holds the Mac's replay until it is complete and draws it in
   one go, keeping what was on screen meanwhile, and says "Loading session…"

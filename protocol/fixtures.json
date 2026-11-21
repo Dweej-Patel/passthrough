@@ -1,5 +1,5 @@
 {
-  "_comment": "Shared by the Swift tests (Packages/PassthroughCore) and the Kotlin tests (android/). Change it and both suites must agree. See protocol/README.md.",
+  "_comment": "Shared by the Swift tests (Packages/PassthroughCore), the Kotlin tests (android/) and the C# tests (windows/). Change it and all three suites must agree. See protocol/README.md.",
   "protocolVersion": 2,
   "ports": {
     "socks": 7890,
@@ -407,8 +407,18 @@
       },
       {
         "line": "{\"t\":\"error\",\"reason\":\"no_such_session\"}"
+      },
+      {
+        "line": "{\"t\":\"replaying\",\"session\":\"3F2B8C1A-7D4E-4A55-9C0B-1E6F2A9D8B34\"}"
+      },
+      {
+        "line": "{\"t\":\"lock\"}"
+      },
+      {
+        "line": "{\"t\":\"viewing\",\"on\":true}"
       }
     ],
+    "errors": ["not_authorized", "too_many_sessions", "no_such_session", "bad_request", "screen_not_allowed", "screen_unavailable", "screen_video_unavailable", "too_many_screens", "not_allowed", "vpn_not_set_up", "screen_only", "pass_not_saved"],
     "addresses": [
       {
         "host": "192.168.1.20",
