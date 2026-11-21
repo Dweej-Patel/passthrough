@@ -240,6 +240,11 @@ these steps as written and check each one before building.
   once the phone confirms it; an unanswered grant is tried again with the Mac's
   waits. Forgetting a pairing takes its shell access with it. Remote access
   doesn't exist yet, so nothing is granted.
+* Windows: which peers may reach the shell (private, Tailscale and the PC's own
+  IPv6 networks; Tailscale's range only through a tunnel) and how many
+  connections may wait to prove a key (16 in all, 2 per address or network, 4
+  kept for addresses that proved one lately) are ported from the Mac with its
+  tests. Nothing listens yet.
 * Remote shell: coming back to a session no longer plays it back from the
   top. The phone holds the Mac's replay until it is complete and draws it in
   one go, keeping what was on screen meanwhile, and says "Loading session…"
