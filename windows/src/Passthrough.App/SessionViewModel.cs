@@ -24,6 +24,7 @@ public sealed class SessionViewModel : ObservableBase
     private string _pairingsKey = "";
     private bool _androidEnabled;
     private SessionState _state;
+    private FlyoutHeader _header;
     /// <summary>The slots this PC holds a pairing in, attached or not, as last read; they decide which install hints show.</summary>
     private IReadOnlyList<string> _pairedSlots = [];
 
@@ -36,6 +37,7 @@ public sealed class SessionViewModel : ObservableBase
         _androidEnabled = androidEnabled;
         _notice = notice;
         _state = _session.State;
+        _header = FlyoutHeader.For(_state);
         _session.StateChanged += state => _ui.TryEnqueue(() => Apply(state));
         Apply(_session.State);
         RefreshPairedSlots();
@@ -52,7 +54,14 @@ public sealed class SessionViewModel : ObservableBase
         private set { _androidEnabled = value; Raise(nameof(AndroidEnabled)); }
     }
 
-    public Visibility EmptyVisibility => Rows.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
+    /// <summary>The two lines at the top of the flyout and their picture, by Core's <see cref="FlyoutHeader"/>.</summary>
+    public string HeaderTitle => _header.Title;
+    public string HeaderSubtitle => _header.Subtitle;
+    public string HeaderGlyph => Glyphs.For(_header.Kind);
+    public Visibility HeaderOnVisibility => _header.Connected ? Visibility.Visible : Visibility.Collapsed;
+    public Visibility HeaderIdleVisibility => _header.Connected ? Visibility.Collapsed : Visibility.Visible;
+
+    public Visibility RowsVisibility => Rows.Count == 0 ? Visibility.Collapsed : Visibility.Visible;
 
     /// <summary>What the user should do (install or open Apple Devices, allow USB debugging…), one per line.</summary>
     public string Hints
@@ -91,7 +100,17 @@ public sealed class SessionViewModel : ObservableBase
     {
         _state = state;
         RowList.Reconcile(Rows, state.Phones, r => r.Id, e => new PhoneRow(e), (r, e) => r.Update(e));
-        Raise(nameof(EmptyVisibility));
+        Raise(nameof(RowsVisibility));
+        var header = FlyoutHeader.For(state);
+        if (header != _header)
+        {
+            _header = header;
+            Raise(nameof(HeaderTitle));
+            Raise(nameof(HeaderSubtitle));
+            Raise(nameof(HeaderGlyph));
+            Raise(nameof(HeaderOnVisibility));
+            Raise(nameof(HeaderIdleVisibility));
+        }
         ShowHints();
 
         var key = string.Join("\n", state.Phones.Select(p => $"{p.Device.PairingSlot}|{p.HasPairing}|{p.SavedName}"));

@@ -26,6 +26,18 @@ public sealed record PhoneRowModel
 
     public required string StateText { get; init; }
 
+    /// <summary>iPhone, Android phone or iPad, for the row's picture.</summary>
+    public required PhoneKind Kind { get; init; }
+
+    /// <summary>The phone this PC is using; its picture is filled in.</summary>
+    public required bool IsActive { get; init; }
+
+    /// <summary>What the state means at a glance: paired is good, the active phone waiting for its code needs a person, a failed channel is a problem.</summary>
+    public required RowTone Tone { get; init; }
+
+    /// <summary>Something is under way (the channel is opening, a code is being checked): a spinner stands in for the dot.</summary>
+    public required bool Busy { get; init; }
+
     /// <summary>"{carrier} · {radio} · {battery}", see <see cref="Presentation.StatusLine"/>.</summary>
     public required string StatusLine { get; init; }
 
@@ -81,6 +93,16 @@ public sealed record PhoneRowModel
                 PhoneState.RemoteOnlyLater => "Not supported yet",
                 _ => "",
             },
+            Kind = e.Device.Kind,
+            IsActive = e.IsActive,
+            Tone = e.State switch
+            {
+                PhoneState.Paired => RowTone.Good,
+                PhoneState.Failed => RowTone.Problem,
+                PhoneState.NotPaired when e.IsActive => RowTone.Attention,
+                _ => RowTone.Neutral,
+            },
+            Busy = e.State is PhoneState.Connecting or PhoneState.Pairing,
             StatusLine = Presentation.StatusLine.Format(e.Status),
             ActivityLine = e.IsActive && e.State == PhoneState.Paired
                 ? $"{e.Active} {(e.Active == 1 ? "connection" : "connections")} · ↓ {Format.Bytes(e.Rx)} ↑ {Format.Bytes(e.Tx)}"

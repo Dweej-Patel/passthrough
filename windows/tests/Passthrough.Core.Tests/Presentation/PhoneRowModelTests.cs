@@ -37,6 +37,21 @@ public class PhoneRowModelTests
     [InlineData(PhoneState.RemoteOnlyLater, "Not supported yet")]
     public void StateText(PhoneState state, string text) => Assert.Equal(text, PhoneRowModel.From(Entry(IPhone, state)).StateText);
 
+    [Theory]
+    [InlineData(PhoneState.Paired, true, RowTone.Good, false)]
+    [InlineData(PhoneState.Paired, false, RowTone.Good, false)]
+    [InlineData(PhoneState.NotPaired, true, RowTone.Attention, false)]
+    [InlineData(PhoneState.NotPaired, false, RowTone.Neutral, false)] // only the phone in use asks for its code
+    [InlineData(PhoneState.Connecting, true, RowTone.Neutral, true)]
+    [InlineData(PhoneState.Pairing, true, RowTone.Neutral, true)]
+    [InlineData(PhoneState.Failed, true, RowTone.Problem, false)]
+    [InlineData(PhoneState.RemoteOnlyLater, false, RowTone.Neutral, false)]
+    public void Tone_AndBusy(PhoneState state, bool active, RowTone tone, bool busy)
+    {
+        var row = PhoneRowModel.From(Entry(IPhone, state, active: active));
+        Assert.Equal((tone, busy, active, PhoneKind.IPhone), (row.Tone, row.Busy, row.IsActive, row.Kind));
+    }
+
     [Fact]
     public void Title_LiveNameFirst_ThenSavedName_ThenTheKind()
     {

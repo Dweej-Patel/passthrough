@@ -154,7 +154,7 @@ public partial class App : Application
             _settings = new SettingsWindow(_flyout.ViewModel);
             _settings.Closed += (_, _) => _settings = null;
         }
-        _settings.Activate();
+        _settings.BringToFront();
     }
 
     private async void Quit()

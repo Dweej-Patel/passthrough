@@ -45,6 +45,16 @@ public class FlyoutTests
         Assert.Equal(new PixelRect(2560 + 2880 - 540 - 18, 1728 - 720 - 18, 540, 720), FlyoutPlacement.Place(new PixelRect(2560, 0, 2880, 1728), 1.5));
     }
 
+    [Theory]
+    [InlineData(300, 300)]
+    [InlineData(20, FlyoutPlacement.MinHeightDip)]
+    [InlineData(5000, FlyoutPlacement.MaxHeightDip)]
+    public void Place_IsAsTallAsItsContent_WithinLimits_AndStaysAtTheBottom(int content, int height)
+    {
+        Assert.Equal(new PixelRect(1920 - 360 - 12, 1032 - height - 12, 360, height), FlyoutPlacement.Place(new PixelRect(0, 0, 1920, 1032), 1.0, content));
+        Assert.Equal(height * 2, FlyoutPlacement.Place(new PixelRect(0, 0, 3840, 2064), 2.0, content).Height);
+    }
+
     [Fact]
     public void Place_FitsAWorkAreaSmallerThanTheFlyout()
     {

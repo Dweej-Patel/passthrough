@@ -4,7 +4,9 @@
     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
     xmlns:local="using:Passthrough.App">
 
-    <Grid Padding="16" RowSpacing="12">
+    <!-- Read top to bottom, as the Mac's panel is: what the PC is doing with the phone, the phones, what needs doing,
+         then Settings and Quit. No background of its own: the window's acrylic shows through. -->
+    <Grid x:Name="Root" Padding="14">
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto" />
             <RowDefinition Height="*" />
@@ -12,61 +14,145 @@
             <RowDefinition Height="Auto" />
         </Grid.RowDefinitions>
 
-        <TextBlock Grid.Row="0" Text="Passthrough" Style="{StaticResource SubtitleTextBlockStyle}" />
+        <!-- Header -->
+        <Grid Grid.Row="0" ColumnSpacing="12" Margin="2,2,2,0">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="Auto" />
+                <ColumnDefinition Width="*" />
+            </Grid.ColumnDefinitions>
+            <Grid Width="38" Height="38" Visibility="{x:Bind ViewModel.HeaderIdleVisibility, Mode=OneWay}">
+                <Ellipse Fill="{ThemeResource ControlFillColorSecondaryBrush}" />
+                <FontIcon Glyph="{x:Bind ViewModel.HeaderGlyph, Mode=OneWay}" FontSize="18"
+                          Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+            </Grid>
+            <Grid Width="38" Height="38" Visibility="{x:Bind ViewModel.HeaderOnVisibility, Mode=OneWay}">
+                <Ellipse Fill="{StaticResource PtTintBrush}" />
+                <FontIcon Glyph="{x:Bind ViewModel.HeaderGlyph, Mode=OneWay}" FontSize="18"
+                          Foreground="{StaticResource PtOnTintBrush}" />
+            </Grid>
+            <StackPanel Grid.Column="1" VerticalAlignment="Center" Spacing="1">
+                <TextBlock Text="{x:Bind ViewModel.HeaderTitle, Mode=OneWay}" Style="{StaticResource BodyStrongTextBlockStyle}"
+                           FontSize="15" TextTrimming="CharacterEllipsis" TextWrapping="NoWrap" />
+                <TextBlock Text="{x:Bind ViewModel.HeaderSubtitle, Mode=OneWay}" Style="{StaticResource CaptionTextBlockStyle}"
+                           Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                           TextTrimming="CharacterEllipsis" TextWrapping="NoWrap" />
+            </StackPanel>
+        </Grid>
 
-        <ScrollViewer Grid.Row="1">
-            <StackPanel Spacing="12">
-                <TextBlock Text="No phone attached. Plug one in with its cable."
-                           Visibility="{x:Bind ViewModel.EmptyVisibility, Mode=OneWay}"
-                           TextWrapping="Wrap" Opacity="0.7" />
-                <ItemsControl ItemsSource="{x:Bind ViewModel.Rows}">
-                    <ItemsControl.ItemTemplate>
-                        <DataTemplate x:DataType="local:PhoneRow">
-                            <StackPanel Spacing="4" Margin="0,0,0,12">
-                                <Grid ColumnSpacing="8">
+        <!-- The phones, one card each -->
+        <ScrollViewer Grid.Row="1" Margin="0,12,0,0" VerticalScrollBarVisibility="Auto"
+                      Visibility="{x:Bind ViewModel.RowsVisibility, Mode=OneWay}">
+            <ItemsControl x:Name="Body" ItemsSource="{x:Bind ViewModel.Rows}">
+                <ItemsControl.ItemsPanel>
+                    <ItemsPanelTemplate>
+                        <StackPanel Spacing="8" />
+                    </ItemsPanelTemplate>
+                </ItemsControl.ItemsPanel>
+                <ItemsControl.ItemTemplate>
+                    <DataTemplate x:DataType="local:PhoneRow">
+                        <Border Style="{StaticResource PtCardStyle}">
+                            <StackPanel Spacing="10">
+                                <Grid ColumnSpacing="10">
                                     <Grid.ColumnDefinitions>
                                         <ColumnDefinition Width="Auto" />
                                         <ColumnDefinition Width="*" />
                                         <ColumnDefinition Width="Auto" />
                                     </Grid.ColumnDefinitions>
-                                    <TextBlock Grid.Column="0" Text="{x:Bind Marker, Mode=OneWay}" />
-                                    <TextBlock Grid.Column="1" Text="{x:Bind Title, Mode=OneWay}" FontWeight="SemiBold" />
-                                    <TextBlock Grid.Column="2" Text="{x:Bind StateText, Mode=OneWay}" Opacity="0.7" />
+                                    <Grid Width="32" Height="32" Visibility="{x:Bind InactiveVisibility, Mode=OneWay}">
+                                        <Ellipse Fill="{ThemeResource ControlFillColorSecondaryBrush}" />
+                                        <FontIcon Glyph="{x:Bind Glyph, Mode=OneWay}" FontSize="15"
+                                                  Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                                    </Grid>
+                                    <Grid Width="32" Height="32" Visibility="{x:Bind ActiveVisibility, Mode=OneWay}">
+                                        <Ellipse Fill="{StaticResource PtTintBrush}" />
+                                        <FontIcon Glyph="{x:Bind Glyph, Mode=OneWay}" FontSize="15"
+                                                  Foreground="{StaticResource PtOnTintBrush}" />
+                                    </Grid>
+                                    <StackPanel Grid.Column="1" VerticalAlignment="Center">
+                                        <TextBlock Text="{x:Bind Title, Mode=OneWay}" Style="{StaticResource BodyStrongTextBlockStyle}"
+                                                   TextTrimming="CharacterEllipsis" TextWrapping="NoWrap" />
+                                        <TextBlock Text="{x:Bind Detail, Mode=OneWay}" Style="{StaticResource CaptionTextBlockStyle}"
+                                                   Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                                   TextTrimming="CharacterEllipsis" TextWrapping="NoWrap" />
+                                    </StackPanel>
+                                    <StackPanel Grid.Column="2" Orientation="Horizontal" Spacing="6" VerticalAlignment="Center">
+                                        <ProgressRing Width="14" Height="14" MinWidth="14" MinHeight="14" IsActive="True"
+                                                      Visibility="{x:Bind BusyVisibility, Mode=OneWay}" />
+                                        <Ellipse Width="8" Height="8" Fill="{x:Bind Dot, Mode=OneWay}"
+                                                 Visibility="{x:Bind DotVisibility, Mode=OneWay}" />
+                                        <TextBlock Text="{x:Bind StateText, Mode=OneWay}" Style="{StaticResource CaptionTextBlockStyle}"
+                                                   Foreground="{ThemeResource TextFillColorSecondaryBrush}" VerticalAlignment="Center" />
+                                    </StackPanel>
                                 </Grid>
-                                <TextBlock Margin="22,0,0,0" Text="{x:Bind Detail, Mode=OneWay}" Opacity="0.7" />
-                                <TextBlock Margin="22,0,0,0" Text="{x:Bind StatusLine, Mode=OneWay}"
+
+                                <TextBlock Text="{x:Bind StatusLine, Mode=OneWay}" TextWrapping="Wrap"
                                            Visibility="{x:Bind StatusVisibility, Mode=OneWay}" />
-                                <TextBlock Margin="22,0,0,0" Text="{x:Bind ActivityLine, Mode=OneWay}"
-                                           Visibility="{x:Bind ActivityVisibility, Mode=OneWay}" Opacity="0.7" />
-                                <TextBlock Margin="22,0,0,0" Text="{x:Bind Message, Mode=OneWay}"
-                                           Visibility="{x:Bind MessageVisibility, Mode=OneWay}" TextWrapping="Wrap" />
-                                <StackPanel Margin="22,0,0,0" Orientation="Horizontal" Spacing="8"
-                                            Visibility="{x:Bind PairVisibility, Mode=OneWay}">
-                                    <TextBox Width="120" MaxLength="12" PlaceholderText="Six-digit code"
+                                <TextBlock Text="{x:Bind ActivityLine, Mode=OneWay}" Style="{StaticResource CaptionTextBlockStyle}"
+                                           Margin="0,-6,0,0" Visibility="{x:Bind ActivityVisibility, Mode=OneWay}"
+                                           Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+
+                                <Border Background="{StaticResource PtAttentionFillBrush}" CornerRadius="6" Padding="10,8"
+                                        Visibility="{x:Bind MessageVisibility, Mode=OneWay}">
+                                    <TextBlock Text="{x:Bind Message, Mode=OneWay}" Style="{StaticResource CaptionTextBlockStyle}"
+                                               TextWrapping="Wrap" />
+                                </Border>
+
+                                <Grid ColumnSpacing="8" Visibility="{x:Bind PairVisibility, Mode=OneWay}">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="Auto" />
+                                    </Grid.ColumnDefinitions>
+                                    <TextBox MaxLength="12" PlaceholderText="Six-digit code" FontSize="16" CharacterSpacing="80"
                                              Text="{x:Bind Code, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
                                              InputScope="Number" KeyDown="OnCodeKeyDown" />
-                                    <Button Content="Pair" IsEnabled="{x:Bind CanPair, Mode=OneWay}" Click="OnPairClick" />
-                                </StackPanel>
-                                <TextBlock Margin="22,0,0,0" Text="{x:Bind CodeProblem, Mode=OneWay}"
+                                    <Button Grid.Column="1" Content="Pair" MinWidth="72" VerticalAlignment="Stretch"
+                                            Style="{StaticResource AccentButtonStyle}"
+                                            IsEnabled="{x:Bind CanPair, Mode=OneWay}" Click="OnPairClick" />
+                                </Grid>
+                                <TextBlock Text="{x:Bind CodeProblem, Mode=OneWay}" Style="{StaticResource CaptionTextBlockStyle}"
+                                           Foreground="{ThemeResource SystemFillColorCautionBrush}"
                                            Visibility="{x:Bind CodeProblemVisibility, Mode=OneWay}" TextWrapping="Wrap" />
-                                <Button Margin="22,0,0,0" Content="Try again"
+
+                                <Button Content="Try again" HorizontalAlignment="Stretch" Style="{StaticResource AccentButtonStyle}"
                                         Visibility="{x:Bind RetryVisibility, Mode=OneWay}" Click="OnRetryClick" />
-                                <Button Margin="22,0,0,0" Content="Use this phone"
+                                <Button Content="Use this phone" HorizontalAlignment="Stretch"
                                         Visibility="{x:Bind UseVisibility, Mode=OneWay}" Click="OnUseClick" />
                             </StackPanel>
-                        </DataTemplate>
-                    </ItemsControl.ItemTemplate>
-                </ItemsControl>
-            </StackPanel>
+                        </Border>
+                    </DataTemplate>
+                </ItemsControl.ItemTemplate>
+            </ItemsControl>
         </ScrollViewer>
 
-        <TextBlock Grid.Row="2" Text="{x:Bind ViewModel.Hints, Mode=OneWay}"
-                   Visibility="{x:Bind ViewModel.HintsVisibility, Mode=OneWay}"
-                   TextWrapping="Wrap" Opacity="0.7" />
+        <!-- What the user should do: install Apple Devices, allow USB debugging, ... -->
+        <Border x:Name="HintsBox" Grid.Row="2" Margin="0,12,0,0" Style="{StaticResource PtCardStyle}"
+                Visibility="{x:Bind ViewModel.HintsVisibility, Mode=OneWay}">
+            <Grid ColumnSpacing="10">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="Auto" />
+                    <ColumnDefinition Width="*" />
+                </Grid.ColumnDefinitions>
+                <FontIcon Glyph="&#xE946;" FontSize="14" VerticalAlignment="Top" Margin="0,1,0,0"
+                          Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                <TextBlock Grid.Column="1" Text="{x:Bind ViewModel.Hints, Mode=OneWay}" Style="{StaticResource CaptionTextBlockStyle}"
+                           Foreground="{ThemeResource TextFillColorSecondaryBrush}" TextWrapping="Wrap" />
+            </Grid>
+        </Border>
 
-        <Grid Grid.Row="3">
-            <HyperlinkButton Content="Settings…" HorizontalAlignment="Left" Click="OnSettingsClick" />
-            <HyperlinkButton Content="Quit" HorizontalAlignment="Right" Click="OnQuitClick" />
+        <!-- Footer -->
+        <Grid Grid.Row="3" Margin="0,12,0,0" BorderBrush="{ThemeResource DividerStrokeColorDefaultBrush}" BorderThickness="0,1,0,0" Padding="2,8,0,0">
+            <TextBlock Text="Passthrough" Style="{StaticResource CaptionTextBlockStyle}" VerticalAlignment="Center"
+                       Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+            <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" Spacing="2">
+                <Button Style="{StaticResource PtIconButtonStyle}" Click="OnSettingsClick"
+                        ToolTipService.ToolTip="Settings" AutomationProperties.Name="Settings">
+                    <FontIcon Glyph="&#xE713;" FontSize="14" />
+                </Button>
+                <Button Style="{StaticResource PtIconButtonStyle}" Click="OnQuitClick"
+                        ToolTipService.ToolTip="Quit Passthrough" AutomationProperties.Name="Quit Passthrough">
+                    <FontIcon Glyph="&#xE7E8;" FontSize="14" />
+                </Button>
+            </StackPanel>
         </Grid>
     </Grid>
 </Window>

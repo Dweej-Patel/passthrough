@@ -3,6 +3,7 @@ using Microsoft.UI.Windowing;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Input;
+using Microsoft.UI.Xaml.Media;
 using Passthrough.App.Platform;
 using Passthrough.Core.Desktop;
 using Passthrough.Core.Presentation;
@@ -11,8 +12,9 @@ using Windows.Graphics;
 namespace Passthrough.App;
 
 /// <summary>
-/// The tray flyout: a small borderless window above the taskbar that hides itself when it loses focus. Its size and
-/// place come from Core's <see cref="FlyoutPlacement"/>, and the icon toggles it through <see cref="FlyoutToggle"/>.
+/// The tray flyout: a small borderless acrylic window above the taskbar, as tall as what it shows, that stays above
+/// other windows and hides itself when it loses focus. Its size and place come from Core's
+/// <see cref="FlyoutPlacement"/>, and the icon toggles it through <see cref="FlyoutToggle"/>.
 /// </summary>
 public sealed partial class FlyoutWindow : Window
 {
@@ -20,6 +22,10 @@ public sealed partial class FlyoutWindow : Window
     private readonly Action _quit;
     private readonly FlyoutToggle _toggle = new(TimeProvider.System);
     private bool _quitting;
+    /// <summary>The work area the flyout was last opened in; it is fitted to it again when its content changes.</summary>
+    private RectInt32 _area;
+    /// <summary>The content's height when last measured, so the next opening starts at the right size.</summary>
+    private int? _contentHeightDip;
 
     public FlyoutWindow(SessionViewModel viewModel, Action openSettings, Action quit)
     {
@@ -33,9 +39,18 @@ public sealed partial class FlyoutWindow : Window
             presenter.IsResizable = false;
             presenter.IsMaximizable = false;
             presenter.IsMinimizable = false;
+            // Above the other windows while it is up: it is gone as soon as it loses focus (see ShowAtTray).
+            presenter.IsAlwaysOnTop = true;
             presenter.SetBorderAndTitleBar(hasBorder: true, hasTitleBar: false);
         }
         AppWindow.IsShownInSwitchers = false;
+        AppWindow.SetIcon(AppIcon.Path);
+        // What the Windows 11 tray flyouts are made of; where it isn't supported the window keeps its plain background.
+        SystemBackdrop = new DesktopAcrylicBackdrop();
+        // A phone arriving, a code box or a hint appearing changes how tall the content is.
+        Body.SizeChanged += (_, _) => FitIfOpen();
+        HintsBox.SizeChanged += (_, _) => FitIfOpen();
+        ViewModel.PropertyChanged += (_, _) => DispatcherQueue.TryEnqueue(FitIfOpen);
         AppWindow.Closing += (_, args) =>
         {
             // Closing hides: the window is reused until the app quits.
@@ -45,7 +60,13 @@ public sealed partial class FlyoutWindow : Window
         };
         Activated += (_, args) =>
         {
-            if (args.WindowActivationState != WindowActivationState.Deactivated || !AppWindow.IsVisible) return;
+            if (args.WindowActivationState != WindowActivationState.Deactivated)
+            {
+                // The bindings first run when the window is first activated, which can collapse parts of it.
+                DispatcherQueue.TryEnqueue(FitIfOpen);
+                return;
+            }
+            if (!AppWindow.IsVisible) return;
             AppWindow.Hide();
             _toggle.HiddenByDeactivation();
         };
@@ -65,22 +86,56 @@ public sealed partial class FlyoutWindow : Window
 
     /// <summary>
     /// Places the window at the bottom right of the work area of the monitor under the cursor (the one whose taskbar was
-    /// clicked), sized for that monitor's DPI, and brings it forward. The window is moved onto that monitor first, so the
-    /// DPI read from its own handle is that monitor's; it is sized after that move, so a size Windows suggests when the
-    /// DPI changes (WM_DPICHANGED, which WinUI applies) is replaced by this one.
+    /// clicked), sized for that monitor's DPI and for its content, and brings it in front of the other windows. The
+    /// window is moved onto that monitor first, so the DPI read from its own handle is that monitor's; it is sized after
+    /// that move, so a size Windows suggests when the DPI changes (WM_DPICHANGED, which WinUI applies) is replaced by
+    /// this one.
     /// </summary>
     private void ShowAtTray()
     {
         var cursor = NativeMethods.CursorPosition();
-        var area = DisplayArea.GetFromPoint(new PointInt32(cursor.X, cursor.Y), DisplayAreaFallback.Primary).WorkArea;
-        AppWindow.Move(new PointInt32(area.X, area.Y));
-        var hwnd = Win32Interop.GetWindowFromWindowId(AppWindow.Id);
-        var scale = FlyoutPlacement.ScaleFromDpi(NativeMethods.DpiOf(hwnd));
-        var r = FlyoutPlacement.Place(new PixelRect(area.X, area.Y, area.Width, area.Height), scale);
-        AppWindow.MoveAndResize(new RectInt32(r.X, r.Y, r.Width, r.Height));
+        _area = DisplayArea.GetFromPoint(new PointInt32(cursor.X, cursor.Y), DisplayAreaFallback.Primary).WorkArea;
+        AppWindow.Move(new PointInt32(_area.X, _area.Y));
+        Place(_contentHeightDip);
+        if (AppWindow.Presenter is OverlappedPresenter shown) shown.IsAlwaysOnTop = true;
         AppWindow.Show();
+        // Laid out now, so the height is right before the first frame is drawn.
+        Root.UpdateLayout();
+        Fit();
         Activate();
+        // It hides when it loses focus, so it may only stay above the other windows if it got the focus. When Windows
+        // refuses that (an elevated or hung app is in front), it is an ordinary window that the icon closes.
+        var front = NativeMethods.BringToFront(Win32Interop.GetWindowFromWindowId(AppWindow.Id));
+        if (AppWindow.Presenter is OverlappedPresenter presenter) presenter.IsAlwaysOnTop = front;
     }
+
+    private void FitIfOpen()
+    {
+        // Layout and view-model callbacks can still arrive once the window has been closed for quitting.
+        if (!_quitting && AppWindow.IsVisible) Fit();
+    }
+
+    /// <summary>Makes the window as tall as its content wants at the window's width (the list scrolls past the limit).</summary>
+    private void Fit()
+    {
+        var scale = Scale();
+        var chrome = AppWindow.Size.Height - AppWindow.ClientSize.Height;
+        Root.Measure(new Windows.Foundation.Size(AppWindow.ClientSize.Width / scale, double.PositiveInfinity));
+        var height = (int)Math.Ceiling(Root.DesiredSize.Height + chrome / scale);
+        // That measure was a question, not the layout: have the next pass measure for the real size again.
+        Root.InvalidateMeasure();
+        if (height == _contentHeightDip) return;
+        _contentHeightDip = height;
+        Place(height);
+    }
+
+    private void Place(int? contentHeightDip)
+    {
+        var r = FlyoutPlacement.Place(new PixelRect(_area.X, _area.Y, _area.Width, _area.Height), Scale(), contentHeightDip);
+        AppWindow.MoveAndResize(new RectInt32(r.X, r.Y, r.Width, r.Height));
+    }
+
+    private double Scale() => FlyoutPlacement.ScaleFromDpi(NativeMethods.DpiOf(Win32Interop.GetWindowFromWindowId(AppWindow.Id)));
 
     private async void OnPairClick(object sender, RoutedEventArgs e)
     {

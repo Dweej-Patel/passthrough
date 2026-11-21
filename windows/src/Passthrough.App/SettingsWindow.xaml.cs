@@ -1,7 +1,11 @@
 using System.Collections.ObjectModel;
 using System.ComponentModel;
+using Microsoft.UI;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Media;
+using Passthrough.Core.Desktop;
+using Windows.Graphics;
 using Passthrough.App.Platform;
 using Passthrough.Core.Presentation;
 
@@ -10,12 +14,23 @@ namespace Passthrough.App;
 /// <summary>Android support, start at login, and forgetting any stored pairing (its phone attached or not).</summary>
 public sealed partial class SettingsWindow : Window
 {
+    private const int WidthDip = 560;
+    private const int HeightDip = 620;
+
     private bool _forgetting;
 
     public SettingsWindow(SessionViewModel viewModel)
     {
         ViewModel = viewModel;
         InitializeComponent();
+        AppWindow.SetIcon(AppIcon.Path); // the taskbar button and Alt+Tab; without it Windows shows a blank default
+        SystemBackdrop = new MicaBackdrop();
+        // The Mica runs under the caption buttons too; the strip above the scrolling content is what drags the window.
+        ExtendsContentIntoTitleBar = true;
+        SetTitleBar(TitleBarArea);
+        var hwnd = Win32Interop.GetWindowFromWindowId(AppWindow.Id);
+        var scale = FlyoutPlacement.ScaleFromDpi(NativeMethods.DpiOf(hwnd));
+        AppWindow.Resize(new SizeInt32((int)Math.Round(WidthDip * scale), (int)Math.Round(HeightDip * scale)));
 
         // Set the switches before listening, so loading the saved values does not count as a change.
         AndroidSwitch.IsOn = viewModel.AndroidEnabled;
@@ -37,7 +52,7 @@ public sealed partial class SettingsWindow : Window
     public SessionViewModel ViewModel { get; }
 
     /// <summary>The stored pairings, as Core's <see cref="PairedPhone.List"/> names them.</summary>
-    public ObservableCollection<PairedPhone> Paired { get; } = new();
+    public ObservableCollection<PairedPhoneRow> Paired { get; } = new();
 
     /// <summary>Whether Start at login is on; a registry that can't be read shows it off, with the error line, instead of failing the window.</summary>
     private bool ReadStartAtLogin()
@@ -65,7 +80,7 @@ public sealed partial class SettingsWindow : Window
         {
             var list = await ViewModel.PairedPhonesAsync();
             Paired.Clear();
-            foreach (var phone in list) Paired.Add(phone);
+            foreach (var phone in list) Paired.Add(new PairedPhoneRow(phone));
             NoPairingsText.Visibility = Paired.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
         }
         catch (Exception ex)
@@ -90,7 +105,7 @@ public sealed partial class SettingsWindow : Window
         try
         {
             await ViewModel.SetAndroidEnabledAsync(wanted);
-            ErrorText.Visibility = Visibility.Collapsed;
+            ErrorBox.Visibility = Visibility.Collapsed;
         }
         catch (Exception ex)
         {
@@ -105,7 +120,7 @@ public sealed partial class SettingsWindow : Window
         try
         {
             StartupRegistration.SetEnabled(StartAtLoginSwitch.IsOn);
-            ErrorText.Visibility = Visibility.Collapsed;
+            ErrorBox.Visibility = Visibility.Collapsed;
         }
         catch (Exception ex)
         {
@@ -122,7 +137,7 @@ public sealed partial class SettingsWindow : Window
         // One dialog at a time: a second click while it is up would make ShowAsync throw.
         if (_forgetting) return;
         _forgetting = true;
-        var phone = (PairedPhone)((FrameworkElement)sender).DataContext;
+        var phone = (PairedPhoneRow)((FrameworkElement)sender).DataContext;
         try
         {
             var dialog = new ContentDialog
@@ -137,7 +152,7 @@ public sealed partial class SettingsWindow : Window
             if (await dialog.ShowAsync() == ContentDialogResult.Primary)
             {
                 await ViewModel.ForgetSlotAsync(phone.Slot);
-                ErrorText.Visibility = Visibility.Collapsed;
+                ErrorBox.Visibility = Visibility.Collapsed;
             }
         }
         catch (Exception ex)
@@ -152,9 +167,16 @@ public sealed partial class SettingsWindow : Window
         OnPairingsChanged();
     }
 
+    /// <summary>In front of whatever is there: opened from the tray, the window would otherwise come up behind it.</summary>
+    public void BringToFront()
+    {
+        Activate();
+        _ = NativeMethods.BringToFront(Win32Interop.GetWindowFromWindowId(AppWindow.Id));
+    }
+
     private void ShowError(string message)
     {
         ErrorText.Text = message;
-        ErrorText.Visibility = Visibility.Visible;
+        ErrorBox.Visibility = Visibility.Visible;
     }
 }
