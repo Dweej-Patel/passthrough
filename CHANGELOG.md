@@ -18,6 +18,12 @@ the **Before you rebuild** notes first. The Mac and phone apps update together.
   phone in once** afterwards; until then phones can't reach the PC's shell.
   Your phones' access, your relay and its token move into the service; this
   account's copies are deleted.
+* **Windows: phones on the same network or Tailscale reach the PC directly**
+  (Windows 11 and Server 2022; Windows 10 has no TLS 1.3 server, so phones use
+  the built-in connection there). The service listens on TCP 7893, TLS 1.3
+  only, with a key that can't leave the PC, and names itself on the network as
+  the PC's host name. The firewall rule lets in the local subnet and the
+  private and Tailscale ranges only.
 
 * **Phone notifications now take their push key from the build, not from
   Settings.** The *Team ID*, *Key ID* and *Choose .p8* fields in

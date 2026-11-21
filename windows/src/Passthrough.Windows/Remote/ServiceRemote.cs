@@ -5,6 +5,7 @@ using Passthrough.Core.Shell.Access;
 using Passthrough.Core.Shell.Serving;
 using Passthrough.Core.Storage;
 using Passthrough.Windows.Iroh;
+using Passthrough.Windows.Net;
 using Passthrough.Windows.Storage;
 
 namespace Passthrough.Windows.Remote;
@@ -28,14 +29,27 @@ public sealed class ServiceRemote : IDisposable
     private IrohEndpoint? _endpoint;
     private IrohShellListener? _listener;
     private readonly IrohRelay? _relayOverride;
+    private readonly TlsOptions? _tls;
+    private readonly LocalAdapters _adapters = new();
+    private ServiceIdentity? _identity;
+    private TlsListener? _tlsListener;
+    private DnsSd? _dnsSd;
 
-    public ServiceRemote(ISecretStore secrets, string installFolder, ITrayHosts trays, Func<string?> relayUrl, Action<string> log, string? hostName = null, IrohRelay? relayOverride = null)
+    /// <summary>Where the TLS identity lives and how the door is opened (null: no listener on the network, as on Windows 10).</summary>
+    public sealed record TlsOptions(string CertificateFile, string KeyName = ServiceIdentity.KeyName, int Port = RemoteShell.DefaultPort, bool Advertise = true);
+
+    /// <summary>Why the local path isn't open, in the words the setup row shows; null when it is (or wasn't asked for).</summary>
+    public string? NetworkProblem { get; private set; }
+
+    public ServiceRemote(ISecretStore secrets, string installFolder, ITrayHosts trays, Func<string?> relayUrl, Action<string> log, string? hostName = null, IrohRelay? relayOverride = null,
+        TlsOptions? tls = null)
     {
         _secrets = secrets;
         _trays = trays;
         _relayUrl = relayUrl;
         _log = log;
-        _hostName = hostName ?? Environment.MachineName;
+        _hostName = hostName ?? HostName.Current();
+        _tls = tls;
         _relayOverride = relayOverride;
         Directory = new AccessDirectory(_secrets, log: log);
         IrohEndpoint.UseLibraryIn(installFolder);
@@ -69,6 +83,7 @@ public sealed class ServiceRemote : IDisposable
 
     public void Start()
     {
+        StartTls();
         if (!IrohEndpoint.IsAvailable)
         {
             _log("iroh: the bridge is missing from the install; phones can't connect from anywhere");
@@ -94,6 +109,47 @@ public sealed class ServiceRemote : IDisposable
         }
     }
 
+    /// <summary>The same network and Tailscale: TLS 1.3 on 7893, and the DNS-SD record phones look for.</summary>
+    private void StartTls()
+    {
+        if (_tls is null) return;
+        try { _identity = ServiceIdentity.LoadOrCreate(_tls.CertificateFile, _tls.KeyName, _log); }
+        catch (Exception e) when (e is System.Security.Cryptography.CryptographicException or IOException or UnauthorizedAccessException)
+        {
+            // Never replaced over an error: a new key changes what every phone pins.
+            NetworkProblem = $"This PC's key couldn't be opened ({e.HResult:X8}). Phones use the built-in connection instead.";
+            _log($"tls: {NetworkProblem}");
+            return;
+        }
+        try
+        {
+            _tlsListener = new TlsListener(Gate, _identity, _adapters, _tls.Port, _log);
+            _tlsListener.Start();
+        }
+        catch (System.Net.Sockets.SocketException)
+        {
+            _tlsListener = null;
+            NetworkProblem = $"Port {_tls.Port} is in use by another program. Phones use the built-in connection instead.";
+            _log($"tls: {NetworkProblem}");
+            return;
+        }
+        if (_tls.Advertise)
+        {
+            _dnsSd = new DnsSd(_log);
+            var port = _tlsListener.Port;
+            _ = Task.Run(() => _dnsSd.RegisterAsync(_hostName, port, TimeSpan.FromSeconds(10)));
+        }
+    }
+
+    /// <summary>The port phones dial on the same network, once the listener is open (tests ask for any free one).</summary>
+    internal int? TlsPort => _tlsListener?.Port;
+
+    /// <summary>The certificate hash phones pin, once there is a listener.</summary>
+    internal string? Pin => _tlsListener is null ? null : _identity?.Pin;
+
+    /// <summary>Where phones dial on the same network and Tailscale: none until the listener is open.</summary>
+    private IReadOnlyList<string> Addresses() => _tlsListener is null ? [] : AdapterPolicy.Advertised(_adapters.Facts);
+
     /// <summary>The service's own iroh key: made once, in its store, and never taken from a tray app.</summary>
     private byte[] SecretKey()
     {
@@ -108,17 +164,22 @@ public sealed class ServiceRemote : IDisposable
         return fresh;
     }
 
-    /// <summary>What a grant carries now: the iroh identity (no listener on the network yet: the TLS path comes with its own PR).</summary>
+    /// <summary>
+    /// What a grant carries now: the certificate and addresses of the listener on the network (the no-listener pin and
+    /// none without one: RECONCILIATION), the host's name (the DNS-SD instance name), and the iroh identity.
+    /// </summary>
     private GrantContents? Grant()
     {
-        if (_endpoint is not { } endpoint) return null;
+        if (_endpoint is not { } endpoint && _tlsListener is null) return null;
         return new GrantContents
         {
-            CertSHA256 = GrantContents.NoListenerPin,
+            CertSHA256 = Pin ?? GrantContents.NoListenerPin,
+            Port = _tlsListener?.Port ?? RemoteShell.DefaultPort,
+            Addresses = Addresses(),
             HostName = _hostName,
-            IrohId = endpoint.Id,
-            IrohRelay = endpoint.HomeRelay,
-            RelayToken = _relayUrl() is { Length: > 0 } ? _secrets.Get(RelayTokenSlot) : null,
+            IrohId = _endpoint?.Id,
+            IrohRelay = _endpoint?.HomeRelay,
+            RelayToken = _endpoint is not null && _relayUrl() is { Length: > 0 } ? _secrets.Get(RelayTokenSlot) : null,
         };
     }
 
@@ -130,7 +191,8 @@ public sealed class ServiceRemote : IDisposable
                 IrohID = endpoint.Id,
                 IrohRelay = endpoint.HomeRelay,
                 RelayToken = _relayUrl() is { Length: > 0 } ? _secrets.Get(RelayTokenSlot) : null,
-                Addresses = [.. endpoint.DirectAddresses],
+                // Where to dial this PC over TLS (protocol/README.md): never iroh's own addresses.
+                Addresses = [.. Addresses()],
             }
             : null,
         Host = phone =>
@@ -162,6 +224,9 @@ public sealed class ServiceRemote : IDisposable
 
     public void Dispose()
     {
+        _dnsSd?.Dispose();
+        _tlsListener?.Dispose();
+        _identity?.Dispose();
         Gate.Stop();
         _listener?.Dispose();
         _endpoint?.Dispose();

@@ -1,3 +1,6 @@
+using System.Net.Security;
+using System.Net.Sockets;
+using System.Security.Authentication;
 using System.Security.Principal;
 using System.Text;
 using Passthrough.Core.Pipe;
@@ -6,6 +9,7 @@ using Passthrough.Core.Shell.Serving;
 using Passthrough.Core.Shell.Sessions;
 using Passthrough.Core.Storage;
 using Passthrough.Windows.Iroh;
+using Passthrough.Windows.Net;
 using Passthrough.Windows.Pipes;
 using Passthrough.Windows.Remote;
 using Passthrough.Windows.Shell;
@@ -31,11 +35,16 @@ public sealed class ServiceRemoteTests : IDisposable
     private readonly PipeAccessAdmin _admin;
     private readonly IrohEndpoint _phone = IrohEndpoint.Bind([], IrohRelay.None);
     private PipeLink? _trayLink;
+    private readonly string _keyName = "Passthrough.Test.TLS." + Guid.NewGuid().ToString("N");
+    private readonly string _certificate;
 
     public ServiceRemoteTests()
     {
         using (var me = WindowsIdentity.GetCurrent()) _account = me.User!.Value;
-        _remote = new ServiceRemote(_serviceSecrets, AppContext.BaseDirectory, _trays, () => null, _ => { }, "TEST-PC", IrohRelay.None);
+        Directory.CreateDirectory(_directory);
+        _certificate = Path.Combine(_directory, "tls.cer");
+        _remote = new ServiceRemote(_serviceSecrets, AppContext.BaseDirectory, _trays, () => null, _ => { }, "TEST-PC", IrohRelay.None,
+            new ServiceRemote.TlsOptions(_certificate, _keyName, Port: 0, Advertise: false));
         _trays.Admin = _remote.Admin.Handle;
         _remote.Start();
         var catalog = ShellCatalog.Discover(new ShellProbe());
@@ -51,6 +60,7 @@ public sealed class ServiceRemoteTests : IDisposable
         _remote.Dispose();
         _manager.CloseAll();
         _phone.Dispose();
+        ServiceIdentity.Forget(_certificate, _keyName);
         try { Directory.Delete(_directory, recursive: true); } catch (IOException) { }
     }
 
@@ -209,6 +219,48 @@ public sealed class ServiceRemoteTests : IDisposable
         Assert.Empty(_remote.Admin.Handle("S-1-5-21-9-9-9-1002", new PipeAdminRequest { Op = PipeAdminRequest.List }).Devices!);
         Assert.Equal(PipeAdminReply.Unknown, _remote.Admin.Handle("S-1-5-21-9-9-9-1002", new PipeAdminRequest { Op = PipeAdminRequest.Revoke, Phone = "phone-a" }).Error);
         Assert.Single(await _admin.ListAsync());
+    }
+
+    [Fact]
+    public async Task APhoneOnTheSameNetworkConnectsOverTls13WithThePinnedCertificate()
+    {
+        await LinkTrayAsync();
+        Assert.True(await _admin.AddKeyAsync("phone-a", "iPhone", "token.iphone.A", Key));
+        var grant = (await _admin.GrantContentsAsync())!;
+        Assert.Equal(_remote.Pin, grant.CertSHA256);
+        Assert.NotEqual(Passthrough.Core.Shell.Access.GrantContents.NoListenerPin, grant.CertSHA256);
+        Assert.Equal(_remote.TlsPort, grant.Port);
+
+        using var tcp = new TcpClient();
+        await tcp.ConnectAsync("127.0.0.1", grant.Port);
+        string? seen = null;
+        var ssl = new SslStream(tcp.GetStream(), false, (_, certificate, _, _) =>
+        {
+            seen = Passthrough.Core.Shell.Identity.CertificateDer.Pin(certificate!.GetRawCertData());
+            return seen == grant.CertSHA256; // the phone's rule: the pin, nothing else
+        });
+        await ssl.AuthenticateAsClientAsync(new SslClientAuthenticationOptions { TargetHost = "Passthrough PC", EnabledSslProtocols = SslProtocols.Tls13 });
+        Assert.Equal(SslProtocols.Tls13, ssl.SslProtocol);
+        Assert.Equal(grant.CertSHA256, seen);
+        // Over TLS the host speaks first: the challenge, no hello.
+        var lines = new Lines(ssl);
+        var challenge = await lines.Next(ShellEnvelope.Challenge);
+        await lines.Send(new ShellEnvelope(ShellEnvelope.Proof)
+        {
+            PhoneID = "phone-a",
+            Mac = Convert.ToBase64String(RemoteShell.Proof(Key, Convert.FromBase64String(challenge.Nonce!))),
+        });
+        Assert.Equal(ShellEnvelope.Ready, (await lines.Next())?.T);
+    }
+
+    [Fact]
+    public void ThePinStaysAcrossARestartOfTheService()
+    {
+        var first = _remote.Pin;
+        using var again = ServiceIdentity.LoadOrCreate(_certificate, _keyName);
+        Assert.Equal(first, again.Pin);
+        // The key can't be taken out.
+        Assert.Equal(System.Security.Cryptography.CngExportPolicies.None, again.Key.ExportPolicy);
     }
 
     [Fact]

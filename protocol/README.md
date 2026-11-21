@@ -911,7 +911,9 @@ handshake completes: 10/8, 172.16/12, 192.168/16, 169.254/16, 127/8,
 (Tailscale). 100.64/10 is also carrier-grade NAT space, so a peer from it, or
 from `fd7a:115c:a1e0::/48`, is let in only while one of the Mac's own tunnel
 interfaces (a point-to-point `utun`, as Tailscale, NetBird and Headscale set
-up) has an address in that range of the same family, and only when the
+up; on a Windows PC, an adapter of virtual or tunnel type with no hardware and
+no connector, which is what Wintun and WireGuard adapters report, never
+Ethernet, Wi-Fi, WWAN or a Hyper-V or WSL switch) has an address in that range of the same family, and only when the
 connection arrived on such an address; the same range on Wi-Fi or Ethernet is
 the carrier's network and does not count. A connection from such a peer whose
 arrival address is not known is refused. Hosts may carry a `%zone` suffix, which is ignored. A global

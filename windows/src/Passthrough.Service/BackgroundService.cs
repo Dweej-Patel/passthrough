@@ -60,7 +60,12 @@ internal sealed class BackgroundService
     {
         var store = new Passthrough.Windows.Storage.ServiceSecretStore(_machine.StoreFolder);
         TakePending(store);
-        Remote = new ServiceRemote(store, _installed.InstallFolder, Trays!, () => _state.Relay.Url, Log);
+        // The local path needs Windows' TLS 1.3 server (Windows 11, Server 2022): below that, phones use iroh only.
+        var tls = Environment.OSVersion.Version.Build >= ServiceDefinition.TlsListenerBuild
+            ? new ServiceRemote.TlsOptions(Path.Combine(_machine.StoreFolder, "tls.cer"))
+            : null;
+        if (tls is null) Log("tls: this Windows has no TLS 1.3 server; phones use the built-in connection only");
+        Remote = new ServiceRemote(store, _installed.InstallFolder, Trays!, () => _state.Relay.Url, Log, tls: tls);
         Trays!.Admin = Remote.Admin.Handle;
         Remote.Start();
     }
@@ -82,6 +87,7 @@ internal sealed class BackgroundService
             {
                 // A new identity: every phone knew this PC by the old one, so every phone's access goes too.
                 store.Delete(ServiceRemote.IrohKeySlot);
+                Passthrough.Windows.Net.ServiceIdentity.Forget(Path.Combine(_machine.StoreFolder, "tls.cer"));
                 foreach (var slot in store.Slots().Where(s => s.StartsWith(Passthrough.Core.Shell.Access.AccessDirectory.SlotPrefix, StringComparison.Ordinal)))
                     store.Delete(slot);
                 File.Delete(reset);
