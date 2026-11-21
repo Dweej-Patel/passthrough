@@ -6,9 +6,14 @@ that follow are in the [roadmap](#roadmap) below.
 
 ```
 windows/
-  src/Passthrough.Core/          net10.0, all the logic, no Windows APIs
-  src/Passthrough.App/           WinUI 3 tray app, unpackaged, x64
-  tests/Passthrough.Core.Tests/  xUnit
+  src/Passthrough.Core/            net10.0, all the logic, no Windows APIs
+  src/Passthrough.Windows/         what only Windows does: ConPTY, iroh, pipes, the Service Control Manager, the firewall
+  src/Passthrough.Service/         Remote access's background service, and its install, update, off and remove verbs
+  src/Passthrough.App/             WinUI 3 tray app, unpackaged, x64
+  native/iroh-bridge/              Rust: Passthrough's iroh endpoint as a C ABI
+  tests/Passthrough.Core.Tests/    xUnit, any OS
+  tests/Passthrough.Windows.Tests/ xUnit, Windows only
+  tests/install-round-trip.ps1     installs and removes the service (changes the PC; CI runs it)
 ```
 
 ## Roadmap
@@ -58,6 +63,22 @@ without it, publish it self-contained instead:
 ```
 dotnet publish windows/src/Passthrough.App -c Release --self-contained
 ```
+
+Remote access's background service can only be installed from a
+self-contained build, because a service account can't use a .NET installed in
+one user's profile. Build one folder with the app, the service and the iroh
+bridge, and `files.json` (every file's size and SHA-256), with:
+
+```
+scripts/build-windows.ps1
+```
+
+It lands in `windows/artifacts/Passthrough` (about 320 MB). Run
+`Passthrough.Service.exe --install` from there in an administrator's prompt
+(the Remote access switch runs it for you once the service holds the phones,
+later in stage 4): it copies exactly those files into `C:\Program Files\Passthrough`, makes
+the service, its folders and firewall rules, and starts it. From then on Start
+at login and the Start menu run the installed copy.
 
 The SDK version comes from `global.json` at the repo root (10.0.100 or any
 later 10.0 feature band). Packages come only from nuget.org

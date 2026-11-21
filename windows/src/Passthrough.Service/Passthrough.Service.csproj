@@ -1,0 +1,32 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- Passthrough's background service (stage 4) and the only code that runs as administrator: the verbs
+       install, update, off, remove and configure, each behind one prompt. Published self-contained and single-file
+       (scripts/build-windows.ps1): a service account can't use a .NET that lives in one user's profile, and an elevated
+       run loads no runtime file from the folder it was started from. -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0-windows10.0.19041.0</TargetFramework>
+    <RootNamespace>Passthrough.Service</RootNamespace>
+    <AssemblyName>Passthrough.Service</AssemblyName>
+    <Platforms>x64</Platforms>
+    <PlatformTarget>x64</PlatformTarget>
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <ApplicationIcon>..\Passthrough.App\Assets\app.ico</ApplicationIcon>
+    <ConptyRequiresx64Host>true</ConptyRequiresx64Host>
+    <InvariantGlobalization>true</InvariantGlobalization>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="System.Security.Cryptography.ProtectedData" Version="10.0.0" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\Passthrough.Core\Passthrough.Core.csproj" />
+    <ProjectReference Include="..\Passthrough.Windows\Passthrough.Windows.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="Passthrough.Windows.Tests" />
+  </ItemGroup>
+</Project>

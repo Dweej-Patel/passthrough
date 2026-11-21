@@ -82,7 +82,7 @@ jobs:
   windows:
     name: Windows tests and app build
     runs-on: windows-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -101,6 +101,12 @@ jobs:
         run: dotnet test windows/tests/Passthrough.Windows.Tests -c Release --no-restore --blame-hang-timeout 120s
       - name: Build the app
         run: dotnet build windows/src/Passthrough.App -c Release --no-restore
+      - name: Build the self-contained layout (app, service, files.json)
+        shell: pwsh
+        run: ./scripts/build-windows.ps1
+      - name: Install, off, on, update and remove the service (the runner is elevated)
+        shell: pwsh
+        run: ./windows/tests/install-round-trip.ps1 -Build windows/artifacts/Passthrough
 
   android:
     name: Android tests, lint and build
