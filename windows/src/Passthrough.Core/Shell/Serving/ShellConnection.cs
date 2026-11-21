@@ -17,6 +17,7 @@ public sealed class ShellConnection : IShellAttachment
     internal const int HistoryLimit = 500;
 
     private readonly ShellGate _gate;
+    private readonly ISessionHost _host;
     private readonly Stream _stream;
     private readonly ShellLineReader _reader;
     private readonly Channel<(byte[] Line, TaskCompletionSource? Written)> _outgoing =
@@ -26,12 +27,14 @@ public sealed class ShellConnection : IShellAttachment
     private long _backlog;
     private string? _attached;
     private ulong _generation;
+    private ulong _nextGeneration;
     private volatile bool _looking;
     private int _closed;
 
-    internal ShellConnection(ShellGate gate, Stream stream, ShellLineReader reader, string phoneId, string label)
+    internal ShellConnection(ShellGate gate, ISessionHost host, Stream stream, ShellLineReader reader, string phoneId, string label)
     {
         _gate = gate;
+        _host = host;
         _stream = stream;
         _reader = reader;
         PhoneId = phoneId;
@@ -41,7 +44,8 @@ public sealed class ShellConnection : IShellAttachment
     public string PhoneId { get; }
     public string Label { get; }
     public bool IsLooking => _looking;
-    private ShellSessionManager Manager => _gate.Manager;
+    /// <summary>The shells of the account this phone belongs to.</summary>
+    internal ISessionHost Host => _host;
 
     /// <summary>Sends <c>ready</c>, <c>macInfo</c>, <c>host</c>, the state and the session list, then serves requests until the phone goes.</summary>
     internal async Task RunAsync()
@@ -51,7 +55,7 @@ public sealed class ShellConnection : IShellAttachment
         if (_gate.Hooks.MacInfo() is { } info) Send(info);
         SendHost();
         SendState();
-        SendSessions(Manager.Sessions);
+        SendSessions(_host.Sessions);
         try
         {
             while (await _reader.ReadLineAsync(_closing.Token).ConfigureAwait(false) is { } line)
@@ -67,7 +71,7 @@ public sealed class ShellConnection : IShellAttachment
     public void Close()
     {
         if (Interlocked.Exchange(ref _closed, 1) == 1) return;
-        Manager.Detach(this);
+        _host.Gone(this);
         lock (_lock) _attached = null;
         _outgoing.Writer.TryComplete();
         _closing.Cancel();
@@ -87,7 +91,7 @@ public sealed class ShellConnection : IShellAttachment
         switch (message.T)
         {
             case ShellEnvelope.List:
-                SendSessions(Manager.Sessions);
+                SendSessions(_host.Sessions);
                 break;
             case ShellEnvelope.Open:
                 if (message.Cols is not { } cols || message.Rows is not { } rows) { Fail(ShellError.BadRequest, @ref: message.Ref); break; }
@@ -95,7 +99,8 @@ public sealed class ShellConnection : IShellAttachment
                 break;
             case ShellEnvelope.Attach:
                 if (message.Session is not { } id || message.Cols is not { } c || message.Rows is not { } r) { Fail(ShellError.BadRequest); break; }
-                if (Attach(id, c, r)) Event("attached to a session");
+                if (!_host.IsAvailable) { Fail(ShellError.SignedOut, id); break; }
+                if (await AttachAsync(id, c, r).ConfigureAwait(false)) Event("attached to a session");
                 break;
             case ShellEnvelope.Input:
                 byte[]? data = null;
@@ -103,7 +108,7 @@ public sealed class ShellConnection : IShellAttachment
                 string? current;
                 lock (_lock) current = _attached;
                 if (message.Session is null || message.Session != current || data is null) { Fail(ShellError.BadRequest, message.Session); break; }
-                Manager.Input(current, data, this);
+                _host.Input(current, data, this);
                 break;
             case ShellEnvelope.Resize:
                 // For whatever is attached when the line is read: lines wait behind an open, so a resize sent before
@@ -111,31 +116,34 @@ public sealed class ShellConnection : IShellAttachment
                 if (message.Cols is not { } rc || message.Rows is not { } rr) { Fail(ShellError.BadRequest, message.Session); break; }
                 string? target;
                 lock (_lock) target = _attached;
-                if (target is not null) Manager.Resize(target, rc, rr, this);
+                if (target is not null) _host.Resize(target, rc, rr, this);
                 break;
             case ShellEnvelope.Close:
                 if (message.Session is not { } closing) { Fail(ShellError.BadRequest); break; }
-                if (!Manager.Sessions.Any(s => s.Id == closing && s.Running)) { Fail(ShellError.NoSuchSession, closing); break; }
-                Manager.Close(closing);
+                if (!_host.Sessions.Any(s => s.Id == closing && s.Running)) { Fail(ShellError.NoSuchSession, closing); break; }
+                _host.Close(closing);
                 Event("closed a session");
                 break;
             case ShellEnvelope.History:
-                var entries = await Task.Run(() => _gate.Transcripts.Entries()).ConfigureAwait(false);
-                Send(HistoryReply(entries));
+                if (!_host.IsAvailable) { Fail(ShellError.SignedOut); break; }
+                try { Send(HistoryReply(await _host.HistoryAsync().ConfigureAwait(false))); }
+                catch (ShellException e) { Fail(e.Error); }
                 break;
             case ShellEnvelope.Transcript:
                 if (message.Session is not { } wanted) { Fail(ShellError.BadRequest); break; }
                 // Session ids are UUIDs the host made: nothing else a phone names may reach the file system (B-9).
                 if (!Guid.TryParseExact(wanted, "D", out _)) { Fail(ShellError.NoSuchSession, wanted); break; }
+                if (!_host.IsAvailable) { Fail(ShellError.SignedOut, wanted); break; }
                 await SendTranscriptAsync(wanted).ConfigureAwait(false);
                 break;
             case ShellEnvelope.Viewing:
                 if (message.On is not { } on) { Fail(ShellError.BadRequest); break; }
                 _looking = on;
-                if (on) Manager.LookedAt(this);
+                _host.SetViewing(this, on);
                 break;
             case ShellEnvelope.Lock:
                 if (_gate.Hooks.Lock is not { } lockScreen) { Fail(ShellError.BadRequest); break; }
+                if (!_host.IsAvailable) { Fail(ShellError.SignedOut); break; }
                 if (lockScreen(PhoneId) is { } refused) Fail(refused);
                 else _ = AnswerStateLaterAsync();
                 break;
@@ -180,8 +188,9 @@ public sealed class ShellConnection : IShellAttachment
     private async Task OpenAsync(int cols, int rows, string? shell, int? @ref)
     {
         if (shell is not null && !HostShell.IsValidId(shell)) { Fail(ShellError.BadRequest, @ref: @ref); return; }
+        if (!_host.IsAvailable) { Fail(ShellError.SignedOut, @ref: @ref); return; }
         string id;
-        try { id = await Task.Run(() => Manager.Open(Label, cols, rows, PhoneId, shell)).ConfigureAwait(false); }
+        try { id = await _host.OpenAsync(Label, cols, rows, PhoneId, shell).ConfigureAwait(false); }
         catch (ShellException e) { Fail(e.Error, @ref: @ref, message: e.Error == ShellError.BadRequest ? null : e.Message); return; }
         catch (Exception e) when (e is IOException or UnauthorizedAccessException or System.ComponentModel.Win32Exception or ArgumentException)
         {
@@ -192,20 +201,21 @@ public sealed class ShellConnection : IShellAttachment
         if (IsClosed) return; // gone meanwhile: the session runs on, as one a phone left does
         Event("opened a session");
         Send(new ShellEnvelope(ShellEnvelope.Opened) { Session = id, Cols = cols, Rows = rows, Ref = @ref });
-        Attach(id, cols, rows);
+        await AttachAsync(id, cols, rows).ConfigureAwait(false);
     }
 
     /// <summary>Attaches to <paramref name="id"/>, leaving any other session first. False if there is no such session.</summary>
-    private bool Attach(string id, int cols, int rows)
+    private async Task<bool> AttachAsync(string id, int cols, int rows)
     {
         string? before;
+        ulong generation;
         lock (_lock) { before = _attached; _attached = id; }
-        if (before != id) Manager.Detach(this);
-        lock (_lock) _attached = id;
+        if (before != id) _host.Detach(this);
+        // Chosen here, before the attach is asked for: a takeover notice for it may arrive before the answer does.
+        lock (_lock) { _attached = id; generation = _generation = ++_nextGeneration; }
         try
         {
-            var generation = Manager.Attach(id, this, cols, rows);
-            lock (_lock) _generation = generation;
+            await _host.AttachAsync(id, this, cols, rows, generation).ConfigureAwait(false);
             return true;
         }
         catch (ShellException e)
@@ -238,9 +248,9 @@ public sealed class ShellConnection : IShellAttachment
     /// <summary>The transcript's end, a line at a time, each once the one before it was written.</summary>
     private async Task SendTranscriptAsync(string id)
     {
-        List<ShellEnvelope> lines;
-        try { lines = await Task.Run(() => ShellReplay.TranscriptLines(id, _gate.Transcripts.Replay(id))).ConfigureAwait(false); }
-        catch (Exception e) when (e is ArgumentException or IOException or UnauthorizedAccessException) { Fail(ShellError.NoSuchSession, id); return; }
+        IReadOnlyList<ShellEnvelope> lines;
+        try { lines = await _host.TranscriptAsync(id).ConfigureAwait(false); }
+        catch (ShellException e) { Fail(e.Error, id); return; }
         foreach (var line in lines)
         {
             if (IsClosed) return;
@@ -355,6 +365,12 @@ public sealed class ShellConnection : IShellAttachment
             _attached = null;
         }
         Send(new ShellEnvelope(ShellEnvelope.Detached) { Session = session });
+    }
+
+    public void ShellDropped()
+    {
+        _gate.Log?.Invoke("shell: a phone's output backed up on the way from the tray app; disconnected");
+        Close();
     }
 
     private bool IsAttached(string session)

@@ -1,6 +1,7 @@
 using System.Net;
 using System.Net.Sockets;
 using System.Text;
+using Passthrough.Core.Pipe;
 using Passthrough.Core.Shell;
 using Passthrough.Core.Shell.Access;
 using Passthrough.Core.Shell.Serving;
@@ -11,7 +12,7 @@ using Xunit;
 namespace Passthrough.Core.Tests.Shell;
 
 /// <summary>Ports of ShellListenerTests.swift's gate and connection cases, over loopback TCP and fake pseudoterminals.</summary>
-public sealed class ShellGateTests : IAsyncDisposable
+public class ShellGateTests : IAsyncDisposable
 {
     private static readonly TimeSpan Patience = TimeSpan.FromSeconds(10);
     private static readonly byte[] KeyA = Enumerable.Repeat((byte)7, 32).ToArray();
@@ -24,10 +25,16 @@ public sealed class ShellGateTests : IAsyncDisposable
     private readonly List<string> _events = [];
     private readonly CancellationTokenSource _stop = new();
     private Func<string, ShellError?>? _lock;
+    /// <summary>Over the pipe: the service's view of the shells, and the tray app's end serving them.</summary>
+    protected readonly PipeSessionHost? PipeHost;
+    protected PipeLink? TrayLink, ServiceLink;
+    protected readonly PipeSessionServer? TrayServer;
 
     public ShellGateTests() : this(TimeSpan.FromSeconds(10)) { }
 
-    private ShellGateTests(TimeSpan handshakeTimeout)
+    protected ShellGateTests(bool overPipe) : this(TimeSpan.FromSeconds(10), overPipe) { }
+
+    private ShellGateTests(TimeSpan handshakeTimeout, bool overPipe = false)
     {
         var transcripts = new TranscriptStore(_directory);
         _manager = new ShellSessionManager(transcripts,
@@ -35,7 +42,7 @@ public sealed class ShellGateTests : IAsyncDisposable
             start => { var pty = new FakePty(start); lock (_ptys) _ptys.Add(pty); return pty; },
             () => new Dictionary<string, string>(), @"C:\Users\dev");
         _access.Record(new ShellPhone { PhoneId = "phone-a", Label = "iPhone", PairingSlot = "token.iphone.A", Key = KeyA, GrantedAt = DateTimeOffset.UtcNow });
-        _gate = new ShellGate(_manager, transcripts, _access, new HandshakeLimiter(handshakeTimeout, TimeProvider.System), new ShellGateHooks
+        var hooks = new ShellGateHooks
         {
             MacInfo = () => new ShellEnvelope(ShellEnvelope.MacInfo) { IrohID = "endpoint-id" },
             Host = _ => new HostInfo { Kind = "windows", Os = "Windows 11 Pro", Shells = [new HostShell { Id = "pwsh", Name = "PowerShell", Default = true }] },
@@ -43,10 +50,41 @@ public sealed class ShellGateTests : IAsyncDisposable
             Label = id => id == "phone-a" ? "iPhone" : id,
             Lock = id => _lock?.Invoke(id),
             Event = e => { lock (_events) _events.Add(e); },
-        });
+        };
+        var limiter = new HandshakeLimiter(handshakeTimeout, TimeProvider.System);
+        if (overPipe)
+        {
+            // The same phones and the same answers, with the shells across the pipe as in the service.
+            var local = new LocalSessionHost(_manager, transcripts);
+            TrayServer = new PipeSessionServer(local, () => new PipeHostState(), () => null);
+            PipeHost = new PipeSessionHost("S-1-5-21-test");
+            _gate = new ShellGate(PipeHost, _access, limiter, hooks);
+            PipeHost.Changed += () => _gate.PushSessions(PipeHost);
+            LinkTray();
+        }
+        else _gate = new ShellGate(_manager, transcripts, _access, limiter, hooks);
         _listener.Start();
         _ = AcceptLoop();
     }
+
+    /// <summary>Connects a tray app's end to the service's (again, after <see cref="CutTray"/>).</summary>
+    protected void LinkTray()
+    {
+        var (tray, service) = Pipe.DuplexStreams.Create();
+        TrayLink = new PipeLink(tray, service: false, PipeSessionServer.LinkBacklogLimit);
+        ServiceLink = new PipeLink(service, service: true, 4 << 20);
+        var serviceLink = ServiceLink;
+        PipeHost!.Link(serviceLink);
+        _ = Task.Run(async () =>
+        {
+            await serviceLink.RunAsync(PipeHost.OnFrameAsync);
+            PipeHost.Unlink(serviceLink);
+        });
+        _ = Task.Run(() => TrayServer!.ServeAsync(TrayLink));
+    }
+
+    /// <summary>The tray app crashes: its end of the pipe goes.</summary>
+    protected void CutTray() => TrayLink!.Close();
 
     public async ValueTask DisposeAsync()
     {
@@ -72,7 +110,7 @@ public sealed class ShellGateTests : IAsyncDisposable
     private FakePty Pty() { lock (_ptys) return _ptys[^1]; }
 
     /// <summary>A phone's end of a connection.</summary>
-    private sealed class Phone : IDisposable
+    private protected sealed class Phone : IDisposable
     {
         private readonly TcpClient _client = new();
         private ShellLineReader _reader = null!;
@@ -137,7 +175,7 @@ public sealed class ShellGateTests : IAsyncDisposable
 
     private int Port => ((IPEndPoint)_listener.LocalEndpoint).Port;
 
-    private async Task<Phone> Proven(string phoneId = "phone-a", byte[]? key = null)
+    private protected async Task<Phone> Proven(string phoneId = "phone-a", byte[]? key = null)
     {
         var phone = await Phone.Connect(Port);
         Assert.Equal(ShellEnvelope.Ready, (await phone.Prove(phoneId, key ?? KeyA))?.T);
@@ -317,7 +355,18 @@ public sealed class ShellGateTests : IAsyncDisposable
         _access.Revoke("phone-a");
         _gate.Disconnect("phone-a");
         Assert.Null(await phone.NextOrNullAfterOthers());
-        Assert.False(_manager.Sessions.Single().Running);
+        // Across the pipe the shells end a moment later, once the tray app hears of it.
+        await Eventually(() => !_manager.Sessions.Single().Running);
+    }
+
+    private static async Task Eventually(Func<bool> condition)
+    {
+        var deadline = DateTime.UtcNow + Patience;
+        while (!condition())
+        {
+            if (DateTime.UtcNow > deadline) Assert.Fail("never happened");
+            await Task.Delay(10);
+        }
     }
 
     [Fact]
@@ -342,8 +391,10 @@ public sealed class ShellGateTests : IAsyncDisposable
     {
         using var phone = await Proven();
         _manager.Open("Mac", 80, 24);
+        // Across the pipe the service's list follows the tray app's a moment later.
+        await Eventually(() => _gate.ConnectedPhones.Count == 1 && (PipeHost?.Sessions.Count ?? 1) == 1);
         _gate.PushSessions();
-        Assert.Single((await phone.Next(ShellEnvelope.Sessions)).SessionList!);
+        while ((await phone.Next(ShellEnvelope.Sessions)).SessionList!.Count == 0) { }
         await _gate.GoingAwayAsync("sleeping");
         Assert.Equal("sleeping", (await phone.Next(ShellEnvelope.GoingAway)).Reason);
     }

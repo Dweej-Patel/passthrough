@@ -207,14 +207,15 @@ public sealed class ShellSessionManager
     /// <summary>
     /// Replays the scrollback to <paramref name="client"/>, then streams live output to it. A client attached earlier is
     /// told it was detached, with the generation its own attach returned. The terminal takes this client's size.
-    /// Returns this attach's generation, unique per manager.
+    /// Returns this attach's generation: <paramref name="generation"/> when the caller chose one (across the pipe it
+    /// must know it before any notice for it arrives), else one unique per manager.
     /// </summary>
-    public ulong Attach(string id, IShellAttachment client, int cols, int rows)
+    public ulong Attach(string id, IShellAttachment client, int cols, int rows, ulong? generation = null)
     {
         lock (_lock)
         {
             if (!_table.TryGetValue(id, out var session)) throw new ShellException(ShellError.NoSuchSession);
-            var generation = ++_lastGeneration;
+            var chosen = generation ?? ++_lastGeneration;
             var size = new Size(Dimension(cols), Dimension(rows));
             if (session.Attachment is { } previous && !ReferenceEquals(previous, client))
             {
@@ -243,13 +244,13 @@ public sealed class ShellSessionManager
             if (session.Running)
             {
                 session.Attachment = client;
-                session.Generation = generation;
+                session.Generation = chosen;
             }
             else if (session.ExitStatus is { } status)
             {
                 _callouts.Post(() => client.ShellEnded(id, status));
             }
-            return generation;
+            return chosen;
         }
     }
 

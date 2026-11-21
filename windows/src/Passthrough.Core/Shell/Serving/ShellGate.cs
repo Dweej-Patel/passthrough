@@ -46,11 +46,25 @@ public sealed class ShellGate
     private readonly HashSet<Admission> _admissions = [];
     private bool _stopped;
 
+    /// <summary>A gate for the shells of the account this process runs as (the tray app hosting them itself).</summary>
     public ShellGate(ShellSessionManager manager, TranscriptStore transcripts, ShellAccessStore access, HandshakeLimiter limiter,
         ShellGateHooks? hooks = null, TimeProvider? time = null, Action<string>? log = null)
+        : this(new LocalSessionHost(manager, transcripts), access, limiter, hooks, time, log)
     {
-        Manager = manager;
-        Transcripts = transcripts;
+    }
+
+    /// <summary>A gate for one account's shells, wherever they are (in process, or across the service's pipe).</summary>
+    public ShellGate(ISessionHost host, ShellAccessStore access, HandshakeLimiter limiter, ShellGateHooks? hooks = null, TimeProvider? time = null,
+        Action<string>? log = null)
+        : this(_ => host, access, limiter, hooks, time, log)
+    {
+    }
+
+    /// <summary>A gate whose phones each reach the shells of the account that owns them (the service, on a shared PC).</summary>
+    public ShellGate(Func<string, ISessionHost> hostFor, ShellAccessStore access, HandshakeLimiter limiter, ShellGateHooks? hooks = null,
+        TimeProvider? time = null, Action<string>? log = null)
+    {
+        HostFor = hostFor;
         Access = access;
         _limiter = limiter;
         Hooks = hooks ?? new ShellGateHooks();
@@ -58,8 +72,8 @@ public sealed class ShellGate
         Log = log;
     }
 
-    internal ShellSessionManager Manager { get; }
-    internal TranscriptStore Transcripts { get; }
+    /// <summary>The shells a phone reaches: those of the account that owns it.</summary>
+    internal Func<string, ISessionHost> HostFor { get; }
     internal ShellAccessStore Access { get; }
     internal ShellGateHooks Hooks { get; }
     internal TimeProvider Time { get; }
@@ -192,7 +206,7 @@ public sealed class ShellGate
             lock (_lock)
             {
                 if (_stopped) return;
-                connection = new ShellConnection(this, stream, reader, phoneId, Hooks.Label(phoneId));
+                connection = new ShellConnection(this, HostFor(phoneId), stream, reader, phoneId, Hooks.Label(phoneId));
                 _connections.Add(connection);
             }
             Log?.Invoke("shell: a phone connected");
@@ -244,7 +258,7 @@ public sealed class ShellGate
         List<ShellConnection> closing;
         lock (_lock) closing = [.. _connections.Where(c => c.PhoneId == phoneId)];
         closing.ForEach(c => c.Close());
-        Manager.CloseSessions(phoneId);
+        HostFor(phoneId).CloseSessions(phoneId);
     }
 
     /// <summary>Drops every attempt and connection, and refuses new ones. Sessions keep running.</summary>
@@ -266,8 +280,19 @@ public sealed class ShellGate
     /// <summary>Sends every phone the session list, unasked (the manager's list changed).</summary>
     public void PushSessions()
     {
-        var list = Manager.Sessions;
-        foreach (var connection in Connections()) connection.SendSessions(list);
+        foreach (var connection in Connections()) connection.SendSessions(connection.Host.Sessions);
+    }
+
+    /// <summary>Sends the phones of <paramref name="host"/>'s account its session list (it changed, or the tray app came or went).</summary>
+    public void PushSessions(ISessionHost host)
+    {
+        foreach (var connection in Connections().Where(c => c.Host == host)) connection.SendSessions(host.Sessions);
+    }
+
+    /// <summary>Sends <c>host</c> again to the phones of <paramref name="host"/>'s account.</summary>
+    public void PushHost(ISessionHost host)
+    {
+        foreach (var connection in Connections().Where(c => c.Host == host)) connection.SendHost();
     }
 
     /// <summary>Sends every phone the host's state again.</summary>

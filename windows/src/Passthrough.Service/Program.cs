@@ -25,6 +25,7 @@ internal static class Program
             {
                 "--service" => RunService(),
                 ServiceDefinition.LaunchVerb => Launch(args[1..]),
+                "--check-pipe" => CheckPipe(),
                 "--install" or "--update" or "--off" or "--remove" or "--configure" => Elevated.Run(args),
                 _ => Usage(),
             };
@@ -60,6 +61,32 @@ internal static class Program
         foreach (var argument in rest) start.ArgumentList.Add(argument);
         using var _ = Process.Start(start);
         return 0;
+    }
+
+    /// <summary>
+    /// Asks the running service, as this account, whether it would take a tray app: prints its answer (welcome, or
+    /// refused and why). For the install round trip and by hand; 0 when the service answered at all.
+    /// </summary>
+    private static int CheckPipe()
+    {
+        try
+        {
+            using var pipe = Passthrough.Windows.Pipes.ServicePipe.Connect();
+            var welcome = Passthrough.Core.Pipe.PipeHandshakes.ClientAsync(pipe, new Passthrough.Core.Pipe.PipeHello { Build = "check", Pid = Environment.ProcessId })
+                .GetAwaiter().GetResult();
+            Console.WriteLine($"welcome: protocol {welcome.Proto}, build {welcome.Build}, session {welcome.Session}");
+            return 0;
+        }
+        catch (Passthrough.Core.Pipe.PipeRefusedException e)
+        {
+            Console.WriteLine($"refused: {e.Refused.Reason}");
+            return 0;
+        }
+        catch (IOException e)
+        {
+            Console.WriteLine($"no answer: {e.Message}");
+            return 1;
+        }
     }
 
     private const uint LoadLibrarySearchSystem32 = 0x00000800;

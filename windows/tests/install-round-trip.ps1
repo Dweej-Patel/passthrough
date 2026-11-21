@@ -43,6 +43,11 @@ Check (Test-Path $shortcut) 'Start menu shortcut'
 $rules = @(Get-NetFirewallRule -Group 'Passthrough' -ErrorAction SilentlyContinue)
 Check ($rules.Count -ge 2) "firewall rules ($($rules.Count))"
 Check ((Get-Content (Join-Path $data 'logs\service.log') -Raw -ErrorAction SilentlyContinue) -match 'service: started') 'the service logged its start'
+# The pipe is the service's (its owner and process checked) and it read this client from its token: an elevated
+# runner is refused for being elevated, a normal account welcomed.
+$answer = & $installed --check-pipe 2>&1 | Out-String
+Write-Host "     $answer"
+Check ($answer -match 'welcome|refused: elevated') 'the service answers its pipe and reads who asked'
 
 Check ((Verb $installed @('--off')) -eq 0) 'off exits 0'
 Check ((Get-Service PassthroughService).Status -eq 'Stopped') 'stopped'

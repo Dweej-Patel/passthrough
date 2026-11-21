@@ -68,6 +68,9 @@ public interface IShellAttachment
 
     /// <summary>Someone is looking at what this client shows: a result that arrives then is seen.</summary>
     bool IsLooking => true;
+
+    /// <summary>Whoever carries this client's output gave up on it (across the pipe, the tray app's queue for it overflowed): close it.</summary>
+    void ShellDropped() { }
 }
 
 /// <summary>A session can't be opened or used; carries the reason a phone is told.</summary>
