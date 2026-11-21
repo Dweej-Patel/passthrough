@@ -96,7 +96,7 @@ public partial class App : Application
             });
             directory.Error += LogFile.Error; // watcher failures (adb that won't start, a daemon that falls silent), once each
 
-            // Remote access: phones' shells on this PC, from anywhere (over iroh; the local path comes with the service).
+            // Remote access: phones' shells on this PC, through the background service (which faces the network and holds their keys).
             _remote = new RemoteAccess(settings, secrets, Path.Combine(AppFolder.Path, "ShellHistory"), Environment.MachineName, LogFile.Write);
             _session = new HostSession(
                 directory, secrets, settings, Environment.MachineName,

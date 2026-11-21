@@ -10,10 +10,29 @@ namespace Passthrough.Service;
 /// checks who it is from its token, and links it to that account's <see cref="PipeSessionHost"/>. One link per account:
 /// a newer tray app of the same account replaces an older one.
 /// </summary>
-internal sealed class TrayLinks(Func<IReadOnlyCollection<string>> allowedAccounts, Func<PipeWelcome> welcome, Action<string> log)
+internal sealed class TrayLinks(Func<IReadOnlyCollection<string>> allowedAccounts, Func<PipeWelcome> welcome, Action<string> log) : ITrayHosts
 {
     public const long ServiceBacklogLimit = 4 << 20;
     private readonly Dictionary<string, PipeSessionHost> _hosts = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<string, PipeLink> _links = new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>Answers a tray app's requests about its account's phones (set before <see cref="RunAsync"/>).</summary>
+    public Func<string, PipeAdminRequest, PipeAdminReply>? Admin { get; set; }
+
+    /// <summary>Pushes an event to <paramref name="account"/>'s tray app, when it is linked.</summary>
+    public void Tell(string account, PipeAdminEvent e)
+    {
+        PipeLink? link;
+        lock (_lock) _links.TryGetValue(account, out link);
+        link?.Send(PipeFrame.Json(PipeKind.AdminEvent, e));
+    }
+
+    public void TellAll(PipeAdminEvent e)
+    {
+        List<PipeLink> links;
+        lock (_lock) links = [.. _links.Values];
+        foreach (var link in links) link.Send(PipeFrame.Json(PipeKind.AdminEvent, e));
+    }
     private readonly Lock _lock = new();
     private DateTime _lastRefusalLog;
 
@@ -78,9 +97,19 @@ internal sealed class TrayLinks(Func<IReadOnlyCollection<string>> allowedAccount
             var host = HostFor(peer.Account);
             await using var link = new PipeLink(pipe, service: true, ServiceBacklogLimit, log: log);
             host.Link(link);
+            lock (_lock) _links[peer.Account] = link;
             log($"pipe: account …{Tail(peer.Account)} linked (session {peer.Session}, build {accepted.Value.Hello.Build})");
-            await link.RunAsync(host.OnFrameAsync).ConfigureAwait(false);
+            var account = peer.Account;
+            await link.RunAsync(frame =>
+            {
+                if (frame.Kind != PipeKind.Admin) return host.OnFrameAsync(frame);
+                // Off the pipe's reader: a store write must not hold up output. The account is the token's, never the frame's.
+                if (frame.Read<PipeAdminRequest>() is { } request && Admin is { } admin)
+                    _ = Task.Run(() => link.Send(PipeFrame.Json(PipeKind.AdminReply, admin(account, request))));
+                return ValueTask.CompletedTask;
+            }).ConfigureAwait(false);
             host.Unlink(link);
+            lock (_lock) if (_links.TryGetValue(account, out var current) && ReferenceEquals(current, link)) _links.Remove(account);
         }
         catch (Exception e) when (e is IOException or ObjectDisposedException or OperationCanceledException) { }
         finally { await pipe.DisposeAsync().ConfigureAwait(false); }

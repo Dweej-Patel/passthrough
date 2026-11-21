@@ -47,21 +47,21 @@ public sealed class ShellGate
     private bool _stopped;
 
     /// <summary>A gate for the shells of the account this process runs as (the tray app hosting them itself).</summary>
-    public ShellGate(ShellSessionManager manager, TranscriptStore transcripts, ShellAccessStore access, HandshakeLimiter limiter,
+    public ShellGate(ShellSessionManager manager, TranscriptStore transcripts, IShellAccess access, HandshakeLimiter limiter,
         ShellGateHooks? hooks = null, TimeProvider? time = null, Action<string>? log = null)
         : this(new LocalSessionHost(manager, transcripts), access, limiter, hooks, time, log)
     {
     }
 
     /// <summary>A gate for one account's shells, wherever they are (in process, or across the service's pipe).</summary>
-    public ShellGate(ISessionHost host, ShellAccessStore access, HandshakeLimiter limiter, ShellGateHooks? hooks = null, TimeProvider? time = null,
+    public ShellGate(ISessionHost host, IShellAccess access, HandshakeLimiter limiter, ShellGateHooks? hooks = null, TimeProvider? time = null,
         Action<string>? log = null)
         : this(_ => host, access, limiter, hooks, time, log)
     {
     }
 
     /// <summary>A gate whose phones each reach the shells of the account that owns them (the service, on a shared PC).</summary>
-    public ShellGate(Func<string, ISessionHost> hostFor, ShellAccessStore access, HandshakeLimiter limiter, ShellGateHooks? hooks = null,
+    public ShellGate(Func<string, ISessionHost> hostFor, IShellAccess access, HandshakeLimiter limiter, ShellGateHooks? hooks = null,
         TimeProvider? time = null, Action<string>? log = null)
     {
         HostFor = hostFor;
@@ -74,7 +74,7 @@ public sealed class ShellGate
 
     /// <summary>The shells a phone reaches: those of the account that owns it.</summary>
     internal Func<string, ISessionHost> HostFor { get; }
-    internal ShellAccessStore Access { get; }
+    internal IShellAccess Access { get; }
     internal ShellGateHooks Hooks { get; }
     internal TimeProvider Time { get; }
     internal Action<string>? Log { get; }

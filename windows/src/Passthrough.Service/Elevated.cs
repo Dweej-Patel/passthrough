@@ -79,12 +79,18 @@ internal static class Elevated
                 {
                     case "allow": plan = SetupPlans.AllowAccount(); break;
                     case "disallow" when args.ElementAtOrDefault(2) is { } sid && IsSid(sid): plan = SetupPlans.DisallowAccount(sid); break;
+                    case "relay": plan = SetupPlans.ConfigureRelay(); break;
+                    case "reset-identity": plan = SetupPlans.ResetIdentity(); break;
                     default: return Refuse("Unknown setting.").ExitCode;
                 }
                 break;
             default: return Refuse("Unknown verb.").ExitCode;
         }
-        var context = new SetupContext { System = system, Source = source, AskingAccount = asking };
+        var context = new SetupContext
+        {
+            System = system, Source = source, AskingAccount = asking,
+            RelayUrl = reporter?.Input.RelayUrl, RelayToken = reporter?.Input.RelayToken,
+        };
         var result = Finish(SetupEngine.Run(plan, context, Say, continuePastFailure));
         mutex.ReleaseMutex();
         return result.ExitCode;

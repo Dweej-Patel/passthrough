@@ -21,10 +21,6 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <PackageReference Include="System.Security.Cryptography.ProtectedData" Version="10.0.0" />
-  </ItemGroup>
-
-  <ItemGroup>
     <ProjectReference Include="..\Passthrough.Core\Passthrough.Core.csproj" />
     <ProjectReference Include="..\Passthrough.Windows\Passthrough.Windows.csproj" />
   </ItemGroup>

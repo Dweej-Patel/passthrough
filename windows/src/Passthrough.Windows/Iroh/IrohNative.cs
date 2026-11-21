@@ -18,7 +18,13 @@ internal static unsafe class IrohNative
     public const int CloseClean = 0, CloseApplication = 1, CloseLost = 2;
     public const int RelayDisabled = 0, RelayN0 = 1, RelayCustom = 2;
 
-    public static string LibraryPath => Path.Combine(AppContext.BaseDirectory, LibraryName);
+    /// <summary>
+    /// The folder the bridge is loaded from: beside the app, or (the service, whose exe sits at a path that never
+    /// changes) the install folder, which only administrators can write. Set before the first call.
+    /// </summary>
+    public static string LibraryFolder { get; set; } = AppContext.BaseDirectory;
+
+    public static string LibraryPath => Path.Combine(LibraryFolder, LibraryName);
 
     public static bool IsAvailable => File.Exists(LibraryPath);
 

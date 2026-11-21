@@ -36,9 +36,76 @@ public static class SetupPlans
         Firewall(),
         PublicState(),
         Shortcut(),
+        Relay(),
         Start(),
         Tidy(),
     ];
+
+    /// <summary><c>--configure relay</c>: the relay (URL and token from the setup pipe) for phones away from this network.</summary>
+    public static IReadOnlyList<ISetupStep> ConfigureRelay() =>
+    [
+        new SetupStep("check", c =>
+        {
+            c.Before = ReadState(c) ?? throw new SetupException("Remote access isn't set up on this PC.");
+            c.State = c.Before;
+            return StepState.Skipped;
+        }),
+        Relay(),
+        new SetupStep("state", c =>
+        {
+            c.System.Files.Write(c.Machine.StateFile, c.State!.Encode());
+            return StepState.Done;
+        }, c => c.System.Files.Write(c.Machine.StateFile, c.Before!.Encode())),
+        Reload(),
+    ];
+
+    /// <summary><c>--configure reset-identity</c>: the service makes a new identity; every phone's access goes with the old one.</summary>
+    public static IReadOnlyList<ISetupStep> ResetIdentity() =>
+    [
+        new SetupStep("check", c =>
+        {
+            if (ReadState(c) is null) throw new SetupException("Remote access isn't set up on this PC.");
+            return StepState.Skipped;
+        }),
+        new SetupStep("reset", c =>
+        {
+            c.System.Files.Write(c.Machine.PendingReset, "reset"u8.ToArray());
+            return StepState.Done;
+        }, c => c.System.Files.DeleteFile(c.Machine.PendingReset)),
+        Reload(),
+    ];
+
+    /// <summary>Tells a running service to re-read what administrators wrote (a stopped one reads it as it starts).</summary>
+    private static ISetupStep Reload() => new SetupStep("reload", c =>
+        c.System.Service.SendControl(ServiceDefinition.ControlReload) ? StepState.Done : StepState.Skipped);
+
+    /// <summary>
+    /// The relay, when the setup pipe named one: its URL into install.json (the service reads it), its token into a
+    /// file only administrators and the service can open, which the service moves into its own store.
+    /// </summary>
+    private static ISetupStep Relay() => new SetupStep("relay", c =>
+    {
+        if (c.RelayUrl is null && c.RelayToken is null) return StepState.Skipped;
+        if (c.RelayUrl is { Length: > 0 } url && !IsRelayUrl(url)) throw new SetupException("A relay is an https:// address with nothing after its path.");
+        if (c.RelayUrl is not null) c.State = c.State! with { Relay = new InstallState.RelayState { Url = c.RelayUrl.Length == 0 ? null : c.RelayUrl } };
+        var token = c.RelayUrl is { Length: 0 } ? "" : c.RelayToken;
+        if (token is not null)
+        {
+            if (token.Length > 4096) throw new SetupException("That relay token is too long.");
+            c.System.Files.Write(c.Machine.PendingRelayToken, System.Text.Encoding.UTF8.GetBytes(token));
+        }
+        c.System.Files.Write(c.Machine.StateFile, c.State!.Encode());
+        return StepState.Done;
+    }, c =>
+    {
+        c.System.Files.DeleteFile(c.Machine.PendingRelayToken);
+        if (c.Before is { } before) c.System.Files.Write(c.Machine.StateFile, before.Encode());
+    });
+
+    /// <summary>https, a host, no query, fragment or user info (where a token would end up logged), at most 512 characters.</summary>
+    public static bool IsRelayUrl(string text) =>
+        text.Length <= 512 && Uri.TryCreate(text, UriKind.Absolute, out var uri) && uri.Scheme == Uri.UriSchemeHttps && uri.Host.Length > 0
+        && uri.Query.Length == 0 && uri.Fragment.Length == 0 && uri.UserInfo.Length == 0;
 
     /// <summary><c>--off</c>: phones can't reach the PC until it is turned on again; files, store and state stay.</summary>
     public static IReadOnlyList<ISetupStep> TurnOff() =>

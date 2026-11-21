@@ -110,6 +110,9 @@
                         <Button Content="Use this relay" Click="OnRelayClick" />
                         <HyperlinkButton Content="Reset this PC's identity…" Click="OnResetIdentityClick" />
                     </StackPanel>
+                    <TextBlock Text="Once Remote access runs as a background service, changing either asks for an administrator."
+                               Style="{StaticResource CaptionTextBlockStyle}" TextWrapping="Wrap"
+                               Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
                 </StackPanel>
             </Border>
             <TextBlock Text="Phones with access" Style="{StaticResource BodyStrongTextBlockStyle}" Margin="0,16,0,0" />

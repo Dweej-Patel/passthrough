@@ -143,6 +143,9 @@ public sealed record SetupMachine
     public string StateFile => WinPath.Join(DataFolder, ServiceDefinition.StateFileName);
     public string StoreFolder => WinPath.Join(DataFolder, "store");
     public string LogsFolder => WinPath.Join(DataFolder, "logs");
+    /// <summary>Files an administrator leaves for the service to take (it alone can write its own store's secrets).</summary>
+    public string PendingRelayToken => WinPath.Join(StoreFolder, "relay-token.pending");
+    public string PendingReset => WinPath.Join(StoreFolder, "reset-identity.pending");
     /// <summary>The service's exe at the path that never changes (<see cref="ServiceDefinition.LaunchVerb"/>).</summary>
     public string ServiceExe => ServiceDefinition.ServiceExe(ProgramFolder);
 }

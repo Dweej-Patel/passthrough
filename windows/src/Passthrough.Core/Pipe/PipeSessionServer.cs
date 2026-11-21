@@ -36,10 +36,28 @@ public sealed class PipeSessionServer
         _host.Changed += () => Send(PipeFrame.Json(PipeKind.Sessions, new PipeMessage { Sessions = [.. _host.Sessions] }));
     }
 
+    /// <summary>Frames this end doesn't serve itself (the answers to the tray app's own requests: <see cref="PipeAccessAdmin"/>).</summary>
+    public event Action<PipeFrame>? OtherFrame;
+
+    /// <summary>Fires when a link to the service comes (true) or goes (false).</summary>
+    public event Action<bool>? LinkChanged;
+
+    /// <summary>Linked to the service now.</summary>
+    public bool IsLinked { get { lock (_gate) return _link is not null; } }
+
+    /// <summary>Sends a frame to the service; false when there is no link.</summary>
+    public bool SendFrame(PipeFrame frame)
+    {
+        PipeLink? link;
+        lock (_gate) link = _link;
+        return link?.Send(frame) ?? false;
+    }
+
     /// <summary>Serves <paramref name="link"/> until it closes: the snapshots first, then the service's requests in order.</summary>
     public async Task ServeAsync(PipeLink link)
     {
         lock (_gate) _link = link;
+        LinkChanged?.Invoke(true);
         link.Send(PipeFrame.Json(PipeKind.Sessions, new PipeMessage { Sessions = [.. _host.Sessions] }));
         PushState();
         try { await link.RunAsync(OnFrameAsync).ConfigureAwait(false); }
@@ -54,6 +72,7 @@ public sealed class PipeSessionServer
             }
             // The phones went with the link (the service tells them); their sessions keep running.
             foreach (var stub in stubs) _host.Gone(stub);
+            LinkChanged?.Invoke(false);
         }
     }
 
@@ -91,6 +110,11 @@ public sealed class PipeSessionServer
         if (frame.Kind == PipeKind.Input)
         {
             if (frame.ReadData() is { } data) _host.Input(data.Session, data.Data.ToArray(), StubFor(data.Conn));
+            return ValueTask.CompletedTask;
+        }
+        if (frame.Kind is PipeKind.AdminReply or PipeKind.AdminEvent)
+        {
+            OtherFrame?.Invoke(frame);
             return ValueTask.CompletedTask;
         }
         if (frame.Kind is not (PipeKind.Open or PipeKind.Attach or PipeKind.Detach or PipeKind.Resize or PipeKind.Close or PipeKind.SetViewing

@@ -1,10 +1,13 @@
 using System.Runtime.InteropServices;
+using Passthrough.Core.Pipe;
+using Passthrough.Core.Setup;
 using Passthrough.Core.Shell;
 using Passthrough.Core.Shell.Access;
 using Passthrough.Core.Shell.Serving;
 using Passthrough.Core.Shell.Sessions;
 using Passthrough.Core.Storage;
-using Passthrough.Windows.Iroh;
+using Passthrough.Windows.Pipes;
+using Passthrough.Windows.Setup;
 using Passthrough.Windows.Shell;
 
 namespace Passthrough.Windows.Remote;
@@ -13,21 +16,25 @@ namespace Passthrough.Windows.Remote;
 public enum RemoteAccessState
 {
     Off,
+    /// <summary>Not set up on this PC yet (or set up by stage 3, in the app): Turn on installs the background service.</summary>
+    NeedsSetup,
     Starting,
-    /// <summary>Phones can reach this PC (directly, or through its relay once <see cref="RemoteAccess.HomeRelay"/> is known).</summary>
+    /// <summary>Phones can reach this PC through the service (directly, or through its relay once <see cref="RemoteAccess.HomeRelay"/> is known).</summary>
     On,
     /// <summary>It can't run here: <see cref="RemoteAccess.Problem"/> says why.</summary>
     Unavailable,
 }
 
 /// <summary>
-/// Remote access in the tray app (stage 3; the service takes the network side over in stage 4): the switch, this PC's
-/// iroh identity, the phones allowed a shell, their sessions and the door they come in by. It is the
-/// <see cref="IAccessAdmin"/> the cable side asks what a grant carries and gives the keys phones confirmed.
-/// It never runs elevated: a phone's shell would run as administrator.
+/// Remote access in the tray app, from stage 4: the background service faces the network and holds the phones' keys;
+/// this app runs the account's shells (ConPTY, as the user, never elevated) and serves them to the service over the
+/// pipe. The switch installs the service or turns it off (one administrator prompt each). Settings reads and changes
+/// the phones with access through the service. It is the <see cref="IAccessAdmin"/> the cable side asks what a grant
+/// carries and gives the keys phones confirmed: both go to the service.
 /// </summary>
 public sealed class RemoteAccess : IAccessAdmin, IDisposable
 {
+    // Stage 3's settings and secrets in this account's own store: carried into the service once, then deleted.
     internal const string EnabledSetting = "remoteAccess";
     internal const string SecretKeySlot = "iroh.secretKey";
     internal const string RelayUrlSetting = "relayUrl";
@@ -35,37 +42,54 @@ public sealed class RemoteAccess : IAccessAdmin, IDisposable
 
     private readonly ISettingsStore _settings;
     private readonly ISecretStore _secrets;
-    private readonly string _computerName;
     private readonly Action<string>? _log;
     private readonly Lock _lock = new();
-    private IrohEndpoint? _endpoint;
-    private IrohShellListener? _listener;
-    private ShellGate? _gate;
-    private RemoteAccessState _state = RemoteAccessState.Off;
+    private readonly PipeSessionServer _server;
+    private readonly PipeAccessAdmin _admin;
+    private ServiceLink? _link;
+    private IReadOnlyList<PipeDevice> _phones = [];
+    private GrantContents? _grant;
+    private string? _problem;
+    private bool _busy;
 
-    private readonly IrohRelay? _relayOverride;
-
-    /// <param name="relayOverride">For tests: relays off, whatever the settings say.</param>
-    public RemoteAccess(ISettingsStore settings, ISecretStore secrets, string transcriptFolder, string computerName, Action<string>? log = null,
-        IrohRelay? relayOverride = null)
+    public RemoteAccess(ISettingsStore settings, ISecretStore secrets, string transcriptFolder, string computerName, Action<string>? log = null)
     {
-        _relayOverride = relayOverride;
         _settings = settings;
         _secrets = secrets;
-        _computerName = computerName;
         _log = log;
-        Access = new ShellAccessStore(secrets, log: log);
         Catalog = ShellCatalog.Discover(new ShellProbe());
         Transcripts = new TranscriptStore(transcriptFolder, log: log);
         PrivateFolder.Restrict(transcriptFolder, log);
         Sessions = new ShellSessionManager(Transcripts, Catalog.Resolve, start => new ConPty(start), UserEnvironment.Create, UserEnvironment.Home, log: log);
-        Sessions.Changed += () => _gate?.PushSessions();
-        Access.Changed += () => PhonesChanged?.Invoke();
+        Host = new LocalSessionHost(Sessions, Transcripts);
+        _server = new PipeSessionServer(Host, HostStateNow, LockScreen, log);
+        _admin = new PipeAccessAdmin(_server);
+        _admin.Changed += () => _ = RefreshGrantAsync();
+        _admin.AccessChanged += () => _ = RefreshPhonesAsync();
+        _server.LinkChanged += linked =>
+        {
+            if (linked) _ = Task.Run(AfterLinkAsync);
+            StatusChanged?.Invoke();
+        };
         // Old sessions go as the owner chose, now and every hour (also while Remote access is off).
         _pruner = new Timer(_ => PruneHistory(), null, TimeSpan.FromSeconds(30), TimeSpan.FromHours(1));
     }
 
-    // MARK: History
+    public ShellCatalog Catalog { get; }
+    public TranscriptStore Transcripts { get; }
+    public ShellSessionManager Sessions { get; }
+    public LocalSessionHost Host { get; }
+
+    /// <summary>Fires, on any thread, when what a grant carries may have changed.</summary>
+    public event Action? Changed;
+
+    /// <summary>Fires, on any thread, when the state, the relay or the connected phones change: what the UI shows.</summary>
+    public event Action? StatusChanged;
+
+    /// <summary>Fires when the phones with access change.</summary>
+    public event Action? PhonesChanged;
+
+    // MARK: History (the transcripts stay in this account's profile; the service never reads them)
 
     internal const string HistoryDaysSetting = "shellHistoryDays";
     /// <summary>What "Keep shell history" offers, in days; 0 is Forever (then only the 2 GB cap applies).</summary>
@@ -73,7 +97,6 @@ public sealed class RemoteAccess : IAccessAdmin, IDisposable
     public const int DefaultHistoryDays = 30;
     private readonly Timer _pruner;
 
-    /// <summary>How many days finished sessions' transcripts are kept (0: forever, within 2 GB).</summary>
     public int HistoryDays
     {
         get => int.TryParse(_settings.Get(HistoryDaysSetting), out var days) && HistoryChoices.Contains(days) ? days : DefaultHistoryDays;
@@ -85,7 +108,6 @@ public sealed class RemoteAccess : IAccessAdmin, IDisposable
         }
     }
 
-    /// <summary>Deletes what is past the retention (and past 2 GB, oldest first); a session still recording stays.</summary>
     public int PruneHistory()
     {
         try
@@ -98,264 +120,276 @@ public sealed class RemoteAccess : IAccessAdmin, IDisposable
         catch (Exception e) when (e is IOException or UnauthorizedAccessException) { return 0; }
     }
 
-    /// <summary>Deletes every finished session's transcript (Delete shell history); running ones keep recording.</summary>
     public void DeleteHistory() => Transcripts.DeleteFinished();
 
-    // MARK: Relay and identity
+    // MARK: The service
 
-    /// <summary>The custom relay's URL, or null for n0's public relays.</summary>
-    public string? RelayUrl => _settings.Get(RelayUrlSetting) is { Length: > 0 } url ? url : null;
+    /// <summary>The service is installed and Remote access turned on (HKLM, every account reads it).</summary>
+    public bool Enabled => WindowsMachineRegistry.Read() is { Enabled: true };
 
-    /// <summary>Whether a relay token is kept (never shown back).</summary>
-    public bool HasRelayToken => _secrets.Get(RelayTokenSlot) is { Length: > 0 };
+    /// <summary>Installed (on or off).</summary>
+    public static bool IsInstalled => WindowsMachineRegistry.Read() is not null;
 
-    /// <summary>
-    /// A relay URL Passthrough accepts: https, a host, nothing after the path (no query or fragment, where a token
-    /// would end up logged). Null for one that isn't.
-    /// </summary>
-    public static string? ValidRelayUrl(string? text) =>
-        Uri.TryCreate(text?.Trim(), UriKind.Absolute, out var uri) && uri.Scheme == Uri.UriSchemeHttps && uri.Host.Length > 0
-        && uri.Query.Length == 0 && uri.Fragment.Length == 0 && uri.UserInfo.Length == 0 ? uri.AbsoluteUri : null;
-
-    /// <summary>
-    /// Uses <paramref name="url"/> (null: n0's relays) with <paramref name="token"/> (null: keep the one kept, "" none).
-    /// Running, it restarts on the new relay; phones learn it at their next connection and plug-in.
-    /// </summary>
-    public async Task SetRelayAsync(string? url, string? token)
+    public RemoteAccessState State
     {
-        string? valid = null;
-        if (url is not null && (valid = ValidRelayUrl(url)) is null) throw new ArgumentException("A relay is an https:// address.", nameof(url));
-        _settings.Set(RelayUrlSetting, valid ?? "");
-        if (valid is null || token is { Length: 0 }) _secrets.Delete(RelayTokenSlot);
-        else if (token is not null)
+        get
         {
-            Passthrough.Core.Logging.LogText.Register(token.Trim());
-            _secrets.Set(RelayTokenSlot, token.Trim());
+            lock (_lock) if (_busy) return RemoteAccessState.Starting;
+            if (_problem is not null) return RemoteAccessState.Unavailable;
+            if (WindowsMachineRegistry.Read() is not { } installed) return RemoteAccessState.NeedsSetup;
+            if (!installed.Enabled) return RemoteAccessState.Off;
+            return _link?.State switch
+            {
+                ServiceLinkState.Linked => RemoteAccessState.On,
+                ServiceLinkState.Refused or ServiceLinkState.Impostor or ServiceLinkState.NotRunning => RemoteAccessState.Unavailable,
+                _ => RemoteAccessState.Starting,
+            };
         }
-        await RestartAsync().ConfigureAwait(false);
     }
-
-    /// <summary>
-    /// A new iroh identity for this PC: every phone's access is taken away (their keys, connections and shells), since
-    /// they knew it by the old id. Each gets access again the next time it is plugged in with Remote access on.
-    /// </summary>
-    public async Task ResetIdentityAsync()
-    {
-        foreach (var phone in Access.Phones.ToList()) Revoke(phone.PhoneId);
-        _secrets.Delete(SecretKeySlot);
-        _log?.Invoke("remote access: this PC's identity was reset");
-        await RestartAsync().ConfigureAwait(false);
-    }
-
-    private async Task RestartAsync()
-    {
-        if (!Enabled) { Changed?.Invoke(); return; }
-        await StopAsync().ConfigureAwait(false);
-        await StartAsync().ConfigureAwait(false);
-    }
-
-    public ShellAccessStore Access { get; }
-    public ShellCatalog Catalog { get; }
-    public TranscriptStore Transcripts { get; }
-    public ShellSessionManager Sessions { get; }
-
-    /// <summary>Fires, on any thread, when what a grant carries may have changed.</summary>
-    public event Action? Changed;
-
-    /// <summary>Fires, on any thread, when the state, the relay or the connected phones change: what the UI shows.</summary>
-    public event Action? StatusChanged;
-
-    /// <summary>Fires when the phones with access change.</summary>
-    public event Action? PhonesChanged;
-
-    public bool Enabled => _settings.Get(EnabledSetting) == "true";
-
-    public RemoteAccessState State { get { lock (_lock) return _state; } }
 
     /// <summary>Why it can't run, in the words the setup row shows; null when nothing is wrong.</summary>
-    public string? Problem { get; private set; }
+    public string? Problem => _problem ?? (_link?.State switch
+    {
+        ServiceLinkState.NotRunning => "Remote access isn't running. Turn it off and on again.",
+        ServiceLinkState.Impostor => "Another program is answering for Passthrough's service. Restart this PC; if it comes back, see the log.",
+        ServiceLinkState.Refused => _link.Refusal switch
+        {
+            PipeRefused.ReasonVersion => "Finish the update: turn Remote access off and on again from this copy.",
+            PipeRefused.ReasonNotAllowed => "Remote access on this PC is set up for another account. An administrator can add yours by turning it on here.",
+            PipeRefused.ReasonElevated => "Passthrough can't host shells when it runs as administrator. Close it and open it normally.",
+            var other => $"The background service refused this copy of Passthrough ({other}).",
+        },
+        _ => null,
+    });
+
+    /// <summary>Stage 3 had Remote access on in this app: Turn on finishes moving it into the service.</summary>
+    public bool NeedsFinishing => !IsInstalled && _settings.Get(EnabledSetting) == "true";
 
     /// <summary>The relay this PC is reachable through now, once known.</summary>
-    public string? HomeRelay => _endpoint?.HomeRelay;
+    public string? HomeRelay => _grant?.IrohRelay;
 
-    public IReadOnlyList<string> ConnectedPhones => _gate?.ConnectedPhones ?? [];
+    public IReadOnlyList<PipeDevice> Phones { get { lock (_lock) return _phones; } }
 
-    /// <summary>Turns Remote access on or off and remembers it. Off drops every phone's connection; their sessions keep running until quit.</summary>
-    public Task SetEnabledAsync(bool on)
+    public IReadOnlyList<string> ConnectedPhones => [.. Phones.Where(p => p.Connections > 0).Select(p => p.Phone)];
+
+    /// <summary>At launch: connects to the service when it is installed and on.</summary>
+    public Task StartIfEnabledAsync()
     {
-        _settings.Set(EnabledSetting, on ? "true" : "false");
-        return on ? StartAsync() : StopAsync();
+        if (UserEnvironment.IsElevated())
+        {
+            _problem = "Passthrough can't host shells when it runs as administrator. Close it and open it normally.";
+            StatusChanged?.Invoke();
+            return Task.CompletedTask;
+        }
+        if (_link is null)
+        {
+            var build = typeof(RemoteAccess).Assembly.GetCustomAttributes(typeof(System.Reflection.AssemblyInformationalVersionAttribute), false)
+                .OfType<System.Reflection.AssemblyInformationalVersionAttribute>().FirstOrDefault()?.InformationalVersion ?? "dev";
+            _link = new ServiceLink(_server, build, _log);
+            _link.Changed += () => StatusChanged?.Invoke();
+            _link.Start();
+        }
+        return Task.CompletedTask;
     }
 
-    /// <summary>Starts it if the switch is on (at launch).</summary>
-    public Task StartIfEnabledAsync() => Enabled ? StartAsync() : Task.CompletedTask;
-
-    private async Task StartAsync()
+    /// <summary>
+    /// Turns Remote access on (installs or repairs the service, carrying over stage 3's relay, behind one prompt) or
+    /// off. Returns what the person is told (null when it worked).
+    /// </summary>
+    public async Task<string?> SetEnabledAsync(bool on)
     {
         lock (_lock)
         {
-            if (_state is RemoteAccessState.On or RemoteAccessState.Starting) return;
-            _state = RemoteAccessState.Starting;
+            if (_busy) return null;
+            _busy = true;
         }
         StatusChanged?.Invoke();
         try
         {
-            if (UserEnvironment.IsElevated()) throw new RemoteAccessException("Passthrough is running as administrator, so it won't host shells: a phone's would run as administrator too. Start it normally.");
-            if (!ConPty.IsAvailable) throw new RemoteAccessException("This copy of Passthrough is missing its terminal (conpty.dll). Reinstall it.");
-            if (!IrohNative.IsAvailable) throw new RemoteAccessException("This copy of Passthrough is missing its network library (passthrough_iroh.dll). Reinstall it.");
-            var key = SecretKey();
-            var relay = Relay();
-            var endpoint = await Task.Run(() => IrohEndpoint.Bind(key, relay, IrohEndpoint.ShellAlpn)).ConfigureAwait(false);
-            var gate = new ShellGate(Sessions, Transcripts, Access, new HandshakeLimiter(TimeSpan.FromSeconds(10), TimeProvider.System), Hooks(endpoint), log: _log);
-            var listener = new IrohShellListener(endpoint, gate, _log);
-            listener.Failed += _ => { lock (_lock) _state = RemoteAccessState.Unavailable; Problem = "Remote access stopped unexpectedly. Turn it off and on again."; StatusChanged?.Invoke(); };
-            lock (_lock)
+            SetupResult result;
+            if (on)
             {
-                if (_state != RemoteAccessState.Starting) { listener.Dispose(); endpoint.Dispose(); return; } // turned off meanwhile
-                (_endpoint, _gate, _listener) = (endpoint, gate, listener);
-                _state = RemoteAccessState.On;
+                var exe = Path.Combine(AppContext.BaseDirectory, ServiceDefinition.ExeName);
+                if (!File.Exists(exe) || !File.Exists(Path.Combine(AppContext.BaseDirectory, ServiceDefinition.ManifestName)))
+                    return "This copy of Passthrough can't set up its background service. Build it with scripts/build-windows.ps1, then turn Remote access on from that copy.";
+                var input = new SetupInput
+                {
+                    RelayUrl = _settings.Get(RelayUrlSetting) is { Length: > 0 } url ? url : null,
+                    RelayToken = _settings.Get(RelayUrlSetting) is { Length: > 0 } ? _secrets.Get(RelayTokenSlot) : null,
+                };
+                result = await ElevatedSetup.RunAsync(exe, [IsInstalled ? "--update" : "--install"], input, _ => { }, _log).ConfigureAwait(false);
+                if (result.Result == SetupResult.Ok)
+                {
+                    // The service has the relay now; this account's copies go.
+                    _settings.Set(RelayUrlSetting, "");
+                    _secrets.Delete(RelayTokenSlot);
+                    _settings.Set(EnabledSetting, "false");
+                    await StartIfEnabledAsync().ConfigureAwait(false);
+                }
             }
-            Problem = null;
-            listener.Start();
-            _log?.Invoke("remote access: on");
+            else
+            {
+                if (InstalledExe() is not { } installed) return null;
+                result = await ElevatedSetup.RunAsync(installed, ["--off"], new SetupInput(), _ => { }, _log).ConfigureAwait(false);
+            }
+            return Sentence(result);
+        }
+        finally
+        {
+            lock (_lock) _busy = false;
             StatusChanged?.Invoke();
             Changed?.Invoke();
-            // Once it has a home relay, grants carry it: phones away from this network reach it through there.
-            _ = Task.Run(() => { if (endpoint.WaitOnline(TimeSpan.FromSeconds(30))) { Changed?.Invoke(); StatusChanged?.Invoke(); } });
-        }
-        catch (Exception e) when (e is RemoteAccessException or IrohException or IOException or DllNotFoundException or System.ComponentModel.Win32Exception)
-        {
-            lock (_lock) _state = RemoteAccessState.Unavailable;
-            Problem = e is RemoteAccessException ? e.Message : "Remote access couldn't start. See the log for details.";
-            _log?.Invoke($"remote access: couldn't start ({e.GetType().Name}: {e.Message})");
-            StatusChanged?.Invoke();
         }
     }
 
-    private Task StopAsync()
-    {
-        IrohShellListener? listener;
-        IrohEndpoint? endpoint;
-        lock (_lock)
-        {
-            (listener, endpoint) = (_listener, _endpoint);
-            (_listener, _endpoint, _gate) = (null, null, null);
-            _state = RemoteAccessState.Off;
-        }
-        Problem = null;
-        listener?.Stop();
-        endpoint?.Dispose();
-        _log?.Invoke("remote access: off");
-        StatusChanged?.Invoke();
-        Changed?.Invoke();
-        return Task.CompletedTask;
-    }
+    /// <summary>The service's exe at the path that never changes, when installed.</summary>
+    private static string? InstalledExe() =>
+        WindowsMachineRegistry.Read() is { InstallFolder: { Length: > 0 } folder } && Path.GetDirectoryName(folder.TrimEnd('\\')) is { } root
+        && File.Exists(Path.Combine(root, ServiceDefinition.ExeName)) ? Path.Combine(root, ServiceDefinition.ExeName) : null;
 
-    /// <summary>This PC's iroh secret key: made once and kept, so its id (what phones dial) never changes.</summary>
-    private byte[] SecretKey()
+    private static string? Sentence(SetupResult result) => result.Result switch
     {
-        if (_secrets.Get(SecretKeySlot) is { } stored)
-        {
-            try { if (Convert.FromBase64String(stored) is { Length: 32 } key) return key; }
-            catch (FormatException) { }
-        }
-        var fresh = IrohEndpoint.NewSecretKey();
-        _secrets.Set(SecretKeySlot, Convert.ToBase64String(fresh));
-        return fresh;
-    }
-
-    private IrohRelay Relay()
-    {
-        // Whatever the log is given, this token never reaches it (LogText removes it by value).
-        if (_secrets.Get(RelayTokenSlot) is { Length: > 0 } token) Passthrough.Core.Logging.LogText.Register(token);
-        return RelayChoice();
-    }
-
-    private IrohRelay RelayChoice() => _relayOverride ??
-        (_settings.Get(RelayUrlSetting) is { Length: > 0 } url ? new IrohRelay(url, _secrets.Get(RelayTokenSlot)) : IrohRelay.N0);
-
-    private ShellGateHooks Hooks(IrohEndpoint endpoint) => new()
-    {
-        MacInfo = () => new ShellEnvelope(ShellEnvelope.MacInfo)
-        {
-            IrohID = endpoint.Id,
-            IrohRelay = endpoint.HomeRelay,
-            RelayToken = _settings.Get(RelayUrlSetting) is { Length: > 0 } ? _secrets.Get(RelayTokenSlot) : null,
-            Addresses = [.. endpoint.DirectAddresses],
-        },
-        Host = phone => new HostInfo
-        {
-            Kind = HostInfo.KindWindows,
-            Os = RuntimeInformation.OSDescription,
-            SignedIn = true,
-            App = true,
-            Shells = [.. Catalog.Shells],
-            Screens = [],
-            Rdp = "service",
-            Access = new HostAccess { Shell = true, Screen = Access.ScreenAllowed(phone) },
-            Lock = true,
-            User = Environment.UserName,
-        }.Cleaned(),
-        Label = phone => Access.Phones.FirstOrDefault(p => p.PhoneId == phone)?.Label ?? "A phone",
-        Lock = _ => Native.LockWorkStation() ? null : ShellError.BadRequest,
-        Event = e => _log?.Invoke($"shell: {e}"),
+        SetupResult.Ok => null,
+        SetupResult.Declined => "Nothing was changed.",
+        _ when result.FailedStep is null => result.Error ?? "The setup stopped without saying why. See the log.",
+        _ => $"Setting up stopped at {result.FailedStep}: {result.Error} " + (result.Undone ? "What it had changed was put back." : "Some of it could not be put back; see the log."),
     };
+
+    // MARK: Relay and identity (machine-wide: each costs one administrator prompt)
+
+    /// <summary>The relay set before the service held it (stage 3), until Turn on carries it over.</summary>
+    public string? RelayUrl => _settings.Get(RelayUrlSetting) is { Length: > 0 } url ? url : null;
+
+    public bool HasRelayToken => _secrets.Get(RelayTokenSlot) is { Length: > 0 };
+
+    public static string? ValidRelayUrl(string? text) =>
+        text?.Trim() is { } trimmed && SetupPlans.IsRelayUrl(trimmed) && Uri.TryCreate(trimmed, UriKind.Absolute, out var uri) ? uri.AbsoluteUri : null;
+
+    /// <summary>
+    /// Uses <paramref name="url"/> (null: n0's relays) with <paramref name="token"/> (null: keep it, "" none). Installed:
+    /// the service is told, behind one prompt. Returns the sentence to show, or null when it worked.
+    /// </summary>
+    public async Task<string?> SetRelayAsync(string? url, string? token)
+    {
+        string? valid = null;
+        if (url is not null && (valid = ValidRelayUrl(url)) is null) throw new ArgumentException("A relay is an https:// address.", nameof(url));
+        if (InstalledExe() is not { } installed)
+        {
+            _settings.Set(RelayUrlSetting, valid ?? "");
+            if (valid is null || token is { Length: 0 }) _secrets.Delete(RelayTokenSlot);
+            else if (token is not null) _secrets.Set(RelayTokenSlot, token.Trim());
+            return null;
+        }
+        var result = await ElevatedSetup.RunAsync(installed, ["--configure", "relay"], new SetupInput { RelayUrl = valid ?? "", RelayToken = token?.Trim() }, _ => { }, _log)
+            .ConfigureAwait(false);
+        Changed?.Invoke();
+        return Sentence(result);
+    }
+
+    /// <summary>A new identity for this PC (one prompt): every phone's access goes, since they knew it by the old one.</summary>
+    public async Task<string?> ResetIdentityAsync()
+    {
+        if (InstalledExe() is not { } installed) return "Remote access isn't set up on this PC.";
+        var result = await ElevatedSetup.RunAsync(installed, ["--configure", "reset-identity"], new SetupInput(), _ => { }, _log).ConfigureAwait(false);
+        Changed?.Invoke();
+        return Sentence(result);
+    }
+
+    // MARK: Once linked
+
+    /// <summary>
+    /// The first time this account links: stage 3's phone records go to the service (records only: RECONCILIATION),
+    /// and this account's copies of them and of its iroh key are deleted once the service has them.
+    /// </summary>
+    private async Task AfterLinkAsync()
+    {
+        var old = new ShellAccessStore(_secrets, log: _log);
+        if (old.Phones is { Count: > 0 } records)
+        {
+            var reply = await _admin.HandOverAsync(records).ConfigureAwait(false);
+            if (reply.Error is null)
+            {
+                foreach (var phone in records) old.Revoke(phone.PhoneId);
+                _log?.Invoke($"remote access: handed {reply.Taken?.Count ?? 0} phone record(s) to the service; {reply.Refused?.Count ?? 0} belong to another account");
+            }
+            else _log?.Invoke($"remote access: couldn't hand the phones to the service ({reply.Error})");
+        }
+        if (_secrets.Get(SecretKeySlot) is not null)
+        {
+            // The service has an identity of its own; phones that knew this one need the cable once.
+            _secrets.Delete(SecretKeySlot);
+            _log?.Invoke("remote access: deleted this account's old iroh identity");
+        }
+        await RefreshPhonesAsync().ConfigureAwait(false);
+        await RefreshGrantAsync().ConfigureAwait(false);
+    }
+
+    private async Task RefreshPhonesAsync()
+    {
+        var phones = await _admin.ListAsync().ConfigureAwait(false);
+        lock (_lock) _phones = phones;
+        PhonesChanged?.Invoke();
+        StatusChanged?.Invoke();
+    }
+
+    private async Task RefreshGrantAsync()
+    {
+        _grant = await _admin.GrantContentsAsync().ConfigureAwait(false);
+        Changed?.Invoke();
+        StatusChanged?.Invoke();
+    }
+
+    private PipeHostState HostStateNow() => new()
+    {
+        Shells = [.. Catalog.Shells],
+        User = Environment.UserName,
+    };
+
+    private static ShellError? LockScreen() => Native.LockWorkStation() ? null : ShellError.BadRequest;
 
     // MARK: IAccessAdmin
 
-    public Task<GrantContents?> GrantContentsAsync()
+    public async Task<GrantContents?> GrantContentsAsync() => _server.IsLinked ? await _admin.GrantContentsAsync().ConfigureAwait(false) : null;
+
+    public async Task<bool> AddKeyAsync(string phoneId, string label, string pairingSlot, ReadOnlyMemory<byte> key)
     {
-        IrohEndpoint? endpoint;
-        lock (_lock) endpoint = _state == RemoteAccessState.On ? _endpoint : null;
-        if (endpoint is null) return Task.FromResult<GrantContents?>(null);
-        var custom = _settings.Get(RelayUrlSetting) is { Length: > 0 };
-        return Task.FromResult<GrantContents?>(new GrantContents
-        {
-            // No listener of its own until stage 4: phones reach this PC over iroh only.
-            CertSHA256 = GrantContents.NoListenerPin,
-            HostName = _computerName,
-            IrohId = endpoint.Id,
-            IrohRelay = endpoint.HomeRelay,
-            RelayToken = custom ? _secrets.Get(RelayTokenSlot) : null,
-            // No addresses before a listener exists: a phone that saw some would try TCP to them (RECONCILIATION).
-        });
+        var added = await _admin.AddKeyAsync(phoneId, label, pairingSlot, key).ConfigureAwait(false);
+        await RefreshPhonesAsync().ConfigureAwait(false);
+        return added;
     }
 
-    public Task<bool> AddKeyAsync(string phoneId, string label, string pairingSlot, ReadOnlyMemory<byte> key) =>
-        Task.Run(() => Access.Record(new ShellPhone { PhoneId = phoneId, Label = label, PairingSlot = pairingSlot, Key = key.ToArray(), GrantedAt = DateTimeOffset.UtcNow }));
-
-    public Task RevokeSlotAsync(string pairingSlot) => Task.Run(() =>
+    public async Task RevokeSlotAsync(string pairingSlot)
     {
-        // Keys first, so a reconnect is already refused; then what is connected, and what it opened.
-        var (_, removed) = Access.RevokeSlot(pairingSlot);
-        foreach (var phone in removed) Disconnect(phone.PhoneId);
-    });
+        await _admin.RevokeSlotAsync(pairingSlot).ConfigureAwait(false);
+        await RefreshPhonesAsync().ConfigureAwait(false);
+    }
 
     /// <summary>Takes one phone's access away: its key, its connections, its sessions.</summary>
-    public void Revoke(string phoneId)
+    public async Task RevokeAsync(string phoneId)
     {
-        Access.Revoke(phoneId);
-        Disconnect(phoneId);
+        await _admin.RevokeAsync(phoneId).ConfigureAwait(false);
+        Sessions.CloseSessions(phoneId);
+        await RefreshPhonesAsync().ConfigureAwait(false);
     }
 
     /// <summary>Ends a phone's connections and the sessions it opened, keeping its access (Stop).</summary>
-    public void Disconnect(string phoneId)
+    public async Task DisconnectAsync(string phoneId)
     {
-        if (_gate is { } gate) gate.Disconnect(phoneId);
-        else Sessions.CloseSessions(phoneId);
-        StatusChanged?.Invoke();
+        await _admin.DisconnectAsync(phoneId).ConfigureAwait(false);
+        Sessions.CloseSessions(phoneId);
+        await RefreshPhonesAsync().ConfigureAwait(false);
     }
 
-    public void SetScreenAllowed(string phoneId, bool allowed)
+    public async Task SetScreenAllowedAsync(string phoneId, bool allowed)
     {
-        Access.SetScreenAllowed(phoneId, allowed);
-        _gate?.PushHost();
+        await _admin.SetScreenAsync(phoneId, allowed).ConfigureAwait(false);
+        await RefreshPhonesAsync().ConfigureAwait(false);
     }
 
     public void Dispose()
     {
         _pruner.Dispose();
-        StopAsync();
+        _link?.Dispose();
         Sessions.CloseAll();
     }
 

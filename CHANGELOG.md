@@ -8,6 +8,17 @@ the **Before you rebuild** notes first. The Mac and phone apps update together.
 
 ### Before you rebuild
 
+* **Windows: Remote access now runs as a background service, and needs a
+  self-contained build.** Build with `scripts/build-windows.ps1` and run
+  `Passthrough.exe` from `windows/artifacts/Passthrough`. Turning Remote
+  access on (or *Finish setup*, if you used it before) asks Windows for an
+  administrator once: it installs the service into `C:\Program
+  Files\Passthrough`, and from then on Start at login and the Start menu run
+  the installed copy. The service has an identity of its own, so **plug each
+  phone in once** afterwards; until then phones can't reach the PC's shell.
+  Your phones' access, your relay and its token move into the service; this
+  account's copies are deleted.
+
 * **Phone notifications now take their push key from the build, not from
   Settings.** The *Team ID*, *Key ID* and *Choose .p8* fields in
   *Settings › Remote Shell › Notifications* are gone. To keep notifications:

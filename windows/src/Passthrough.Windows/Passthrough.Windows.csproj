@@ -17,6 +17,8 @@
     <!-- Microsoft's own build of the pseudoconsole (MIT), always used: the inbox one breaks OSC 7501
          (Spikes/ConPtyProbe/README.md). conpty.dll and x64\OpenConsole.exe are copied beside the app. -->
     <PackageReference Include="Microsoft.Windows.Console.ConPTY" Version="1.25.261109001" />
+    <!-- DPAPI, for the service's own store. -->
+    <PackageReference Include="System.Security.Cryptography.ProtectedData" Version="10.0.0" />
   </ItemGroup>
 
   <ItemGroup>

@@ -203,11 +203,14 @@ public sealed partial class SettingsWindow : Window
         }
         RemoteStatusText.Text = _remote.State switch
         {
-            RemoteAccessState.Off => "Off. Phones can't reach this PC's shell.",
+            RemoteAccessState.NeedsSetup when _remote.NeedsFinishing =>
+                "Remote access needs one more step. It now runs as a background service, so this PC answers before you sign in. Windows will ask for an administrator once. Afterwards, plug each phone in once.",
+            RemoteAccessState.NeedsSetup => "Off. Turning it on sets up a background service, so this PC answers before you sign in. Windows will ask for an administrator once.",
+            RemoteAccessState.Off => "Off. Phones can't reach this PC's shell. Turning it on asks Windows for an administrator.",
             RemoteAccessState.Starting => "Starting…",
             RemoteAccessState.On when _remote.HomeRelay is { } relay =>
-                $"On. Phones you've plugged in once reach this PC from anywhere, directly or through {RelayName(relay)}. Works while Passthrough is open and you're signed in.",
-            RemoteAccessState.On => "On. Phones you've plugged in once reach this PC directly; looking for a relay for when they're away. Works while Passthrough is open and you're signed in.",
+                $"On. Phones you've plugged in once reach this PC from anywhere, directly or through {RelayName(relay)}. Shells work while you're signed in and Passthrough is open.",
+            RemoteAccessState.On => "On. Phones you've plugged in once reach this PC directly; looking for a relay for when they're away. Shells work while you're signed in and Passthrough is open.",
             _ => _remote.Problem ?? "Remote access couldn't start. See the log for details.",
         };
         if (RemoteSwitch.IsOn != _remote.Enabled)
@@ -221,8 +224,8 @@ public sealed partial class SettingsWindow : Window
             + (_isAdministrator ? " Your Windows account is an administrator, so a phone with access can do anything you can, including approving administrator prompts." : "");
         var connected = _remote.ConnectedPhones.ToHashSet();
         WithAccess.Clear();
-        foreach (var phone in _remote.Access.Phones)
-            WithAccess.Add(new RemotePhoneRow(phone.PhoneId, phone.Label, phone.PairingSlot, connected.Contains(phone.PhoneId), _remote.Sessions.RunningSessions(phone.PhoneId)));
+        foreach (var phone in _remote.Phones)
+            WithAccess.Add(new RemotePhoneRow(phone.Phone, phone.Label, phone.PairingSlot, connected.Contains(phone.Phone), _remote.Sessions.RunningSessions(phone.Phone)));
         NoAccessText.Visibility = WithAccess.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
     }
 
@@ -285,9 +288,9 @@ public sealed partial class SettingsWindow : Window
         }
         try
         {
-            // An empty token box keeps the token kept for this relay; n0's relays take none.
-            await _remote.SetRelayAsync(url.Length == 0 ? null : url, RelayTokenBox.Password.Length == 0 ? null : RelayTokenBox.Password);
-            ErrorBox.Visibility = Visibility.Collapsed;
+            // An empty token box keeps the token kept for this relay; n0's relays take none. Installed, it asks for an administrator.
+            if (await _remote.SetRelayAsync(url.Length == 0 ? null : url, RelayTokenBox.Password.Length == 0 ? null : RelayTokenBox.Password) is { } said) ShowError(said);
+            else ErrorBox.Visibility = Visibility.Collapsed;
         }
         catch (Exception ex)
         {
@@ -312,7 +315,7 @@ public sealed partial class SettingsWindow : Window
         };
         try
         {
-            if (await dialog.ShowAsync() == ContentDialogResult.Primary) await _remote.ResetIdentityAsync();
+            if (await dialog.ShowAsync() == ContentDialogResult.Primary && await _remote.ResetIdentityAsync() is { } said) ShowError(said);
         }
         catch (Exception ex)
         {
@@ -331,8 +334,8 @@ public sealed partial class SettingsWindow : Window
         if (_remote is null) return;
         try
         {
-            await _remote.SetEnabledAsync(RemoteSwitch.IsOn);
-            ErrorBox.Visibility = Visibility.Collapsed;
+            if (await _remote.SetEnabledAsync(RemoteSwitch.IsOn) is { } said) ShowError(said);
+            else ErrorBox.Visibility = Visibility.Collapsed;
         }
         catch (Exception ex)
         {
@@ -346,7 +349,7 @@ public sealed partial class SettingsWindow : Window
     private void OnStopClick(object sender, RoutedEventArgs e)
     {
         var phone = (RemotePhoneRow)((FrameworkElement)sender).DataContext;
-        _remote?.Disconnect(phone.PhoneId);
+        if (_remote is not null) _ = _remote.DisconnectAsync(phone.PhoneId);
         ShowRemote();
         ShowHistoryAndRelay();
     }
@@ -367,7 +370,7 @@ public sealed partial class SettingsWindow : Window
                 CloseButtonText = "Cancel",
                 DefaultButton = ContentDialogButton.Close,
             };
-            if (await dialog.ShowAsync() == ContentDialogResult.Primary) _remote.Revoke(phone.PhoneId);
+            if (await dialog.ShowAsync() == ContentDialogResult.Primary) await _remote.RevokeAsync(phone.PhoneId);
         }
         catch (Exception ex)
         {

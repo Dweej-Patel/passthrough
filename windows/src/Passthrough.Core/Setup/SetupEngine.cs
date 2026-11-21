@@ -77,6 +77,13 @@ public sealed class SetupContext
     /// <summary>The folder the build is (being) installed in.</summary>
     public string? InstallFolder { get; set; }
 
+    /// <summary>
+    /// A relay to use (from the setup pipe, never the command line): its URL (null keeps what is set; "" n0's), and
+    /// its token (null keeps it; "" none). The install carries stage 3's choice over in the same prompt.
+    /// </summary>
+    public string? RelayUrl { get; init; }
+    public string? RelayToken { get; init; }
+
     public SetupMachine Machine => System.Machine;
 }
 

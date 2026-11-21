@@ -177,7 +177,8 @@
         "type": "Project",
         "dependencies": {
           "Microsoft.Windows.Console.ConPTY": "[1.25.261109001, )",
-          "Passthrough.Core": "[1.0.0, )"
+          "Passthrough.Core": "[1.0.0, )",
+          "System.Security.Cryptography.ProtectedData": "[10.0.0, )"
         }
       }
     },

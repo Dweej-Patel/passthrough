@@ -29,6 +29,12 @@ public sealed unsafe class IrohEndpoint : IDisposable
 
     private IrohEndpoint(ulong handle) => _handle = handle;
 
+    /// <summary>Loads the bridge from <paramref name="folder"/> (an administrators-only install folder), not beside this exe. Before any other call.</summary>
+    public static void UseLibraryIn(string folder) => IrohNative.LibraryFolder = folder;
+
+    /// <summary>The bridge is where it will be loaded from.</summary>
+    public static bool IsAvailable => IrohNative.IsAvailable;
+
     /// <summary>A fresh 32-byte endpoint secret key, for the host to store.</summary>
     public static byte[] NewSecretKey()
     {

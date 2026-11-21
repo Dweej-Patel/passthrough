@@ -36,7 +36,7 @@ public sealed record ShellPhone
 /// in memory even when the store can't be written, and is laid over every later read until a write succeeds.
 /// Thread-safe; the lock guarding the copy is never held across store I/O, and writes serialize on their own.
 /// </summary>
-public sealed class ShellAccessStore
+public sealed class ShellAccessStore : IShellAccess
 {
     internal const string Slot = "shell.phones";
     public static readonly TimeSpan EmptyTtl = TimeSpan.FromSeconds(5);
