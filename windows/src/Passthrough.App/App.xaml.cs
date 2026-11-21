@@ -58,6 +58,18 @@ public partial class App : Application
 
     protected override async void OnLaunched(LaunchActivatedEventArgs args)
     {
+        // Started by a copy handing over to the installed one (after Turn on): it goes first, then this one runs.
+        var command = Environment.GetCommandLineArgs();
+        var handoff = Array.IndexOf(command, "--handoff");
+        if (handoff >= 0 && handoff + 1 < command.Length && int.TryParse(command[handoff + 1], out var earlier))
+        {
+            try
+            {
+                using var before = System.Diagnostics.Process.GetProcessById(earlier);
+                await before.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(15));
+            }
+            catch (Exception e) when (e is ArgumentException or InvalidOperationException or TimeoutException) { }
+        }
         // One copy per Windows user session; a second launch just exits.
         _singleInstance = new Mutex(initiallyOwned: true, @"Local\Passthrough.App", out var isFirst);
         if (!isFirst)
@@ -117,6 +129,8 @@ public partial class App : Application
             var remote = _remote;
             remote.NoticesChanged += () => viewModel.ShowNotices(remote.Notices);
             viewModel.AnswerNotice = remote.AnswerNoticeAsync;
+            remote.HandOffWanted += launcher => DispatcherQueue.GetForCurrentThread()?.TryEnqueue(() => HandOff(launcher));
+            _ui = DispatcherQueue.GetForCurrentThread();
 
             await _session.StartAsync();
             await _remote.StartIfEnabledAsync();
@@ -167,6 +181,30 @@ public partial class App : Application
             _settings.Closed += (_, _) => _settings = null;
         }
         _settings.BringToFront();
+    }
+
+    private Microsoft.UI.Dispatching.DispatcherQueue? _ui;
+
+    /// <summary>
+    /// After Turn on: Start at login follows the installed copy, the installed copy starts (it waits for this one to
+    /// go), and this one quits. A copy that already is the installed one stays.
+    /// </summary>
+    private void HandOff(string launcher)
+    {
+        if (StartupRegistration.IsInstalledCopy()) return;
+        _ui?.TryEnqueue(() =>
+        {
+            try
+            {
+                if (StartupRegistration.IsEnabled()) StartupRegistration.SetEnabled(true);
+                var start = new System.Diagnostics.ProcessStartInfo(launcher) { UseShellExecute = false };
+                foreach (var a in new[] { "--launch", "--handoff", Environment.ProcessId.ToString(System.Globalization.CultureInfo.InvariantCulture) }) start.ArgumentList.Add(a);
+                using var _ = System.Diagnostics.Process.Start(start);
+                LogFile.Write("handed over to the installed copy of Passthrough");
+                Quit();
+            }
+            catch (Exception e) when (e is System.ComponentModel.Win32Exception or InvalidOperationException) { LogFile.Error(e); }
+        });
     }
 
     private async void Quit()

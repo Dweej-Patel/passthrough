@@ -87,6 +87,12 @@ public sealed class RemoteAccess : IAccessAdmin, IDisposable
     /// <summary>Fires, on any thread, when the state, the relay or the connected phones change: what the UI shows.</summary>
     public event Action? StatusChanged;
 
+    /// <summary>
+    /// Fires, after Turn on installed the service, with the launcher (the installed exe at the path that never changes):
+    /// this copy should start the installed one with <c>--launch --handoff &lt;pid&gt;</c> and quit.
+    /// </summary>
+    public event Action<string>? HandOffWanted;
+
     /// <summary>Fires when the phones with access change.</summary>
     public event Action? PhonesChanged;
 
@@ -226,6 +232,8 @@ public sealed class RemoteAccess : IAccessAdmin, IDisposable
                     _secrets.Delete(RelayTokenSlot);
                     _settings.Set(EnabledSetting, "false");
                     await StartIfEnabledAsync().ConfigureAwait(false);
+                    // From here the installed copy is this account's Passthrough: this one hands over to it.
+                    if (InstalledExe() is { } launcher) HandOffWanted?.Invoke(launcher);
                 }
             }
             else
