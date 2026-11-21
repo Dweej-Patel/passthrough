@@ -114,7 +114,8 @@ public sealed class IrohTests : IDisposable
             Assert.False(second.Retry(), "a peer that came with a token can't be asked again");
             return true;
         });
-        var dial = Task.Run(() => viewer.Connect(host.Id, null, host.LoopbackAddresses));
+        // One path only: an attempt over [::1] as well would come without the token the IPv4 one was given.
+        var dial = Task.Run(() => viewer.Connect(host.Id, null, host.LoopbackAddresses.Where(a => a.StartsWith("127.", StringComparison.Ordinal))));
         Assert.True(await accepted.WaitAsync(Patience));
         // The second attempt was turned away by the failed retry: the dial fails rather than hangs.
         await Assert.ThrowsAsync<IrohException>(() => dial.WaitAsync(Patience));

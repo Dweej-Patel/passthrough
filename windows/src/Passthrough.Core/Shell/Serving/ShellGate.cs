@@ -43,7 +43,7 @@ public sealed class ShellGate
     private readonly HandshakeLimiter _limiter;
     private readonly Lock _lock = new();
     private readonly HashSet<ShellConnection> _connections = [];
-    private readonly HashSet<Stream> _handshakes = [];
+    private readonly HashSet<Admission> _admissions = [];
     private bool _stopped;
 
     public ShellGate(ShellSessionManager manager, TranscriptStore transcripts, ShellAccessStore access, HandshakeLimiter limiter,
@@ -71,25 +71,94 @@ public sealed class ShellGate
     public int PendingHandshakes => _limiter.Count;
 
     /// <summary>
-    /// Serves one connection until it ends; owns <paramref name="stream"/>. <paramref name="host"/> is the peer's
-    /// address (for iroh, its IP when direct, else its endpoint id), what its handshake slot is counted against. When
-    /// <paramref name="expectHello"/>, the first line must be <c>hello</c>.
+    /// One attempt's hold on a handshake slot, from before its stream exists (an iroh attempt holds one through its
+    /// QUIC handshake) until it has proved itself, failed, or timed out. At the timeout its stream is closed, or, while
+    /// it has none, <c>abandon</c> runs.
     /// </summary>
-    public async Task ServeAsync(Stream stream, string host, bool expectHello = true, int? maxForHost = null)
+    public sealed class Admission
     {
+        private readonly Lock _lock = new();
+        private readonly Action _abandon;
+        private Stream? _stream;
+        private bool _over;
+        internal HandshakeLimiter.Slot? Slot;
+
+        internal Admission(string host, Action abandon) => (Host, _abandon) = (host, abandon);
+
+        internal string Host { get; }
+
+        public bool IsOver { get { lock (_lock) return _over; } }
+
+        /// <summary>The stream it now has; false (and the stream closed) when it is already over.</summary>
+        internal bool Attach(Stream stream)
+        {
+            lock (_lock)
+            {
+                if (!_over) { _stream = stream; return true; }
+            }
+            stream.Dispose();
+            return false;
+        }
+
+        /// <summary>Drops the attempt: closes its stream, or abandons it while it has none.</summary>
+        internal void Drop()
+        {
+            Stream? stream;
+            lock (_lock)
+            {
+                if (_over) return;
+                _over = true;
+                stream = _stream;
+            }
+            if (stream is not null) stream.Dispose(); else _abandon();
+        }
+    }
+
+    /// <summary>
+    /// A handshake slot for an attempt from <paramref name="host"/> (at most <paramref name="maxForHost"/> at once from
+    /// it, else the limiter's per-host cap), or null when it must be refused. Hand the admission its stream with
+    /// <see cref="ServeAsync(Admission, Stream, bool)"/>, or <see cref="Abandon"/> it if none comes.
+    /// </summary>
+    public Admission? Admit(string host, Action abandon, int? maxForHost = null)
+    {
+        lock (_lock) if (_stopped) return null;
+        var admission = new Admission(host, abandon);
+        admission.Slot = _limiter.Acquire(host, admission.Drop, maxForHost);
+        if (admission.Slot is null) return null;
         lock (_lock)
         {
-            if (_stopped) { stream.Dispose(); return; }
-            _handshakes.Add(stream);
+            if (_stopped) { admission.Slot.Release(); return null; }
+            _admissions.Add(admission);
         }
-        // At the timeout the slot is freed and the attempt dropped: closing its stream ends any read.
-        var slot = _limiter.Acquire(host, () => stream.Dispose(), maxForHost);
-        if (slot is null)
+        return admission;
+    }
+
+    /// <summary>The attempt ended before it had a stream: frees its slot.</summary>
+    public void Abandon(Admission admission)
+    {
+        admission.Slot?.Release();
+        lock (_lock) _admissions.Remove(admission);
+    }
+
+    /// <summary>
+    /// Serves one connection until it ends; owns <paramref name="stream"/>. <paramref name="host"/> is the peer's
+    /// address, what its handshake slot is counted against. When <paramref name="expectHello"/>, the first line must be <c>hello</c>.
+    /// </summary>
+    public Task ServeAsync(Stream stream, string host, bool expectHello = true, int? maxForHost = null)
+    {
+        if (Admit(host, stream.Dispose, maxForHost) is not { } admission)
         {
-            Forget(stream);
             stream.Dispose();
-            return;
+            return Task.CompletedTask;
         }
+        return ServeAsync(admission, stream, expectHello);
+    }
+
+    /// <summary>Runs the handshake on <paramref name="stream"/> within the admission's time, then the connection; owns the stream.</summary>
+    public async Task ServeAsync(Admission admission, Stream stream, bool expectHello = true)
+    {
+        var slot = admission.Slot!;
+        if (!admission.Attach(stream) || slot.IsReleased) { Abandon(admission); stream.Dispose(); return; }
         ShellConnection? connection = null;
         try
         {
@@ -106,7 +175,7 @@ public sealed class ShellGate
             if (phoneId is null)
             {
                 Log?.Invoke("shell: refused a connection that could not prove a shell key");
-                slot.Release();
+                Abandon(admission);
                 try
                 {
                     await stream.WriteAsync(new ShellEnvelope(ShellEnvelope.Error) { Reason = ShellError.NotAuthorized.ToWire() }.EncodeLine())
@@ -117,12 +186,12 @@ public sealed class ShellGate
             }
             // Timed out meanwhile: the slot is gone and the stream closed.
             if (!slot.Release()) return;
-            _limiter.Proven(host);
+            lock (_lock) _admissions.Remove(admission);
+            _limiter.Proven(admission.Host);
             reader.Limit = RemoteShell.LineLimit;
             lock (_lock)
             {
                 if (_stopped) return;
-                _handshakes.Remove(stream);
                 connection = new ShellConnection(this, stream, reader, phoneId, Hooks.Label(phoneId));
                 _connections.Add(connection);
             }
@@ -132,19 +201,12 @@ public sealed class ShellGate
         catch (Exception e) when (e is IOException or ObjectDisposedException or OperationCanceledException or LineTooLongException) { }
         finally
         {
-            slot.Release();
-            Forget(stream);
+            Abandon(admission);
             if (connection is not null) lock (_lock) _connections.Remove(connection);
             connection?.Close();
             stream.Dispose();
         }
     }
-
-    private void Forget(Stream stream)
-    {
-        lock (_lock) _handshakes.Remove(stream);
-    }
-
     private static ShellEnvelope? Decode(byte[] line)
     {
         try { return ShellEnvelope.Decode(line); }
@@ -189,15 +251,15 @@ public sealed class ShellGate
     public void Stop()
     {
         List<ShellConnection> closing;
-        List<Stream> pending;
+        List<Admission> pending;
         lock (_lock)
         {
             _stopped = true;
             closing = [.. _connections];
-            pending = [.. _handshakes];
-            _handshakes.Clear();
+            pending = [.. _admissions];
+            _admissions.Clear();
         }
-        pending.ForEach(s => s.Dispose());
+        pending.ForEach(a => { a.Slot?.Release(); a.Drop(); });
         closing.ForEach(c => c.Close());
     }
 
