@@ -74,6 +74,17 @@ public sealed partial class FlyoutWindow : Window
 
     public SessionViewModel ViewModel { get; }
 
+    private async void OnNoticeOk(object sender, RoutedEventArgs e) => await Answer(sender, act: false);
+
+    private async void OnNoticeAction(object sender, RoutedEventArgs e) => await Answer(sender, act: true);
+
+    private async Task Answer(object sender, bool act)
+    {
+        if (((FrameworkElement)sender).DataContext is not NoticeRow row || ViewModel.AnswerNotice is not { } answer) return;
+        try { await answer(row.Notice, act); }
+        catch (Exception ex) { Platform.LogFile.Error(ex); }
+    }
+
     /// <summary>Lets the window really close, for quitting.</summary>
     public void AllowClose() => _quitting = true;
 

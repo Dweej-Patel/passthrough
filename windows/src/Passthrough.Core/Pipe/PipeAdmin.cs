@@ -11,7 +11,7 @@ public sealed record PipeAdminRequest
 {
     public const string List = "list", GrantInfo = "grantInfo", AddKey = "addKey", SetScreen = "setScreen", Revoke = "revoke",
         RevokeSlot = "revokeSlot", Relabel = "relabel", Disconnect = "disconnect", HandOver = "handOver", SetStayAwake = "setStayAwake", Power = "power", Screen = "screen",
-        SetMayShare = "setMayShare";
+        SetMayShare = "setMayShare", Notices = "notices", AnswerNotice = "answerNotice";
 
     public uint Id { get; init; }
     public string Op { get; init; } = "";
@@ -21,6 +21,8 @@ public sealed record PipeAdminRequest
     /// <summary>A phone's shell key, base64 (<see cref="AddKey"/>).</summary>
     public string? Key { get; init; }
     public bool? On { get; init; }
+    /// <summary><see cref="AnswerNotice"/>: which.</summary>
+    public string? NoticeId { get; init; }
     /// <summary><see cref="Disconnect"/>: <c>all</c> (its shells and views) or <c>screen</c> (its views only).</summary>
     public string? What { get; init; }
     /// <summary>The access records stage 3 kept in the tray app, moved into the service once (<see cref="HandOver"/>).</summary>
@@ -46,6 +48,7 @@ public sealed record PipeAdminReply
     public bool? OnMains { get; init; }
     /// <summary>The Screen row for the caller's account (<see cref="PipeAdminRequest.Screen"/>).</summary>
     public PipeScreenRow? ScreenRow { get; init; }
+    public List<PipeNotice>? NoticeList { get; init; }
 }
 
 /// <summary>Settings' Screen row: <c>host.rdp</c>'s value, the row's state (done, needed, problem), its sentence and its button.</summary>
@@ -89,7 +92,7 @@ public sealed record PipeGrant
 /// <summary>An event the service pushes (<see cref="PipeKind.AdminEvent"/>): <c>access</c> (the phones changed), <c>grant</c> (what a grant carries changed).</summary>
 public sealed record PipeAdminEvent
 {
-    public const string Access = "access", Grant = "grant";
+    public const string Access = "access", Grant = "grant", Notice = "notice";
     public string What { get; init; } = "";
 }
 
@@ -105,6 +108,9 @@ public sealed class PipeAdminHandler(AccessDirectory directory, Func<GrantConten
 
     /// <summary>Ends a phone's views of the screen, keeping its shells, and tells its other connections why (<c>screenEnded</c>).</summary>
     public Action<string, string>? EndScreen { get; init; }
+
+    /// <summary>The notices waiting for each account.</summary>
+    public NoticeBoard? Board { get; init; }
 
     /// <summary>The Screen row for an account; null when this PC has no relay.</summary>
     public Func<string, PipeScreenRow?>? ScreenRow { get; init; }
@@ -129,9 +135,10 @@ public sealed class PipeAdminHandler(AccessDirectory directory, Func<GrantConten
             case PipeAdminRequest.AddKey:
                 if (request.Phone is not { } phone || !ShellAccessStore.IsPhoneId(phone) || request.PairingSlot is not { Length: > 0 } slot || Key(request.Key) is not { } key)
                     return reply with { Error = PipeAdminReply.BadRequest };
+                var isNew = !store.IsKnown(phone);
                 return directory.Add(account, new ShellPhone { PhoneId = phone, Label = ShellAccessStore.CleanLabel(request.Label), PairingSlot = slot, Key = key, GrantedAt = DateTimeOffset.UtcNow }) switch
                 {
-                    AccessDirectory.AddResult.Added => reply,
+                    AccessDirectory.AddResult.Added => Welcomed(account, phone, ShellAccessStore.CleanLabel(request.Label), isNew, reply),
                     AccessDirectory.AddResult.NotYours => reply with { Error = PipeAdminReply.NotYours },
                     _ => reply with { Error = PipeAdminReply.StoreFailed },
                 };
@@ -168,6 +175,10 @@ public sealed class PipeAdminHandler(AccessDirectory directory, Func<GrantConten
                 if (request.On is not { } awake || SetStayAwake is null) return reply with { Error = PipeAdminReply.BadRequest };
                 SetStayAwake(awake);
                 return reply;
+            case PipeAdminRequest.Notices:
+                return reply with { NoticeList = [.. Board?.For(account) ?? []] };
+            case PipeAdminRequest.AnswerNotice:
+                return request.NoticeId is { } noticeId && Board?.Answer(account, noticeId) == true ? reply : reply with { Error = PipeAdminReply.Unknown };
             case PipeAdminRequest.Screen:
                 return reply with { ScreenRow = ScreenRow?.Invoke(account) ?? new PipeScreenRow("service", "problem", "This copy of the service can't relay the screen.", null, null) };
             case PipeAdminRequest.Power:
@@ -176,6 +187,13 @@ public sealed class PipeAdminHandler(AccessDirectory directory, Func<GrantConten
             default:
                 return reply with { Error = PipeAdminReply.BadRequest };
         }
+    }
+
+    /// <summary>A phone given access for the first time: the notice that asks whether it may see the screen too.</summary>
+    private PipeAdminReply Welcomed(string account, string phone, string label, bool isNew, PipeAdminReply reply)
+    {
+        if (isNew) Board?.Add(account, PipeNotice.Granted, $"{label} can now open shells on this PC. Let it see the screen too? Windows still asks for your password.", phone);
+        return reply;
     }
 
     /// <summary>Keys first (a reconnect is already refused), then what is connected and what it opened.</summary>

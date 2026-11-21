@@ -64,8 +64,14 @@ public sealed class ServiceRemote : IDisposable
         RemoteDesktop = screenSetup is null ? null : new Passthrough.Windows.Screen.RemoteDesktopGate(screenSetup, IsWorkAccount, log);
         Gate = new ShellGate(HostFor, Directory, new HandshakeLimiter(TimeSpan.FromSeconds(10), TimeProvider.System), Hooks(), log: log);
         Gate.RelayRate.LockoutThreshold = LockoutThreshold();
+        Notices.Changed += account =>
+        {
+            if (account is null) trays.TellAll(new PipeAdminEvent { What = PipeAdminEvent.Notice });
+            else trays.Tell(account, new PipeAdminEvent { What = PipeAdminEvent.Notice });
+        };
         Admin = new PipeAdminHandler(Directory, Grant, ConnectionsOf, Disconnect, log)
         {
+            Board = Notices,
             PowerState = () => (StayAwake, SleepAfter(), PowerFacts.OnMains),
             EndScreen = (phone, reason) => Gate.DisconnectScreen(phone, reason),
             ScreenRow = account => RemoteDesktop?.Verdict(account) is { } v ? new PipeScreenRow(v.Rdp, v.RowState, v.Text, v.Action, v.Reason) : null,
@@ -94,6 +100,20 @@ public sealed class ServiceRemote : IDisposable
     }
 
     public AccessDirectory Directory { get; }
+
+    /// <summary>What the person at the PC should know, until they answer it.</summary>
+    public NoticeBoard Notices { get; } = new();
+
+    private DateTime _lastExposureCheck = DateTime.MinValue;
+
+    /// <summary>Every minute: is Remote Desktop open to the network where Passthrough promised it isn't? The notice follows.</summary>
+    private void CheckExposure()
+    {
+        if (RemoteDesktop is null || DateTime.UtcNow - _lastExposureCheck < TimeSpan.FromSeconds(60)) return;
+        _lastExposureCheck = DateTime.UtcNow;
+        var verdict = RemoteDesktop.Verdict(null);
+        Notices.Exposed(Directory.Accounts, verdict.Rdp == Passthrough.Core.Screen.RemoteDesktopVerdict.Exposed ? verdict.Reason ?? "" : null);
+    }
 
     /// <summary>This PC's Remote Desktop, when Screen is set up.</summary>
     public Passthrough.Windows.Screen.RemoteDesktopGate? RemoteDesktop { get; }
@@ -171,6 +191,7 @@ public sealed class ServiceRemote : IDisposable
     /// </summary>
     private void UpdatePower()
     {
+        CheckExposure();
         if (Gate.ConnectedPhones.Count > 0) _lastConnected = DateTime.UtcNow;
         _connectedRequest?.Set(DateTime.UtcNow - _lastConnected < AwakeAfterLast);
         _awakeRequest?.Set(StayAwake && PowerFacts.OnMains);
@@ -311,9 +332,23 @@ public sealed class ServiceRemote : IDisposable
         RemoteDesktop = RemoteDesktop,
         AccountOf = phone => Directory.Owner(phone),
         ViewStarted = v => _log($"screen: \"{v.Label}\" ({Short(v.PhoneId)}) account …{Tail(v.Account)} opened a view"),
-        ViewEnded = v => _log($"screen: \"{v.Label}\" ({Short(v.PhoneId)}) account …{Tail(v.Account)} view ended after {(v.End - v.Start)?.ToString(@"h\:mm\:ss")}; {v.BytesOut / 1e6:F1} MB out, {v.BytesIn / 1e6:F1} MB in; ended by {v.EndedBy}"),
+        ViewEnded = v =>
+        {
+            if (v.Account is { } owner && v.End is { } end)
+                Notices.Viewed(owner, v.PhoneId, v.Label, v.Start, end, t => t.ToLocalTime().ToString("HH:mm", System.Globalization.CultureInfo.CurrentCulture));
+            ViewLog(v);
+        },
+        ComputerGranted = (phone, c) =>
+        {
+            if (Directory.Owner(c.Id) is not { } owner) return;
+            Notices.Add(owner, PipeNotice.ComputerGranted, c.ScreenPending == true
+                ? $"{phone} gave {c.Name} access to this PC's shell. Let it see the screen too? Windows still asks for your password."
+                : $"{phone} gave {c.Name} access to this PC's {(c.Shell == true ? "shell" : "screen")}.", c.Id);
+        },
         Event = e => _log($"shell: {e}"),
     };
+
+    private void ViewLog(Passthrough.Core.Screen.RelayRecord v) => _log($"screen: \"{v.Label}\" ({Short(v.PhoneId)}) account …{Tail(v.Account)} view ended after {(v.End - v.Start)?.ToString(@"h\:mm\:ss")}; {v.BytesOut / 1e6:F1} MB out, {v.BytesIn / 1e6:F1} MB in; ended by {v.EndedBy}");
 
     private static string Short(string id) => id.Length > 8 ? id[..8] : id;
     private static string Tail(string? sid) => sid?.Split('-')[^1] ?? "?";

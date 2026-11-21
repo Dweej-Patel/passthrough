@@ -23,6 +23,7 @@ public sealed class PipeAccessAdmin : IAccessAdmin
             if (!linked) FailAll();
             Changed?.Invoke();
             AccessChanged?.Invoke();
+            NoticesChanged?.Invoke();
         };
     }
 
@@ -44,6 +45,7 @@ public sealed class PipeAccessAdmin : IAccessAdmin
         {
             if (e.What == PipeAdminEvent.Grant) Changed?.Invoke();
             if (e.What == PipeAdminEvent.Access) AccessChanged?.Invoke();
+            if (e.What == PipeAdminEvent.Notice) NoticesChanged?.Invoke();
         }
     }
 
@@ -100,6 +102,14 @@ public sealed class PipeAccessAdmin : IAccessAdmin
     public Task<PipeAdminReply> DisconnectAsync(string phoneId) => AskAsync(new PipeAdminRequest { Op = PipeAdminRequest.Disconnect, Phone = phoneId });
 
     public Task<PipeAdminReply> SetMayShareAsync(string phoneId, bool on) => AskAsync(new PipeAdminRequest { Op = PipeAdminRequest.SetMayShare, Phone = phoneId, On = on });
+
+    public async Task<IReadOnlyList<PipeNotice>> NoticesAsync() =>
+        (await AskAsync(new PipeAdminRequest { Op = PipeAdminRequest.Notices }).ConfigureAwait(false)).NoticeList ?? [];
+
+    public Task<PipeAdminReply> AnswerNoticeAsync(string id) => AskAsync(new PipeAdminRequest { Op = PipeAdminRequest.AnswerNotice, NoticeId = id });
+
+    /// <summary>Fires when the service says the notices changed.</summary>
+    public event Action? NoticesChanged;
 
     public Task<PipeAdminReply> ScreenAsync() => AskAsync(new PipeAdminRequest { Op = PipeAdminRequest.Screen });
 

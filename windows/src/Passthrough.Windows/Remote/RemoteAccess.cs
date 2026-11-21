@@ -66,6 +66,7 @@ public sealed class RemoteAccess : IAccessAdmin, IDisposable
         _admin = new PipeAccessAdmin(_server);
         _admin.Changed += () => _ = RefreshGrantAsync();
         _admin.AccessChanged += () => _ = RefreshPhonesAsync();
+        _admin.NoticesChanged += () => _ = RefreshNoticesAsync();
         _server.LinkChanged += linked =>
         {
             if (linked) _ = Task.Run(AfterLinkAsync);
@@ -378,6 +379,29 @@ public sealed class RemoteAccess : IAccessAdmin, IDisposable
         await _admin.DisconnectAsync(phoneId).ConfigureAwait(false);
         Sessions.CloseSessions(phoneId);
         await RefreshPhonesAsync().ConfigureAwait(false);
+    }
+
+    private IReadOnlyList<PipeNotice> _notices = [];
+
+    /// <summary>What the service wants the person at the PC to know, until they answer it.</summary>
+    public IReadOnlyList<PipeNotice> Notices { get { lock (_lock) return _notices; } }
+
+    /// <summary>Fires, on any thread, when <see cref="Notices"/> changes.</summary>
+    public event Action? NoticesChanged;
+
+    private async Task RefreshNoticesAsync()
+    {
+        var notices = await _admin.NoticesAsync().ConfigureAwait(false);
+        lock (_lock) _notices = notices;
+        NoticesChanged?.Invoke();
+    }
+
+    /// <summary>Answers a notice: OK, or its action first (Allow screen: the phone may see the screen).</summary>
+    public async Task AnswerNoticeAsync(PipeNotice notice, bool act)
+    {
+        if (act && notice.Kind == PipeNotice.Granted && notice.Subject is { } phone) await SetScreenAllowedAsync(phone, true).ConfigureAwait(false);
+        await _admin.AnswerNoticeAsync(notice.Id).ConfigureAwait(false);
+        await RefreshNoticesAsync().ConfigureAwait(false);
     }
 
     /// <summary>The Screen row for this account, from the service.</summary>

@@ -114,6 +114,9 @@ public partial class App : Application
             // The icon first: if the flyout fails to build, the failure path below still has something to take down.
             _tray = new TrayIcon(ToggleFlyout, ShowSettings, Quit);
             _flyout = new FlyoutWindow(viewModel, ShowSettings, Quit);
+            var remote = _remote;
+            remote.NoticesChanged += () => viewModel.ShowNotices(remote.Notices);
+            viewModel.AnswerNotice = remote.AnswerNoticeAsync;
 
             await _session.StartAsync();
             await _remote.StartIfEnabledAsync();
