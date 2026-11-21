@@ -121,10 +121,11 @@ public sealed class ConPtyTests : IDisposable
     }
 
     [Fact]
-    public void TestsDoNotRunElevated()
+    public void ElevationIsToldAsWindowsSeesIt()
     {
-        // The app refuses to host shells elevated; these tests are the same process kind it is.
-        Assert.False(UserEnvironment.IsElevated(), "run the tests as yourself, not as administrator");
+        // The app refuses to host shells elevated. CI's runners are elevated; a PC under UAC usually isn't.
+        var principal = new System.Security.Principal.WindowsPrincipal(System.Security.Principal.WindowsIdentity.GetCurrent());
+        Assert.Equal(principal.IsInRole(System.Security.Principal.WindowsBuiltInRole.Administrator), UserEnvironment.IsElevated());
     }
 }
 
