@@ -53,5 +53,26 @@ facts measured on a real PC.
     pseudoconsole's own start-up query, keep its win32-input and focus modes
     from phones, accept BEL-terminated 7501 queries). WSL is still to be run
     on a PC where WSL2 starts.
-* Next: the spikes that need the Mac and a phone (0.1, 0.3, 0.5, 0.6), and
-  stage 1's CI job and `ShellEnvelope` for C#, which need neither.
+* Open pull requests (each stacked on the one before, all against `dev`;
+  merge in this order):
+  * #42 CI: a Windows job, the .NET SDK pinned, NuGet locked (stage 1, PR 1).
+  * #43 the C# shell envelope, all three suites on the same fixtures (stage 1, PR 2).
+  * #44 the wire contract: `host`, shells, `signed_out`, `goingAway`, the
+    Remote Desktop relay messages, `hostKind`; the Mac sends `host` (stage 1, PR 3).
+  * #45 shell grants over the cable and log redaction (stage 3, PR 1).
+  * #46 the shell grant ledger (stage 3, first half of PR 2).
+  All were reviewed together and the findings fixed. Each says in its
+  description what still has to be checked by hand on a Mac and phones.
+* Deliberately left from that review: the Mac sends `host` once per connection
+  (a phone sees a changed Screen switch at its next connection); `hostKind`
+  takes only `mac` and `windows`; C# decodes a little more leniently than
+  Swift and Kotlin when a required field is missing; the plan's Swift and
+  Kotlin tests for `hostKind` on the grant and for `host` ordering on the Mac
+  listener are not written yet.
+* Next, on the PC: stage 3, second half of PR 2 (a control channel to every
+  attached phone, iPads pairing, Forget revoking shell access), then PR 3 (the
+  shell's logic ported from the Mac). Stage 1 PR 4 (computers) waits for stage 7.
+* Next, needing the Mac and a phone: spikes 0.1, 0.3, 0.5, 0.6, and stage 2
+  (the phones show a PC as a PC).
+* Needs your PC set up: Rust and the MSVC build tools (an administrator
+  install), for the iroh bridge in stage 3, PR 5.
