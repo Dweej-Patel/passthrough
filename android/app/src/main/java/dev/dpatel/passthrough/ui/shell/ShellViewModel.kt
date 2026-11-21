@@ -754,6 +754,8 @@ class ShellViewModel(app: Application) : AndroidViewModel(app) {
                 }
             }
             is ShellEvent.MacInfo -> apply(event)
+            // Read from stage 2 on (a PC's page and wording); a Mac sends `host` but nothing here needs it yet.
+            is ShellEvent.Host, is ShellEvent.GoingAway -> Unit
             is ShellEvent.MacStateChanged -> {
                 _macState.value = event.state
                 controls.stateArrived(event.state)

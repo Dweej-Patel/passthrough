@@ -56,6 +56,15 @@ public sealed class ShellEnvelope
     public const string Ping = "ping";
     public const string Pong = "pong";
     public const string Error = "error";
+    /// <summary>What the host is (<see cref="HostInfo"/>), after <c>macInfo</c> and whenever it changes.</summary>
+    public const string Host = "host";
+    /// <summary>The host is about to go away (<c>reason</c>: <c>sleeping</c>, <c>turned_off</c>, <c>shutting_down</c>).</summary>
+    public const string GoingAway = "goingAway";
+    /// <summary>The screen through the host's Remote Desktop: answered <c>rdpReady</c> (<c>certSHA256</c>), then raw bytes.</summary>
+    public const string Rdp = "rdp";
+    public const string RdpReady = "rdpReady";
+    /// <summary>A view of the screen on this device's other connection ended (<c>reason</c>: <c>switched_off</c>, <c>stopped</c>, <c>taken</c>).</summary>
+    public const string ScreenEnded = "screenEnded";
 
     private static readonly JsonSerializerOptions Options = new()
     {
@@ -101,6 +110,18 @@ public sealed class ShellEnvelope
     [JsonPropertyName("key")] public string? Key { get; set; }
     /// <summary>screenPass: what a host keeps to view another host's screen.</summary>
     [JsonPropertyName("pass")] public ShellCredentialWire? Pass { get; set; }
+    /// <summary>host: what the host says about itself.</summary>
+    [JsonPropertyName("host")] public HostInfo? HostInfo { get; set; }
+    /// <summary>open: which of the host's shells to start (<see cref="HostShell.Id"/>).</summary>
+    [JsonPropertyName("shell")] public string? Shell { get; set; }
+    /// <summary>error: more about the reason (<c>rdp_unavailable</c>'s cause, in <see cref="HostInfo.Rdp"/>'s words).</summary>
+    [JsonPropertyName("detail")] public string? Detail { get; set; }
+    /// <summary>error: a sentence the host wrote, shown when the client has none of its own.</summary>
+    [JsonPropertyName("message")] public string? Message { get; set; }
+    /// <summary>error <c>try_later</c>: seconds until a retry can work.</summary>
+    [JsonPropertyName("retryAfter")] public int? RetryAfter { get; set; }
+    /// <summary>rdpReady: SHA-256 of the certificate Remote Desktop presents, lowercase hex.</summary>
+    [JsonPropertyName("certSHA256")] public string? CertSHA256 { get; set; }
 
     public ShellEnvelope() { }
     public ShellEnvelope(string t) { T = t; }

@@ -66,6 +66,8 @@ public sealed class ControlEnvelope
     [JsonPropertyName("irohRelay")] public string? IrohRelay { get; set; }
     [JsonPropertyName("relayToken")] public string? RelayToken { get; set; }
     [JsonPropertyName("grantID")] public string? GrantID { get; set; }
+    /// <summary>hello, shellGrant: what this host is (<c>mac</c>, <c>windows</c>); absent from older Macs.</summary>
+    [JsonPropertyName("hostKind")] public string? HostKind { get; set; }
 
     public ControlEnvelope() { }
     public ControlEnvelope(string t) { T = t; }

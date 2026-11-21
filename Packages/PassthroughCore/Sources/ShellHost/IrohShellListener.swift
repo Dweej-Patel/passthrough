@@ -95,6 +95,12 @@ public final class IrohShellListener: @unchecked Sendable {
         set { gate.screenOnlyCheck.set(newValue) }
     }
 
+    /// As `ShellListener.hostInfo`.
+    public var hostInfo: (@Sendable (String) -> HostInfo?)? {
+        get { gate.hostInfoProvider.get() }
+        set { gate.hostInfoProvider.set(newValue) }
+    }
+
     /// As `ShellListener.onScreenGrant`.
     public var onScreenGrant: (@Sendable (_ phoneID: String, _ label: String, _ name: String, _ viewer: String) -> Result<(id: String, key: Data), ShellError>)? {
         get { gate.screenGrant.get() }

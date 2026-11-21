@@ -99,6 +99,9 @@ public struct ControlEnvelope: Codable, Equatable, Sendable {
     /// shellGrant: names this grant (at most 64 UTF-8 bytes); the phone echoes
     /// it in `shellGranted` so the Mac knows which grant was stored.
     public var grantID: String?
+    /// hello, shellGrant: what the host is (`mac`, `windows`); absent from older Macs.
+    /// A phone keeps it only from a connection whose pairing is proved.
+    public var hostKind: String?
     /// The longest `grantID` (UTF-8 bytes) a phone echoes.
     public static let maxGrantIDLength = 64
 

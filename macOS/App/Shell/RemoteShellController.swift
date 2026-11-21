@@ -273,6 +273,7 @@ final class RemoteShellController: ObservableObject {
             macInfo: { reach.get().macInfo() })
         listener.onSessionEvent = { text in ptLog(.info, "shell: \(text)") }
         listener.screenAllowed = { store.screenAllowed(forPhone: $0) }
+        listener.hostInfo = { Self.hostInfo(screenAllowed: store.screenAllowed(forPhone: $0)) }
         listener.screenSharingVerified = screenSharingVerifier()
         listener.screenVideo = Self.screenVideoSource
         listener.screenViews = screenViews
@@ -406,6 +407,7 @@ final class RemoteShellController: ObservableObject {
                 macInfo: { reach.get().macInfo() })
             listener.onSessionEvent = { text in ptLog(.info, "shell: \(text)") }
             listener.screenAllowed = { store.screenAllowed(forPhone: $0) }
+            listener.hostInfo = { Self.hostInfo(screenAllowed: store.screenAllowed(forPhone: $0)) }
             listener.screenSharingVerified = screenSharingVerified
             listener.screenVideo = Self.screenVideoSource
             listener.screenViews = screenViews
@@ -1066,6 +1068,19 @@ final class RemoteShellController: ObservableObject {
 
     func refreshScreenVideo() {
         screenVideo = ScreenVideoAccess(capture: ScreenVideoPermissions.canCapture, control: ScreenVideoPermissions.canControl)
+    }
+
+    /// For both listeners: what this Mac says about itself to a phone (`host`). It names its one shell
+    /// (the login shell), both ways to see its screen, and what that phone may do. Nothing in it changes
+    /// while a phone is connected except Screen, whose switch ends the views anyway.
+    nonisolated static func hostInfo(screenAllowed: Bool) -> HostInfo {
+        let version = ProcessInfo.processInfo.operatingSystemVersion
+        let shell = (ProcessInfo.processInfo.environment["SHELL"] as NSString?)?.lastPathComponent ?? "zsh"
+        return HostInfo(kind: HostInfo.kindMac,
+                        os: "macOS \(version.majorVersion).\(version.minorVersion)",
+                        shells: [HostShell(id: HostShell.loginID, name: shell.isEmpty ? "zsh" : shell, default: true)],
+                        screens: [HostInfo.screenVideo, HostInfo.screenRFB],
+                        access: HostAccess(shell: true, screen: screenAllowed))
     }
 
     /// For both listeners: the Mac's own H.264 stream when it may capture and post input, else nil (the phone then uses Screen Sharing).

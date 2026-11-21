@@ -35,11 +35,14 @@ public struct ShellGrant: Codable, Equatable, Sendable {
     /// The relay's token is kept apart, in the secret store.
     public var irohID: String?
     public var irohRelay: String?
+    /// What the host is, as its grant said (`HostInfo.kindMac`, `kindWindows`);
+    /// absent from Macs that predate it, which are Macs.
+    public var hostKind: String?
 
     public init(certSHA256: String, port: UInt16, addresses: [String], macName: String,
-                irohID: String? = nil, irohRelay: String? = nil) {
+                irohID: String? = nil, irohRelay: String? = nil, hostKind: String? = nil) {
         self.certSHA256 = certSHA256; self.port = port; self.addresses = addresses; self.macName = macName
-        self.irohID = irohID; self.irohRelay = irohRelay
+        self.irohID = irohID; self.irohRelay = irohRelay; self.hostKind = hostKind
     }
 }
 

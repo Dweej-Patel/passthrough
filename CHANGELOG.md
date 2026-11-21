@@ -206,6 +206,17 @@ these steps as written and check each one before building.
   `protocol/fixtures.json`'s `shell` section like the Swift and Kotlin suites.
   The fixtures gain the list of error reasons and the `replaying`, `lock` and
   `viewing` lines. Nothing on the wire changes and the PC hosts no shell yet.
+* **A host says what it is.** After `ready` the Mac now sends `host`: that
+  it is a Mac, its macOS version, its one shell (your login shell), how its
+  screen can be seen and what this phone may do. The protocol also gains what
+  a Windows PC will need: a choice of shell in `open` (and each session says
+  its shell), `signed_out`, `goingAway`, a Remote Desktop relay (`rdp`,
+  `rdpReady` with the certificate to accept, `rdp_unavailable`, `try_later`,
+  `screenEnded`), and `hostKind` on the grant over the cable, which the
+  phones keep. Phones and the Mac read all of it; nothing you can see changes
+  yet, and older phones and Macs ignore it (see
+  [protocol/README.md](protocol/README.md#the-host)). Update phones and the
+  Mac in any order.
 * Remote shell: coming back to a session no longer plays it back from the
   top. The phone holds the Mac's replay until it is complete and draws it in
   one go, keeping what was on screen meanwhile, and says "Loading session…"

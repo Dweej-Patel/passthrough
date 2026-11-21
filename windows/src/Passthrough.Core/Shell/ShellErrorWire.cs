@@ -17,6 +17,9 @@ public static class ShellErrorWire
         (ShellError.VpnNotSetUp, "vpn_not_set_up"),
         (ShellError.ScreenOnly, "screen_only"),
         (ShellError.PassNotSaved, "pass_not_saved"),
+        (ShellError.SignedOut, "signed_out"),
+        (ShellError.RdpUnavailable, "rdp_unavailable"),
+        (ShellError.TryLater, "try_later"),
     ];
 
     /// <summary>Every wire name, in declaration order.</summary>

@@ -203,7 +203,7 @@ class ControlServer(
         val irohRelay = m.irohRelay.takeIf { irohOk }
         val relayToken = m.relayToken.takeIf { irohOk }
         val grant = ShellGrant(cert.lowercase(Locale.ROOT), port, (m.addresses ?: emptyList()).take(IrohInfo.MAX_ADDRESSES), (m.macName ?: mac.name).take(64),
-            irohID, irohRelay)
+            irohID, irohRelay, m.hostKind?.takeIf { it == HostInfo.KIND_MAC || it == HostInfo.KIND_WINDOWS })
         // The key is only ever kept sealed to the app's key. Before the app has made one, no
         // answer: the Mac keeps the key unrecorded and grants again later (with backoff, and on
         // every new cable connection).

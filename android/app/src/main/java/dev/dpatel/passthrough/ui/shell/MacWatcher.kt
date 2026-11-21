@@ -184,7 +184,7 @@ class MacWatcher(
                 if (event.error != null && !watch.refused) scheduleRedial(id)
             }
             // Nothing a watch asks for (`Ended` is followed by a fresh `sessions`).
-            is ShellEvent.MacInfo, is ShellEvent.Events, is ShellEvent.Opened, is ShellEvent.OpenedDetached,
+            is ShellEvent.MacInfo, is ShellEvent.Host, is ShellEvent.GoingAway, is ShellEvent.Events, is ShellEvent.Opened, is ShellEvent.OpenedDetached,
             is ShellEvent.Output, is ShellEvent.Replaying, is ShellEvent.Attached, is ShellEvent.Ended, is ShellEvent.Detached,
             is ShellEvent.History, is ShellEvent.Transcript -> Unit
         }

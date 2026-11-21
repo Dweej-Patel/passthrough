@@ -22,4 +22,6 @@ public sealed record ShellSessionInfo
     [JsonPropertyName("theme")] public ShellTheme? Theme { get; init; }
     /// <summary>What the program in it says it is doing (OSC 7501), when it says.</summary>
     [JsonPropertyName("status")] public ShellStatus? Status { get; init; }
+    /// <summary>The host's shell it runs (<see cref="HostShell.Id"/>), when the host offers more than one.</summary>
+    [JsonPropertyName("shell")] public string? Shell { get; init; }
 }

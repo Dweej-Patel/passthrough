@@ -47,6 +47,55 @@ class ShellProtocolTests {
         }
     }
 
+    @Test fun errorReasonsMatchFixtures() {
+        val reasons = shell["errors"]!!.jsonArray.map { it.jsonPrimitive.content }
+        assertEquals(reasons.toSet(), ShellError.entries.map { it.wire }.toSet())
+        assertEquals(reasons.size, ShellError.entries.size)
+    }
+
+    /** The three `host` lines, the shared limits and shell ids, and what `cleaned()` keeps. */
+    @Test fun hostFields() {
+        val hosts = shell["messages"]!!.jsonArray.map { ShellEnvelope.decode(it.jsonObject["line"]!!.jsonPrimitive.content) }
+            .filter { it.t == ShellEnvelope.HOST }.mapNotNull { it.host?.cleaned() }
+        assertEquals(3, hosts.size)
+        assertEquals(HostInfo.KIND_MAC, hosts[0].kind)
+        assertEquals(listOf(HostShell(HostShell.LOGIN_ID, "zsh", true)), hosts[0].shells)
+        assertEquals(listOf("pwsh", "powershell", "cmd", "wsl:Ubuntu", "gitbash"), hosts[1].shells?.map { it.id })
+        assertEquals(HostAccess(shell = true, screen = true, share = false), hosts[1].access)
+        assertEquals("signedOut", hosts[2].console)
+
+        val host = shell["host"]!!.jsonObject
+        assertEquals(host["maxShells"]!!.jsonPrimitive.int, HostInfo.MAX_SHELLS)
+        assertEquals(host["maxLineBytes"]!!.jsonPrimitive.int, HostInfo.MAX_LINE_BYTES)
+        assertEquals(host["inUseIdleSeconds"]!!.jsonPrimitive.int, HostInfo.IN_USE_IDLE_SECONDS)
+        assertEquals(host["consoleStates"]!!.jsonArray.map { it.jsonPrimitive.content }, HostInfo.CONSOLE_STATES)
+        assertEquals(host["goingAwayReasons"]!!.jsonArray.map { it.jsonPrimitive.content }, HostInfo.GOING_AWAY_REASONS)
+        for (c in host["shellIDs"]!!.jsonArray) {
+            val id = c.jsonObject["id"]!!.jsonPrimitive.content
+            assertEquals(id, c.jsonObject["valid"]!!.jsonPrimitive.boolean, HostShell.isValidID(id))
+        }
+        val cleaning = host["cleaning"]!!.jsonObject
+        val dirty = ControlEnvelope.json.decodeFromString(HostInfo.serializer(), cleaning["in"].toString())
+        val cleaned = ControlEnvelope.json.encodeToString(HostInfo.serializer(), dirty.cleaned()!!)
+        assertEquals(Fixtures.normalize(cleaning["out"]!!), Fixtures.normalize(Json.parseToJsonElement(cleaned)))
+        assertEquals(null, HostInfo(os = "macOS 15").cleaned())
+        assertEquals("someday", HostInfo(kind = "someday").cleaned()?.kind)
+    }
+
+    /**
+     * What a PC answers to what only a Mac serves: every answer round-trips. The requests only
+     * decode, since this app sends few of them (it models no screen passes).
+     */
+    @Test fun pcAnswersRoundTrip() {
+        for (row in shell["pcAnswers"]!!.jsonArray) {
+            val request = row.jsonObject["request"]!!.jsonPrimitive.content
+            assertEquals(Json.parseToJsonElement(request).jsonObject["t"]!!.jsonPrimitive.content, ShellEnvelope.decode(request).t)
+            val line = row.jsonObject["answer"]!!.jsonPrimitive.content
+            val encoded = String(ShellEnvelope.decode(line).encodeLine()).trimEnd('\n')
+            assertEquals(line, Fixtures.normalize(Json.parseToJsonElement(line)), Fixtures.normalize(Json.parseToJsonElement(encoded)))
+        }
+    }
+
     /** The Mac's state and a phone's requests to change it; absent fields stay absent. */
     @Test fun macStateAndControlFields() {
         val lines = shell["messages"]!!.jsonArray.map { ShellEnvelope.decode(it.jsonObject["line"]!!.jsonPrimitive.content) }

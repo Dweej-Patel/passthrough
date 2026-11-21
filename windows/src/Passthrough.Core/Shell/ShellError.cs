@@ -23,4 +23,10 @@ public enum ShellError
     ScreenOnly,
     /// <summary>The host couldn't save a pass.</summary>
     PassNotSaved,
+    /// <summary>No shell can start: the granting account isn't signed in, or Passthrough isn't open there.</summary>
+    SignedOut,
+    /// <summary>The Remote Desktop relay can't be used now (<c>detail</c> says why).</summary>
+    RdpUnavailable,
+    /// <summary>Too many tries in a short time (<c>retryAfter</c>).</summary>
+    TryLater,
 }

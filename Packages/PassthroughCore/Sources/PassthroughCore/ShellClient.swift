@@ -103,6 +103,10 @@ public final class ShellClient: @unchecked Sendable {
         case macInfo(ShellEnvelope)
         /// How the Mac is doing (after `ready`, and whenever it changes).
         case macState(MacState)
+        /// What the host says it is (after `macInfo`, and whenever it changes), cleaned (`HostInfo.cleaned`).
+        case host(HostInfo)
+        /// The host is about to go away; `reason` is a `GoingAwayReason` raw value, or one this side doesn't know.
+        case goingAway(reason: String)
         /// Whether the Mac will send this phone notices (the answer to `setPush`).
         case pushState(Bool)
         /// The answer to `requestEvents`: what happened since then, oldest first, and the battery meanwhile.
@@ -706,6 +710,11 @@ public final class ShellClient: @unchecked Sendable {
         case ShellEnvelope.macState:
             guard let state = message.state else { return }
             emit(.macState(state))
+        case ShellEnvelope.host:
+            guard let info = message.host?.cleaned() else { return }
+            emit(.host(info))
+        case ShellEnvelope.goingAway:
+            emit(.goingAway(reason: message.reason ?? ""))
         case ShellEnvelope.pushState:
             emit(.pushState(message.on ?? false))
         case ShellEnvelope.eventList:

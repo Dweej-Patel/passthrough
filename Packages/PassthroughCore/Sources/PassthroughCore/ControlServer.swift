@@ -243,7 +243,8 @@ public final class ControlServer: @unchecked Sendable {
             }
             let grant = ShellGrant(certSHA256: cert.lowercased(), port: port, addresses: Array((message.addresses ?? []).prefix(IrohInfo.maxAddresses)),
                                    macName: String((message.macName ?? mac.name).prefix(64)),
-                                   irohID: iroh.id, irohRelay: iroh.relay)
+                                   irohID: iroh.id, irohRelay: iroh.relay,
+                                   hostKind: message.hostKind.flatMap { [HostInfo.kindMac, HostInfo.kindWindows].contains($0) ? $0 : nil })
             // The key is only ever kept sealed to the app's key. Before the app has made
             // one, no answer: the Mac keeps the key unrecorded and grants again later
             // (with backoff, and on every new cable connection).

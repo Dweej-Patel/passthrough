@@ -53,7 +53,7 @@ public class ShellFixtureTests
     public void ShellMessages_RoundTrip()
     {
         var lines = Lines().ToList();
-        Assert.True(lines.Count >= 44, $"only {lines.Count} lines");
+        Assert.True(lines.Count >= 57, $"only {lines.Count} lines");
         foreach (var line in lines)
         {
             var encoded = Encoding.UTF8.GetString(Decode(line).EncodeLine());
@@ -157,6 +157,87 @@ public class ShellFixtureTests
         var push = new PushRegistration { Token = "abcdef", Key = "a2V5", Mac = "m" };
         Assert.DoesNotContain("abcdef", push.ToString());
         Assert.DoesNotContain("a2V5", push.ToString());
+    }
+
+    [Fact]
+    public void Host_Fields()
+    {
+        var hosts = Lines().Select(Decode).Where(m => m.T == ShellEnvelope.Host).Select(m => m.HostInfo!.Cleaned()!).ToList();
+        Assert.Equal(3, hosts.Count);
+        var mac = hosts[0];
+        Assert.Equal(HostInfo.KindMac, mac.Kind);
+        Assert.Equal([new HostShell { Id = HostShell.LoginId, Name = "zsh", Default = true }], mac.Shells!);
+        Assert.Equal([HostInfo.ScreenVideo, HostInfo.ScreenRfb], mac.Screens!);
+        Assert.Null(mac.SignedIn);
+        var pc = hosts[1];
+        Assert.Equal(HostInfo.KindWindows, pc.Kind);
+        Assert.Equal((true, true, "active", 40), (pc.SignedIn, pc.App, pc.Console, pc.IdleSeconds));
+        Assert.Equal(["pwsh", "powershell", "cmd", "wsl:Ubuntu", "gitbash"], pc.Shells!.Select(s => s.Id));
+        Assert.Equal("pwsh", pc.Shells!.Single(s => s.Default == true).Id);
+        Assert.Equal(("ready", true, true, false), (pc.Rdp, pc.Access!.Shell, pc.Access.Screen, pc.Access.Share));
+        Assert.Equal((true, "name@outlook.com", 0), (pc.Lock, pc.User, pc.SleepAfter));
+        var signedOut = hosts[2];
+        Assert.Equal((false, false, "signedOut"), (signedOut.SignedIn, signedOut.App, signedOut.Console));
+        Assert.Null(signedOut.User);
+    }
+
+    [Fact]
+    public void Host_Constants_MatchFixtures()
+    {
+        var h = S.GetProperty("host");
+        Assert.Equal([HostInfo.KindMac, HostInfo.KindWindows], h.GetProperty("kinds").EnumerateArray().Select(e => e.GetString()));
+        Assert.Equal(HostInfo.ConsoleStates, h.GetProperty("consoleStates").EnumerateArray().Select(e => e.GetString()!));
+        Assert.Equal(HostInfo.MaxShells, h.GetProperty("maxShells").GetInt32());
+        Assert.Equal(HostInfo.MaxLineBytes, h.GetProperty("maxLineBytes").GetInt32());
+        Assert.Equal(HostInfo.InUseIdleSeconds, h.GetProperty("inUseIdleSeconds").GetInt32());
+        foreach (var c in h.GetProperty("shellIDs").EnumerateArray())
+            Assert.Equal(c.GetProperty("valid").GetBoolean(), HostShell.IsValidId(c.GetProperty("id").GetString()));
+    }
+
+    [Fact]
+    public void Host_Cleaning()
+    {
+        var cleaning = S.GetProperty("host").GetProperty("cleaning");
+        var dirty = JsonSerializer.Deserialize<HostInfo>(cleaning.GetProperty("in").GetRawText())!;
+        var expected = cleaning.GetProperty("out").GetRawText();
+        var cleaned = JsonSerializer.Serialize(dirty.Cleaned(), new JsonSerializerOptions { DefaultIgnoreCondition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull });
+        Assert.True(Fixtures.JsonEqual(expected, cleaned), cleaned);
+        Assert.Null(new HostInfo { Os = "macOS 15" }.Cleaned());
+        Assert.Null(new HostInfo { Kind = "" }.Cleaned());
+        Assert.Equal("someday", new HostInfo { Kind = "someday" }.Cleaned()!.Kind);
+        Assert.Null(new HostInfo { Kind = "windows", User = "a\nb" }.Cleaned()!.User);
+        Assert.Null(new HostInfo { Kind = "windows", IdKey = "ABCD" }.Cleaned()!.IdKey);
+        var many = new HostInfo { Kind = "windows", Shells = Enumerable.Range(0, 40).Select(i => new HostShell { Id = $"s{i}", Name = $"S{i}" }).ToList() };
+        Assert.Equal(HostInfo.MaxShells, many.Cleaned()!.Shells!.Count);
+    }
+
+    /// <summary>What a PC answers to what only a Mac serves: both lines of every row round-trip.</summary>
+    [Fact]
+    public void PcAnswers_RoundTrip()
+    {
+        foreach (var row in S.GetProperty("pcAnswers").EnumerateArray())
+            foreach (var key in new[] { "request", "answer" })
+            {
+                var line = row.GetProperty(key).GetString()!;
+                Assert.True(Fixtures.JsonEqual(Encoding.UTF8.GetString(Decode(line).EncodeLine()).TrimEnd('\n'), line), line);
+            }
+    }
+
+    [Fact]
+    public void RelayAndShellChoice_Fields()
+    {
+        var all = Lines().Select(Decode).ToList();
+        Assert.Equal("wsl:Ubuntu", all.First(m => m.T == ShellEnvelope.Open && m.Shell is not null).Shell);
+        Assert.Equal("pwsh", all.Where(m => m.T == ShellEnvelope.Sessions).SelectMany(m => m.SessionList!).First(s => s.Shell is not null).Shell);
+        var ready = all.First(m => m.T == ShellEnvelope.RdpReady);
+        Assert.Matches("^[0-9a-f]{64}$", ready.CertSHA256!);
+        var unavailable = all.First(m => m.Reason == ShellError.RdpUnavailable.ToWire());
+        Assert.Equal("exposed", unavailable.Detail);
+        Assert.NotNull(unavailable.Message);
+        Assert.Equal(540, all.First(m => m.Reason == ShellError.TryLater.ToWire()).RetryAfter);
+        Assert.Equal(3, all.First(m => m.Reason == ShellError.SignedOut.ToWire()).Ref);
+        Assert.Equal("sleeping", all.First(m => m.T == ShellEnvelope.GoingAway).Reason);
+        Assert.Equal("switched_off", all.First(m => m.T == ShellEnvelope.ScreenEnded).Reason);
     }
 
     [Fact]

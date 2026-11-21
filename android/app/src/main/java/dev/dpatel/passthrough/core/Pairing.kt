@@ -58,6 +58,8 @@ data class ShellGrant(
     /** The Mac's iroh endpoint id and home relay, when it offers the shell over iroh. The relay's token is kept in the secret store. */
     val irohID: String? = null,
     val irohRelay: String? = null,
+    /** What the host is, as its grant said (`mac`, `windows`); absent from Macs that predate it, which are Macs. */
+    val hostKind: String? = null,
 )
 
 /** A Mac that has been granted access to this phone's proxy. Times are epoch millis. */

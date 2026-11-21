@@ -65,6 +65,18 @@ data class ShellEnvelope(
     var since: Double? = null,
     var events: List<MacEvent>? = null,
     var battery: List<BatterySample>? = null,
+    /** host: what the host says about itself ([HostInfo]). */
+    var host: HostInfo? = null,
+    /** open: which of the host's shells to start ([HostShell.id]). */
+    var shell: String? = null,
+    /** error: more about the reason (`rdp_unavailable`'s cause, in [HostInfo.rdp]'s words). */
+    var detail: String? = null,
+    /** error: a sentence the host wrote, shown when the app has none of its own. */
+    var message: String? = null,
+    /** error `try_later`: seconds until a retry can work. */
+    var retryAfter: Int? = null,
+    /** rdpReady: SHA-256 of the certificate Remote Desktop presents, lowercase hex. */
+    var certSHA256: String? = null,
 ) {
     fun encodeLine(): ByteArray =
         (ControlEnvelope.json.encodeToString(serializer(), this) + "\n").toByteArray(Charsets.UTF_8)
@@ -105,6 +117,11 @@ data class ShellEnvelope(
         const val PING = "ping"
         const val PONG = "pong"
         const val ERROR = "error"
+        /** What the host is ([HostInfo]), after `macInfo` and whenever it changes. */
+        const val HOST = "host"
+        /** The host is about to go away (`reason`: `sleeping`, `turned_off`, `shutting_down`). */
+        const val GOING_AWAY = "goingAway"
+        const val VIEWING = "viewing"
 
         fun decode(line: String): ShellEnvelope = ControlEnvelope.json.decodeFromString(serializer(), line)
     }
@@ -144,6 +161,8 @@ data class ShellSessionInfo(
     val exitStatus: Int? = null,
     /** The question a running session went quiet on, as the Mac reads its screen; absent when it isn't waiting. */
     val waiting: String? = null,
+    /** The host's shell it runs ([HostShell.id]), when the host offers more than one. */
+    val shell: String? = null,
 )
 
 /** A past session in the Mac's history. Times are Unix seconds. */
@@ -171,6 +190,19 @@ enum class ShellError(val wire: String) {
     NOT_ALLOWED("not_allowed"),
     /** The VPN can't turn on: the Mac has no VPN set up. */
     VPN_NOT_SET_UP("vpn_not_set_up"),
+    // The screen's reasons: this app has no screen view yet, but reads them so it never mistakes one for another.
+    SCREEN_NOT_ALLOWED("screen_not_allowed"),
+    SCREEN_UNAVAILABLE("screen_unavailable"),
+    SCREEN_VIDEO_UNAVAILABLE("screen_video_unavailable"),
+    TOO_MANY_SCREENS("too_many_screens"),
+    SCREEN_ONLY("screen_only"),
+    PASS_NOT_SAVED("pass_not_saved"),
+    /** No shell can start: the granting account isn't signed in to the host, or Passthrough isn't open there. */
+    SIGNED_OUT("signed_out"),
+    /** The Remote Desktop relay can't be used now (`detail` says why). */
+    RDP_UNAVAILABLE("rdp_unavailable"),
+    /** Too many tries in a short time (`retryAfter`). */
+    TRY_LATER("try_later"),
 }
 
 /** Something that happened on the Mac, for the phone's timeline. Mirrors MacEvent in ShellProtocol.swift. */

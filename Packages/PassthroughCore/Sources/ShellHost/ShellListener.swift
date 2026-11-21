@@ -129,6 +129,14 @@ public final class ShellListener: @unchecked Sendable {
         set { gate.screenOnlyCheck.set(newValue) }
     }
 
+    /// What the host says about itself to a phone, by phone ID (`host`, after
+    /// `macInfo`; never to a screen-only pass). Asked on the listener's queue
+    /// once per connection, so it must not block. Unset: no `host` is sent.
+    public var hostInfo: (@Sendable (String) -> HostInfo?)? {
+        get { gate.hostInfoProvider.get() }
+        set { gate.hostInfoProvider.set(newValue) }
+    }
+
     /// A phone asking for a screen-only pass for another device it calls
     /// `name` and knows as `viewer`: the new pass's id and key, or why not.
     /// Run off the listener's queue (it writes the Keychain). Unset: `bad_request`.
@@ -412,6 +420,8 @@ final class ShellGate: @unchecked Sendable {
     let pushRegistration = Locked<(@Sendable (_ phoneID: String, _ registration: PushRegistration?) -> Bool)?>(nil)
     let eventsProvider = Locked<(@Sendable (_ phoneID: String, _ since: Double) -> (events: [MacEvent], battery: [BatterySample]))?>(nil)
     let screenOnlyCheck = Locked<(@Sendable (String) -> Bool)?>(nil)
+    /// What the host says about itself to a phone (`host`), after `macInfo`; unset: no `host` is sent.
+    let hostInfoProvider = Locked<(@Sendable (String) -> HostInfo?)?>(nil)
     let screenGrant = Locked<(@Sendable (_ phoneID: String, _ label: String, _ name: String, _ viewer: String) -> Result<(id: String, key: Data), ShellError>)?>(nil)
     let screenPass = Locked<(@Sendable (_ phoneID: String, _ label: String, _ pass: ShellCredential) -> Bool)?>(nil)
     let screenRevoke = Locked<(@Sendable (_ phoneID: String, _ viewerID: String) -> Bool)?>(nil)
@@ -593,7 +603,7 @@ final class ShellGate: @unchecked Sendable {
         ptLog(.info, screenOnly ? "shell: a screen pass connected" : "shell: a phone connected")
         // Told off this queue: it may write the Keychain.
         if screenOnly, let used = screenPassUsed.get() { DispatchQueue.global(qos: .utility).async { used(phoneID) } }
-        connection.start(initialBytes: rest, macInfo: macInfo())
+        connection.start(initialBytes: rest, macInfo: macInfo(), host: screenOnly ? nil : hostInfoProvider.get()?(phoneID))
     }
 
     /// On the queue: drops every attempt and connection; refuses new ones.
@@ -729,12 +739,17 @@ final class ShellConnection: ShellAttachment, @unchecked Sendable {
         self.label = label
     }
 
-    /// Sends `ready`, then `macInfo` if the Mac has one, then its state, then the session list.
-    func start(initialBytes: Data, macInfo: ShellEnvelope? = nil) {
+    /// Sends `ready`, then `macInfo` if the Mac has one, then `host`, then its state, then the session list.
+    func start(initialBytes: Data, macInfo: ShellEnvelope? = nil, host: HostInfo? = nil) {
         stream.onTerminated = { [weak self] _ in self?.queue.async { self?.close() } }
         send(ShellEnvelope(t: ShellEnvelope.ready))
         if !screenOnly {
             if let macInfo { send(macInfo) }
+            if let host {
+                var message = ShellEnvelope(t: ShellEnvelope.host)
+                message.host = host
+                send(message)
+            }
             sendMacState()
             var list = ShellEnvelope(t: ShellEnvelope.sessions)
             list.sessions = manager.sessions

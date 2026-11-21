@@ -851,6 +851,9 @@ final class ShellModel: ObservableObject {
         case .screenGranted, .screenPassSaved, .screenRevoked:
             // Screen passes have their own clients (`ScreenShareModel`); this one never asks.
             break
+        case .host, .goingAway:
+            // Read from stage 2 on (a PC's page and wording); a Mac sends `host` but nothing here needs it yet.
+            break
         }
     }
 
@@ -1080,6 +1083,10 @@ extension ShellError {
         case .vpnNotSetUp: "Your Mac has no VPN set up yet. Add one in Passthrough's VPN settings on the Mac."
         case .screenOnly: "That Mac only lets this device see its screen."
         case .passNotSaved: "Your Mac couldn't save the screen pass. Try again."
+        // Sent only by a PC so far; stage 2 words these per host.
+        case .signedOut: "Nobody is signed in there, so its shell can't start. Sign in at the computer first."
+        case .rdpUnavailable: "That computer's screen isn't available right now."
+        case .tryLater: "Too many tries just now. Wait a few minutes, then try again."
         case .notAuthorized: nil
         }
     }

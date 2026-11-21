@@ -79,6 +79,18 @@ public struct ShellEnvelope: Codable, Equatable, Sendable {
     public var key: String?
     /// screenPass: what a Mac keeps to view another Mac's screen.
     public var pass: ShellCredential?
+    /// host: what the host says about itself (`HostInfo`).
+    public var host: HostInfo?
+    /// open: which of the host's shells to start (`HostShell.id`).
+    public var shell: String?
+    /// error: more about the reason (`rdp_unavailable`'s cause, in `HostInfo.rdp`'s words).
+    public var detail: String?
+    /// error: a sentence the host wrote, shown when the client has none of its own.
+    public var message: String?
+    /// error `try_later`: seconds until a retry can work.
+    public var retryAfter: Int?
+    /// rdpReady: SHA-256 of the certificate Remote Desktop presents, lowercase hex; the viewer accepts only it.
+    public var certSHA256: String?
 
     public init(t: String) { self.t = t }
 
@@ -146,6 +158,15 @@ public struct ShellEnvelope: Codable, Equatable, Sendable {
     public static let ping = "ping"
     public static let pong = "pong"
     public static let error = "error"
+    /// What the host is (`HostInfo`), after `macInfo` and whenever it changes.
+    public static let host = "host"
+    /// The host is about to go away (`GoingAwayReason` in `reason`).
+    public static let goingAway = "goingAway"
+    /// The screen through the host's Remote Desktop: answered `rdpReady` (`certSHA256`), then raw bytes.
+    public static let rdp = "rdp"
+    public static let rdpReady = "rdpReady"
+    /// A view of the screen on this device's other connection ended (`reason`: `switched_off`, `stopped`, `taken`).
+    public static let screenEnded = "screenEnded"
 
     public func encodedLine() throws -> Data {
         var data = try JSONEncoder().encode(self)
@@ -206,14 +227,17 @@ public struct ShellSessionInfo: Codable, Equatable, Sendable {
     /// you, done), when it says; absent for a plain shell. `waiting` carries
     /// a blocked one's question too, so everything that shows "needs you" sees it.
     public var status: ShellStatus?
+    /// The host's shell it runs (`HostShell.id`), when the host offers more than one.
+    public var shell: String?
 
     public static let originMac = "mac"
 
     public init(id: String, title: String, startedAt: Double, lastOutputAt: Double, running: Bool, exitStatus: Int32? = nil,
-                waiting: String? = nil, origin: String? = nil, theme: ShellTheme? = nil, status: ShellStatus? = nil) {
+                waiting: String? = nil, origin: String? = nil, theme: ShellTheme? = nil, status: ShellStatus? = nil,
+                shell: String? = nil) {
         self.id = id; self.title = title; self.startedAt = startedAt; self.lastOutputAt = lastOutputAt
         self.running = running; self.exitStatus = exitStatus; self.waiting = waiting; self.origin = origin; self.theme = theme
-        self.status = status
+        self.status = status; self.shell = shell
     }
 
     /// Started in a terminal window on the Mac.
@@ -274,7 +298,7 @@ public struct ShellHistoryEntry: Codable, Equatable, Sendable {
 }
 
 /// Reasons the Mac gives in an `error` line.
-public enum ShellError: String, Error, Sendable {
+public enum ShellError: String, Error, Sendable, CaseIterable {
     case notAuthorized = "not_authorized"
     case tooManySessions = "too_many_sessions"
     case noSuchSession = "no_such_session"
@@ -297,6 +321,13 @@ public enum ShellError: String, Error, Sendable {
     case screenOnly = "screen_only"
     /// The Mac couldn't save a pass (granted or handed to it).
     case passNotSaved = "pass_not_saved"
+    /// No shell can start: the account that granted this device isn't signed in to
+    /// the host, or Passthrough isn't open there (`HostInfo` says which).
+    case signedOut = "signed_out"
+    /// The Remote Desktop relay can't be used now (`detail` says why).
+    case rdpUnavailable = "rdp_unavailable"
+    /// Too many tries in a short time (`retryAfter`).
+    case tryLater = "try_later"
 }
 
 /// A screen-only pass one device (a phone) gets a Mac to issue for another

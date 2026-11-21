@@ -75,6 +75,8 @@ data class ControlEnvelope(
     var relayToken: String? = null,
     /** shellGrant: names this grant (at most 64 UTF-8 bytes); the phone echoes it in shellGranted. */
     var grantID: String? = null,
+    /** hello, shellGrant: what the host is (`mac`, `windows`); absent from older Macs. Kept only from a proved pairing. */
+    var hostKind: String? = null,
 ) {
     fun encodeLine(): ByteArray = (json.encodeToString(serializer(), this) + "\n").toByteArray(Charsets.UTF_8)
 
