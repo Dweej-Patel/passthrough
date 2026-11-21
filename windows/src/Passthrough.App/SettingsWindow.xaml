@@ -79,6 +79,39 @@
             <TextBlock x:Name="ShellsText" Style="{StaticResource CaptionTextBlockStyle}" TextWrapping="Wrap"
                        Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
 
+            <Border Style="{StaticResource PtCardStyle}" Padding="16,12">
+                <Grid ColumnSpacing="12" RowSpacing="8">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="Auto" />
+                    </Grid.ColumnDefinitions>
+                    <StackPanel VerticalAlignment="Center">
+                        <TextBlock Text="Keep shell history" />
+                        <TextBlock Text="What phones' shells showed, kept on this PC for you to look back at. Only your Windows account can open it."
+                                   Style="{StaticResource CaptionTextBlockStyle}" TextWrapping="Wrap"
+                                   Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                    </StackPanel>
+                    <ComboBox x:Name="HistoryChoice" Grid.Column="1" VerticalAlignment="Center" MinWidth="120"
+                              AutomationProperties.Name="Keep shell history" />
+                    <HyperlinkButton x:Name="DeleteHistoryButton" Grid.Row="1" Content="Delete shell history" Padding="0"
+                                     Click="OnDeleteHistoryClick" />
+                </Grid>
+            </Border>
+            <Border Style="{StaticResource PtCardStyle}" Padding="16,12">
+                <StackPanel Spacing="8">
+                    <TextBlock Text="Relay" />
+                    <TextBlock x:Name="RelayText" Style="{StaticResource CaptionTextBlockStyle}" TextWrapping="Wrap"
+                               Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                    <TextBox x:Name="RelayUrlBox" PlaceholderText="https://relay.example.com (empty: n0's public relays)"
+                             AutomationProperties.Name="Relay address" />
+                    <PasswordBox x:Name="RelayTokenBox" PlaceholderText="Token, if your relay needs one"
+                                 AutomationProperties.Name="Relay token" />
+                    <StackPanel Orientation="Horizontal" Spacing="8">
+                        <Button Content="Use this relay" Click="OnRelayClick" />
+                        <HyperlinkButton Content="Reset this PC's identity…" Click="OnResetIdentityClick" />
+                    </StackPanel>
+                </StackPanel>
+            </Border>
             <TextBlock Text="Phones with access" Style="{StaticResource BodyStrongTextBlockStyle}" Margin="0,16,0,0" />
             <Border x:Name="NoAccessText" Style="{StaticResource PtCardStyle}" Padding="16,14" Visibility="Collapsed">
                 <TextBlock Text="No phone can open shells here yet. With Remote access on, plug a paired phone in once."

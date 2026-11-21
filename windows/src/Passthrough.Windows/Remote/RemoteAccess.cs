@@ -57,9 +57,101 @@ public sealed class RemoteAccess : IAccessAdmin, IDisposable
         Access = new ShellAccessStore(secrets, log: log);
         Catalog = ShellCatalog.Discover(new ShellProbe());
         Transcripts = new TranscriptStore(transcriptFolder, log: log);
+        PrivateFolder.Restrict(transcriptFolder, log);
         Sessions = new ShellSessionManager(Transcripts, Catalog.Resolve, start => new ConPty(start), UserEnvironment.Create, UserEnvironment.Home, log: log);
         Sessions.Changed += () => _gate?.PushSessions();
         Access.Changed += () => PhonesChanged?.Invoke();
+        // Old sessions go as the owner chose, now and every hour (also while Remote access is off).
+        _pruner = new Timer(_ => PruneHistory(), null, TimeSpan.FromSeconds(30), TimeSpan.FromHours(1));
+    }
+
+    // MARK: History
+
+    internal const string HistoryDaysSetting = "shellHistoryDays";
+    /// <summary>What "Keep shell history" offers, in days; 0 is Forever (then only the 2 GB cap applies).</summary>
+    public static readonly IReadOnlyList<int> HistoryChoices = [7, 30, 365, 0];
+    public const int DefaultHistoryDays = 30;
+    private readonly Timer _pruner;
+
+    /// <summary>How many days finished sessions' transcripts are kept (0: forever, within 2 GB).</summary>
+    public int HistoryDays
+    {
+        get => int.TryParse(_settings.Get(HistoryDaysSetting), out var days) && HistoryChoices.Contains(days) ? days : DefaultHistoryDays;
+        set
+        {
+            if (!HistoryChoices.Contains(value)) throw new ArgumentOutOfRangeException(nameof(value));
+            _settings.Set(HistoryDaysSetting, value.ToString(System.Globalization.CultureInfo.InvariantCulture));
+            PruneHistory();
+        }
+    }
+
+    /// <summary>Deletes what is past the retention (and past 2 GB, oldest first); a session still recording stays.</summary>
+    public int PruneHistory()
+    {
+        try
+        {
+            var days = HistoryDays;
+            var removed = Transcripts.Prune(days == 0 ? null : DateTimeOffset.UtcNow.AddDays(-days));
+            if (removed > 0) _log?.Invoke($"shell: deleted {removed} old session transcript(s)");
+            return removed;
+        }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException) { return 0; }
+    }
+
+    /// <summary>Deletes every finished session's transcript (Delete shell history); running ones keep recording.</summary>
+    public void DeleteHistory() => Transcripts.DeleteFinished();
+
+    // MARK: Relay and identity
+
+    /// <summary>The custom relay's URL, or null for n0's public relays.</summary>
+    public string? RelayUrl => _settings.Get(RelayUrlSetting) is { Length: > 0 } url ? url : null;
+
+    /// <summary>Whether a relay token is kept (never shown back).</summary>
+    public bool HasRelayToken => _secrets.Get(RelayTokenSlot) is { Length: > 0 };
+
+    /// <summary>
+    /// A relay URL Passthrough accepts: https, a host, nothing after the path (no query or fragment, where a token
+    /// would end up logged). Null for one that isn't.
+    /// </summary>
+    public static string? ValidRelayUrl(string? text) =>
+        Uri.TryCreate(text?.Trim(), UriKind.Absolute, out var uri) && uri.Scheme == Uri.UriSchemeHttps && uri.Host.Length > 0
+        && uri.Query.Length == 0 && uri.Fragment.Length == 0 && uri.UserInfo.Length == 0 ? uri.AbsoluteUri : null;
+
+    /// <summary>
+    /// Uses <paramref name="url"/> (null: n0's relays) with <paramref name="token"/> (null: keep the one kept, "" none).
+    /// Running, it restarts on the new relay; phones learn it at their next connection and plug-in.
+    /// </summary>
+    public async Task SetRelayAsync(string? url, string? token)
+    {
+        string? valid = null;
+        if (url is not null && (valid = ValidRelayUrl(url)) is null) throw new ArgumentException("A relay is an https:// address.", nameof(url));
+        _settings.Set(RelayUrlSetting, valid ?? "");
+        if (valid is null || token is { Length: 0 }) _secrets.Delete(RelayTokenSlot);
+        else if (token is not null)
+        {
+            Passthrough.Core.Logging.LogText.Register(token.Trim());
+            _secrets.Set(RelayTokenSlot, token.Trim());
+        }
+        await RestartAsync().ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// A new iroh identity for this PC: every phone's access is taken away (their keys, connections and shells), since
+    /// they knew it by the old id. Each gets access again the next time it is plugged in with Remote access on.
+    /// </summary>
+    public async Task ResetIdentityAsync()
+    {
+        foreach (var phone in Access.Phones.ToList()) Revoke(phone.PhoneId);
+        _secrets.Delete(SecretKeySlot);
+        _log?.Invoke("remote access: this PC's identity was reset");
+        await RestartAsync().ConfigureAwait(false);
+    }
+
+    private async Task RestartAsync()
+    {
+        if (!Enabled) { Changed?.Invoke(); return; }
+        await StopAsync().ConfigureAwait(false);
+        await StartAsync().ConfigureAwait(false);
     }
 
     public ShellAccessStore Access { get; }
@@ -172,7 +264,14 @@ public sealed class RemoteAccess : IAccessAdmin, IDisposable
         return fresh;
     }
 
-    private IrohRelay Relay() => _relayOverride ??
+    private IrohRelay Relay()
+    {
+        // Whatever the log is given, this token never reaches it (LogText removes it by value).
+        if (_secrets.Get(RelayTokenSlot) is { Length: > 0 } token) Passthrough.Core.Logging.LogText.Register(token);
+        return RelayChoice();
+    }
+
+    private IrohRelay RelayChoice() => _relayOverride ??
         (_settings.Get(RelayUrlSetting) is { Length: > 0 } url ? new IrohRelay(url, _secrets.Get(RelayTokenSlot)) : IrohRelay.N0);
 
     private ShellGateHooks Hooks(IrohEndpoint endpoint) => new()
@@ -255,6 +354,7 @@ public sealed class RemoteAccess : IAccessAdmin, IDisposable
 
     public void Dispose()
     {
+        _pruner.Dispose();
         StopAsync();
         Sessions.CloseAll();
     }

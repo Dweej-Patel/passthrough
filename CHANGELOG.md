@@ -289,6 +289,12 @@ these steps as written and check each one before building.
   device service or your own adb; Passthrough refuses to host shells when it
   runs as administrator. Not yet: the phones' PC wording (they still say Mac),
   the PC's own listener on the network, and the screen.
+* Windows: Settings ▸ Remote access also has Keep shell history (1 week, 30
+  days, 1 year or Forever; 30 days at first, 2 GB at most), Delete shell
+  history, your own relay with its token, and Reset this PC's identity (a new
+  address; every phone loses its access until plugged in again). The history
+  folder opens only for your Windows account, and a relay token never reaches
+  the log.
 * Remote shell: coming back to a session no longer plays it back from the
   top. The phone holds the Mac's replay until it is complete and draws it in
   one go, keeping what was on screen meanwhile, and says "Loading session…"

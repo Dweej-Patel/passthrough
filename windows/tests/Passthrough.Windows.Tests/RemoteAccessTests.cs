@@ -62,6 +62,58 @@ public sealed class RemoteAccessTests : IDisposable
     }
 
     [Fact]
+    public void TheHistoryFolderIsOnlyThisAccounts_AndRetentionIsAChoice()
+    {
+        var remote = Make();
+        Assert.True(PrivateFolder.OnlyMine(_directory));
+        Assert.Equal(RemoteAccess.DefaultHistoryDays, remote.HistoryDays);
+        remote.HistoryDays = 0;
+        Assert.Equal(0, Make().HistoryDays);
+        Assert.Throws<ArgumentOutOfRangeException>(() => remote.HistoryDays = 3);
+
+        // A finished session older than a week goes; with Forever, it stays.
+        var old = remote.Transcripts.Begin("old", "pwsh", "iPhone", 80, 24, DateTimeOffset.UtcNow.AddDays(-10));
+        old.Finish(0, DateTimeOffset.UtcNow.AddDays(-9));
+        Assert.Equal(0, remote.PruneHistory());
+        remote.HistoryDays = 7;
+        Assert.Empty(remote.Transcripts.Entries());
+        remote.Transcripts.Begin("done", "pwsh", "iPhone", 80, 24, DateTimeOffset.UtcNow).Finish(0, DateTimeOffset.UtcNow);
+        remote.DeleteHistory();
+        Assert.Empty(remote.Transcripts.Entries());
+    }
+
+    [Fact]
+    public async Task RelaysAreHttpsOnly_AndATokenIsKeptApart()
+    {
+        var remote = Make();
+        foreach (var bad in new[] { "http://relay.example", "relay.example", "https://relay.example/?token=x", "https://user:pw@relay.example", "" })
+            Assert.Null(RemoteAccess.ValidRelayUrl(bad));
+        Assert.Equal("https://relay.example/", RemoteAccess.ValidRelayUrl(" https://relay.example "));
+        await remote.SetRelayAsync("https://relay.example", "s3cret");
+        Assert.Equal("https://relay.example/", remote.RelayUrl);
+        Assert.True(remote.HasRelayToken);
+        Assert.DoesNotContain("s3cret", _settings.Get(RemoteAccess.RelayUrlSetting) ?? "");
+        await remote.SetRelayAsync("https://other.example", null);
+        Assert.True(remote.HasRelayToken, "null keeps the token");
+        await remote.SetRelayAsync(null, null);
+        Assert.Null(remote.RelayUrl);
+        Assert.False(remote.HasRelayToken, "n0's relays need none");
+        await Assert.ThrowsAsync<ArgumentException>(() => remote.SetRelayAsync("http://x", null));
+    }
+
+    [Fact]
+    public async Task ResettingTheIdentityTakesEveryPhonesAccessAway()
+    {
+        var remote = Make();
+        await remote.AddKeyAsync("phone-a", "iPhone", "token.iphone.A", Enumerable.Repeat((byte)1, 32).ToArray());
+        await remote.SetEnabledAsync(true);
+        var before = (await remote.GrantContentsAsync())?.IrohId;
+        await remote.ResetIdentityAsync();
+        Assert.Empty(remote.Access.Phones);
+        if (before is not null) Assert.NotEqual(before, (await remote.GrantContentsAsync())?.IrohId);
+    }
+
+    [Fact]
     public async Task AConfirmedKeyIsKept_AndForgettingThePairingTakesItAway()
     {
         var remote = Make();

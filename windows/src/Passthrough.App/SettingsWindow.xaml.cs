@@ -224,6 +224,102 @@ public sealed partial class SettingsWindow : Window
         NoAccessText.Visibility = WithAccess.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
     }
 
+    private static readonly (int Days, string Name)[] HistoryNames = [(7, "1 week"), (30, "30 days"), (365, "1 year"), (0, "Forever")];
+
+    private void ShowHistoryAndRelay()
+    {
+        var enabled = _remote is not null;
+        HistoryChoice.IsEnabled = DeleteHistoryButton.IsEnabled = RelayUrlBox.IsEnabled = RelayTokenBox.IsEnabled = enabled;
+        if (_remote is null) return;
+        HistoryChoice.SelectionChanged -= OnHistoryChanged;
+        HistoryChoice.Items.Clear();
+        foreach (var (_, name) in HistoryNames) HistoryChoice.Items.Add(name);
+        HistoryChoice.SelectedIndex = Array.FindIndex(HistoryNames, h => h.Days == _remote.HistoryDays);
+        HistoryChoice.SelectionChanged += OnHistoryChanged;
+        RelayUrlBox.Text = _remote.RelayUrl ?? "";
+        RelayTokenBox.Password = "";
+        RelayText.Text = _remote.RelayUrl is { } url
+            ? $"Phones away from this network reach this PC through {RelayName(url)}{(_remote.HasRelayToken ? ", with its token" : "")}."
+            : "Phones away from this network reach this PC through n0's public relays. They carry only encrypted traffic.";
+    }
+
+    private void OnHistoryChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (_remote is null || HistoryChoice.SelectedIndex < 0) return;
+        _remote.HistoryDays = HistoryNames[HistoryChoice.SelectedIndex].Days;
+    }
+
+    private async void OnDeleteHistoryClick(object sender, RoutedEventArgs e)
+    {
+        if (_remote is null) return;
+        var dialog = new ContentDialog
+        {
+            XamlRoot = Content.XamlRoot,
+            Title = "Delete shell history?",
+            Content = "Every finished session's history on this PC is deleted. Shells still running keep theirs.",
+            PrimaryButtonText = "Delete",
+            CloseButtonText = "Cancel",
+            DefaultButton = ContentDialogButton.Close,
+        };
+        try
+        {
+            if (await dialog.ShowAsync() == ContentDialogResult.Primary) _remote.DeleteHistory();
+        }
+        catch (Exception ex)
+        {
+            LogFile.Error(ex);
+            ShowError("Could not delete the shell history. See the log for details.");
+        }
+    }
+
+    private async void OnRelayClick(object sender, RoutedEventArgs e)
+    {
+        if (_remote is null) return;
+        var url = RelayUrlBox.Text.Trim();
+        if (url.Length > 0 && RemoteAccess.ValidRelayUrl(url) is null)
+        {
+            ShowError("A relay's address starts with https:// and has nothing after its path.");
+            return;
+        }
+        try
+        {
+            // An empty token box keeps the token kept for this relay; n0's relays take none.
+            await _remote.SetRelayAsync(url.Length == 0 ? null : url, RelayTokenBox.Password.Length == 0 ? null : RelayTokenBox.Password);
+            ErrorBox.Visibility = Visibility.Collapsed;
+        }
+        catch (Exception ex)
+        {
+            LogFile.Error(ex);
+            ShowError("Could not change the relay. See the log for details.");
+        }
+        ShowHistoryAndRelay();
+        ShowRemote();
+    }
+
+    private async void OnResetIdentityClick(object sender, RoutedEventArgs e)
+    {
+        if (_remote is null) return;
+        var dialog = new ContentDialog
+        {
+            XamlRoot = Content.XamlRoot,
+            Title = "Reset this PC's identity?",
+            Content = "This PC gets a new address for phones. Every phone loses its access, and its shells here end. Plug each one in again with Remote access on to give it back.",
+            PrimaryButtonText = "Reset",
+            CloseButtonText = "Cancel",
+            DefaultButton = ContentDialogButton.Close,
+        };
+        try
+        {
+            if (await dialog.ShowAsync() == ContentDialogResult.Primary) await _remote.ResetIdentityAsync();
+        }
+        catch (Exception ex)
+        {
+            LogFile.Error(ex);
+            ShowError("Could not reset this PC's identity. See the log for details.");
+        }
+        ShowRemote();
+    }
+
     /// <summary>"use1-1.relay.n0.iroh.link" for "https://use1-1.relay.n0.iroh.link./".</summary>
     private static string RelayName(string url) =>
         Uri.TryCreate(url, UriKind.Absolute, out var uri) ? uri.Host.TrimEnd('.') : url;
@@ -242,6 +338,7 @@ public sealed partial class SettingsWindow : Window
             ShowError("Could not change Remote access. See the log for details.");
         }
         ShowRemote();
+        ShowHistoryAndRelay();
     }
 
     private void OnStopClick(object sender, RoutedEventArgs e)
@@ -249,6 +346,7 @@ public sealed partial class SettingsWindow : Window
         var phone = (RemotePhoneRow)((FrameworkElement)sender).DataContext;
         _remote?.Disconnect(phone.PhoneId);
         ShowRemote();
+        ShowHistoryAndRelay();
     }
 
     private async void OnRevokeClick(object sender, RoutedEventArgs e)
@@ -279,6 +377,7 @@ public sealed partial class SettingsWindow : Window
             _revoking = false;
         }
         ShowRemote();
+        ShowHistoryAndRelay();
     }
 
     /// <summary>In front of whatever is there: opened from the tray, the window would otherwise come up behind it.</summary>
