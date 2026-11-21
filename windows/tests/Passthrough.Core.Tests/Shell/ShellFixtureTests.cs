@@ -170,6 +170,7 @@ public class ShellFixtureTests
         Assert.True(IrohInfo.IsValidRelay("https://relay.example.com/"));
         Assert.False(IrohInfo.IsValidRelay("http://relay.example.com/"));
         Assert.False(IrohInfo.IsValidRelay("https://"));
+        Assert.False(IrohInfo.IsValidRelay("https:\\relay.example.com\\"));
         Assert.False(IrohInfo.IsValidRelay("https://a.example.com/" + new string('x', 256)));
         Assert.True(IrohInfo.IsValidToken(new string('t', 512)));
         Assert.False(IrohInfo.IsValidToken(new string('t', 513)));

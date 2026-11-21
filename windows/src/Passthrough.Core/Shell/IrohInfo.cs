@@ -16,7 +16,8 @@ public static class IrohInfo
     /// <summary>An https URL with a host, at most <see cref="MaxRelayLength"/> UTF-8 bytes.</summary>
     public static bool IsValidRelay(string? relay)
     {
-        if (relay is null || Encoding.UTF8.GetByteCount(relay) > MaxRelayLength) return false;
+        // .NET reads "https:\\host" as a URL; Swift's URLComponents and Java's URI do not.
+        if (relay is null || relay.Contains('\\') || Encoding.UTF8.GetByteCount(relay) > MaxRelayLength) return false;
         return Uri.TryCreate(relay, UriKind.Absolute, out var url)
             && url.Scheme.Equals("https", StringComparison.OrdinalIgnoreCase)
             && url.Host.Length > 0;

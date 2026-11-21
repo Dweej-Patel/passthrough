@@ -15,7 +15,7 @@ public sealed record ShellCredentialWire
     /// <summary>32 bytes, base64.</summary>
     [JsonPropertyName("shellKey")] public string ShellKey { get; init; } = "";
     [JsonPropertyName("phoneID")] public string PhoneID { get; init; } = "";
-    [JsonPropertyName("port")] public int Port { get; init; }
+    [JsonPropertyName("port")] public ushort Port { get; init; }
     [JsonPropertyName("addresses")] public List<string> Addresses { get; init; } = [];
     [JsonPropertyName("irohID")] public string? IrohID { get; init; }
     [JsonPropertyName("irohRelay")] public string? IrohRelay { get; init; }
