@@ -488,6 +488,7 @@ class ShellConnectionTests {
             mac.handshake()
             mac.send(ShellEnvelope(ShellEnvelope.SESSIONS, sessions = listOf(info)))
             mac.send(ShellEnvelope(ShellEnvelope.OPENED, session = "s2", cols = 80, rows = 24))
+            mac.send(ShellEnvelope(ShellEnvelope.REPLAYING, session = "s2"))
             mac.send(ShellEnvelope(ShellEnvelope.ATTACHED, session = "s2"))
             mac.send(ShellEnvelope(ShellEnvelope.HISTORY_LIST, history = listOf(entry)))
             mac.send(ShellEnvelope(ShellEnvelope.TRANSCRIPT_DATA, session = "h1", data = b64("hi".toByteArray()), cols = 48, rows = 20, done = true))
@@ -499,6 +500,7 @@ class ShellConnectionTests {
         }
         assertEquals(listOf(info), events.next<ShellEvent.Sessions>().sessions)
         assertEquals("s2", events.next<ShellEvent.Opened>().session)
+        assertEquals("s2", events.next<ShellEvent.Replaying>().session)
         assertEquals("s2", events.next<ShellEvent.Attached>().session)
         assertEquals(listOf(entry), events.next<ShellEvent.History>().entries)
         val transcript = events.next<ShellEvent.Transcript>()

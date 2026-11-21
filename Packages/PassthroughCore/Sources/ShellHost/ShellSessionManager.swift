@@ -11,6 +11,9 @@ public protocol ShellAttachment: AnyObject, Sendable {
     /// that of the attach that returned it: a notice queued before the client
     /// attached again belongs to the older attach.
     func shellDetached(session: String, generation: UInt64)
+    /// The scrollback replay for an attach comes next: output handed over
+    /// before this was live, and is in the replay too.
+    func shellReplaying(session: String)
     /// The scrollback replay for an attach has been handed over; what follows is live.
     func shellReplayed(session: String)
     /// Someone is looking at what this client shows: a result that arrives
@@ -20,6 +23,7 @@ public protocol ShellAttachment: AnyObject, Sendable {
 }
 
 public extension ShellAttachment {
+    func shellReplaying(session: String) {}
     func shellReplayed(session: String) {}
     var isLooking: Bool { true }
 }
@@ -351,6 +355,7 @@ public final class ShellSessionManager: @unchecked Sendable {
                session.scrollback.isPartial, session.scrollback.modes.isAlternateScreen {
                 redraw(session)
             }
+            callouts.async { client.shellReplaying(session: id) }
             var offset = 0
             while offset < replay.count {
                 let chunk = Data(replay[(replay.startIndex + offset)..<(replay.startIndex + min(offset + RemoteShell.outputChunk, replay.count))])

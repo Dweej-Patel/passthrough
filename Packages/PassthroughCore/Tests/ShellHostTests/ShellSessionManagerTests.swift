@@ -37,6 +37,9 @@ final class ShellSessionManagerTests: XCTestCase {
         private var endStatus: Int32?
         private var detachCount = 0
         private var replayedAfter: Int?
+        private var replayingAfter: [Int] = []
+        /// How many chunks had arrived when each `shellReplaying` came.
+        var replayingAt: [Int] { lock.lock(); defer { lock.unlock() }; return replayingAfter }
         /// How many chunks had arrived when `shellReplayed` came.
         var replayedAt: Int? { lock.lock(); defer { lock.unlock() }; return replayedAfter }
         var deliveries: [Data] { lock.lock(); defer { lock.unlock() }; return chunks }
@@ -46,6 +49,7 @@ final class ShellSessionManagerTests: XCTestCase {
         func shellOutput(_ data: Data, session: String) { lock.lock(); chunks.append(data); lock.unlock() }
         func shellEnded(session: String, exitStatus: Int32) { lock.lock(); endStatus = exitStatus; lock.unlock() }
         func shellDetached(session: String, generation: UInt64) { lock.lock(); detachCount += 1; lock.unlock() }
+        func shellReplaying(session: String) { lock.lock(); replayingAfter.append(chunks.count); lock.unlock() }
         func shellReplayed(session: String) { lock.lock(); replayedAfter = chunks.count; lock.unlock() }
     }
 
@@ -180,6 +184,26 @@ final class ShellSessionManagerTests: XCTestCase {
         XCTAssertTrue(replay.contains("before-42\r\n"))
         XCTAssertFalse(replay.contains("after-"))
         XCTAssertTrue(live.contains("after-42"))
+    }
+
+    /// Attached again while already attached: each replay is announced where
+    /// it starts, so a client can tell it from the live output before it.
+    func testReplayingComesBeforeEachReplay() throws {
+        let id = try manager.open(phoneLabel: "Pixel", cols: 80, rows: 24)
+        manager.input(id, Data("echo before-$((6*7))\n".utf8))
+        wait("output complete") { String(decoding: (try? store.output(of: id)) ?? Data(), as: UTF8.self).contains("before-42\r\n") }
+        let client = FakeClient()
+        try manager.attach(id, client: client, cols: 80, rows: 24)
+        wait("replayed") { client.replayedAt != nil }
+        XCTAssertEqual(client.replayingAt, [0])
+        manager.input(id, Data("echo live-$((6*7))\n".utf8))
+        wait("live output") { client.text.contains("live-42") }
+        let liveEnd = client.deliveries.count
+        try manager.attach(id, client: client, cols: 80, rows: 24)
+        wait("announced again") { client.replayingAt.count == 2 }
+        let second = client.replayingAt[1]
+        XCTAssertGreaterThanOrEqual(second, liveEnd)
+        wait("second replay") { String(decoding: client.deliveries[second...].reduce(Data(), +), as: UTF8.self).contains("live-42") }
     }
 
     func testAttachUnknownSessionThrows() {

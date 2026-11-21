@@ -81,6 +81,7 @@ data class ShellEnvelope(
         const val OPENED = "opened"
         const val ATTACH = "attach"
         const val ATTACHED = "attached"
+        const val REPLAYING = "replaying"
         const val INPUT = "input"
         const val RESIZE = "resize"
         const val OUTPUT = "output"

@@ -1308,6 +1308,15 @@ final class ShellConnection: ShellAttachment, @unchecked Sendable {
         }
     }
 
+    func shellReplaying(session: String) {
+        queue.async { [self] in
+            guard session == attached else { return }
+            var message = ShellEnvelope(t: ShellEnvelope.replaying)
+            message.session = session
+            send(message)
+        }
+    }
+
     func shellReplayed(session: String) {
         queue.async { [self] in
             guard session == attached else { return }

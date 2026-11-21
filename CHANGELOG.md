@@ -175,6 +175,15 @@ these steps as written and check each one before building.
 
 ### Changed
 
+* Remote shell: coming back to a session no longer plays it back from the
+  top. The phone holds the Mac's replay until it is complete and draws it in
+  one go, keeping what was on screen meanwhile, and says "Loading session…"
+  when that takes more than a moment. A replay cut short (the connection
+  dropped, another device took the session) draws what arrived. The Mac says
+  where a replay begins (`replaying`), so output of a session still printing
+  isn't drawn twice and a second replay replaces the first. Rebuild the Mac
+  app too for that last part; a new phone on an older Mac works as before it.
+  iPhone, iPad and Android. Not yet tried on devices.
 * Screen view: the on-screen keyboard works as it does elsewhere on the iPhone
   and iPad. Holding delete goes on deleting (it deleted one character), and
   the keyboard's own dictation key is there. The view is a text input now:

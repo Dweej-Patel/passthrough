@@ -137,6 +137,8 @@ sealed interface ShellEvent {
     class Output(val session: String, val data: ByteArray) : ShellEvent {
         override fun toString() = "Output(session=$session, ${data.size} bytes)"
     }
+    /** The replay after an `attach` begins: output since the request and before this is not part of it (the replay holds it already). */
+    data class Replaying(val session: String) : ShellEvent
     /** The replay after an `attach` is complete; later output is live. */
     data class Attached(val session: String) : ShellEvent
     data class Ended(val session: String, val exitStatus: Int) : ShellEvent
@@ -421,6 +423,7 @@ class ShellConnection(
                 val data = m.data?.let(::unb64) ?: return
                 emit(ShellEvent.Output(id, data))
             }
+            ShellEnvelope.REPLAYING -> emit(ShellEvent.Replaying(m.session ?: return))
             ShellEnvelope.ATTACHED -> emit(ShellEvent.Attached(m.session ?: return))
             ShellEnvelope.ENDED -> {
                 val id = m.session ?: return
