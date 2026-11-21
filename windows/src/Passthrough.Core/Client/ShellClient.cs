@@ -58,6 +58,12 @@ public abstract record ShellClientEvent
     public sealed record GoingAway(string Reason) : ShellClientEvent;
     /// <summary>Once per <see cref="ShellClient.Connect"/>: the connection is over (an error, or none for a clean end).</summary>
     public sealed record Disconnected(Exception? Error) : ShellClientEvent;
+    /// <summary>
+    /// The host answered <see cref="ShellClient.RequestScreen"/>: the stream is now the screen's (ScreenVideoWire's with
+    /// <c>video</c>), starting with <paramref name="InitialBytes"/>. The client lets go of it and sends and reports nothing
+    /// more, not even <see cref="Disconnected"/>; the receiver disposes the stream.
+    /// </summary>
+    public sealed record Screen(IShellStream Stream, ReadOnlyMemory<byte> InitialBytes) : ShellClientEvent;
 }
 
 /// <summary>The host stopped answering pings (15 s of silence).</summary>
@@ -101,6 +107,8 @@ public sealed class ShellClient : IAsyncDisposable
     private string? _attached;
     private long _lastHeard;
     private int _connected;
+    private volatile bool _screenRequested;
+    private volatile bool _handedOver;
 
     public ShellClient(ShellCredential credential, IPinnedTlsDialer? tls, IShellIrohDialer? iroh, Action<ShellClientEvent> onEvent,
         ShellConnectMode mode = ShellConnectMode.Automatic, TimeProvider? time = null, Trust.IComputerIdentity? identity = null)
@@ -174,6 +182,16 @@ public sealed class ShellClient : IAsyncDisposable
             while (await reader.ReadLineAsync(_closing.Token).ConfigureAwait(false) is { } line)
             {
                 Interlocked.Exchange(ref _lastHeard, _time.GetTimestamp());
+                if (_screenRequested && IsScreenReady(line))
+                {
+                    // Past screenReady the bytes are the screen's, not lines: nothing more is read, sent or reported.
+                    _handedOver = true;
+                    _outgoing.Writer.TryComplete();
+                    await writer.ConfigureAwait(false);
+                    lock (_lock) _winner = null;
+                    Emit(new ShellClientEvent.Screen(stream, reader.TakePending()));
+                    return;
+                }
                 Handle(line);
             }
             _outgoing.Writer.TryComplete();
@@ -187,7 +205,7 @@ public sealed class ShellClient : IAsyncDisposable
             IShellStream? winner;
             lock (_lock) winner = _winner;
             if (winner is not null) await winner.DisposeAsync().ConfigureAwait(false);
-            Emit(new ShellClientEvent.Disconnected(error));
+            if (!_handedOver) Emit(new ShellClientEvent.Disconnected(error));
             _events.Writer.TryComplete();
         }
     }
@@ -383,14 +401,37 @@ public sealed class ShellClient : IAsyncDisposable
 
     public void SetViewing(bool on) => Send(new ShellEnvelope(ShellEnvelope.Viewing) { On = on });
 
-    private void Send(ShellEnvelope message) => _outgoing.Writer.TryWrite(message.EncodeLine());
+    /// <summary>
+    /// Asks for the host's screen: with <paramref name="video"/> its own stream (<c>screenVideo</c>), else Screen Sharing
+    /// (<c>screen</c>). The answer is <see cref="ShellClientEvent.Screen"/>, or <see cref="ShellClientEvent.Failed"/> with the
+    /// reason it won't (the connection then stays usable). Use a client of its own for the screen, never one with a session.
+    /// </summary>
+    public void RequestScreen(bool video)
+    {
+        _screenRequested = true;
+        Send(new ShellEnvelope(video ? ShellEnvelope.ScreenVideo : ShellEnvelope.Screen));
+    }
+
+    private static bool IsScreenReady(byte[] line)
+    {
+        try { return ShellEnvelope.Decode(line).T is ShellEnvelope.ScreenReady or ShellEnvelope.ScreenVideoReady; }
+        catch (Protocol.ProtocolException) { return false; }
+    }
+
+    private void Send(ShellEnvelope message)
+    {
+        if (!_handedOver) _outgoing.Writer.TryWrite(message.EncodeLine());
+    }
 
     private async Task WriteAllAsync(Stream stream)
     {
         try
         {
             await foreach (var line in _outgoing.Reader.ReadAllAsync(_closing.Token).ConfigureAwait(false))
+            {
+                if (_handedOver) break; // after the hand-over the stream isn't lines any more
                 await stream.WriteAsync(line, _closing.Token).ConfigureAwait(false);
+            }
         }
         catch (Exception e) when (e is IOException or ObjectDisposedException or OperationCanceledException) { _closing.Cancel(); }
     }
