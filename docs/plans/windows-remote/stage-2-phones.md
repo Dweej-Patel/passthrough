@@ -1,6 +1,6 @@
 # Stage 2: Phones know a PC
 
-Master plan: `docs/plans/windows-remote/MASTER.md` (cited below as *MP*, with its section). Paths are relative to `D:\projects\passthrough`. `iOS/App/...` lines were read on branch `windows-remote-spikes`.
+Master plan: `docs/plans/windows-remote/MASTER.md` (cited below as *MP*, with its section). Paths are relative to `the repo root`. `iOS/App/...` lines were read on branch `windows-remote-spikes`.
 
 ## Goal and done-when
 

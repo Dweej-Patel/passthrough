@@ -1,6 +1,6 @@
 # Stage 7: Mac ↔ PC
 
-Four tracks that ship separately. Each has its own section under *Design*, its own PRs and its own done-when. Paths are relative to `D:\projects\passthrough` unless absolute. "Master plan" is `scalable-watching-hummingbird-of-…md`.
+Four tracks that ship separately. Each has its own section under *Design*, its own PRs and its own done-when. Paths are relative to `the repo root` unless absolute. "Master plan" is `scalable-watching-hummingbird-of-…md`.
 
 What this stage delivers to a user: **the Mac reaches a PC's shell and screen**, by a phone's hand-over or by pairing the two computers directly. The reverse direction (a PC reaching a Mac) is used in stage 8, but everything the Mac must do as a host for it, and the whole pairing protocol in both implementations, is built here.
 

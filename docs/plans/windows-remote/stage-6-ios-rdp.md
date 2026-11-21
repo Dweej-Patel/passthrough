@@ -16,7 +16,7 @@ Done when:
 
 ## What exists today (verified, with path:line)
 
-All paths are under `D:\projects\passthrough`.
+All paths are under `the repo root`.
 
 **The model holds two concrete clients and speaks their types.**
 - `iOS/App/Screen/ScreenModel.swift:112-113` holds `rfb: RFBClient?` and `video: ScreenVideoClient?`; almost every method branches on which is set (`:690-694`, `:708-722`, `:729-733`, `:737-758`, `:790-800`, `:811`).

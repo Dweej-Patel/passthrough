@@ -3,7 +3,7 @@
 You are writing the detailed implementation plan for one or two stages of an approved master plan. Read these first, in this order:
 
 1. The master plan: `docs/plans/windows-remote/MASTER.md` (all of it; it holds the decisions, the UX wording, the architecture, the protocol changes and the stage list).
-2. The repo at `D:\projects\passthrough` (branch `windows-remote-spikes`, same tree as `dev`): `README.md`, `CONTRIBUTING.md`, `protocol/README.md`, `protocol/fixtures.json`, `windows/README.md`, `docs/GUIDE.md`, `SECURITY.md`, and the source your stage touches. Verify every claim you make about existing code by opening the file; cite `path:line`.
+2. The repo at `the repo root` (branch `windows-remote-spikes`, same tree as `dev`): `README.md`, `CONTRIBUTING.md`, `protocol/README.md`, `protocol/fixtures.json`, `windows/README.md`, `docs/GUIDE.md`, `SECURITY.md`, and the source your stage touches. Verify every claim you make about existing code by opening the file; cite `path:line`.
 3. `Spikes\PcProbe\README.md`: facts already measured on a real PC.
 
 ## Rules
