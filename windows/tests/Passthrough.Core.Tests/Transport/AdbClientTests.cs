@@ -1,0 +1,304 @@
+using System.Net.Sockets;
+using System.Text;
+using Passthrough.Core.Tests.Fakes;
+using Passthrough.Core.Transport;
+using Xunit;
+
+namespace Passthrough.Core.Tests.Transport;
+
+public class AdbClientTests
+{
+    private static CancellationToken Deadline() => new CancellationTokenSource(TimeSpan.FromSeconds(10)).Token;
+
+    private static async Task<IReadOnlyList<AdbDevice>> FirstListAsync(string block)
+    {
+        await using var fake = new FakeAdbServer(async s =>
+        {
+            Assert.Equal("host:track-devices-l", await FakeAdbServer.ReadRequestAsync(s));
+            await FakeAdbServer.WriteAsync(s, "OKAY");
+            await FakeAdbServer.WriteBlockAsync(s, block);
+            await FakeAdbServer.HoldOpenAsync(s);
+        });
+        var client = new AdbClient(fake.Connector);
+        await foreach (var list in client.TrackDevicesAsync(Deadline())) return list;
+        throw new InvalidOperationException("no list");
+    }
+
+    [Fact]
+    public async Task Track_ParsesAndFiltersDevices()
+    {
+        var list = await FirstListAsync(
+            "R58M123 device usb:1-1 product:x model:Pixel_8 device:y\n" +
+            "emulator-5554 device product:sdk model:sdk_phone\n" +
+            "192.168.1.5:5555 device product:x model:Pixel_7\n");
+
+        Assert.Equal(new[] { new AdbDevice("R58M123", "device", "Pixel 8", true) }, list);
+    }
+
+    [Fact]
+    public async Task Track_WindowsLineWithoutUsbIsReported()
+    {
+        // Native Windows adb registers USB devices with no device path, so their lines carry no usb: property.
+        var list = await FirstListAsync("R58M123 device product:p model:Pixel_8 device:d transport_id:1\n");
+
+        Assert.Equal(new[] { new AdbDevice("R58M123", "device", "Pixel 8", true) }, list);
+    }
+
+    [Fact]
+    public async Task Track_WindowsUnauthorizedWithoutUsbIsListedNotUsable()
+    {
+        var device = Assert.Single(await FirstListAsync("R58M123 unauthorized transport_id:2\n"));
+
+        Assert.Equal("R58M123", device.Serial);
+        Assert.False(device.IsUsable);
+    }
+
+    [Theory]
+    [InlineData("192.168.1.5:5555 device product:p model:m device:d transport_id:3")]
+    [InlineData("emulator-5554 device product:sdk model:sdk_phone device:emu transport_id:4")]
+    [InlineData("adb-R58M123-abc._adb-tls-connect._tcp device product:p model:m device:d transport_id:5")]
+    [InlineData("adb-R58M123-abc._adb._tcp device product:p model:m device:d transport_id:6")]
+    public async Task Track_NetworkAndEmulatorSerialsWithoutUsbAreExcluded(string line)
+    {
+        Assert.Empty(await FirstListAsync(line + "\n"));
+    }
+
+    [Fact]
+    public async Task Track_OddSerialWithUsbIsIncluded()
+    {
+        var list = await FirstListAsync("emulator-like:5555 device usb:2-3 model:P\n");
+
+        Assert.Equal("emulator-like:5555", Assert.Single(list).Serial);
+    }
+
+    [Fact]
+    public async Task Track_UnauthorizedDeviceIsListedNotUsable()
+    {
+        var list = await FirstListAsync("R58M123 unauthorized usb:1-1\n");
+
+        var device = Assert.Single(list);
+        Assert.Equal("R58M123", device.Serial);
+        Assert.False(device.IsUsable);
+    }
+
+    [Fact]
+    public async Task Track_TwoWordStateIsKept()
+    {
+        var list = await FirstListAsync("R58M123 no permissions usb:1-2 model:P\n");
+
+        Assert.Equal("no permissions", Assert.Single(list).State);
+    }
+
+    [Fact]
+    public async Task Track_EmptyBlockYieldsEmptyList()
+    {
+        Assert.Empty(await FirstListAsync(""));
+    }
+
+    [Fact]
+    public async Task Connect_SendsTransportThenTcpPort()
+    {
+        var seen = new List<string>();
+        await using var fake = new FakeAdbServer(async s =>
+        {
+            seen.Add(await FakeAdbServer.ReadRequestAsync(s));
+            await FakeAdbServer.WriteAsync(s, "OKAY");
+            seen.Add(await FakeAdbServer.ReadRequestAsync(s));
+            await FakeAdbServer.WriteAsync(s, "OKAY");
+            var buf = new byte[2];
+            await s.ReadExactlyAsync(buf);
+            await s.WriteAsync(buf);
+            await s.FlushAsync();
+            await FakeAdbServer.HoldOpenAsync(s);
+        });
+        var client = new AdbClient(fake.Connector);
+
+        await using var stream = await client.ConnectAsync("R58M123", 7891, Deadline());
+        await stream.WriteAsync(Encoding.ASCII.GetBytes("hi"));
+        await stream.FlushAsync();
+        var echo = new byte[2];
+        await stream.ReadExactlyAsync(echo);
+
+        Assert.Equal(new[] { "host:transport:R58M123", "tcp:7891" }, seen);
+        Assert.Equal("hi", Encoding.ASCII.GetString(echo));
+    }
+
+    [Fact]
+    public async Task Connect_Fail_ThrowsWithMessage()
+    {
+        await using var fake = new FakeAdbServer(async s =>
+        {
+            await FakeAdbServer.ReadRequestAsync(s);
+            await FakeAdbServer.WriteAsync(s, "FAIL0010device not found");
+            await FakeAdbServer.HoldOpenAsync(s);
+        });
+        var client = new AdbClient(fake.Connector);
+
+        var e = await Assert.ThrowsAsync<AdbException>(() => client.ConnectAsync("R58M123", 7891, Deadline()));
+        Assert.Equal("device not found", e.Message);
+    }
+
+    [Fact]
+    public async Task Connect_SilentServer_TimesOut()
+    {
+        await using var fake = new FakeAdbServer(FakeAdbServer.HoldOpenAsync);
+        var client = new AdbClient(fake.Connector, TimeSpan.FromMilliseconds(200));
+
+        await Assert.ThrowsAsync<TimeoutException>(() => client.ConnectAsync("R58M123", 7891, Deadline()));
+    }
+
+    private sealed class RecordingRunner : IProcessRunner
+    {
+        public List<(string Exe, string Args)> Calls { get; } = [];
+
+        public Task<int> RunAsync(string exe, string args, CancellationToken ct)
+        {
+            Calls.Add((exe, args));
+            return Task.FromResult(0);
+        }
+    }
+
+    [Fact]
+    public async Task EnsureServer_StartsServerWhenNothingAnswers()
+    {
+        await using var fake = new FakeAdbServer(FakeAdbServer.HoldOpenAsync);
+        var attempts = 0;
+        var client = new AdbClient(async ct =>
+        {
+            if (attempts++ == 0) throw new SocketException((int)SocketError.ConnectionRefused);
+            return await fake.Connector(ct);
+        });
+        var runner = new RecordingRunner();
+
+        await AdbClient.EnsureServerAsync(client, "C:\\sdk\\adb.exe", runner, TimeProvider.System, Deadline());
+
+        Assert.Equal(new[] { ("C:\\sdk\\adb.exe", "start-server") }, runner.Calls);
+        Assert.Equal(2, attempts);
+    }
+
+    [Fact]
+    public async Task EnsureServer_ServerAlreadyUp_DoesNotRunAdb()
+    {
+        await using var fake = new FakeAdbServer(FakeAdbServer.HoldOpenAsync);
+        var runner = new RecordingRunner();
+
+        await AdbClient.EnsureServerAsync(new AdbClient(fake.Connector), "adb", runner, TimeProvider.System, Deadline());
+
+        Assert.Empty(runner.Calls);
+    }
+
+    [Fact]
+    public async Task EnsureServer_NoAdbBinary_Throws()
+    {
+        var client = new AdbClient(_ => throw new SocketException((int)SocketError.ConnectionRefused));
+        var runner = new RecordingRunner();
+
+        await Assert.ThrowsAsync<SocketException>(() => AdbClient.EnsureServerAsync(client, null, runner, TimeProvider.System, Deadline()));
+        Assert.Empty(runner.Calls);
+    }
+
+    [Fact]
+    public async Task EnsureServer_ServerThatNeverAccepts_IsATimeout_AndAdbIsNotStarted()
+    {
+        // Something holds the port but never accepts (a hung server, a filtered SYN): not "nothing answers", so no start-server.
+        var client = new AdbClient(async ct =>
+        {
+            await Task.Delay(Timeout.InfiniteTimeSpan, ct);
+            throw new InvalidOperationException("unreachable");
+        }, TimeSpan.FromMilliseconds(200));
+        var runner = new RecordingRunner();
+
+        var e = await Assert.ThrowsAsync<TimeoutException>(() => AdbClient.EnsureServerAsync(client, "C:\\sdk\\adb.exe", runner, TimeProvider.System, Deadline()));
+        Assert.Equal("adb did not answer in time", e.Message);
+        Assert.Empty(runner.Calls);
+    }
+
+    private static readonly TimeSpan Short = TimeSpan.FromMilliseconds(200);
+
+    private static async Task DrainAsync(AdbClient client)
+    {
+        await foreach (var _ in client.TrackDevicesAsync(Deadline())) { }
+    }
+
+    [Fact]
+    public async Task Track_ServerThatNeverAnswers_TimesOut()
+    {
+        await using var fake = new FakeAdbServer(async s =>
+        {
+            await FakeAdbServer.ReadRequestAsync(s);
+            await FakeAdbServer.HoldOpenAsync(s); // takes the request, never says OKAY
+        });
+
+        await Assert.ThrowsAsync<TimeoutException>(() => DrainAsync(new AdbClient(fake.Connector, Short)));
+    }
+
+    [Fact]
+    public async Task Track_BlockThatStopsHalfway_TimesOut()
+    {
+        await using var fake = new FakeAdbServer(async s =>
+        {
+            await FakeAdbServer.ReadRequestAsync(s);
+            await FakeAdbServer.WriteAsync(s, "OKAY");
+            await FakeAdbServer.WriteAsync(s, "00"); // half a length, then nothing
+            await FakeAdbServer.HoldOpenAsync(s);
+        });
+
+        await Assert.ThrowsAsync<TimeoutException>(() => DrainAsync(new AdbClient(fake.Connector, Short)));
+    }
+
+    [Fact]
+    public async Task Track_IdleBetweenBlocks_IsNotATimeout()
+    {
+        await using var fake = new FakeAdbServer(async s =>
+        {
+            await FakeAdbServer.ReadRequestAsync(s);
+            await FakeAdbServer.WriteAsync(s, "OKAY");
+            await Task.Delay(Short * 3); // nothing plugged in for a while: an idle subscription is fine
+            await FakeAdbServer.WriteBlockAsync(s, "R58M123 device usb:1-1\n");
+            await FakeAdbServer.HoldOpenAsync(s);
+        });
+        var client = new AdbClient(fake.Connector, Short);
+
+        await foreach (var list in client.TrackDevicesAsync(Deadline()))
+        {
+            Assert.Equal("R58M123", Assert.Single(list).Serial);
+            return;
+        }
+        Assert.Fail("the track ended without a list");
+    }
+
+    /// <summary>A runner whose program never exits on its own; it ends only when cancelled, as ProcessRunner kills it.</summary>
+    private sealed class HangingRunner : IProcessRunner
+    {
+        private readonly TaskCompletionSource _started = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public Task Started => _started.Task;
+        public volatile bool Killed;
+
+        public async Task<int> RunAsync(string exe, string args, CancellationToken ct)
+        {
+            _started.TrySetResult();
+            try { await Task.Delay(Timeout.InfiniteTimeSpan, ct); }
+            catch (OperationCanceledException) { Killed = true; throw; }
+            return 0;
+        }
+    }
+
+    [Fact]
+    public async Task EnsureServer_StartServerThatHangs_IsKilledAfter15SecondsOnTheInjectedClock()
+    {
+        var client = new AdbClient(_ => throw new SocketException((int)SocketError.ConnectionRefused));
+        var runner = new HangingRunner();
+        var time = new FakeTimeProvider();
+
+        var ensure = AdbClient.EnsureServerAsync(client, "C:\\sdk\\adb.exe", runner, time, Deadline());
+        await runner.Started.WaitAsync(TimeSpan.FromSeconds(10));
+        Assert.Equal([TimeSpan.FromSeconds(15)], time.DueIn()); // the Mac's limit (ADB.swift startServer)
+        time.Advance(TimeSpan.FromSeconds(15) - TimeSpan.FromMilliseconds(1));
+        Assert.False(ensure.IsCompleted);
+        time.Advance(TimeSpan.FromMilliseconds(1));
+
+        var e = await Assert.ThrowsAsync<TimeoutException>(() => ensure.WaitAsync(TimeSpan.FromSeconds(10)));
+        Assert.Equal("adb start-server did not finish within 15 seconds", e.Message);
+        Assert.True(runner.Killed);
+    }
+}

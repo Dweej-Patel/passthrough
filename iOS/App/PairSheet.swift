@@ -17,15 +17,15 @@ struct PairSheet: View {
                     .font(.system(size: 54, weight: .medium))
                     .foregroundStyle(PTTheme.accent)
                 VStack(spacing: 6) {
-                    Text("Pair a Mac").font(PTTheme.display(28))
-                    Text("Open Passthrough in the menu bar on your Mac, plug in the cable, and enter this code.")
+                    Text("Pair a Mac or PC").font(PTTheme.display(28))
+                    Text("Open Passthrough on your Mac or PC, plug in the cable, and enter this code.")
                         .font(.subheadline).foregroundStyle(.secondary).multilineTextAlignment(.center)
                         .padding(.horizontal, 24)
                 }
                 if model.state != .running, !ThisDevice.isPad {
                     PTCard {
                         VStack(alignment: .leading, spacing: 10) {
-                            Label("This \(ThisDevice.name)'s internet sharing is off, so the Mac can't reach it to pair.", systemImage: "exclamationmark.triangle.fill")
+                            Label("This \(ThisDevice.name)'s internet sharing is off, so the computer can't reach it to pair.", systemImage: "exclamationmark.triangle.fill")
                                 .font(.footnote).foregroundStyle(PTTheme.warning)
                                 .fixedSize(horizontal: false, vertical: true)
                             Button(model.state == .starting ? "Turning on…" : "Turn on sharing") { model.start() }
@@ -78,7 +78,7 @@ struct PairSheet: View {
     }
 
     /// Why the code on screen went away early. Same words as the Android app's.
-    static let withdrawnDetail = "Too many wrong codes were entered, so it no longer works. If that wasn't you, something on this phone or the Mac tried to guess it. Generate a new code to pair."
+    static let withdrawnDetail = "Too many wrong codes were entered, so it no longer works. If that wasn't you, something on this phone or the computer tried to guess it. Generate a new code to pair."
 
     private func remaining(_ expiry: Date, now: Date) -> TimeInterval {
         max(0, expiry.timeIntervalSince(now))

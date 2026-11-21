@@ -1,0 +1,102 @@
+<Window
+    x:Class="Passthrough.App.SettingsWindow"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:local="using:Passthrough.App"
+    Title="Passthrough settings">
+
+    <!-- No background of its own: the window's Mica shows through. One card per group, as in Windows Settings. -->
+    <Grid>
+        <Grid.RowDefinitions>
+            <RowDefinition Height="32" />
+            <RowDefinition Height="*" />
+        </Grid.RowDefinitions>
+        <!-- The title bar: kept above the scrolling content, so nothing scrolls under the caption buttons. -->
+        <Grid x:Name="TitleBarArea" Grid.Row="0">
+            <TextBlock Text="Passthrough settings" Style="{StaticResource CaptionTextBlockStyle}" VerticalAlignment="Center"
+                       Margin="16,0,0,0" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+        </Grid>
+    <ScrollViewer Grid.Row="1">
+        <StackPanel Padding="24,4,24,24" Spacing="8" MaxWidth="560">
+            <TextBlock Text="Settings" Style="{StaticResource TitleTextBlockStyle}" Margin="0,0,0,8" />
+
+            <Border x:Name="ErrorBox" Visibility="Collapsed" Background="{StaticResource PtAttentionFillBrush}"
+                    CornerRadius="6" Padding="12,10">
+                <TextBlock x:Name="ErrorText" TextWrapping="Wrap" />
+            </Border>
+
+            <TextBlock Text="General" Style="{StaticResource BodyStrongTextBlockStyle}" Margin="0,8,0,0" />
+            <Border Style="{StaticResource PtCardStyle}" Padding="16,12">
+                <Grid ColumnSpacing="12">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="Auto" />
+                    </Grid.ColumnDefinitions>
+                    <StackPanel VerticalAlignment="Center">
+                        <TextBlock Text="Start at login" />
+                        <TextBlock Text="Passthrough starts in the tray when you sign in to Windows."
+                                   Style="{StaticResource CaptionTextBlockStyle}" TextWrapping="Wrap"
+                                   Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                    </StackPanel>
+                    <ToggleSwitch x:Name="StartAtLoginSwitch" Grid.Column="1" MinWidth="0" OnContent="" OffContent=""
+                                  AutomationProperties.Name="Start at login" />
+                </Grid>
+            </Border>
+            <Border Style="{StaticResource PtCardStyle}" Padding="16,12">
+                <Grid ColumnSpacing="12">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="Auto" />
+                    </Grid.ColumnDefinitions>
+                    <StackPanel VerticalAlignment="Center">
+                        <TextBlock Text="Android support" />
+                        <TextBlock Text="On: Android phones are listed once adb finds them. Off: they are ignored."
+                                   Style="{StaticResource CaptionTextBlockStyle}" TextWrapping="Wrap"
+                                   Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                    </StackPanel>
+                    <ToggleSwitch x:Name="AndroidSwitch" Grid.Column="1" MinWidth="0" OnContent="" OffContent=""
+                                  AutomationProperties.Name="Android support" />
+                </Grid>
+            </Border>
+
+            <TextBlock Text="Paired phones" Style="{StaticResource BodyStrongTextBlockStyle}" Margin="0,16,0,0" />
+            <TextBlock Text="Every phone this PC holds a pairing for, attached or not. Forget one you no longer use."
+                       Style="{StaticResource CaptionTextBlockStyle}" TextWrapping="Wrap"
+                       Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+            <Border x:Name="NoPairingsText" Style="{StaticResource PtCardStyle}" Padding="16,14" Visibility="Collapsed">
+                <TextBlock Text="No phone is paired with this PC." Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+            </Border>
+            <ItemsControl ItemsSource="{x:Bind Paired}">
+                <ItemsControl.ItemsPanel>
+                    <ItemsPanelTemplate>
+                        <StackPanel Spacing="8" />
+                    </ItemsPanelTemplate>
+                </ItemsControl.ItemsPanel>
+                <ItemsControl.ItemTemplate>
+                    <DataTemplate x:DataType="local:PairedPhoneRow">
+                        <Border Style="{StaticResource PtCardStyle}" Padding="16,12">
+                            <Grid ColumnSpacing="12">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="Auto" />
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="Auto" />
+                                </Grid.ColumnDefinitions>
+                                <Grid Width="32" Height="32">
+                                    <Ellipse Fill="{ThemeResource ControlFillColorSecondaryBrush}" />
+                                    <FontIcon Glyph="{x:Bind Glyph}" FontSize="15" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                                </Grid>
+                                <StackPanel Grid.Column="1" VerticalAlignment="Center">
+                                    <TextBlock Text="{x:Bind Title}" TextTrimming="CharacterEllipsis" />
+                                    <TextBlock Text="{x:Bind Detail}" Style="{StaticResource CaptionTextBlockStyle}"
+                                               Foreground="{ThemeResource TextFillColorSecondaryBrush}" TextTrimming="CharacterEllipsis" />
+                                </StackPanel>
+                                <Button Grid.Column="2" Content="Forget pairing" Click="OnForgetClick" />
+                            </Grid>
+                        </Border>
+                    </DataTemplate>
+                </ItemsControl.ItemTemplate>
+            </ItemsControl>
+        </StackPanel>
+    </ScrollViewer>
+    </Grid>
+</Window>

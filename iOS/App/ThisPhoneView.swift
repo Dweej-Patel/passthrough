@@ -335,7 +335,7 @@ struct MacsCard: View {
                     PTSectionTitle(ThisDevice.isPad ? "Paired Macs" : "Paired devices", icon: "laptopcomputer")
                     Spacer()
                     Menu {
-                        Button { showPairing = true } label: { Label("Pair a Mac", systemImage: "laptopcomputer") }
+                        Button { showPairing = true } label: { Label("Pair a Mac or PC", systemImage: "laptopcomputer") }
                         if !ThisDevice.isPad {
                             Button { scanIPad = true } label: { Label("Scan an iPad's code", systemImage: "qrcode.viewfinder") }
                         }
@@ -346,12 +346,12 @@ struct MacsCard: View {
                     .buttonBorderShape(.capsule)
                     .tint(PTColor.tintText)
                     .controlSize(.small)
-                    .accessibilityLabel("Pair a Mac or iPad")
+                    .accessibilityLabel("Pair a Mac, PC or iPad")
                 }
                 if model.pairedClients.isEmpty && model.pairedIPads.isEmpty {
                     Text(ThisDevice.isPad
                          ? "No Mac paired yet. Tap Pair and enter the code in Passthrough on your Mac, with the cable plugged in."
-                         : "Nothing paired yet. Tap Pair: a Mac enters a code with the cable plugged in, and an iPad shows a code to scan.")
+                         : "Nothing paired yet. Tap Pair: a Mac or PC enters a code with the cable plugged in, and an iPad shows a code to scan.")
                         .font(.subheadline).foregroundStyle(.secondary)
                 } else {
                     ForEach(model.pairedClients + model.pairedIPads) { client in
