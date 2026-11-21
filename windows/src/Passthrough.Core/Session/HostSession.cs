@@ -1,6 +1,9 @@
+using System.Security.Cryptography;
 using System.Threading.Channels;
+using Passthrough.Core.Cable;
 using Passthrough.Core.Control;
 using Passthrough.Core.Protocol;
+using Passthrough.Core.Shell.Access;
 using Passthrough.Core.Storage;
 using Passthrough.Core.Transport;
 
@@ -37,6 +40,9 @@ public sealed class HostSession : IAsyncDisposable
     private readonly string _computerName;
     private readonly Func<PhoneDevice, ControlIdentity, ControlClient> _clientFactory;
     private readonly TimeProvider _time;
+    private readonly IAccessAdmin _access;
+    /// <summary>When each device is granted a shell key (touched only on the loop).</summary>
+    private readonly ShellGrantLedger _ledger = new();
     private readonly Channel<(Func<Task> Work, TaskCompletionSource? Done)> _work =
         Channel.CreateUnbounded<(Func<Task>, TaskCompletionSource?)>(new UnboundedChannelOptions { SingleReader = true });
     private readonly Task _loop;
@@ -65,7 +71,7 @@ public sealed class HostSession : IAsyncDisposable
     private readonly Dictionary<string, string> _namesSaved = [];
 
     public HostSession(DeviceDirectory directory, ISecretStore secrets, ISettingsStore settings, string computerName,
-        Func<PhoneDevice, ControlIdentity, ControlClient> clientFactory, TimeProvider time)
+        Func<PhoneDevice, ControlIdentity, ControlClient> clientFactory, TimeProvider time, IAccessAdmin? access = null)
     {
         _directory = directory;
         _secrets = secrets;
@@ -73,7 +79,9 @@ public sealed class HostSession : IAsyncDisposable
         _computerName = computerName;
         _clientFactory = clientFactory;
         _time = time;
+        _access = access ?? NoRemoteAccess.Instance;
         _loop = Task.Run(RunLoopAsync);
+        _access.Changed += () => Post(ConsiderAllAsync);
         // Both fire on background threads; never block them, just queue.
         _directory.Changed += change => Post(() => OnDeviceChangeAsync(change));
         foreach (var watcher in _directory.Watchers) watcher.StatusChanged += _ => Post(() => Task.CompletedTask);
@@ -192,6 +200,12 @@ public sealed class HostSession : IAsyncDisposable
         _secrets.Delete(slot); // never read first: a slot that cannot be read can still be deleted
         _hasToken[slot] = false;
         ForgetName(slot);
+        // The shell access granted through this pairing goes with it; a grant in flight to it is dropped, so a late
+        // answer can't record its key. As on the Mac, forgetting a pairing starts every device's grants afresh.
+        foreach (var ch in _channels.Values.Where(c => c.Device.PairingSlot == slot)) ch.CancelGrant();
+        _ledger.Reset();
+        try { await _access.RevokeSlotAsync(slot); }
+        catch (Exception e) { ReportError(e); } // the token is gone either way
         if (_closed) return;
         // Reopen a channel that uses the credential (opened with the token, or paired on it), or that has none open
         // (waiting or failed); an unpaired channel is left alone, so a second Forget changes nothing.
@@ -274,6 +288,7 @@ public sealed class HostSession : IAsyncDisposable
             case DeviceChange.Detached d:
                 _devices.Remove(d.Device);
                 _attachments.Remove(d.Device.Id);
+                _ledger.Detached(d.Device.Id);
                 if (_channels.Remove(d.Device.Id, out var gone)) await CloseChannelAsync(gone);
                 if (_activeId == d.Device.Id) _activeId = null;
                 break;
@@ -327,6 +342,8 @@ public sealed class HostSession : IAsyncDisposable
             return;
         }
         ch.Client = client;
+        ch.CancelGrant();
+        _ledger.ChannelOpened(device.Id);
         ch.OpenedAt = _time.GetTimestamp();
         ch.HasCredential = _hasToken[device.PairingSlot];
         ch.Welcomed = false;
@@ -358,6 +375,7 @@ public sealed class HostSession : IAsyncDisposable
                 {
                     ch.State = PhoneState.Paired;
                     ch.Message = null;
+                    await ConsiderAsync(ch);
                 }
                 else if (ch.State != PhoneState.Pairing) ch.State = PhoneState.NotPaired; // a code may already be on its way
                 break;
@@ -382,6 +400,11 @@ public sealed class HostSession : IAsyncDisposable
                 }
                 ch.State = PhoneState.Paired;
                 ch.Message = null;
+                _ledger.Paired(device.Id); // a phone pairing anew gets its grant, even after a revoke
+                await ConsiderAsync(ch);
+                break;
+            case ControlEvent.ShellGranted g:
+                await OnShellGrantedAsync(ch, g);
                 break;
             case ControlEvent.PairingFailed f:
                 if (ch.State == PhoneState.Pairing) ch.State = PhoneState.NotPaired;
@@ -398,6 +421,7 @@ public sealed class HostSession : IAsyncDisposable
                 ch.State = PhoneState.Paired; // status flows only on a proved channel
                 (ch.Status, ch.Rx, ch.Tx, ch.Connections) = (s.Status, s.Rx, s.Tx, s.Active);
                 SaveName(device.PairingSlot, s.Status.DeviceName);
+                if (!string.IsNullOrWhiteSpace(s.Status.DeviceName)) ch.Label = s.Status.DeviceName;
                 break;
             case ControlEvent.Goodbye:
                 // The phone's user turned Passthrough off; the phone closes next. Logged, as on the Mac.
@@ -406,6 +430,8 @@ public sealed class HostSession : IAsyncDisposable
             case ControlEvent.Disconnected d:
                 ch.Client = null;
                 ch.ClearStatus();
+                ch.CancelGrant();
+                _ledger.ChannelClosed(device.Id); // an unanswered grant goes again on the next channel
                 if (d.Error is ControlException failure)
                 {
                     // Retrying cannot fix a failed proof or another version; the stored token stays.
@@ -438,6 +464,74 @@ public sealed class HostSession : IAsyncDisposable
                 break;
         }
     }
+
+    private Task ConsiderAllAsync() => Task.WhenAll(_channels.Values.ToList().Select(ConsiderAsync));
+
+    /// <summary>
+    /// Sends this device a shell grant when it should get one (port of <c>sendShellGrant</c> in
+    /// SessionCoordinator.swift): its pairing is proved on this channel, the cable peer check found its far end
+    /// genuine, Remote access has something to hand out, and the ledger says so. The key is kept only once the phone
+    /// confirms it stored it.
+    /// </summary>
+    private async Task ConsiderAsync(DeviceChannel ch)
+    {
+        if (_closed || ch.State != PhoneState.Paired || ch.Client is not { Peer: PeerVerdict.Genuine } client || ch.PendingGrant is not null) return;
+        GrantContents? contents;
+        try { contents = await _access.GrantContentsAsync(); }
+        catch (Exception e)
+        {
+            ReportError(e);
+            return;
+        }
+        // Checked again: the channel may have changed while the contents were read.
+        if (contents is null || !ReferenceEquals(ch.Client, client) || ch.PendingGrant is not null || !IsCurrent(ch)) return;
+        var id = ch.Device.Id;
+        if (!_ledger.ShouldGrant(id, contents.Fingerprint, _time.GetUtcNow())) return;
+        var key = RandomNumberGenerator.GetBytes(32);
+        var grantId = Guid.NewGuid().ToString().ToUpperInvariant();
+        if (!client.GrantShell(key, contents, grantId)) return; // the channel ended meanwhile
+        ch.PendingGrant = (key, grantId);
+        _ledger.Sent(id, contents.Fingerprint, grantId);
+        ch.GrantTimer = _time.CreateTimer(_ => Post(() => GrantExpiredAsync(ch, client, grantId)), null,
+            ShellGrantLedger.AnswerTimeout, Timeout.InfiniteTimeSpan);
+    }
+
+    private async Task GrantExpiredAsync(DeviceChannel ch, ControlClient client, string grantId)
+    {
+        if (!IsCurrent(ch) || !ReferenceEquals(ch.Client, client)) return;
+        if (_ledger.Expired(ch.Device.Id, grantId, _time.GetUtcNow()) is not ShellGrantLedger.Expiry.Retry retry) return;
+        if (ch.PendingGrant?.GrantId == grantId) ch.CancelGrant();
+        if (retry.FirstTimeout)
+            WriteLog($"{ch.Device.Id} ({ch.Device.Kind.Label()}): did not confirm its shell key in {ShellGrantLedger.AnswerTimeout.TotalSeconds:0} s; " +
+                $"trying again in {retry.After.TotalSeconds:0} s");
+        ch.GrantTimer = _time.CreateTimer(_ => Post(() => ConsiderAsync(ch)), null,
+            retry.After + TimeSpan.FromMilliseconds(500), Timeout.InfiniteTimeSpan);
+        await Task.CompletedTask;
+    }
+
+    private async Task OnShellGrantedAsync(DeviceChannel ch, ControlEvent.ShellGranted g)
+    {
+        if (ch.PendingGrant is not { } pending || !ShellGrantLedger.AnswerMatches(g.GrantId, pending.GrantId)) return; // an earlier grant's answer
+        ch.CancelGrant();
+        var id = ch.Device.Id;
+        if (!_ledger.Confirmed(id, pending.GrantId))
+        {
+            // Revoked meanwhile: the key is never kept. Grant afresh unless held.
+            if (!_ledger.IsHeld(id)) await ConsiderAsync(ch);
+            return;
+        }
+        bool kept;
+        try { kept = await _access.AddKeyAsync(g.PhoneId, ch.Label ?? ch.Device.Kind.Label(), ch.Device.PairingSlot, pending.Key); }
+        catch (Exception e)
+        {
+            ReportError(e);
+            kept = false;
+        }
+        if (!kept) ch.Message = $"Couldn't save shell access for this {ch.Device.Kind.Label()}. Plug it in again to retry.";
+        await ConsiderAsync(ch); // the contents may have changed while this one was in flight
+    }
+
+    private bool IsCurrent(DeviceChannel ch) => _channels.TryGetValue(ch.Device.Id, out var current) && current == ch;
 
     private void ScheduleReconnect(DeviceChannel ch)
     {

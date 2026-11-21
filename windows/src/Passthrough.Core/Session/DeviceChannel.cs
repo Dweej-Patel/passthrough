@@ -38,6 +38,19 @@ internal sealed class DeviceChannel(PhoneDevice device)
     /// channel fails to open, the next one is given it. Cleared by a welcome and when the channel is reset.
     /// </summary>
     public string? UnsentCode;
+    /// <summary>The shell grant in flight on this channel: its key (kept only once the phone confirms) and id.</summary>
+    public (byte[] Key, string GrantId)? PendingGrant;
+    /// <summary>Fires when the pending grant has waited <see cref="ShellGrantLedger.AnswerTimeout"/>, or a retry is due.</summary>
+    public ITimer? GrantTimer;
+    /// <summary>The device name last given to <see cref="Shell.Access.IAccessAdmin"/>, for the key's label.</summary>
+    public string? Label;
+
+    public void CancelGrant()
+    {
+        PendingGrant = null;
+        GrantTimer?.Dispose();
+        GrantTimer = null;
+    }
 
     public void ClearStatus() => (Status, Rx, Tx, Connections) = (null, 0, 0, 0);
 
@@ -52,6 +65,7 @@ internal sealed class DeviceChannel(PhoneDevice device)
     public void Reset()
     {
         CancelReconnect();
+        CancelGrant();
         Client = null;
         Held = false;
         State = PhoneState.Connecting;

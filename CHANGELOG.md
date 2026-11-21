@@ -235,6 +235,11 @@ these steps as written and check each one before building.
   marks which phone the PC will go online through; it no longer closes the
   other phone's channel, and it is never offered for an iPad. *Try again*
   works on any row that failed.
+* Windows: each paired phone whose cable connection checks out is offered a
+  shell key while Remote access has something to hand out, and the key is kept
+  once the phone confirms it; an unanswered grant is tried again with the Mac's
+  waits. Forgetting a pairing takes its shell access with it. Remote access
+  doesn't exist yet, so nothing is granted.
 * Remote shell: coming back to a session no longer plays it back from the
   top. The phone holds the Mac's replay until it is complete and draws it in
   one go, keeping what was on screen meanwhile, and says "Loading session…"

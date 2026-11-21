@@ -1,5 +1,7 @@
 using System.Collections.Concurrent;
+using Passthrough.Core.Cable;
 using Passthrough.Core.Control;
+using Passthrough.Core.Shell.Access;
 using Passthrough.Core.Protocol;
 using Passthrough.Core.Session;
 using Passthrough.Core.Storage;
@@ -28,11 +30,15 @@ public class HostSessionTests
         public readonly ConcurrentQueue<string> Log = new();
         public readonly HostSession Session;
 
-        public Harness(ISettingsStore? settings = null, ISecretStore? secrets = null)
+        private readonly PeerVerdict _verdict;
+
+        public Harness(ISettingsStore? settings = null, ISecretStore? secrets = null, IAccessAdmin? access = null,
+            PeerVerdict verdict = PeerVerdict.Unknown)
         {
             Settings = settings ?? new MemorySettingsStore();
             Secrets = secrets ?? new MemorySecretStore();
-            Session = new HostSession(new DeviceDirectory([Usb, Adb]), Secrets, Settings, "TEST-PC", Factory, Time);
+            _verdict = verdict;
+            Session = new HostSession(new DeviceDirectory([Usb, Adb]), Secrets, Settings, "TEST-PC", Factory, Time, access);
             Session.StateChanged += History.Enqueue;
             Session.Error += Errors.Enqueue;
             Session.Log += Log.Enqueue;
@@ -40,7 +46,8 @@ public class HostSessionTests
 
         private ControlClient Factory(PhoneDevice device, ControlIdentity identity)
         {
-            var client = new ControlClient(ct => device.Connect(ProtocolConstants.ControlPort, ct), identity, device.Kind.Label(), Time);
+            var client = new ControlClient(ct => device.Connect(ProtocolConstants.ControlPort, ct), identity, device.Kind.Label(), Time,
+                _verdict == PeerVerdict.Unknown ? null : _ => _verdict);
             Clients.Enqueue((device, identity, client));
             return client;
         }
@@ -1104,5 +1111,154 @@ public class HostSessionTests
         Assert.Null(h.Secrets.Get(plus.PairingSlot));
         Assert.Equal(otherToken, h.Secrets.Get(plain.PairingSlot));
         await h.WaitState(s => Entry(s, plus) is { HasPairing: false } && Entry(s, plain) is { State: PhoneState.Paired, HasPairing: true });
+    }
+
+    /// <summary>Shell access held in memory, as a test sees it: what grants carry, the keys confirmed, the slots revoked.</summary>
+    private sealed class FakeAccessAdmin : IAccessAdmin
+    {
+        public volatile GrantContents? Contents = new() { CertSHA256 = GrantContents.NoListenerPin, HostName = "TEST-PC", IrohId = new string('a', 64) };
+        public readonly ConcurrentQueue<(string PhoneId, string Label, string Slot, byte[] Key)> Added = new();
+        public readonly ConcurrentQueue<string> Revoked = new();
+        public volatile bool AddFails;
+
+        public Task<GrantContents?> GrantContentsAsync() => Task.FromResult(Contents);
+
+        public Task<bool> AddKeyAsync(string phoneId, string label, string pairingSlot, ReadOnlyMemory<byte> key)
+        {
+            if (AddFails) return Task.FromResult(false);
+            Added.Enqueue((phoneId, label, pairingSlot, key.ToArray()));
+            return Task.FromResult(true);
+        }
+
+        public Task RevokeSlotAsync(string pairingSlot)
+        {
+            Revoked.Enqueue(pairingSlot);
+            return Task.CompletedTask;
+        }
+
+        public event Action? Changed;
+
+        public void Change(GrantContents? contents)
+        {
+            Contents = contents;
+            Changed?.Invoke();
+        }
+    }
+
+    private static int Grants(FakePhone phone) => phone.Received.Count(m => m.T == ControlEnvelope.ShellGrant);
+
+    [Fact]
+    public async Task Grant_GoesToAPairedGenuinePhone_AndItsKeyIsKeptOnceConfirmed()
+    {
+        await using var phone = new FakePhone { Token = PhoneToken, DeviceName = "Dee's Pixel" };
+        var access = new FakeAccessAdmin();
+        var secrets = new MemorySecretStore();
+        secrets.Set(AndroidSlot, PhoneToken);
+        await using var h = new Harness(secrets: secrets, access: access, verdict: PeerVerdict.Genuine);
+        await h.Session.StartAsync();
+        h.Adb.Attach(Android(phone));
+
+        await WaitFor(() => !access.Added.IsEmpty);
+        var (phoneId, _, slot, key) = access.Added.Single();
+        Assert.Equal(("p-7c1e9a40", AndroidSlot), (phoneId, slot));
+        var grant = phone.Received.Single(m => m.T == ControlEnvelope.ShellGrant);
+        Assert.Equal(Convert.ToBase64String(key), grant.ShellKey);
+        Assert.Equal("windows", grant.HostKind);
+
+        await h.Settle();
+        Assert.Equal(1, Grants(phone)); // the same contents are not granted again on this channel
+    }
+
+    [Theory]
+    [InlineData(PeerVerdict.Unknown)]
+    [InlineData(PeerVerdict.NotGenuine)]
+    public async Task Grant_NeverGoesWithoutAGenuinePeer(PeerVerdict verdict)
+    {
+        await using var phone = new FakePhone { Token = PhoneToken };
+        var access = new FakeAccessAdmin();
+        var secrets = new MemorySecretStore();
+        secrets.Set(AndroidSlot, PhoneToken);
+        await using var h = new Harness(secrets: secrets, access: access, verdict: verdict);
+        await h.Session.StartAsync();
+        var android = Android(phone);
+        h.Adb.Attach(android);
+        await h.WaitState(s => Entry(s, android) is { State: PhoneState.Paired, Status: not null });
+        await h.Settle();
+        Assert.Equal(0, Grants(phone));
+        Assert.Empty(access.Added);
+    }
+
+    [Fact]
+    public async Task Grant_NoneWhileRemoteAccessHasNothing_ThenOnceItChanges()
+    {
+        await using var phone = new FakePhone { Token = PhoneToken };
+        var access = new FakeAccessAdmin { Contents = null };
+        var secrets = new MemorySecretStore();
+        secrets.Set(AndroidSlot, PhoneToken);
+        await using var h = new Harness(secrets: secrets, access: access, verdict: PeerVerdict.Genuine);
+        await h.Session.StartAsync();
+        var android = Android(phone);
+        h.Adb.Attach(android);
+        await h.WaitState(s => Entry(s, android) is { State: PhoneState.Paired, Status: not null });
+        await h.Settle();
+        Assert.Equal(0, Grants(phone));
+
+        access.Change(new GrantContents { CertSHA256 = GrantContents.NoListenerPin, HostName = "TEST-PC" });
+        await WaitFor(() => !access.Added.IsEmpty);
+        Assert.Equal(1, Grants(phone));
+    }
+
+    [Fact]
+    public async Task Grant_UnansweredIsTriedAgainAfterTheWait()
+    {
+        await using var phone = new FakePhone { Token = PhoneToken, GrantAnswer = FakePhone.GrantAnswerMode.None };
+        var access = new FakeAccessAdmin();
+        var secrets = new MemorySecretStore();
+        secrets.Set(AndroidSlot, PhoneToken);
+        await using var h = new Harness(secrets: secrets, access: access, verdict: PeerVerdict.Genuine);
+        await h.Session.StartAsync();
+        h.Adb.Attach(Android(phone));
+        await WaitFor(() => Grants(phone) == 1);
+
+        await WaitFor(() => h.Time.DueIn().Contains(ShellGrantLedger.AnswerTimeout));
+        h.Time.Advance(ShellGrantLedger.AnswerTimeout);
+        var retry = ShellGrantLedger.RetryDelays[0] + TimeSpan.FromMilliseconds(500);
+        await WaitFor(() => h.Time.DueIn().Contains(retry));
+        Assert.Contains(h.Log, l => l.Contains("did not confirm its shell key"));
+        h.Time.Advance(retry);
+        await WaitFor(() => Grants(phone) == 2);
+        Assert.Empty(access.Added);
+    }
+
+    [Fact]
+    public async Task Forget_RevokesTheSlotsShellAccess()
+    {
+        await using var phone = new FakePhone { Token = PhoneToken };
+        var access = new FakeAccessAdmin();
+        var secrets = new MemorySecretStore();
+        secrets.Set(AndroidSlot, PhoneToken);
+        await using var h = new Harness(secrets: secrets, access: access, verdict: PeerVerdict.Genuine);
+        await h.Session.StartAsync();
+        h.Adb.Attach(Android(phone));
+        await WaitFor(() => !access.Added.IsEmpty);
+
+        await h.Session.ForgetSlotAsync(AndroidSlot);
+        Assert.Equal([AndroidSlot], access.Revoked);
+        Assert.Null(secrets.Get(AndroidSlot));
+    }
+
+    [Fact]
+    public async Task Grant_AKeyThatCannotBeKept_SaysSo()
+    {
+        await using var phone = new FakePhone { Token = PhoneToken };
+        var access = new FakeAccessAdmin { AddFails = true };
+        var secrets = new MemorySecretStore();
+        secrets.Set(AndroidSlot, PhoneToken);
+        await using var h = new Harness(secrets: secrets, access: access, verdict: PeerVerdict.Genuine);
+        await h.Session.StartAsync();
+        var android = Android(phone);
+        h.Adb.Attach(android);
+        var s = await h.WaitState(s => Entry(s, android) is { Message: not null } e && e.Message.Contains("Couldn't save shell access"));
+        Assert.Equal("Couldn't save shell access for this Android phone. Plug it in again to retry.", Entry(s, android)!.Message);
     }
 }
