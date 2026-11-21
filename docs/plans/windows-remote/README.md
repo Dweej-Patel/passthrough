@@ -43,7 +43,15 @@ facts measured on a real PC.
 
 * Planned: every stage. Built: nothing yet beyond the Windows foundation
   already on `dev`.
-* Done from stage 0: [`Spikes/PcProbe`](../../../Spikes/PcProbe/README.md)
-  (what a PC can tell us without an administrator), run on one PC.
-* Next: the rest of stage 0, starting with the ConPTY spike (PC only), then
-  stage 1's CI job and `ShellEnvelope` for C#.
+* Done from stage 0:
+  * [`Spikes/PcProbe`](../../../Spikes/PcProbe/README.md) (0.2): what a PC
+    can tell us without an administrator, run on one PC.
+  * [`Spikes/ConPtyProbe`](../../../Spikes/ConPtyProbe/README.md) (0.7):
+    **passes with the bundled ConPTY, fails with the inbox one**, so stage 3
+    bundles it with no fallback; Claude Code's status works through it. Its
+    README lists what stage 3's session manager must add (answer the
+    pseudoconsole's own start-up query, keep its win32-input and focus modes
+    from phones, accept BEL-terminated 7501 queries). WSL is still to be run
+    on a PC where WSL2 starts.
+* Next: the spikes that need the Mac and a phone (0.1, 0.3, 0.5, 0.6), and
+  stage 1's CI job and `ShellEnvelope` for C#, which need neither.
