@@ -45,6 +45,15 @@ without it, publish it self-contained instead:
 dotnet publish windows/src/Passthrough.App -c Release --self-contained
 ```
 
+The SDK version comes from `global.json` at the repo root (10.0.100 or any
+later 10.0 feature band). Packages come only from nuget.org
+(`windows/nuget.config`), and each project's versions and content hashes are
+pinned in its `packages.lock.json`; CI restores with `--locked-mode`, so a
+build fails rather than pick up a package that changed. To change a package:
+edit its version in the `.csproj`, run
+`dotnet restore windows/Passthrough.Windows.sln --force-evaluate`, and commit
+the updated `packages.lock.json` in the same PR.
+
 To work on it in Visual Studio, use Visual Studio 2026 (18.0 or later) with
 the WinUI application development workload, and open
 `windows/Passthrough.Windows.sln`. Visual Studio 2022 can't target .NET 10.

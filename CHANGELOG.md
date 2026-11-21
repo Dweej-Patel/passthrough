@@ -193,6 +193,14 @@ these steps as written and check each one before building.
 
 ### Changed
 
+* **CI builds and tests the Windows app.** A Windows job runs the Windows Core
+  tests and builds the tray app, and the macOS job runs the same Core tests
+  beside `swift test`, so they stay free of Windows APIs. The .NET SDK is
+  pinned by `global.json` at the repo root (10.0.100 or a later 10.0 feature
+  band), every package comes from nuget.org only (`windows/nuget.config`), and
+  each Windows project's package versions and content hashes are pinned in its
+  `packages.lock.json`, restored in locked mode. To change a package, see
+  [windows/README.md](windows/README.md#build). Nothing changes in the apps.
 * Remote shell: coming back to a session no longer plays it back from the
   top. The phone holds the Mac's replay until it is complete and draws it in
   one go, keeping what was on screen meanwhile, and says "Loading session…"

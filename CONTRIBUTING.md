@@ -67,10 +67,19 @@ cd android
 ./gradlew testDebugUnitTest lintDebug assembleDebug
 ```
 
-The Swift and Kotlin sides speak the same wire protocol, described in
-[protocol/README.md](protocol/README.md). Both test suites check themselves
-against `protocol/fixtures.json`: if you change a message, a port or the
-pairing rules, update the fixtures first, then make both suites pass.
+The Windows host lives in `windows/` and needs the .NET 10 SDK (see
+[windows/README.md](windows/README.md)). Its Core tests run on any OS; the app
+builds only on Windows:
+
+```
+dotnet test windows/tests/Passthrough.Core.Tests
+dotnet build windows/src/Passthrough.App -c Release
+```
+
+The Swift, Kotlin and C# sides speak the same wire protocol, described in
+[protocol/README.md](protocol/README.md). The three test suites check
+themselves against `protocol/fixtures.json`: if you change a message, a port
+or the pairing rules, update the fixtures first, then make all three pass.
 
 ## Things to keep in mind
 
@@ -92,6 +101,8 @@ pairing rules, update the fixtures first, then make both suites pass.
 * [ ] Branch is based on `dev`
 * [ ] `swift test` passes in `Packages/PassthroughCore`
 * [ ] `./gradlew testDebugUnitTest lintDebug` passes in `android/` (if you touched it)
+* [ ] `dotnet test windows/tests/Passthrough.Core.Tests` passes (if you touched `windows/` or `protocol/`),
+      and any package change comes with its updated `packages.lock.json`
 * [ ] Both apps build (`xcodegen generate`, then build the `Passthrough` and
       `PassthroughMac` schemes)
 * [ ] README and docs/GUIDE.md updated if behaviour or setup changed
