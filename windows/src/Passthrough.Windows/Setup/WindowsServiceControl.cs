@@ -208,14 +208,16 @@ public sealed class WindowsServiceControl : IServiceControl
 
     public bool DeleteProfile()
     {
-        // The virtual account's profile: its folder (the TLS key, DPAPI's keys) and its ProfileList entry.
-        if (!Native.DeleteProfile(ServiceDefinition.Sid, null, null))
+        // The virtual account's profile: its folder (the TLS key, DPAPI's keys) and its ProfileList entry. Windows keeps
+        // a stopped service's profile loaded for a few seconds, so a refusal is tried again for up to 30 s.
+        for (var attempt = 0; ; attempt++)
         {
+            if (Native.DeleteProfile(ServiceDefinition.Sid, null, null)) return true;
             var error = Marshal.GetLastWin32Error();
             if (error is Native.ErrorFileNotFound or Native.ErrorPathNotFound or Native.ErrorNoSuchUser or Native.ErrorInvalidParameter) return false;
-            throw new Win32Exception(error, "DeleteProfile");
+            if (attempt >= 30) throw new SetupException($"The service's profile couldn't be deleted (error {error}). Restart this PC and remove Passthrough again to finish.");
+            Thread.Sleep(1000);
         }
-        return true;
     }
 
     private static uint StartType(ServiceStart start) => start switch
