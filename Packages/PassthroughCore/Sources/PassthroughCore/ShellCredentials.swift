@@ -17,7 +17,8 @@ public enum ShellCredentials {
                                    phoneID: phoneID, port: grant.port,
                                    addresses: addresses(granted: grant.addresses, manual: manualAddress(client.id)),
                                    irohID: grant.irohID, irohRelay: grant.irohRelay,
-                                   relayToken: grant.irohID == nil ? nil : relayToken(client.id))
+                                   relayToken: grant.irohID == nil ? nil : relayToken(client.id),
+                                   hostKind: client.hostKind ?? grant.hostKind)
         }
     }
 

@@ -136,3 +136,64 @@ public enum GoingAwayReason: String, Sendable, CaseIterable {
     case turnedOff = "turned_off"
     case shuttingDown = "shutting_down"
 }
+
+/// What kind of computer a host is, as the phone words and lays out its page.
+public enum HostKind: String, Codable, Sendable, CaseIterable {
+    case mac
+    case windows
+    /// A kind this build doesn't know (a `host` named it): neutral words, shells only.
+    case other
+
+    /// The kind a wire value names; nil (absent) is nil, anything unknown is `.other`.
+    public init?(wire: String?) {
+        guard let wire else { return nil }
+        switch wire {
+        case HostInfo.kindMac: self = .mac
+        case HostInfo.kindWindows: self = .windows
+        default: self = .other
+        }
+    }
+}
+
+public enum Hosts {
+    /// The kind every word and row is chosen by: what the live `host` says,
+    /// else what was stored for the computer (its `hello` or grant), else a Mac.
+    /// A computer that never said is a Mac: exactly what the apps did before.
+    public static func kind(live: HostInfo?, stored: String?) -> HostKind {
+        if let live = HostKind(wire: live?.kind) { return live }
+        return HostKind(wire: stored) == .windows ? .windows : .mac
+    }
+
+    /// The kinds a phone records for a computer (`PairingRegistry.noteHostKind`):
+    /// only ones this build knows.
+    public static func isRecordable(_ kind: String?) -> Bool {
+        kind == HostInfo.kindMac || kind == HostInfo.kindWindows
+    }
+}
+
+extension HostInfo {
+    /// The shell a plain `open` starts: the one marked `default`, else the first.
+    public var defaultShell: HostShell? { shells?.first { $0.default == true } ?? shells?.first }
+}
+
+/// Why a host said it was leaving (`goingAway`), and when this phone heard it.
+public struct HostFarewell: Codable, Equatable, Sendable {
+    /// A `GoingAwayReason` raw value, or one this build doesn't know (shown as "can't reach").
+    public var reason: String
+    public var at: Date
+
+    public init(reason: String, at: Date) {
+        self.reason = reason; self.at = at
+    }
+}
+
+/// The screen backends this app has a viewer for, per kind of host. A PC's
+/// screen comes with its own viewer (Remote Desktop) in a later version.
+public enum ScreenBackends {
+    public static func supported(for kind: HostKind) -> Set<String> {
+        switch kind {
+        case .mac: [HostInfo.screenVideo, HostInfo.screenRFB]
+        case .windows, .other: []
+        }
+    }
+}

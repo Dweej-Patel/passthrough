@@ -18,12 +18,14 @@ public struct ShellCredential: Codable, Equatable, Sendable {
     public var irohRelay: String?
     /// The relay's token, when the Mac's relay needs one. Never logged.
     public var relayToken: String?
+    /// What kind of computer granted it (`HostInfo.kindMac`, `kindWindows`); nil: a Mac that never said.
+    public var hostKind: String?
 
     public init(macID: String, macName: String, certSHA256: String, shellKey: Data, phoneID: String, port: UInt16, addresses: [String],
-                irohID: String? = nil, irohRelay: String? = nil, relayToken: String? = nil) {
+                irohID: String? = nil, irohRelay: String? = nil, relayToken: String? = nil, hostKind: String? = nil) {
         self.macID = macID; self.macName = macName; self.certSHA256 = certSHA256; self.shellKey = shellKey
         self.phoneID = phoneID; self.port = port; self.addresses = addresses
-        self.irohID = irohID; self.irohRelay = irohRelay; self.relayToken = relayToken
+        self.irohID = irohID; self.irohRelay = irohRelay; self.relayToken = relayToken; self.hostKind = hostKind
     }
 }
 
@@ -32,7 +34,8 @@ public struct ShellCredential: Codable, Equatable, Sendable {
 extension ShellCredential: CustomStringConvertible, CustomDebugStringConvertible {
     public var description: String {
         "ShellCredential(macID: \(macID), macName: \(macName), phoneID: \(phoneID), port: \(port), addresses: \(addresses), "
-            + "irohID: \(irohID ?? "none"), irohRelay: \(irohRelay ?? "none"), relayToken: \(relayToken == nil ? "none" : "<redacted>"))"
+            + "irohID: \(irohID ?? "none"), irohRelay: \(irohRelay ?? "none"), relayToken: \(relayToken == nil ? "none" : "<redacted>"), "
+            + "hostKind: \(hostKind ?? "none"))"
     }
 
     public var debugDescription: String { description }
@@ -43,7 +46,7 @@ extension ShellCredential: CustomReflectable {
     public var customMirror: Mirror {
         Mirror(self, children: ["macID": macID, "macName": macName, "phoneID": phoneID, "port": port, "addresses": addresses,
                                 "irohID": irohID as Any, "irohRelay": irohRelay as Any,
-                                "relayToken": relayToken == nil ? "none" : "<redacted>"], displayStyle: .struct)
+                                "relayToken": relayToken == nil ? "none" : "<redacted>", "hostKind": hostKind as Any], displayStyle: .struct)
     }
 }
 
@@ -311,9 +314,12 @@ public final class ShellClient: @unchecked Sendable {
 
     public func list() { command(ShellEnvelope(t: ShellEnvelope.list)) }
 
-    public func open(cols: Int, rows: Int) {
+    /// Opens a session. `shell`: one of the host's `HostInfo.shells` ids, as listed on this
+    /// connection; nil lets the host choose (the line then has no `shell`, as before hosts named shells).
+    public func open(cols: Int, rows: Int, shell: String? = nil) {
         var m = ShellEnvelope(t: ShellEnvelope.open)
         m.cols = cols; m.rows = rows
+        m.shell = shell.flatMap { HostShell.isValidID($0) ? $0 : nil }
         opensLock.lock()
         lastOpenRef += 1
         let ref = lastOpenRef
