@@ -258,7 +258,7 @@ struct ShellSetupSteps: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
             step(1, done: paired, title: "Pair this \(ThisDevice.name) with your Mac",
-                 detail: paired ? "Done." : "In the \(ThisDevice.name) tab, tap Pair under Paired devices, then Pair a Mac.")
+                 detail: paired ? "Done." : "In the \(ThisDevice.name) tab, tap Pair under Paired devices, then Pair a Mac or PC.")
             step(2, done: false, title: "Turn on Remote shell on your Mac",
                  detail: "On the Mac, open Passthrough's Settings, go to Remote Shell and turn on \u{201C}Allow remote shell from paired phones\u{201D}.")
             step(3, done: false, title: "Connect over USB once",
