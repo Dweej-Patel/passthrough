@@ -217,6 +217,12 @@ these steps as written and check each one before building.
   yet, and older phones and Macs ignore it (see
   [protocol/README.md](protocol/README.md#the-host)). Update phones and the
   Mac in any order.
+* Windows: the PC can now send a shell grant over the cable and hear the
+  phone's answer, but only on a channel whose pairing the phone has proved and
+  whose far end a check has found to be Apple's or adb's own service. No check
+  exists yet, so no grant goes out. The PC's `hello` now says it is a PC. The
+  log filter also removes shell keys (as JSON escapes them too), secret JSON
+  fields, `Bearer` headers and the relay token.
 * Remote shell: coming back to a session no longer plays it back from the
   top. The phone holds the Mac's replay until it is complete and draws it in
   one go, keeping what was on screen meanwhile, and says "Loading session…"
