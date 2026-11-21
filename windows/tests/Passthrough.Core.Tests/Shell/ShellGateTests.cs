@@ -264,16 +264,17 @@ public sealed class ShellGateTests : IAsyncDisposable
     }
 
     [Fact]
-    public async Task AScreenAllowedPhoneIsToldWhyThereIsNoScreenYet()
+    public async Task EvenAScreenAllowedPhoneGetsNoMacScreen_AndRdpWaitsForTheService()
     {
         _access.SetScreenAllowed("phone-a", true);
         using var phone = await Proven();
         await phone.Send("{\"t\":\"screen\"}");
-        var screen = await phone.Next(ShellEnvelope.Error);
-        Assert.Equal(("screen_unavailable", ShellConnection.UpdateForScreen), (screen.Reason, screen.Message));
+        Assert.Equal("screen_not_allowed", (await phone.Next(ShellEnvelope.Error)).Reason);
+        await phone.Send("{\"t\":\"screenVideo\"}");
+        Assert.Equal("screen_not_allowed", (await phone.Next(ShellEnvelope.Error)).Reason);
         await phone.Send("{\"t\":\"rdp\"}");
         var rdp = await phone.Next(ShellEnvelope.Error);
-        Assert.Equal(("rdp_unavailable", "off"), (rdp.Reason, rdp.Detail));
+        Assert.Equal(("rdp_unavailable", "service"), (rdp.Reason, rdp.Detail));
     }
 
     [Fact]

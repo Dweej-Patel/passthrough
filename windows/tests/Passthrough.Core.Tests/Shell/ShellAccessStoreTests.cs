@@ -172,4 +172,17 @@ public class ShellAccessStoreTests
         store.Revoke("phone-a");
         Assert.Equal(4, changes);
     }
+    [Fact]
+    public void APhonesChosenNameIsCleanedBeforeItIsShownOrLogged()
+    {
+        static string S(params int[] codes) => string.Concat(codes.Select(c => char.ConvertFromUtf32(c)));
+        // A right-to-left override, a line separator, a NUL, a zero-width space and a bell are all taken out.
+        Assert.Equal("Jane's iPhone", ShellAccessStore.CleanLabel("Jane's" + S(0x202E) + " iPhone" + S(13, 10)));
+        Assert.Equal("fake log line", ShellAccessStore.CleanLabel("fake" + S(10) + "log" + S(0x2028) + "line" + S(0)));
+        Assert.Equal("A phone", ShellAccessStore.CleanLabel(S(0x200B, 7)));
+        Assert.Equal(ShellAccessStore.MaxLabel, ShellAccessStore.CleanLabel(new string('e', 200)).Length);
+        var store = NewStore();
+        store.Record(Phone() with { Label = "Evil" + S(0x202E) + "enohPi" });
+        Assert.Equal("EvilenohPi", store.Phones.Single().Label);
+    }
 }

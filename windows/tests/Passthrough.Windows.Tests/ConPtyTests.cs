@@ -52,9 +52,46 @@ public sealed class ConPtyTests : IDisposable
     }
 
     [Fact]
-    public void TheBundledPseudoconsoleIsBesideTheApp()
+    public void TheBundledPseudoconsoleIsBesideTheApp_PinnedAndSignedByMicrosoft()
     {
-        Assert.True(ConPty.IsAvailable);
+        Assert.True(ConPty.IsAvailable, "conpty.dll and x64\\OpenConsole.exe beside the app, matching the pinned hashes");
+        Assert.True(Authenticode.IsTrusted(Path.Combine(AppContext.BaseDirectory, "conpty.dll")), "conpty.dll's signature");
+        Assert.True(Authenticode.IsTrusted(ConPty.OpenConsolePath), "OpenConsole.exe's signature");
+    }
+
+    /// <summary>WinVerifyTrust: the file's Authenticode signature chains to a root Windows trusts and isn't revoked.</summary>
+    private static class Authenticode
+    {
+        [System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Sequential, CharSet = System.Runtime.InteropServices.CharSet.Unicode)]
+        private struct FileInfo { public int Size; public string Path; public IntPtr Handle; public IntPtr KnownSubject; }
+
+        [System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Sequential)]
+        private struct TrustData
+        {
+            public int Size; public IntPtr PolicyCallback, SipClientData; public int UiChoice, RevocationChecks, UnionChoice;
+            public IntPtr File; public int StateAction; public IntPtr StateData, UrlReference; public int ProvFlags, UiContext; public IntPtr Signature;
+        }
+
+        [System.Runtime.InteropServices.DllImport("wintrust.dll", CharSet = System.Runtime.InteropServices.CharSet.Unicode)]
+        private static extern int WinVerifyTrust(IntPtr window, ref Guid action, ref TrustData data);
+
+        public static bool IsTrusted(string path)
+        {
+            var file = new FileInfo { Size = System.Runtime.InteropServices.Marshal.SizeOf<FileInfo>(), Path = path };
+            var filePointer = System.Runtime.InteropServices.Marshal.AllocHGlobal(file.Size);
+            try
+            {
+                System.Runtime.InteropServices.Marshal.StructureToPtr(file, filePointer, false);
+                var data = new TrustData
+                {
+                    Size = System.Runtime.InteropServices.Marshal.SizeOf<TrustData>(), UiChoice = 2 /* none */, RevocationChecks = 0,
+                    UnionChoice = 1 /* file */, File = filePointer, ProvFlags = 0x1000 /* cache only URL retrieval: no network */,
+                };
+                var action = new Guid("00AAC56B-CD44-11d0-8CC2-00C04FC295EE"); // WINTRUST_ACTION_GENERIC_VERIFY_V2
+                return WinVerifyTrust(IntPtr.Zero, ref action, ref data) == 0;
+            }
+            finally { System.Runtime.InteropServices.Marshal.FreeHGlobal(filePointer); }
+        }
     }
 
     [Fact]

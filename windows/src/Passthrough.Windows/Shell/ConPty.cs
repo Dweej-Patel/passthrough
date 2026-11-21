@@ -40,13 +40,36 @@ public sealed unsafe class ConPty : IPty
     public Action<byte[]>? OnOutput { get; set; }
     public Action<int>? OnExit { get; set; }
 
-    /// <summary>Whether this PC can run sessions: the bundled pseudoconsole is beside the app.</summary>
-    public static bool IsAvailable => File.Exists(Api.LibraryPath) && File.Exists(Path.Combine(AppContext.BaseDirectory, "x64", "OpenConsole.exe"));
+    /// <summary>
+    /// SHA-256 of Microsoft.Windows.Console.ConPTY 1.25.261109001's x64 binaries, both signed by Microsoft (B-12; the
+    /// test also checks the signature chain). Updating the package means updating these, in the same PR.
+    /// </summary>
+    internal const string ConptyDllSha256 = "e971856f89748dc3b458125e9afdd79b5e9574a7c937676116d3cbbd3b71f492";
+    internal const string OpenConsoleSha256 = "b17e48b07ef153b420f0a6e178bacd31fb4c3390e21ae746586213fc0719a775";
+
+    internal static string OpenConsolePath => Path.Combine(AppContext.BaseDirectory, "x64", "OpenConsole.exe");
+
+    private static readonly Lazy<bool> Verified = new(() =>
+        Matches(Api.LibraryPath, ConptyDllSha256) && Matches(OpenConsolePath, OpenConsoleSha256));
+
+    /// <summary>Whether this PC can run sessions: the bundled pseudoconsole is beside the app, byte for byte the one pinned.</summary>
+    public static bool IsAvailable => Verified.Value;
+
+    private static bool Matches(string path, string sha256)
+    {
+        try
+        {
+            using var file = File.OpenRead(path);
+            return Convert.ToHexStringLower(System.Security.Cryptography.SHA256.HashData(file)) == sha256;
+        }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException) { return false; }
+    }
 
     public ConPty(PtyStart start)
     {
         _start = start;
         if (!Path.IsPathFullyQualified(start.Executable)) throw new ArgumentException("a shell is started by its full path", nameof(start));
+        if (!IsAvailable) throw new InvalidOperationException("the bundled pseudoconsole is missing or isn't the one pinned");
         var api = Functions.Value;
         Native.Check(Native.CreatePipe(out var inputRead, out _inputWrite, IntPtr.Zero, 0), "CreatePipe");
         Native.Check(Native.CreatePipe(out _outputRead, out var outputWrite, IntPtr.Zero, 0), "CreatePipe");

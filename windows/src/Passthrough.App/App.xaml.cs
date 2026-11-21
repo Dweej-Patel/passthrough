@@ -34,6 +34,7 @@ public partial class App : Application
 
     public App()
     {
+        NativeMethods.RestrictDllSearch();
         InitializeComponent();
         // Windows open, hide and close as the app needs; only Quit (or a failed start) ends the process.
         DispatcherShutdownMode = DispatcherShutdownMode.OnExplicitShutdown;

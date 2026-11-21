@@ -15,8 +15,6 @@ public sealed class ShellConnection : IShellAttachment
     public const int SendBacklogLimit = 8 << 20;
     /// <summary>Most entries one <c>historyList</c> carries: the newest.</summary>
     internal const int HistoryLimit = 500;
-    /// <summary>What a phone too old to know a PC's screen is told when it asks for the Mac's.</summary>
-    internal const string UpdateForScreen = "Update Passthrough on this phone to see this PC's screen.";
 
     private readonly ShellGate _gate;
     private readonly Stream _stream;
@@ -127,6 +125,8 @@ public sealed class ShellConnection : IShellAttachment
                 break;
             case ShellEnvelope.Transcript:
                 if (message.Session is not { } wanted) { Fail(ShellError.BadRequest); break; }
+                // Session ids are UUIDs the host made: nothing else a phone names may reach the file system (B-9).
+                if (!Guid.TryParseExact(wanted, "D", out _)) { Fail(ShellError.NoSuchSession, wanted); break; }
                 await SendTranscriptAsync(wanted).ConfigureAwait(false);
                 break;
             case ShellEnvelope.Viewing:
@@ -150,13 +150,10 @@ public sealed class ShellConnection : IShellAttachment
             case ShellEnvelope.PushRegister:
                 Send(new ShellEnvelope(ShellEnvelope.PushState) { On = false });
                 break;
-            case ShellEnvelope.Screen:
-                // The Mac's Screen Sharing: a PC has none. A phone too old to know `rdp` is told to update.
-                if (!_gate.Access.ScreenAllowed(PhoneId)) Fail(ShellError.ScreenNotAllowed);
-                else Fail(ShellError.ScreenUnavailable, message: UpdateForScreen);
-                break;
-            case ShellEnvelope.ScreenVideo:
-                Fail(_gate.Access.ScreenAllowed(PhoneId) ? ShellError.ScreenVideoUnavailable : ShellError.ScreenNotAllowed);
+            // Until the PC has its own stream, both are refused alike: the Mac's Screen Sharing login must never come up
+            // for a PC (RECONCILIATION, the PC's answer table). The screen comes through rdp.
+            case ShellEnvelope.Screen or ShellEnvelope.ScreenVideo:
+                Fail(ShellError.ScreenNotAllowed);
                 break;
             case ShellEnvelope.Rdp:
                 if (!_gate.Access.ScreenAllowed(PhoneId)) Fail(ShellError.ScreenNotAllowed);

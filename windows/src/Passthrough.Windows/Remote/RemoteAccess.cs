@@ -291,7 +291,7 @@ public sealed class RemoteAccess : IAccessAdmin, IDisposable
             App = true,
             Shells = [.. Catalog.Shells],
             Screens = [],
-            Rdp = "off",
+            Rdp = "service",
             Access = new HostAccess { Shell = true, Screen = Access.ScreenAllowed(phone) },
             Lock = true,
             User = Environment.UserName,
@@ -317,7 +317,7 @@ public sealed class RemoteAccess : IAccessAdmin, IDisposable
             IrohId = endpoint.Id,
             IrohRelay = endpoint.HomeRelay,
             RelayToken = custom ? _secrets.Get(RelayTokenSlot) : null,
-            Addresses = [.. endpoint.DirectAddresses],
+            // No addresses before a listener exists: a phone that saw some would try TCP to them (RECONCILIATION).
         });
     }
 

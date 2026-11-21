@@ -48,6 +48,24 @@ public static class UserEnvironment
     public static string Home => Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
 
     /// <summary>
+    /// This Windows account is an administrator, even when (under UAC) this process isn't elevated (B-5). Shell access
+    /// on such an account is administrator access: what runs as the account can ask for elevation, so Settings says so.
+    /// </summary>
+    public static bool IsAdministratorAccount()
+    {
+        if (!Native.OpenProcessToken(Native.GetCurrentProcess(), Native.TokenQuery, out SafeAccessTokenHandle token)) return true;
+        using (token)
+        {
+            // TokenElevationType: 2 full (elevated), 3 limited (an administrator under UAC), 1 default.
+            if (Native.GetTokenInformation(token, TokenElevationTypeClass, out var type, sizeof(int), out _) && type is 2 or 3) return true;
+        }
+        using var identity = System.Security.Principal.WindowsIdentity.GetCurrent();
+        return new System.Security.Principal.WindowsPrincipal(identity).IsInRole(System.Security.Principal.WindowsBuiltInRole.Administrator);
+    }
+
+    private const int TokenElevationTypeClass = 18;
+
+    /// <summary>
     /// This process runs elevated (started as administrator, or UAC is off). It then hosts no shells: a phone's would
     /// run as administrator, which Passthrough never allows.
     /// </summary>

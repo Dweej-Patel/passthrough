@@ -99,6 +99,7 @@ public sealed class ShellAccessStore
     public bool Record(ShellPhone phone)
     {
         if (!IsPhoneId(phone.PhoneId)) { _log?.Invoke("shell: an id that isn't a phone's was offered for access; not recording it"); return false; }
+        phone = phone with { Label = CleanLabel(phone.Label) };
         lock (_writeLock)
         {
             if (LoadForWrite() is not { } list) { _log?.Invoke("shell: the stored phones are unreadable; not recording a new one"); return false; }
@@ -126,6 +127,30 @@ public sealed class ShellAccessStore
     public static bool IsPhoneId(string? id) =>
         Control.ControlClient.IsPhoneId(id)
         && !id!.StartsWith("viewer.", StringComparison.Ordinal) && !id.StartsWith("computer.", StringComparison.Ordinal);
+
+    internal const int MaxLabel = 64;
+
+    /// <summary>
+    /// A phone's name as it said it, made safe to show and log (B-14): control, format and line-separator characters
+    /// gone (no bidi tricks, no fake log lines), spaces run together, at most <see cref="MaxLabel"/> characters.
+    /// </summary>
+    public static string CleanLabel(string? label)
+    {
+        var kept = new System.Text.StringBuilder();
+        foreach (var rune in (label ?? "").EnumerateRunes())
+        {
+            // Breaks and tabs become spaces; other controls, format characters (bidi overrides, zero widths) go.
+            if (System.Text.Rune.IsWhiteSpace(rune)) { kept.Append(' '); continue; }
+            var category = System.Globalization.CharUnicodeInfo.GetUnicodeCategory(rune.Value);
+            if (category is System.Globalization.UnicodeCategory.Control or System.Globalization.UnicodeCategory.Format
+                or System.Globalization.UnicodeCategory.Surrogate or System.Globalization.UnicodeCategory.PrivateUse) continue;
+            kept.Append(rune.ToString());
+        }
+        var text = string.Join(' ', kept.ToString().Split(' ', StringSplitOptions.RemoveEmptyEntries));
+        var info = new System.Globalization.StringInfo(text);
+        if (info.LengthInTextElements > MaxLabel) text = info.SubstringByTextElements(0, MaxLabel).TrimEnd();
+        return text.Length == 0 ? "A phone" : text;
+    }
 
     /// <summary>The keys a proof from this phone may use: its current key, then the previous one while still accepted.</summary>
     public IReadOnlyList<byte[]> CandidateKeys(string phoneId) =>
@@ -176,6 +201,7 @@ public sealed class ShellAccessStore
     /// <summary>The phone granted through <paramref name="pairingSlot"/> now goes by <paramref name="label"/>; true only if a stored label changed.</summary>
     public bool Relabel(string pairingSlot, string label)
     {
+        label = CleanLabel(label);
         if (label.Length == 0 || !Phones.Any(p => p.PairingSlot == pairingSlot && p.Label != label)) return false;
         lock (_writeLock)
         {

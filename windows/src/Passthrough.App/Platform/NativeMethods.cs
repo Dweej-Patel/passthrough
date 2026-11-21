@@ -47,6 +47,18 @@ internal static class NativeMethods
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool IsHungAppWindow(IntPtr hwnd);
 
+    private const uint LoadLibrarySearchApplicationDir = 0x00000200, LoadLibrarySearchSystem32 = 0x00000800;
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool SetDefaultDllDirectories(uint flags);
+
+    /// <summary>
+    /// Every DLL this process loads by name from now on comes from beside the app or from System32, never from the
+    /// current folder or PATH (B-3): nobody can plant a conpty.dll, a vcruntime or a WinUI dependency where it would be found first.
+    /// </summary>
+    public static void RestrictDllSearch() => SetDefaultDllDirectories(LoadLibrarySearchApplicationDir | LoadLibrarySearchSystem32);
+
     [DllImport("user32.dll")]
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool SetForegroundWindow(IntPtr hwnd);

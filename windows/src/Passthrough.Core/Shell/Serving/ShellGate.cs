@@ -26,7 +26,7 @@ public sealed class ShellGateHooks
     /// A phone asked for the screen through Remote Desktop (<c>rdp</c>), and may see it: why it can't be had now, in
     /// <see cref="HostInfo.Rdp"/>'s words, until the relay exists (stage 5).
     /// </summary>
-    public Func<string, string> RdpUnavailable { get; init; } = _ => "off";
+    public Func<string, string> RdpUnavailable { get; init; } = _ => "service";
 
     /// <summary>Something a person would want in the log ("iPhone opened a session"). Never secrets.</summary>
     public Action<string>? Event { get; init; }

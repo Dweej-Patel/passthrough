@@ -52,18 +52,33 @@ public static class CablePeerCheck
 
     private static IPEndPoint V4(IPEndPoint end) => end.Address.IsIPv4MappedToIPv6 ? new IPEndPoint(end.Address.MapToIPv4(), end.Port) : end;
 
-    private static bool IsAppleDeviceService(int pid) => ServiceProcessId(AppleServiceName) == pid || PackageFamilyOf(pid) == AppleDevicesFamily;
+    /// <summary>
+    /// The service's process (never matched when the service is missing: no id, no match), or Apple Devices' process,
+    /// by its package identity and run as this user or the system (B-1).
+    /// </summary>
+    private static bool IsAppleDeviceService(int pid)
+    {
+        if (ServiceProcessId(AppleServiceName) is { } service && service == pid) return true;
+        if (PackageFamilyOf(pid) != AppleDevicesFamily) return false;
+        using var me = WindowsIdentity.GetCurrent();
+        return OwnerOf(pid) is { } owner && ((me.User is { } mine && owner.Equals(mine)) || owner.IsWellKnown(WellKnownSidType.LocalSystemSid));
+    }
 
     private static bool IsThisUsersInThisSession(int pid)
     {
-        using var process = Native.OpenProcess(Native.ProcessQueryLimitedInformation, false, pid);
-        if (process.IsInvalid) return false;
         if (!Native.ProcessIdToSessionId(pid, out var session) || !Native.ProcessIdToSessionId(Environment.ProcessId, out var ours) || session != ours) return false;
-        if (!Native.OpenProcessToken(process, Native.TokenQuery, out var token)) return false;
+        using var me = WindowsIdentity.GetCurrent();
+        return OwnerOf(pid) is { } owner && me.User is { } mine && owner.Equals(mine);
+    }
+
+    /// <summary>The account a process runs as; null when it can't be read.</summary>
+    private static SecurityIdentifier? OwnerOf(int pid)
+    {
+        using var process = Native.OpenProcess(Native.ProcessQueryLimitedInformation, false, pid);
+        if (process.IsInvalid || !Native.OpenProcessToken(process, Native.TokenQuery, out var token)) return null;
         using (token)
         using (var identity = new WindowsIdentity(token.DangerousGetHandle()))
-        using (var me = WindowsIdentity.GetCurrent())
-            return identity.User is { } user && me.User is { } mine && user.Equals(mine);
+            return identity.User;
     }
 
     private static int? ServiceProcessId(string name)

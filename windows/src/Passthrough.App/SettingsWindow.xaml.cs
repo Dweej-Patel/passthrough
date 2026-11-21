@@ -21,6 +21,7 @@ public sealed partial class SettingsWindow : Window
     private bool _forgetting;
     private bool _revoking;
     private readonly RemoteAccess? _remote;
+    private readonly bool _isAdministrator = Passthrough.Windows.Shell.UserEnvironment.IsAdministratorAccount();
 
     public SettingsWindow(SessionViewModel viewModel, RemoteAccess? remote = null)
     {
@@ -216,7 +217,8 @@ public sealed partial class SettingsWindow : Window
             RemoteSwitch.Toggled += OnRemoteToggled;
         }
         var shells = _remote.Catalog.Shells.Select(s => s.Name).ToList();
-        ShellsText.Text = shells.Count == 0 ? "" : $"Shells: {string.Join(", ", shells)}. They open as you, never as administrator.";
+        ShellsText.Text = (shells.Count == 0 ? "" : $"Shells: {string.Join(", ", shells)}. They open as you, never as administrator.")
+            + (_isAdministrator ? " Your Windows account is an administrator, so a phone with access can do anything you can, including approving administrator prompts." : "");
         var connected = _remote.ConnectedPhones.ToHashSet();
         WithAccess.Clear();
         foreach (var phone in _remote.Access.Phones)
