@@ -297,7 +297,7 @@ public sealed class ServiceRemote : IDisposable
                 Shells = state?.Shells ?? [],
                 Screens = rdp == Passthrough.Core.Screen.RemoteDesktopVerdict.Ready ? [HostInfo.ScreenRdp] : [],
                 Rdp = rdp,
-                Access = new HostAccess { Shell = true, Screen = screen },
+                Access = new HostAccess { Shell = true, Screen = screen, Share = Directory.MayShare(phone) },
                 Lock = true,
                 User = screen ? state?.User : null,
                 SleepAfter = SleepAfter(),

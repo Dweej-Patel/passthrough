@@ -328,6 +328,10 @@ public enum ShellError: String, Error, Sendable, CaseIterable {
     case rdpUnavailable = "rdp_unavailable"
     /// Too many tries in a short time (`retryAfter`).
     case tryLater = "try_later"
+    /// The host already lets in as many computers as it allows (8 a phone, 16 in all).
+    case tooManyComputers = "too_many_computers"
+    /// A hand-over would replace access to a host with different details (its certificate or iroh id).
+    case passConflict = "pass_conflict"
 }
 
 /// A screen-only pass one device (a phone) gets a Mac to issue for another

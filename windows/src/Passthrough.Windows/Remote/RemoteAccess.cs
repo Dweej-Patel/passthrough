@@ -397,6 +397,13 @@ public sealed class RemoteAccess : IAccessAdmin, IDisposable
 
     public Task<PipeAdminReply> StopScreenAsync(string phoneId) => _admin.StopScreenAsync(phoneId);
 
+    /// <summary>"May share access with other computers" for a phone (stage 7).</summary>
+    public async Task SetMayShareAsync(string phoneId, bool on)
+    {
+        await _admin.SetMayShareAsync(phoneId, on).ConfigureAwait(false);
+        await RefreshPhonesAsync().ConfigureAwait(false);
+    }
+
     /// <summary>Stay awake while plugged in and the sleep timer, from the service.</summary>
     public Task<PipeAdminReply> PowerAsync() => _admin.PowerAsync();
 

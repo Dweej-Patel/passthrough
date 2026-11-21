@@ -106,7 +106,9 @@ public sealed class TlsListener : IDisposable
             return;
         }
         // Over TLS there is no hello: the challenge comes first (ShellListener.swift).
-        await _gate.ServeAsync(admission, ssl, expectHello: false).ConfigureAwait(false);
+        // A computer's signature is bound to this certificate's hash (stage 7 a.1).
+        await _gate.ServeAsync(admission, ssl, expectHello: false,
+            new Passthrough.Core.Shell.Access.ProofBinding(Passthrough.Core.Shell.Access.ComputerProof.PathTls, Convert.FromHexString(_identity.Pin))).ConfigureAwait(false);
     }
 
     private SslServerAuthenticationOptions Options() => new()

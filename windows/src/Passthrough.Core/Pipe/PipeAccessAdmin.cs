@@ -99,6 +99,8 @@ public sealed class PipeAccessAdmin : IAccessAdmin
 
     public Task<PipeAdminReply> DisconnectAsync(string phoneId) => AskAsync(new PipeAdminRequest { Op = PipeAdminRequest.Disconnect, Phone = phoneId });
 
+    public Task<PipeAdminReply> SetMayShareAsync(string phoneId, bool on) => AskAsync(new PipeAdminRequest { Op = PipeAdminRequest.SetMayShare, Phone = phoneId, On = on });
+
     public Task<PipeAdminReply> ScreenAsync() => AskAsync(new PipeAdminRequest { Op = PipeAdminRequest.Screen });
 
     public Task<PipeAdminReply> StopScreenAsync(string phoneId) => AskAsync(new PipeAdminRequest { Op = PipeAdminRequest.Disconnect, Phone = phoneId, What = "screen" });

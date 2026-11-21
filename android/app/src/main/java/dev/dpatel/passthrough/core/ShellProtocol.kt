@@ -203,6 +203,10 @@ enum class ShellError(val wire: String) {
     RDP_UNAVAILABLE("rdp_unavailable"),
     /** Too many tries in a short time (`retryAfter`). */
     TRY_LATER("try_later"),
+    /** The host already lets in as many computers as it allows (8 a phone, 16 in all). */
+    TOO_MANY_COMPUTERS("too_many_computers"),
+    /** A hand-over would replace access to a host with different details (its certificate or iroh id). */
+    PASS_CONFLICT("pass_conflict"),
 }
 
 /** Something that happened on the Mac, for the phone's timeline. Mirrors MacEvent in ShellProtocol.swift. */

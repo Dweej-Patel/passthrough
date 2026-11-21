@@ -19,10 +19,13 @@ public sealed record ShellPhone
     /// <summary>The owner also lets this phone see and control the screen. Off unless turned on.</summary>
     [JsonPropertyName("screen")] public bool? Screen { get; init; }
 
+    /// <summary>The owner lets this phone give another of its computers access here ("May share access with other computers"). Off unless turned on.</summary>
+    [JsonPropertyName("share")] public bool? Share { get; init; }
+
     [JsonIgnore] public bool ScreenAllowed => Screen ?? false;
 
     public bool Equals(ShellPhone? other) => other is not null && PhoneId == other.PhoneId && Label == other.Label
-        && PairingSlot == other.PairingSlot && Key.AsSpan().SequenceEqual(other.Key) && GrantedAt == other.GrantedAt && Screen == other.Screen
+        && PairingSlot == other.PairingSlot && Key.AsSpan().SequenceEqual(other.Key) && GrantedAt == other.GrantedAt && Screen == other.Screen && Share == other.Share
         && (PreviousKey is null ? other.PreviousKey is null : other.PreviousKey is not null && PreviousKey.AsSpan().SequenceEqual(other.PreviousKey));
 
     public override int GetHashCode() => HashCode.Combine(PhoneId, PairingSlot);
@@ -197,6 +200,26 @@ public sealed class ShellAccessStore : IShellAccess
             return false;
         }
     }
+
+    /// <summary>Lets the phone share access with other computers, or stops it (stopping holds in memory, like Screen off).</summary>
+    public bool SetShareAllowed(string phoneId, bool allowed)
+    {
+        lock (_writeLock)
+        {
+            if (LoadForWrite() is not { } list) return false;
+            var index = list.FindIndex(p => p.PhoneId == phoneId);
+            if (index < 0) return false;
+            var next = new List<ShellPhone>(list) { [index] = list[index] with { Share = allowed ? true : null } };
+            if (allowed) return Store(next, list);
+            SetCache(next);
+            var saved = Write(next);
+            if (saved) Saved();
+            Changed?.Invoke();
+            return saved;
+        }
+    }
+
+    public bool ShareAllowed(string phoneId) => Phones.FirstOrDefault(p => p.PhoneId == phoneId)?.Share == true;
 
     /// <summary>The phone granted through <paramref name="pairingSlot"/> now goes by <paramref name="label"/>; true only if a stored label changed.</summary>
     public bool Relabel(string pairingSlot, string label)

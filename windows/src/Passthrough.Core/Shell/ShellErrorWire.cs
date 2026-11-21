@@ -20,6 +20,8 @@ public static class ShellErrorWire
         (ShellError.SignedOut, "signed_out"),
         (ShellError.RdpUnavailable, "rdp_unavailable"),
         (ShellError.TryLater, "try_later"),
+        (ShellError.TooManyComputers, "too_many_computers"),
+        (ShellError.PassConflict, "pass_conflict"),
     ];
 
     /// <summary>Every wire name, in declaration order.</summary>

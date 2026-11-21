@@ -38,6 +38,12 @@ public sealed class ShellGateHooks
     public Action<Screen.RelayRecord>? ViewEnded { get; init; }
     public Action<Screen.RelayRecord>? ViewStarted { get; init; }
 
+    /// <summary>A phone's screen grant for a computer waits for the owner at this host (a PC: Windows asks for a password).</summary>
+    public bool ScreenNeedsOwner { get; init; } = true;
+
+    /// <summary>A phone gave a computer access here (the notice that stays until the owner answers it).</summary>
+    public Action<string, Access.ShellComputer>? ComputerGranted { get; init; }
+
     /// <summary>Something a person would want in the log ("iPhone opened a session"). Never secrets.</summary>
     public Action<string>? Event { get; init; }
 }
@@ -209,8 +215,12 @@ public sealed class ShellGate
         return ServeAsync(admission, stream, expectHello);
     }
 
-    /// <summary>Runs the handshake on <paramref name="stream"/> within the admission's time, then the connection; owns the stream.</summary>
-    public async Task ServeAsync(Admission admission, Stream stream, bool expectHello = true)
+    /// <summary>
+    /// Runs the handshake on <paramref name="stream"/> within the admission's time, then the connection; owns the stream.
+    /// <paramref name="binding"/> is what a computer's signature must be bound to on this listener (its certificate's
+    /// hash on TLS, its endpoint id on iroh); without one no computer is let in.
+    /// </summary>
+    public async Task ServeAsync(Admission admission, Stream stream, bool expectHello = true, ProofBinding? binding = null)
     {
         var slot = admission.Slot!;
         if (!admission.Attach(stream) || slot.IsReleased) { Abandon(admission); stream.Dispose(); return; }
@@ -226,7 +236,7 @@ public sealed class ShellGate
             var nonce = RandomNumberGenerator.GetBytes(RemoteShell.NonceLength);
             await stream.WriteAsync(new ShellEnvelope(ShellEnvelope.Challenge) { Nonce = Convert.ToBase64String(nonce) }.EncodeLine()).ConfigureAwait(false);
             var proof = await reader.ReadLineAsync().ConfigureAwait(false);
-            var phoneId = proof is null ? null : Verify(proof, nonce);
+            var phoneId = proof is null ? null : Verify(proof, nonce, binding);
             if (phoneId is null)
             {
                 Log?.Invoke("shell: refused a connection that could not prove a shell key");
@@ -273,9 +283,22 @@ public sealed class ShellGate
     /// checked against two keys whatever the phone: missing ones (an unknown phone, no previous key) are throwaway keys.
     /// Proving the current key while a previous one is still accepted retires the previous one.
     /// </summary>
-    private string? Verify(byte[] line, byte[] nonce)
+    private string? Verify(byte[] line, byte[] nonce, ProofBinding? binding)
     {
-        if (Decode(line) is not { T: ShellEnvelope.Proof, PhoneID: { } phoneId, Mac: { } macText }) return null;
+        if (Decode(line) is not { T: ShellEnvelope.Proof, PhoneID: { } phoneId, Mac: { } macText } proof) return null;
+        // A computer also signs the challenge with its identity key, bound to this host (stage 7 a.1). One ECDSA check
+        // always runs for a computer id, against a decoy when there's nothing real, so a missing record costs the same.
+        var computerOk = true;
+        if (Computers.IsComputerId(phoneId))
+        {
+            byte[]? sig = null;
+            try { sig = proof.Sig is { } s ? Convert.FromBase64String(s) : null; } catch (FormatException) { }
+            var key = Access.Computer(phoneId)?.IdentityKey;
+            var real = key is not null && sig is { Length: 64 } && binding is not null;
+            var message = ComputerProof.Message(nonce, binding?.Path ?? 0, binding?.HostBinding ?? new byte[32], phoneId);
+            var valid = ComputerProof.IsValid(real ? sig! : new byte[64], real ? key! : ComputerProof.DecoyKey, message);
+            computerOk = real && valid;
+        }
         byte[] mac;
         try { mac = Convert.FromBase64String(macText); }
         catch (FormatException) { return null; }
@@ -287,7 +310,7 @@ public sealed class ShellGate
             var valid = RemoteShell.ProofIsValid(mac, key ?? RandomNumberGenerator.GetBytes(RemoteShell.KeyLength), nonce);
             if (valid && key is not null && matched is null) matched = i;
         }
-        if (matched is not { } index) return null;
+        if (matched is not { } index || !computerOk) return null;
         if (index == 0 && keys.Count > 1 && keys[0] is { } proven)
             ThreadPool.QueueUserWorkItem(_ => Access.ConfirmCurrentKey(phoneId, proven));
         return phoneId;

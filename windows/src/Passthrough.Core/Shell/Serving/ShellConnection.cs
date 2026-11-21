@@ -61,8 +61,9 @@ public sealed class ShellConnection : IShellAttachment
         Send(new ShellEnvelope(ShellEnvelope.Ready));
         if (_gate.Hooks.MacInfo() is { } info) Send(info);
         SendHost();
-        SendState();
-        SendSessions(_host.Sessions);
+        // A computer without the shell scope gets no state and no sessions (stage 7 a.3).
+        if (ShellScope) SendState();
+        if (ShellScope) SendSessions(_host.Sessions);
         try
         {
             while (await _reader.ReadLineAsync(_closing.Token).ConfigureAwait(false) is { } line)
@@ -193,6 +194,31 @@ public sealed class ShellConnection : IShellAttachment
         }
     }
 
+    /// <summary>
+    /// A phone gives another of its computers access (stage 7 a.2): the host's rules decide, then the new id and key go
+    /// back (<c>computerGranted</c>), with the scopes that wait for the owner here (<c>pending</c>).
+    /// </summary>
+    private void GrantComputer(ShellEnvelope m)
+    {
+        byte[]? idKey = null;
+        try { idKey = m.IdKey is { } k ? Convert.FromBase64String(k) : null; } catch (FormatException) { }
+        if (m.Name is not { } name || m.Viewer is not { } viewer || idKey is null || m.Scopes is not { Count: > 0 } scopes) { Fail(ShellError.BadRequest); return; }
+        var (computer, error) = _gate.Access.GrantComputer(PhoneId, name, viewer, m.Kind, idKey, scopes.ToHashSet(StringComparer.Ordinal), _gate.Hooks.ScreenNeedsOwner);
+        if (computer is null) { Fail(error ?? ShellError.BadRequest); return; }
+        var granted = new List<string>();
+        if (computer.Shell == true) granted.Add(Access.Computers.ScopeShell);
+        if (computer.Screen == true && computer.ScreenPending != true) granted.Add(Access.Computers.ScopeScreen);
+        Send(new ShellEnvelope(ShellEnvelope.ComputerGranted)
+        {
+            PhoneID = computer.Id,
+            Key = Convert.ToBase64String(computer.Key),
+            Scopes = granted,
+            Pending = computer.ScreenPending == true ? [Access.Computers.ScopeScreen] : null,
+        });
+        _gate.Hooks.ComputerGranted?.Invoke(Label, computer);
+        Event($"gave {computer.Name} access");
+    }
+
     /// <summary>Another of this phone's connections had its view stopped from the PC (<c>screenEnded</c>).</summary>
     internal void SendScreenEnded(string reason) => Send(new ShellEnvelope(ShellEnvelope.ScreenEnded) { Reason = reason });
 
@@ -213,13 +239,49 @@ public sealed class ShellConnection : IShellAttachment
 
     // MARK: Requests
 
+    /// <summary>A computer's connection (stage 7 a.3): what it may do is its scopes, asked from memory each time.</summary>
+    private bool IsComputer => Access.Computers.IsComputerId(PhoneId);
+
+    /// <summary>It may use the shell: a phone always (its Shell switch is checked elsewhere), a computer with its shell scope.</summary>
+    private bool ShellScope => !IsComputer || _gate.Access.Computer(PhoneId)?.Shell == true;
+
+    /// <summary>What a computer may ask (stage 7 a.3's table); null when it may, else why not.</summary>
+    private ShellError? ComputerRefusal(string? t)
+    {
+        if (!IsComputer) return null;
+        if (_gate.Access.Computer(PhoneId) is not { } computer) return ShellError.NotAuthorized; // revoked since
+        return t switch
+        {
+            ShellEnvelope.Ping or ShellEnvelope.Pong => null,
+            ShellEnvelope.List or ShellEnvelope.Open or ShellEnvelope.Attach or ShellEnvelope.Input or ShellEnvelope.Resize
+                or ShellEnvelope.Close or ShellEnvelope.Viewing => computer.Shell == true ? null : ShellError.NotAllowed,
+            // rdp: the relay checks the screen scope itself; screen and screenVideo are refused as for anyone on a PC.
+            ShellEnvelope.Rdp or ShellEnvelope.Screen or ShellEnvelope.ScreenVideo => null,
+            _ => ShellError.NotAllowed,
+        };
+    }
+
     private async Task HandleAsync(byte[] line)
     {
         ShellEnvelope message;
         try { message = ShellEnvelope.Decode(line); }
         catch (Protocol.ProtocolException) { Fail(ShellError.BadRequest); return; }
+        if (ComputerRefusal(message.T) is { } computerRefusal)
+        {
+            Fail(computerRefusal, message.Session, message.Ref);
+            if (computerRefusal == ShellError.NotAuthorized) Close();
+            return;
+        }
         switch (message.T)
         {
+            case ShellEnvelope.ComputerGrant:
+                GrantComputer(message);
+                break;
+            case ShellEnvelope.ComputerRevoke:
+                if (message.PhoneID is not { } revoking || !_gate.Access.RevokeComputer(revoking, PhoneId)) { Fail(ShellError.BadRequest); break; }
+                _gate.Disconnect(revoking);
+                Send(new ShellEnvelope(ShellEnvelope.ComputerRevoked));
+                break;
             case ShellEnvelope.List:
                 SendSessions(_host.Sessions);
                 break;
@@ -397,16 +459,21 @@ public sealed class ShellConnection : IShellAttachment
 
     // MARK: Unasked
 
-    internal void SendSessions(IReadOnlyList<ShellSessionInfo> list) => Send(new ShellEnvelope(ShellEnvelope.Sessions) { SessionList = [.. list] });
+    internal void SendSessions(IReadOnlyList<ShellSessionInfo> list)
+    {
+        if (ShellScope) Send(new ShellEnvelope(ShellEnvelope.Sessions) { SessionList = [.. list] });
+    }
 
     internal void SendState()
     {
-        if (_gate.Hooks.State(PhoneId) is { } state) Send(new ShellEnvelope(ShellEnvelope.MacState) { State = state });
+        if (ShellScope && _gate.Hooks.State(PhoneId) is { } state) Send(new ShellEnvelope(ShellEnvelope.MacState) { State = state });
     }
 
     internal void SendHost()
     {
-        if (_gate.Hooks.Host(PhoneId) is { } host) Send(new ShellEnvelope(ShellEnvelope.Host) { HostInfo = host });
+        if (_gate.Hooks.Host(PhoneId) is not { } host) return;
+        // A computer without the shell scope isn't told the shells.
+        Send(new ShellEnvelope(ShellEnvelope.Host) { HostInfo = ShellScope ? host : host with { Shells = [] } });
     }
 
     // MARK: Sending

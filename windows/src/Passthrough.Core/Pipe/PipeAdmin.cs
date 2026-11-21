@@ -10,7 +10,8 @@ namespace Passthrough.Core.Pipe;
 public sealed record PipeAdminRequest
 {
     public const string List = "list", GrantInfo = "grantInfo", AddKey = "addKey", SetScreen = "setScreen", Revoke = "revoke",
-        RevokeSlot = "revokeSlot", Relabel = "relabel", Disconnect = "disconnect", HandOver = "handOver", SetStayAwake = "setStayAwake", Power = "power", Screen = "screen";
+        RevokeSlot = "revokeSlot", Relabel = "relabel", Disconnect = "disconnect", HandOver = "handOver", SetStayAwake = "setStayAwake", Power = "power", Screen = "screen",
+        SetMayShare = "setMayShare";
 
     public uint Id { get; init; }
     public string Op { get; init; } = "";
@@ -57,6 +58,8 @@ public sealed record PipeDevice
     public string Label { get; init; } = "";
     public string PairingSlot { get; init; } = "";
     public bool Screen { get; init; }
+    /// <summary>May share access with other computers (stage 7).</summary>
+    public bool Share { get; init; }
     public long GrantedAt { get; init; }
     public int Connections { get; init; }
 }
@@ -117,7 +120,7 @@ public sealed class PipeAdminHandler(AccessDirectory directory, Func<GrantConten
                 {
                     Devices = [.. store.Phones.Select(p => new PipeDevice
                     {
-                        Phone = p.PhoneId, Label = p.Label, PairingSlot = p.PairingSlot, Screen = p.ScreenAllowed,
+                        Phone = p.PhoneId, Label = p.Label, PairingSlot = p.PairingSlot, Screen = p.ScreenAllowed, Share = p.Share == true,
                         GrantedAt = p.GrantedAt.ToUnixTimeSeconds(), Connections = connections(p.PhoneId),
                     })],
                 };
@@ -139,6 +142,11 @@ public sealed class PipeAdminHandler(AccessDirectory directory, Func<GrantConten
                 var set = store.SetScreenAllowed(screenPhone, on);
                 if (!on) EndScreen?.Invoke(screenPhone, "switched_off");
                 return set ? reply : reply with { Error = PipeAdminReply.StoreFailed };
+            case PipeAdminRequest.SetMayShare:
+                if (request.Phone is not { } sharer || request.On is not { } share) return reply with { Error = PipeAdminReply.BadRequest };
+                if (!store.IsKnown(sharer)) return reply with { Error = PipeAdminReply.Unknown };
+                // Turning it off stops new sharing; computers it already let in stay until removed.
+                return store.SetShareAllowed(sharer, share) ? reply : reply with { Error = PipeAdminReply.StoreFailed };
             case PipeAdminRequest.Revoke:
                 if (request.Phone is not { } revoked || !store.IsKnown(revoked)) return reply with { Error = PipeAdminReply.Unknown };
                 return Removed(reply, store.Revoke(revoked));
