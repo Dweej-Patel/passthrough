@@ -274,6 +274,13 @@ these steps as written and check each one before building.
   validation with retries, direct or relayed paths, and clean closes. Handles
   can't be forged into memory, a panic never crosses into the app, and every
   wait ends when its object is closed. Not yet listening for phones.
+* Windows: the remote shell protocol, ported from the Mac with its tests: the
+  phones allowed a shell (kept in the secret store; taking access away holds
+  even when the store can't be written), the key proof with its handshake
+  limits, and each phone's connection: open (with the chosen shell), attach and
+  take over, typing, resizes, history and transcripts, lock, and what a PC
+  answers to what only a Mac does. A phone that stops reading is dropped at
+  8 MiB.
 * Remote shell: coming back to a session no longer plays it back from the
   top. The phone holds the Mac's replay until it is complete and draws it in
   one go, keeping what was on screen meanwhile, and says "Loading session…"
