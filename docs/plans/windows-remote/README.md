@@ -41,38 +41,35 @@ facts measured on a real PC.
 
 ## Where things stand
 
-* Planned: every stage. Built: nothing yet beyond the Windows foundation
-  already on `dev`.
-* Done from stage 0:
-  * [`Spikes/PcProbe`](../../../Spikes/PcProbe/README.md) (0.2): what a PC
-    can tell us without an administrator, run on one PC.
-  * [`Spikes/ConPtyProbe`](../../../Spikes/ConPtyProbe/README.md) (0.7):
-    **passes with the bundled ConPTY, fails with the inbox one**, so stage 3
-    bundles it with no fallback; Claude Code's status works through it. Its
-    README lists what stage 3's session manager must add (answer the
-    pseudoconsole's own start-up query, keep its win32-input and focus modes
-    from phones, accept BEL-terminated 7501 queries). WSL is still to be run
-    on a PC where WSL2 starts.
-* Open pull requests (each stacked on the one before, all against `dev`;
-  merge in this order):
-  * #42 CI: a Windows job, the .NET SDK pinned, NuGet locked (stage 1, PR 1).
-  * #43 the C# shell envelope, all three suites on the same fixtures (stage 1, PR 2).
-  * #44 the wire contract: `host`, shells, `signed_out`, `goingAway`, the
-    Remote Desktop relay messages, `hostKind`; the Mac sends `host` (stage 1, PR 3).
-  * #45 shell grants over the cable and log redaction (stage 3, PR 1).
-  * #46 the shell grant ledger (stage 3, first half of PR 2).
-  All were reviewed together and the findings fixed. Each says in its
-  description what still has to be checked by hand on a Mac and phones.
-* Deliberately left from that review: the Mac sends `host` once per connection
-  (a phone sees a changed Screen switch at its next connection); `hostKind`
-  takes only `mac` and `windows`; C# decodes a little more leniently than
-  Swift and Kotlin when a required field is missing; the plan's Swift and
-  Kotlin tests for `hostKind` on the grant and for `host` ordering on the Mac
-  listener are not written yet.
-* Next, on the PC: stage 3, second half of PR 2 (a control channel to every
-  attached phone, iPads pairing, Forget revoking shell access), then PR 3 (the
-  shell's logic ported from the Mac). Stage 1 PR 4 (computers) waits for stage 7.
-* Next, needing the Mac and a phone: spikes 0.1, 0.3, 0.5, 0.6, and stage 2
-  (the phones show a PC as a PC).
-* Needs your PC set up: Rust and the MSVC build tools (an administrator
-  install), for the iroh bridge in stage 3, PR 5.
+* Built on the PC, in open pull requests stacked in this order against `dev`
+  (merge in order; each description says what still needs a real device):
+  * #42–#44 stage 1: CI with a Windows job; the C# shell envelope; the wire
+    contract (`host`, shells, `signed_out`, `goingAway`, Remote Desktop relay
+    messages, `hostKind`), with the Mac sending `host`.
+  * #45–#49 stage 3, PRs 1–2: grants over the cable and log redaction; the
+    grant ledger; a channel to every attached phone, iPads pairing, Forget
+    revoking; grants to every paired, genuine channel; the address policy and
+    handshake limits.
+  * #50–#52 stage 3, PR 3: the terminal logic, recording, and the session
+    manager, ported with their tests.
+  * #53 stage 3, PR 4: real shells in the bundled ConPTY, a job each, from the
+    PC's catalog.
+  * #54 stage 3, PR 5: the iroh bridge (Rust, iroh 1.0.2 as the phones use).
+  * #55–#56 stage 3, PR 6: the shell protocol and the phones' access; Remote
+    access in the tray app, grants behind the cable peer check.
+* Found while building, differing from the plan:
+  * With Apple Devices (the Store app) there is no Apple Mobile Device
+    Service: usbmuxd is a packaged process running as the user. The peer
+    check accepts the service's process or that package's identity.
+  * The bundled ConPTY's opening (`ESC[1t ESC[c ESC[?1004h ESC[?9001h`) is
+    dropped before phones and recordings see it; its `ESC[c` is left
+    unanswered (nothing stalls).
+* Left from the stage 1 review, still: the Mac sends `host` once per
+  connection; `hostKind` takes only `mac` and `windows`; C# decodes a little
+  more leniently than Swift and Kotlin; Swift and Kotlin tests for `hostKind`
+  on the grant and `host` ordering are not written.
+* Next on the PC: stage 3 PRs 7–8 (history retention, relay settings and
+  reset identity), then stages 4 and 5.
+* Needs the Mac and a phone: spikes 0.1, 0.3, 0.5, 0.6; stage 2 (the phones
+  call the PC a PC: until then a PC works but is named a Mac); the first real
+  test of #56 (turn on, plug in, open a shell from cellular).
