@@ -228,6 +228,13 @@ these steps as written and check each one before building.
   carry changes, a growing wait for a phone that doesn't answer, nothing for a
   revoked phone until it reconnects) are ported from the Mac with its tests.
   Nothing uses them yet.
+* **Windows: every phone on the cable has its own channel, and an iPad pairs.**
+  The PC now keeps a control channel open to each attached device, not only
+  the phone in use, so two phones on two cables both pair and both show live
+  status, and an iPad pairs with its code like a phone. *Use this phone* only
+  marks which phone the PC will go online through; it no longer closes the
+  other phone's channel, and it is never offered for an iPad. *Try again*
+  works on any row that failed.
 * Remote shell: coming back to a session no longer plays it back from the
   top. The phone holds the Mac's replay until it is complete and draws it in
   one go, keeping what was on screen meanwhile, and says "Loading session…"

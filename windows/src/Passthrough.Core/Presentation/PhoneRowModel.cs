@@ -57,10 +57,10 @@ public sealed record PhoneRowModel
     /// <summary>Pair can be pressed: no code is in flight, and the phone is unpaired (a code typed before the welcome is held for it).</summary>
     public required bool CanPair { get; init; }
 
-    /// <summary>[Try again]: the active phone, once its channel failed for good.</summary>
+    /// <summary>[Try again]: any device whose channel failed for good.</summary>
     public required bool ShowRetry { get; init; }
 
-    /// <summary>[Use this phone]: any other phone that can be made active.</summary>
+    /// <summary>[Use this phone]: any other phone that can carry the PC's internet (never an iPad).</summary>
     public required bool ShowUse { get; init; }
 
     /// <summary>Forget pairing: this PC holds a token for the phone, whatever its state.</summary>
@@ -90,7 +90,6 @@ public sealed record PhoneRowModel
                 PhoneState.Paired => "Paired",
                 PhoneState.Pairing => "Pairing…",
                 PhoneState.Failed => "Failed",
-                PhoneState.RemoteOnlyLater => "Not supported yet",
                 _ => "",
             },
             Kind = e.Device.Kind,
@@ -99,7 +98,7 @@ public sealed record PhoneRowModel
             {
                 PhoneState.Paired => RowTone.Good,
                 PhoneState.Failed => RowTone.Problem,
-                PhoneState.NotPaired when e.IsActive => RowTone.Attention,
+                PhoneState.NotPaired => RowTone.Attention,
                 _ => RowTone.Neutral,
             },
             Busy = e.State is PhoneState.Connecting or PhoneState.Pairing,
@@ -108,10 +107,11 @@ public sealed record PhoneRowModel
                 ? $"{e.Active} {(e.Active == 1 ? "connection" : "connections")} · ↓ {Format.Bytes(e.Rx)} ↑ {Format.Bytes(e.Tx)}"
                 : "",
             Message = e.Message ?? "",
-            ShowPair = e.IsActive && (unpaired || e.State == PhoneState.Pairing),
+            // Every attached device has its own channel, so each row takes its own code.
+            ShowPair = unpaired || e.State == PhoneState.Pairing,
             CanPair = unpaired,
-            ShowRetry = e.IsActive && e.State == PhoneState.Failed,
-            ShowUse = !e.IsActive && e.State != PhoneState.RemoteOnlyLater,
+            ShowRetry = e.State == PhoneState.Failed,
+            ShowUse = !e.IsActive && e.Device.CanRoute,
             ShowForget = e.HasPairing,
         };
     }

@@ -34,18 +34,16 @@ public class PhoneRowModelTests
     [InlineData(PhoneState.Paired, "Paired")]
     [InlineData(PhoneState.Pairing, "Pairing…")]
     [InlineData(PhoneState.Failed, "Failed")]
-    [InlineData(PhoneState.RemoteOnlyLater, "Not supported yet")]
     public void StateText(PhoneState state, string text) => Assert.Equal(text, PhoneRowModel.From(Entry(IPhone, state)).StateText);
 
     [Theory]
     [InlineData(PhoneState.Paired, true, RowTone.Good, false)]
     [InlineData(PhoneState.Paired, false, RowTone.Good, false)]
     [InlineData(PhoneState.NotPaired, true, RowTone.Attention, false)]
-    [InlineData(PhoneState.NotPaired, false, RowTone.Neutral, false)] // only the phone in use asks for its code
+    [InlineData(PhoneState.NotPaired, false, RowTone.Attention, false)] // every device has its own channel, so each asks for its code
     [InlineData(PhoneState.Connecting, true, RowTone.Neutral, true)]
     [InlineData(PhoneState.Pairing, true, RowTone.Neutral, true)]
     [InlineData(PhoneState.Failed, true, RowTone.Problem, false)]
-    [InlineData(PhoneState.RemoteOnlyLater, false, RowTone.Neutral, false)]
     public void Tone_AndBusy(PhoneState state, bool active, RowTone tone, bool busy)
     {
         var row = PhoneRowModel.From(Entry(IPhone, state, active: active));
@@ -71,7 +69,7 @@ public class PhoneRowModelTests
     [Fact]
     public void Title_NamesTheKind_ForAnIPad()
     {
-        Assert.Equal(("iPad", "00008027…"), Pair(PhoneRowModel.From(Entry(IPad, PhoneState.RemoteOnlyLater, active: false))));
+        Assert.Equal(("iPad", "00008027…"), Pair(PhoneRowModel.From(Entry(IPad, PhoneState.NotPaired, active: false))));
         static (string, string) Pair(PhoneRowModel m) => (m.Title, m.Detail);
     }
 
@@ -119,7 +117,7 @@ public class PhoneRowModelTests
     [InlineData(PhoneState.Connecting, true, true, false, false)]  // a paired phone reconnecting: its welcome will prove it
     [InlineData(PhoneState.Paired, true, true, false, false)]
     [InlineData(PhoneState.Failed, true, false, false, false)]
-    [InlineData(PhoneState.NotPaired, false, false, false, true)]  // another phone: no box
+    [InlineData(PhoneState.NotPaired, false, false, true, true)]  // another phone takes its own code too
     public void CodeBox(PhoneState state, bool active, bool hasPairing, bool showPair, bool canPair)
     {
         var m = PhoneRowModel.From(Entry(IPhone, state, active, hasPairing));
@@ -133,11 +131,18 @@ public class PhoneRowModelTests
     [InlineData(PhoneState.Connecting, true, true, false, false, true)]
     [InlineData(PhoneState.Paired, false, true, false, true, true)]
     [InlineData(PhoneState.NotPaired, false, false, false, true, false)]
-    [InlineData(PhoneState.RemoteOnlyLater, false, false, false, false, false)]
     public void Buttons(PhoneState state, bool active, bool hasPairing, bool retry, bool use, bool forget)
     {
         var m = PhoneRowModel.From(Entry(IPhone, state, active, hasPairing));
         Assert.Equal((retry, use, forget), (m.ShowRetry, m.ShowUse, m.ShowForget));
+    }
+
+    [Fact]
+    public void AnIPad_IsNeverOfferedAsThePhoneInUse()
+    {
+        var m = PhoneRowModel.From(Entry(IPad, PhoneState.Paired, active: false, hasPairing: true));
+        Assert.False(m.ShowUse);
+        Assert.True(m.ShowForget);
     }
 
     [Fact]

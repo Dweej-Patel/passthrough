@@ -8,24 +8,26 @@ namespace Passthrough.Core.Session;
 
 /// <summary>
 /// The heart of the app (port of the device, pairing and reconnect parts of SessionCoordinator.swift): follows the
-/// attached phones, keeps one control channel open to the active phone, pairs it with a code, reconnects it, and
-/// forgets pairings.
+/// attached devices, keeps a control channel open to every one of them (iPads included), pairs each with a code,
+/// reconnects them, and forgets pairings. One attached phone that can carry the PC's internet is marked active: it
+/// decides the flyout's header and, later, which phone the PC goes online through. It no longer decides who has a
+/// channel: each device's phone app serves this PC on its own, and shell grants go to every one (stage 3 of the
+/// Windows plan, "a channel to every attached device").
 /// <para>
 /// Every state change runs as one work item on a single loop, in order: public calls, directory changes, watcher
-/// status changes, every client's events and the reconnect timer all queue there, so nothing interleaves. Events
-/// from a client that is no longer current are dropped.
+/// status changes, every client's events and the reconnect timers all queue there, so nothing interleaves. Events
+/// from a client that is no longer its device's current one are dropped.
 /// </para>
 /// </summary>
 public sealed class HostSession : IAsyncDisposable
 {
     /// <summary>
-    /// How long after the <paramref name="failures"/>-th drop in a row the active phone is tried again: 2 s more each
-    /// time, at most 30 s, as on the Mac. The count starts over on a welcome and when a phone is made active.
+    /// How long after the <paramref name="failures"/>-th drop in a row a device is tried again: 2 s more each time,
+    /// at most 30 s, as on the Mac. The count starts over on a welcome and on Try again.
     /// </summary>
     public static TimeSpan ReconnectDelay(int failures) => TimeSpan.FromSeconds(Math.Clamp(2 * failures, 2, 30));
 
     private const string AndroidEnabledKey = "androidEnabled";
-    private const string IPadMessage = "Pairs once Remote shell is available.";
     private const string SaveFailedMessage = "Couldn't save the pairing on this PC. Try pairing again.";
     private const string OpenFailedMessage = "Couldn't read this PC's saved pairings or settings. Try again.";
 
@@ -43,7 +45,9 @@ public sealed class HostSession : IAsyncDisposable
 
     // Everything below is touched only by work items on the loop.
     private readonly List<PhoneDevice> _devices = [];
-    /// <summary>Each attached phone's attachment number (see <see cref="PhoneEntry.Attachment"/>).</summary>
+    /// <summary>Each attached device's channel, by device id.</summary>
+    private readonly Dictionary<string, DeviceChannel> _channels = [];
+    /// <summary>Each attached device's attachment number (see <see cref="PhoneEntry.Attachment"/>).</summary>
     private readonly Dictionary<string, long> _attachments = [];
     private long _attachSeq;
     /// <summary>
@@ -55,38 +59,10 @@ public sealed class HostSession : IAsyncDisposable
     private string? _clientId;
     private bool _started;
     private bool _closed;
-    private PhoneDevice? _active;
-    private ControlClient? _client;
-    private PhoneState _activeState;
-    private DeviceStatus? _status;
-    private long _rx;
-    private long _tx;
-    private int _connections;
-    private string? _message;
-    /// <summary>The active phone's channel failed for good (failed proof, other version, token not saved, store unreadable): no reconnect until it is re-attached or made active.</summary>
-    private bool _held;
-    private ITimer? _reconnect;
-    private long _reconnectSeq;
-    /// <summary>Drops in a row since the last welcome; sets the back-off.</summary>
-    private int _failures;
-    /// <summary>Why the last retryable channel ended, shown while the phone is tried again; cleared by a welcome.</summary>
-    private string? _reason;
-    /// <summary>The last line logged for the active phone, so a repeat is not logged again.</summary>
-    private string? _lastLogged;
-    /// <summary>When the current channel was opened (a <see cref="TimeProvider"/> timestamp).</summary>
-    private long _openedAt;
-    /// <summary>The current channel uses a credential Forget removes: opened with a stored token, or paired on it.</summary>
-    private bool _channelHasCredential;
+    /// <summary>The device marked active (see the class summary), or null.</summary>
+    private string? _activeId;
     /// <summary>The name last saved (or tried) for each slot, so a status tick does not write the settings again.</summary>
     private readonly Dictionary<string, string> _namesSaved = [];
-    /// <summary>The current channel has had its welcome: a code given to it now goes out at once.</summary>
-    private bool _channelWelcomed;
-    /// <summary>
-    /// A code the user typed for the active phone that has not left this PC: held by a channel that was never welcomed.
-    /// When that channel fails to open, the next one is given it, so a code the flyout cleared is not lost. Cleared by a
-    /// welcome (the client sends it then) and when the active phone changes.
-    /// </summary>
-    private string? _unsentCode;
 
     public HostSession(DeviceDirectory directory, ISecretStore secrets, ISettingsStore settings, string computerName,
         Func<PhoneDevice, ControlIdentity, ControlClient> clientFactory, TimeProvider time)
@@ -119,10 +95,9 @@ public sealed class HostSession : IAsyncDisposable
     public event Action<Exception>? Error;
 
     /// <summary>
-    /// Fires, on the session's background loop, with a line for the log when the active phone's channel ends for a
-    /// new reason (a category, never phone-supplied text or a secret); the same reason again is not repeated until
-    /// the phone welcomes the PC or another phone is made active. Also when a paired phone says Passthrough was turned
-    /// off on it (<c>goodbye</c>).
+    /// Fires, on the session's background loop, with a line for the log when a device's channel ends for a new reason
+    /// (a category, never phone-supplied text or a secret); the same reason again is not repeated until that device
+    /// welcomes the PC or is tried again. Also when a paired phone says Passthrough was turned off on it.
     /// </summary>
     public event Action<string>? Log;
 
@@ -138,62 +113,63 @@ public sealed class HostSession : IAsyncDisposable
         return Task.CompletedTask;
     });
 
-    /// <summary>Moves the control channel to an attached phone that can carry the PC's internet; tries again a phone whose channel failed.</summary>
+    /// <summary>
+    /// Marks an attached phone that can carry the PC's internet as the active one, and tries it again if its channel
+    /// failed. Nothing for a device that is not attached or cannot carry the PC's internet.
+    /// </summary>
     public Task MakeActiveAsync(string phoneId) => RunAsync(async () =>
     {
         if (_closed || _devices.FirstOrDefault(d => d.Id == phoneId) is not { CanRoute: true } device) return;
-        if (device.Equals(_active) && _client is not null) return;
-        await ActivateAsync(device);
+        _activeId = device.Id;
+        if (_channels[device.Id].Client is null) await ReopenAsync(_channels[device.Id]);
     });
 
     /// <summary>
-    /// "Try again" for a phone whose channel failed: when it is the active phone, clears the hold and the failure
-    /// message and opens a fresh channel to it; otherwise makes it active. Nothing for a phone that is not attached
-    /// or cannot carry the PC's internet.
+    /// "Try again" for a device whose channel failed or is waiting to reconnect: clears the hold and the failure
+    /// message and opens a fresh channel to it. Nothing for a device that is not attached.
     /// </summary>
     public Task RetryAsync(string phoneId) => RunAsync(async () =>
     {
-        if (_closed || _devices.FirstOrDefault(d => d.Id == phoneId) is not { CanRoute: true } device) return;
-        await ActivateAsync(device); // dropping the old channel clears the hold and the message
+        if (_closed || !_channels.TryGetValue(phoneId, out var channel)) return;
+        await ReopenAsync(channel);
     });
 
     /// <summary>
-    /// Sends the six-digit code shown on a phone, addressed by the phone's id and the <see cref="PhoneEntry.Attachment"/>
-    /// of the row it was typed into, and checked when the call runs on the loop: only to that phone, still attached
-    /// that same time, still active and unpaired (NotPaired, or Connecting with no stored token). A channel still
-    /// opening holds the code until its welcome; with no channel (waiting to reconnect), or one that has just ended, a
-    /// fresh one is opened at once. True only when a client took the code for that phone; false when it was not
-    /// sent, so the caller can keep it.
+    /// Sends the six-digit code shown on a device, addressed by its id and the <see cref="PhoneEntry.Attachment"/> of
+    /// the row it was typed into, and checked when the call runs on the loop: only to that device, still attached that
+    /// same time, and unpaired (NotPaired, or Connecting with no stored token). A channel still opening holds the code
+    /// until its welcome; with no channel (waiting to reconnect), or one that has just ended, a fresh one is opened at
+    /// once. True only when a client took the code; false when it was not sent, so the caller can keep it.
     /// </summary>
     public Task<bool> SubmitCodeAsync(string phoneId, long attachment, string code) => RunAsync(async () =>
     {
-        if (_closed || _active is not { } device || device.Id != phoneId || AttachmentOf(device) != attachment) return false;
-        var unpaired = _activeState == PhoneState.NotPaired || (_activeState == PhoneState.Connecting && !HasToken(device));
+        if (_closed || !_channels.TryGetValue(phoneId, out var ch) || AttachmentOf(ch.Device) != attachment) return false;
+        var unpaired = ch.State == PhoneState.NotPaired || (ch.State == PhoneState.Connecting && !HasToken(ch.Device));
         if (!unpaired) return false;
-        if (_client is { } current && !await current.SubmitCodeAsync(code))
+        if (ch.Client is { } current && !await current.SubmitCodeAsync(code))
         {
             // The channel has ended but its Disconnected is still queued behind this call: drop it (its events no
             // longer count) and put the code on a fresh one, as during a back-off.
-            _client = null;
+            ch.Client = null;
             await current.DisposeAsync();
         }
-        else if (_client is not null) return TookCode(code);
-        OpenClient(keepState: true);
-        // A fresh client takes the code unless the store failed (the phone is Failed now, with Try again).
-        return _client is not null && await _client.SubmitCodeAsync(code) && TookCode(code);
+        else if (ch.Client is not null) return TookCode(ch, code);
+        OpenClient(ch, keepState: true);
+        // A fresh client takes the code unless the store failed (the device is Failed now, with Try again).
+        return ch.Client is not null && await ch.Client.SubmitCodeAsync(code) && TookCode(ch, code);
     });
 
-    private bool TookCode(string code)
+    private static bool TookCode(DeviceChannel ch, string code)
     {
-        // Before the welcome the client only holds the code; remember it until it goes out (see _unsentCode).
-        _unsentCode = _channelWelcomed ? null : code;
-        _activeState = PhoneState.Pairing;
-        _message = null;
-        _reason = null;
+        // Before the welcome the client only holds the code; remember it until it goes out (see UnsentCode).
+        ch.UnsentCode = ch.Welcomed ? null : code;
+        ch.State = PhoneState.Pairing;
+        ch.Message = null;
+        ch.Reason = null;
         return true;
     }
 
-    /// <summary>Deletes an attached phone's stored token (see <see cref="ForgetSlotAsync"/>); nothing for a phone that is not attached.</summary>
+    /// <summary>Deletes an attached device's stored token (see <see cref="ForgetSlotAsync"/>); nothing for a device that is not attached.</summary>
     public Task ForgetAsync(string phoneId) => RunAsync(() =>
     {
         if (_devices.FirstOrDefault(d => d.Id == phoneId) is { } device) return ForgetAsyncCore(device.PairingSlot);
@@ -201,24 +177,26 @@ public sealed class HostSession : IAsyncDisposable
     });
 
     /// <summary>
-    /// Deletes the token in a slot, whether or not its phone is attached (a phone sold or lost). When it is the
-    /// active phone's, closes its channel and opens a fresh one, which asks to pair. Forgetting a slot that holds
+    /// Deletes the token in a slot, whether or not its device is attached (a phone sold or lost). When an attached
+    /// device uses it, closes its channel and opens a fresh one, which asks to pair. Forgetting a slot that holds
     /// nothing does nothing, so a second Forget is not an error.
     /// </summary>
     public Task ForgetSlotAsync(string pairingSlot) => RunAsync(() => ForgetAsyncCore(pairingSlot));
 
-    /// <summary>The slots this PC holds a pairing token in, attached or not, sorted (empty after disposal).</summary>
-    public async Task<IReadOnlyList<string>> PairedSlotsAsync() => await RunAsync(() => Task.FromResult(_secrets.Slots())) ?? [];
+    /// <summary>The slots this PC holds a pairing token in, attached or not, sorted (empty after disposal). Only pairing tokens: other secrets are never listed as paired phones.</summary>
+    public async Task<IReadOnlyList<string>> PairedSlotsAsync() =>
+        await RunAsync(() => Task.FromResult<IReadOnlyList<string>>([.. _secrets.Slots().Where(PhoneDevice.IsPairingSlot)])) ?? [];
 
     private async Task ForgetAsyncCore(string slot)
     {
         _secrets.Delete(slot); // never read first: a slot that cannot be read can still be deleted
         _hasToken[slot] = false;
         ForgetName(slot);
-        // Reopen the active phone's channel only if it uses a credential (opened with a token, or paired on it), or if
-        // none is open (waiting or failed); an unpaired channel is left alone, so a second Forget changes nothing.
-        if (!_closed && _active is { } active && active.PairingSlot == slot && (_channelHasCredential || _client is null))
-            await ActivateAsync(active);
+        if (_closed) return;
+        // Reopen a channel that uses the credential (opened with the token, or paired on it), or that has none open
+        // (waiting or failed); an unpaired channel is left alone, so a second Forget changes nothing.
+        foreach (var ch in _channels.Values.Where(c => c.Device.PairingSlot == slot).ToList())
+            if (ch.HasCredential || ch.Client is null) await ReopenAsync(ch);
     }
 
     /// <summary>Remembers the choice; off stops the adb watcher (its phones leave), on starts it again.</summary>
@@ -230,15 +208,15 @@ public sealed class HostSession : IAsyncDisposable
         else if (_started) adb.Start();
     });
 
-    /// <summary>Closes the active phone's channel and stops the directory; later calls do nothing.</summary>
+    /// <summary>Closes every channel and stops the directory; later calls do nothing.</summary>
     public async ValueTask DisposeAsync()
     {
         if (Interlocked.Exchange(ref _disposed, 1) != 0) return;
-        // Closed first, so phones leaving as the watchers stop do not open a channel to another one.
+        // Closed first, so devices leaving as the watchers stop open nothing.
         await RunAsync(async () =>
         {
             _closed = true;
-            await DropActiveAsync();
+            foreach (var ch in _channels.Values.ToList()) await CloseChannelAsync(ch);
         });
         await _directory.StopAsync();
         _work.Writer.TryComplete();
@@ -285,57 +263,49 @@ public sealed class HostSession : IAsyncDisposable
         switch (change)
         {
             case DeviceChange.Attached a:
-                if (!_devices.Contains(a.Device))
-                {
-                    _devices.Add(a.Device);
-                    _attachments[a.Device.Id] = ++_attachSeq;
-                    _hasToken.Remove(a.Device.PairingSlot); // read afresh for each attachment
-                }
+                if (_devices.Contains(a.Device)) break;
+                _devices.Add(a.Device);
+                _attachments[a.Device.Id] = ++_attachSeq;
+                _hasToken.Remove(a.Device.PairingSlot); // read afresh for each attachment
+                var ch = new DeviceChannel(a.Device);
+                _channels[a.Device.Id] = ch;
+                OpenClient(ch);
                 break;
             case DeviceChange.Detached d:
                 _devices.Remove(d.Device);
                 _attachments.Remove(d.Device.Id);
-                if (d.Device.Equals(_active)) await DropActiveAsync();
+                if (_channels.Remove(d.Device.Id, out var gone)) await CloseChannelAsync(gone);
+                if (_activeId == d.Device.Id) _activeId = null;
                 break;
         }
-        // The active phone stays while attached; otherwise the first one that can carry the PC's internet.
-        if (_active is null && _devices.FirstOrDefault(d => d.CanRoute) is { } best) await ActivateAsync(best);
+        // The active marker stays while its phone is attached; otherwise the first one that can carry the PC's internet.
+        _activeId ??= _devices.FirstOrDefault(d => d.CanRoute)?.Id;
     }
 
-    private async Task ActivateAsync(PhoneDevice device)
+    /// <summary>Closes a device's channel and starts a fresh one, clearing its hold, message and back-off.</summary>
+    private async Task ReopenAsync(DeviceChannel ch)
     {
-        await DropActiveAsync();
-        _active = device;
-        OpenClient();
+        await CloseChannelAsync(ch);
+        OpenClient(ch);
     }
 
-    /// <summary>Closes the active phone's channel, cancels a pending reconnect, and leaves no phone active.</summary>
-    private async Task DropActiveAsync()
+    /// <summary>Closes a device's channel, cancels a pending reconnect, and forgets its state.</summary>
+    private static async Task CloseChannelAsync(DeviceChannel ch)
     {
-        CancelReconnect();
-        var client = _client;
-        _client = null;
-        _active = null;
-        _held = false;
-        _activeState = PhoneState.Connecting;
-        ClearStatus();
-        _message = null;
-        _reason = null;
-        _failures = 0;
-        _lastLogged = null;
-        _unsentCode = null;
+        var client = ch.Client;
+        ch.Reset();
         if (client is not null) await client.DisposeAsync();
     }
 
     /// <summary>
-    /// Opens a channel to the active phone with the token its slot holds, if well-formed. Keeps the message (a pairing
-    /// failure stays shown across a reconnect). <paramref name="keepState"/>: an unpaired phone stays NotPaired while the
-    /// fresh channel opens, so the code box stays up.
+    /// Opens a channel to a device with the token its slot holds, if well-formed. Keeps the message (a pairing
+    /// failure stays shown across a reconnect). <paramref name="keepState"/>: an unpaired device stays NotPaired while
+    /// the fresh channel opens, so the code box stays up.
     /// </summary>
-    private void OpenClient(bool keepState = false)
+    private void OpenClient(DeviceChannel ch, bool keepState = false)
     {
-        CancelReconnect();
-        var device = _active!;
+        ch.CancelReconnect();
+        var device = ch.Device;
         ControlClient client;
         try
         {
@@ -350,148 +320,145 @@ public sealed class HostSession : IAsyncDisposable
             // The slot or the settings could not be read or written (a locked file, a full disk): nothing to retry
             // on its own, but Try again may work once the store recovers.
             ReportError(e);
-            ClearStatus();
-            _activeState = PhoneState.Failed;
-            _message = OpenFailedMessage;
-            _held = true;
+            ch.ClearStatus();
+            ch.State = PhoneState.Failed;
+            ch.Message = OpenFailedMessage;
+            ch.Held = true;
             return;
         }
-        _client = client;
-        _openedAt = _time.GetTimestamp();
-        _channelHasCredential = _hasToken[device.PairingSlot];
-        _channelWelcomed = false;
-        if (!keepState) _activeState = _unsentCode is null ? PhoneState.Connecting : PhoneState.Pairing;
-        ClearStatus();
+        ch.Client = client;
+        ch.OpenedAt = _time.GetTimestamp();
+        ch.HasCredential = _hasToken[device.PairingSlot];
+        ch.Welcomed = false;
+        if (!keepState) ch.State = ch.UnsentCode is null ? PhoneState.Connecting : PhoneState.Pairing;
+        ch.ClearStatus();
         // A code an earlier channel never got to send: this one holds it until its welcome.
-        if (_unsentCode is { } code) _ = client.SubmitCodeAsync(code); // completes at once; true on a fresh client
+        if (ch.UnsentCode is { } code) _ = client.SubmitCodeAsync(code); // completes at once; true on a fresh client
         _readers.RemoveAll(t => t.IsCompleted);
         _readers.Add(Task.Run(async () =>
         {
-            await foreach (var e in client.Events.ReadAllAsync()) Post(() => OnClientEventAsync(client, e));
+            await foreach (var e in client.Events.ReadAllAsync()) Post(() => OnClientEventAsync(ch, client, e));
         }));
         _ = client.StartAsync(CancellationToken.None); // never faults; a failed open arrives as Disconnected
     }
 
-    private async Task OnClientEventAsync(ControlClient client, ControlEvent e)
+    private async Task OnClientEventAsync(DeviceChannel ch, ControlClient client, ControlEvent e)
     {
-        if (!ReferenceEquals(client, _client)) return; // a channel closed since: its events no longer count
+        // A channel closed since, or a device that left: its events no longer count.
+        if (!ReferenceEquals(client, ch.Client) || !_channels.TryGetValue(ch.Device.Id, out var current) || current != ch) return;
+        var device = ch.Device;
         switch (e)
         {
             case ControlEvent.Welcomed w:
-                // The phone is there: the back-off and the last reason start over.
-                (_failures, _reason, _lastLogged) = (0, null, null);
-                _channelWelcomed = true;
-                _unsentCode = null; // the client sent a held code with its answer to this welcome
+                // The device is there: the back-off and the last reason start over.
+                (ch.Failures, ch.Reason, ch.LastLogged) = (0, null, null);
+                ch.Welcomed = true;
+                ch.UnsentCode = null; // the client sent a held code with its answer to this welcome
                 if (w.Paired)
                 {
-                    _activeState = PhoneState.Paired;
-                    _message = null;
+                    ch.State = PhoneState.Paired;
+                    ch.Message = null;
                 }
-                else if (_activeState != PhoneState.Pairing) _activeState = PhoneState.NotPaired; // a code may already be on its way
+                else if (ch.State != PhoneState.Pairing) ch.State = PhoneState.NotPaired; // a code may already be on its way
                 break;
             case ControlEvent.PairedWith p:
                 try
                 {
-                    _secrets.Set(_active!.PairingSlot, p.Token);
-                    _hasToken[_active.PairingSlot] = true;
-                    _channelHasCredential = true;
+                    _secrets.Set(device.PairingSlot, p.Token);
+                    _hasToken[device.PairingSlot] = true;
+                    ch.HasCredential = true;
                 }
                 catch (Exception error)
                 {
                     // Unsaved, the pairing is lost on the next channel: say so, and stop here, as for a failed proof.
                     ReportError(error);
-                    _client = null; // its status and disconnect no longer count
-                    ClearStatus();
-                    _activeState = PhoneState.Failed;
-                    _message = SaveFailedMessage;
-                    _held = true;
+                    ch.Client = null; // its status and disconnect no longer count
+                    ch.ClearStatus();
+                    ch.State = PhoneState.Failed;
+                    ch.Message = SaveFailedMessage;
+                    ch.Held = true;
                     await client.DisposeAsync();
                     break;
                 }
-                _activeState = PhoneState.Paired;
-                _message = null;
+                ch.State = PhoneState.Paired;
+                ch.Message = null;
                 break;
             case ControlEvent.PairingFailed f:
-                if (_activeState == PhoneState.Pairing) _activeState = PhoneState.NotPaired;
-                _message = Describe(f.Reason, _active!.Kind.Label());
+                if (ch.State == PhoneState.Pairing) ch.State = PhoneState.NotPaired;
+                ch.Message = Describe(f.Reason, device.Kind.Label());
                 if (f.Reason == PairingFailure.Locked)
                 {
                     // The phone closes this channel; the code still works on a new one, so open that now (as the Mac does).
-                    _client = null;
+                    ch.Client = null;
                     await client.DisposeAsync();
-                    OpenClient(keepState: true);
+                    OpenClient(ch, keepState: true);
                 }
                 break;
             case ControlEvent.StatusUpdate s:
-                _activeState = PhoneState.Paired; // status flows only on a proved channel
-                (_status, _rx, _tx, _connections) = (s.Status, s.Rx, s.Tx, s.Active);
-                SaveName(_active!.PairingSlot, s.Status.DeviceName);
+                ch.State = PhoneState.Paired; // status flows only on a proved channel
+                (ch.Status, ch.Rx, ch.Tx, ch.Connections) = (s.Status, s.Rx, s.Tx, s.Active);
+                SaveName(device.PairingSlot, s.Status.DeviceName);
                 break;
             case ControlEvent.Goodbye:
                 // The phone's user turned Passthrough off; the phone closes next. Logged, as on the Mac.
-                WriteLog($"{_active!.Id} ({_active.Kind.Label()}): Passthrough was turned off on the phone");
+                WriteLog($"{device.Id} ({device.Kind.Label()}): Passthrough was turned off on the phone");
                 break;
             case ControlEvent.Disconnected d:
-                _client = null;
-                ClearStatus();
+                ch.Client = null;
+                ch.ClearStatus();
                 if (d.Error is ControlException failure)
                 {
                     // Retrying cannot fix a failed proof or another version; the stored token stays.
-                    _unsentCode = null;
-                    _activeState = PhoneState.Failed;
-                    _message = failure.Message;
-                    _held = true;
-                    LogClosed(failure.Kind.ToString(), retrying: false);
+                    ch.UnsentCode = null;
+                    ch.State = PhoneState.Failed;
+                    ch.Message = failure.Message;
+                    ch.Held = true;
+                    LogClosed(ch, failure.Kind.ToString(), retrying: false);
                 }
-                else if (d.Error is null && _activeState == PhoneState.NotPaired
-                    && _time.GetElapsedTime(_openedAt) >= ProtocolConstants.UnauthenticatedTimeout / 2)
+                else if (d.Error is null && ch.State == PhoneState.NotPaired
+                    && _time.GetElapsedTime(ch.OpenedAt) >= ProtocolConstants.UnauthenticatedTimeout / 2)
                 {
                     // The phone closes a channel that has not paired within 10 s unless a code is showing. The user may
                     // still be reading the code off the phone: a fresh channel at once, and the box stays (as on the
                     // Mac; not for a channel closed sooner, so something closing channels at once is not looped on).
                     await client.DisposeAsync();
-                    OpenClient(keepState: true);
+                    OpenClient(ch, keepState: true);
                     break;
                 }
                 else
                 {
                     var category = DisconnectReason.Classify(d.Error);
-                    _reason = DisconnectReason.Describe(category, _active!.Kind);
+                    ch.Reason = DisconnectReason.Describe(category, device.Kind);
                     // A code that never reached the phone waits for the next channel: the row stays Pairing.
-                    _activeState = _unsentCode is null ? PhoneState.Connecting : PhoneState.Pairing;
-                    LogClosed(category.ToString(), retrying: true);
-                    ScheduleReconnect();
+                    ch.State = ch.UnsentCode is null ? PhoneState.Connecting : PhoneState.Pairing;
+                    LogClosed(ch, category.ToString(), retrying: true);
+                    ScheduleReconnect(ch);
                 }
                 await client.DisposeAsync(); // already over; this just waits for its background work
                 break;
         }
     }
 
-    private void ScheduleReconnect()
+    private void ScheduleReconnect(DeviceChannel ch)
     {
-        CancelReconnect();
-        _failures++;
-        var seq = _reconnectSeq;
-        _reconnect = _time.CreateTimer(_ => Post(() =>
+        ch.CancelReconnect();
+        ch.Failures++;
+        var seq = ch.ReconnectSeq;
+        ch.Reconnect = _time.CreateTimer(_ => Post(() =>
         {
-            if (seq == _reconnectSeq && !_closed && !_held && _active is not null && _client is null) OpenClient();
+            if (seq == ch.ReconnectSeq && !_closed && !ch.Held && ch.Client is null
+                && _channels.TryGetValue(ch.Device.Id, out var current) && current == ch)
+                OpenClient(ch);
             return Task.CompletedTask;
-        }), null, ReconnectDelay(_failures), Timeout.InfiniteTimeSpan);
+        }), null, ReconnectDelay(ch.Failures), Timeout.InfiniteTimeSpan);
     }
 
-    private void CancelReconnect()
+    /// <summary>Logs why a device's channel ended, unless that was the last line logged for it.</summary>
+    private void LogClosed(DeviceChannel ch, string category, bool retrying)
     {
-        _reconnectSeq++;
-        _reconnect?.Dispose();
-        _reconnect = null;
-    }
-
-    /// <summary>Logs why the active phone's channel ended, unless that was the last line logged for it.</summary>
-    private void LogClosed(string category, bool retrying)
-    {
-        var line = $"{_active!.Id} ({_active.Kind.Label()}): channel closed: {category}" + (retrying ? "; retrying" : "");
-        if (line == _lastLogged) return;
-        _lastLogged = line;
+        var line = $"{ch.Device.Id} ({ch.Device.Kind.Label()}): channel closed: {category}" + (retrying ? "; retrying" : "");
+        if (line == ch.LastLogged) return;
+        ch.LastLogged = line;
         WriteLog(line);
     }
 
@@ -521,8 +488,6 @@ public sealed class HostSession : IAsyncDisposable
         catch (Exception e) { ReportError(e); } // the token is gone; a name left behind only labels nothing
     }
 
-    private void ClearStatus() => (_status, _rx, _tx, _connections) = (null, 0, 0, 0);
-
     /// <summary>The Mac's wording for a failed code (SessionCoordinator.swift), naming the device.</summary>
     private static string Describe(PairingFailure reason, string kind) => reason switch
     {
@@ -550,13 +515,12 @@ public sealed class HostSession : IAsyncDisposable
     private PhoneEntry EntryFor(PhoneDevice d)
     {
         var name = DeviceNames.Get(_settings, d.PairingSlot);
-        if (!d.CanRoute) return new PhoneEntry(d, PhoneState.RemoteOnlyLater, false, null, 0, 0, 0, IPadMessage, HasToken(d), AttachmentOf(d), name);
-        if (d.Equals(_active)) return new PhoneEntry(d, _activeState, true, _status, _rx, _tx, _connections, _message ?? _reason, HasToken(d), AttachmentOf(d), name);
-        var hasToken = HasToken(d);
-        return new PhoneEntry(d, hasToken ? PhoneState.Paired : PhoneState.NotPaired, false, null, 0, 0, 0, null, hasToken, AttachmentOf(d), name);
+        var ch = _channels[d.Id];
+        return new PhoneEntry(d, ch.State, d.Id == _activeId, ch.Status, ch.Rx, ch.Tx, ch.Connections, ch.Message ?? ch.Reason,
+            HasToken(d), AttachmentOf(d), name);
     }
 
-    /// <summary>Whether the phone's slot holds a well-formed token (cached, see <see cref="_hasToken"/>); a slot that cannot be read counts as empty and is reported once.</summary>
+    /// <summary>Whether the device's slot holds a well-formed token (cached, see <see cref="_hasToken"/>); a slot that cannot be read counts as empty and is reported once.</summary>
     private bool HasToken(PhoneDevice d)
     {
         if (_hasToken.TryGetValue(d.PairingSlot, out var known)) return known;
@@ -572,7 +536,7 @@ public sealed class HostSession : IAsyncDisposable
     }
 
     /// <summary>
-    /// The phone's stored token, checked for format before use: anything else in the slot counts as no token (the
+    /// The device's stored token, checked for format before use: anything else in the slot counts as no token (the
     /// slot is left alone; pairing again replaces it).
     /// </summary>
     private string? StoredToken(PhoneDevice d) =>

@@ -130,9 +130,8 @@ public class HostSessionTests
     private static PhoneDevice IPhone(FakePhone phone) =>
         new("usbmux:3", PhoneKind.IPhone, "00008110…", "token.iphone.00008110-AAAA", WatchTransport.UsbMux, Connect(phone));
 
-    private static PhoneDevice IPad() =>
-        new("usbmux:4", PhoneKind.IPad, "00008027…", "token.ipad.00008027-BBBB", WatchTransport.UsbMux,
-            (_, _) => throw new InvalidOperationException("an iPad is never connected"));
+    private static PhoneDevice IPad(FakePhone phone) =>
+        new("usbmux:4", PhoneKind.IPad, "00008027…", "token.ipad.00008027-BBBB", WatchTransport.UsbMux, Connect(phone));
 
     private static Func<int, CancellationToken, Task<Stream>> Connect(FakePhone phone) => (port, ct) =>
         port == ProtocolConstants.ControlPort ? phone.Open(ct) : throw new InvalidOperationException($"port {port}");
@@ -150,36 +149,51 @@ public class HostSessionTests
     }
 
     [Fact]
-    public async Task ActivePhone_PrefersRoutingPhone_KeepsCurrent()
+    public async Task EveryDeviceGetsAChannel_TheActiveMarkerPrefersARoutingPhoneAndStays()
     {
+        await using var iPadPhone = new FakePhone();
         await using var androidPhone = new FakePhone();
         await using var iPhonePhone = new FakePhone();
         await using var h = new Harness();
         await h.Session.StartAsync();
-        var iPad = IPad();
+        var iPad = IPad(iPadPhone);
         var android = Android(androidPhone);
         var iPhone = IPhone(iPhonePhone);
 
         h.Usb.Attach(iPad);
-        var s = await h.WaitState(s => Entry(s, iPad) is not null);
-        Assert.Equal(PhoneState.RemoteOnlyLater, Entry(s, iPad)!.State);
-        Assert.Equal("Pairs once Remote shell is available.", Entry(s, iPad)!.Message);
-        Assert.False(Entry(s, iPad)!.IsActive);
+        var s = await h.WaitState(s => Entry(s, iPad) is { State: PhoneState.NotPaired });
+        Assert.False(Entry(s, iPad)!.IsActive); // an iPad carries no internet: never the active one
 
         h.Adb.Attach(android);
         s = await h.WaitState(s => Entry(s, android) is { IsActive: true, State: PhoneState.NotPaired });
 
         h.Usb.Attach(iPhone);
-        s = await h.WaitState(s => Entry(s, iPhone) is not null);
+        s = await h.WaitState(s => Entry(s, iPhone) is { State: PhoneState.NotPaired });
         Assert.Equal([iPad, android, iPhone], s.Phones.Select(p => p.Device));
-        Assert.True(Entry(s, android)!.IsActive);
+        Assert.True(Entry(s, android)!.IsActive); // the marker stays where it was
         Assert.Equal(new PhoneEntry(iPhone, PhoneState.NotPaired, false, null, 0, 0, 0, null, false, Entry(s, iPhone)!.Attachment), Entry(s, iPhone));
-        Assert.Equal(PhoneState.RemoteOnlyLater, Entry(s, iPad)!.State);
-        Assert.Equal([android], h.Clients.Select(c => c.Device));
+        Assert.Equal([iPad, android, iPhone], h.Clients.Select(c => c.Device));
     }
 
     [Fact]
-    public async Task MakeActive_SwitchesChannel()
+    public async Task IPad_PairsLikeAPhone()
+    {
+        await using var iPadPhone = new FakePhone { IssuedToken = PhoneToken, DeviceName = "Dee's iPad" };
+        await using var h = new Harness();
+        await h.Session.StartAsync();
+        var iPad = IPad(iPadPhone);
+        h.Usb.Attach(iPad);
+        await h.WaitState(s => Entry(s, iPad) is { State: PhoneState.NotPaired });
+
+        Assert.True(await h.Submit(iPad, iPadPhone.Code));
+        var s = await h.WaitState(s => Entry(s, iPad) is { State: PhoneState.Paired, Status: not null });
+        Assert.Equal("Dee's iPad", Entry(s, iPad)!.Status!.DeviceName);
+        Assert.Equal(PhoneToken, h.Secrets.Get("token.ipad.00008027-BBBB"));
+        Assert.False(Entry(s, iPad)!.IsActive);
+    }
+
+    [Fact]
+    public async Task MakeActive_MovesTheMarker_BothKeepTheirChannels()
     {
         await using var androidPhone = new FakePhone();
         await using var iPhonePhone = new FakePhone();
@@ -189,15 +203,14 @@ public class HostSessionTests
         var iPhone = IPhone(iPhonePhone);
         h.Adb.Attach(android);
         h.Usb.Attach(iPhone);
-        await h.WaitState(s => Entry(s, android) is { IsActive: true, State: PhoneState.NotPaired } && Entry(s, iPhone) is not null);
+        await h.WaitState(s => Entry(s, android) is { IsActive: true, State: PhoneState.NotPaired } && Entry(s, iPhone) is { State: PhoneState.NotPaired });
 
         await h.Session.MakeActiveAsync(iPhone.Id);
 
-        Assert.True(h.Client(0).Client.Events.Completion.IsCompleted);
-        await androidPhone.WaitClosedAsync();
         var s = await h.WaitState(s => Entry(s, iPhone) is { IsActive: true, State: PhoneState.NotPaired });
+        Assert.False(h.Client(0).Client.Events.Completion.IsCompleted); // the Android phone's channel stays open
         Assert.Equal(new PhoneEntry(android, PhoneState.NotPaired, false, null, 0, 0, 0, null, false, Entry(s, android)!.Attachment), Entry(s, android));
-        Assert.Equal([android, iPhone], h.Clients.Select(c => c.Device));
+        Assert.Equal([android, iPhone], h.Clients.Select(c => c.Device)); // no channel was opened for the move
     }
 
     [Fact]
@@ -412,18 +425,19 @@ public class HostSessionTests
         var iPhone = IPhone(iPhonePhone);
         h.Adb.Attach(android);
         h.Usb.Attach(iPhone);
-        var s = await h.WaitState(s => Entry(s, android) is { IsActive: true, State: PhoneState.NotPaired } && Entry(s, iPhone) is not null);
-        var typedFor = Entry(s, android)!; // the user types into the Android row...
-        await h.Session.MakeActiveAsync(iPhone.Id); // ...as the iPhone becomes active
-        s = await h.WaitState(s => Entry(s, iPhone) is { IsActive: true, State: PhoneState.NotPaired });
+        var s = await h.WaitState(s => Entry(s, android) is { IsActive: true, State: PhoneState.NotPaired } && Entry(s, iPhone) is { State: PhoneState.NotPaired });
+        var androidRow = Entry(s, android)!;
 
-        Assert.False(await h.Session.SubmitCodeAsync(typedFor.Device.Id, typedFor.Attachment, iPhonePhone.Code));
-        Assert.False(await h.Session.SubmitCodeAsync(iPhone.Id, typedFor.Attachment, iPhonePhone.Code)); // another attachment's number
-
-        await h.Session.MakeActiveAsync(android.Id); // nothing went to either phone
-        await h.WaitState(s => Entry(s, android) is { IsActive: true, State: PhoneState.NotPaired });
+        // A row's attachment number names that row only: it never sends a code to another device.
+        Assert.False(await h.Session.SubmitCodeAsync(iPhone.Id, androidRow.Attachment, iPhonePhone.Code));
+        await h.WaitState(s => Entry(s, iPhone) is { State: PhoneState.NotPaired });
         Assert.DoesNotContain(iPhonePhone.Received, m => m.T == ControlEnvelope.Pair);
-        Assert.DoesNotContain(androidPhone.Received, m => m.T == ControlEnvelope.Pair);
+
+        // Any attached device takes its own code, active or not.
+        await h.Session.MakeActiveAsync(iPhone.Id);
+        Assert.True(await h.Session.SubmitCodeAsync(android.Id, androidRow.Attachment, androidPhone.Code));
+        await h.WaitState(s => Entry(s, android) is { State: PhoneState.Paired, IsActive: false });
+        Assert.DoesNotContain(iPhonePhone.Received, m => m.T == ControlEnvelope.Pair);
     }
 
     [Fact]
@@ -877,7 +891,7 @@ public class HostSessionTests
     }
 
     [Fact]
-    public async Task Retry_PhoneNotActive_MakesItActive()
+    public async Task Retry_PhoneNotActive_ReopensOnlyItsChannel()
     {
         await using var androidPhone = new FakePhone();
         await using var iPhonePhone = new FakePhone();
@@ -891,8 +905,9 @@ public class HostSessionTests
 
         await h.Session.RetryAsync(iPhone.Id);
 
-        await h.WaitState(s => Entry(s, iPhone) is { IsActive: true, State: PhoneState.NotPaired } && Entry(s, android) is { IsActive: false });
-        Assert.Equal([android, iPhone], h.Clients.Select(c => c.Device));
+        await h.WaitState(s => Entry(s, iPhone) is { IsActive: false, State: PhoneState.NotPaired } && Entry(s, android) is { IsActive: true });
+        Assert.Equal([android, iPhone, iPhone], h.Clients.Select(c => c.Device)); // a fresh channel for the iPhone alone
+        Assert.False(h.Client(0).Client.Events.Completion.IsCompleted);
     }
 
     [Fact]
@@ -999,8 +1014,9 @@ public class HostSessionTests
             h.Adb.Attach(android);
             h.Usb.Attach(iPhone);
 
-            var s = await h.WaitState(s => Entry(s, android) is { IsActive: true, State: PhoneState.NotPaired } && Entry(s, iPhone) is not null);
-            Assert.Equal(PhoneState.NotPaired, Entry(s, iPhone)!.State);
+            var s = await h.WaitState(s => Entry(s, android) is { IsActive: true, State: PhoneState.NotPaired } && Entry(s, iPhone) is { State: PhoneState.Failed });
+            // Its own channel could not read its slot: that row fails (with Try again), the Android phone is unaffected.
+            Assert.Equal("Couldn't read this PC's saved pairings or settings. Try again.", Entry(s, iPhone)!.Message);
             Assert.NotEmpty(h.Errors);
 
             // Later calls still run and complete.
@@ -1015,7 +1031,7 @@ public class HostSessionTests
     }
 
     [Fact]
-    public async Task PairedPhone_ItsNameIsSaved_AndNamesItOnceItIsNoLongerActive()
+    public async Task PairedPhone_ItsNameIsSaved_AndItKeepsItsStatusWhenNoLongerActive()
     {
         await using var androidPhone = new FakePhone { IssuedToken = PhoneToken, DeviceName = "Dee's Pixel" };
         await using var iPhonePhone = new FakePhone();
@@ -1034,7 +1050,8 @@ public class HostSessionTests
         await h.WaitState(s => Entry(s, iPhone) is not null);
         await h.Session.MakeActiveAsync(iPhone.Id);
         var s = await h.WaitState(s => Entry(s, android) is { IsActive: false });
-        Assert.Equal((PhoneState.Paired, (DeviceStatus?)null, "Dee's Pixel"), (Entry(s, android)!.State, Entry(s, android)!.Status, Entry(s, android)!.SavedName));
+        Assert.Equal((PhoneState.Paired, "Dee's Pixel"), (Entry(s, android)!.State, Entry(s, android)!.SavedName));
+        Assert.Equal("Dee's Pixel", Entry(s, android)!.Status!.DeviceName); // its channel stays: its status stays live
     }
 
     [Fact]
