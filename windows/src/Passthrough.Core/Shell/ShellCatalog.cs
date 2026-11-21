@@ -53,18 +53,18 @@ public sealed class ShellCatalog
         var found = new List<(string Id, string Name, string Executable, string[] Arguments)>();
         void Add(string id, string name, string executable, params string[] arguments)
         {
-            if (Path.IsPathFullyQualified(executable) && probe.FileExists(executable)) found.Add((id, name, executable, arguments));
+            if (IsAbsolute(executable) && probe.FileExists(executable)) found.Add((id, name, executable, arguments));
         }
-        Add("pwsh", "PowerShell", Path.Combine(probe.ProgramFiles, "PowerShell", "7", "pwsh.exe"), "-NoLogo");
-        Add("powershell", "Windows PowerShell", Path.Combine(probe.System32, "WindowsPowerShell", "v1.0", "powershell.exe"), "-NoLogo");
-        Add("cmd", "Command Prompt", Path.Combine(probe.System32, "cmd.exe"));
-        var wsl = Path.Combine(probe.System32, "wsl.exe");
+        Add("pwsh", "PowerShell", Join(probe.ProgramFiles, "PowerShell", "7", "pwsh.exe"), "-NoLogo");
+        Add("powershell", "Windows PowerShell", Join(probe.System32, "WindowsPowerShell", "v1.0", "powershell.exe"), "-NoLogo");
+        Add("cmd", "Command Prompt", Join(probe.System32, "cmd.exe"));
+        var wsl = Join(probe.System32, "wsl.exe");
         if (probe.FileExists(wsl))
             foreach (var distribution in probe.WslDistributions().Where(IsValidDistribution).Distinct(StringComparer.OrdinalIgnoreCase))
                 Add($"wsl:{distribution}", distribution, wsl, "-d", distribution, "--cd", "~");
-        var git = new[] { probe.GitInstallFolder(), Path.Combine(probe.ProgramFiles, "Git") }
-            .OfType<string>().Where(Path.IsPathFullyQualified)
-            .Select(folder => Path.Combine(folder, "bin", "bash.exe"))
+        var git = new[] { probe.GitInstallFolder(), Join(probe.ProgramFiles, "Git") }
+            .OfType<string>().Where(IsAbsolute)
+            .Select(folder => Join(folder, "bin", "bash.exe"))
             .FirstOrDefault(probe.FileExists);
         if (git is not null) Add("git-bash", "Git Bash", git, "--login", "-i");
 
@@ -73,4 +73,11 @@ public sealed class ShellCatalog
             new HostShell { Id = f.Id, Name = f.Name, Default = f.Id == defaultId ? true : null },
             new ShellCommand(f.Id, f.Executable, f.Arguments)))]);
     }
+
+    /// <summary>A Windows path from a drive's root (<c>C:\…</c>), whatever OS Core runs on: never relative, never a share.</summary>
+    internal static bool IsAbsolute(string path) =>
+        path.Length >= 3 && char.IsAsciiLetter(path[0]) && path[1] == ':' && path[2] == '\\' && !path.Contains("\\..", StringComparison.Ordinal);
+
+    /// <summary>Windows path joining (<c>\</c>), whatever OS Core runs on.</summary>
+    private static string Join(string folder, params string[] parts) => string.Join('\\', [folder.TrimEnd('\\', '/'), .. parts]);
 }
