@@ -126,7 +126,7 @@ internal sealed class FakePc : IServiceControl, IFirewallRules, IMachineRegistry
 
     // MARK: IFirewallRules
 
-    public IReadOnlyList<FirewallRule> InGroup() => [.. Rules];
+    public IReadOnlyList<FirewallRule> InGroup(string group = ServiceDefinition.FirewallGroup) => [.. Rules.Where(r => r.Group == group)];
 
     public void Add(FirewallRule rule)
     {
@@ -134,10 +134,10 @@ internal sealed class FakePc : IServiceControl, IFirewallRules, IMachineRegistry
         Rules.Add(rule);
     }
 
-    public void Remove(string name)
+    public void Remove(string name, string group = ServiceDefinition.FirewallGroup)
     {
         Call("remove-rule");
-        Rules.RemoveAll(r => r.Name == name);
+        Rules.RemoveAll(r => r.Name == name && r.Group == group);
     }
 
     public void SetEnabled(string name, bool enabled)

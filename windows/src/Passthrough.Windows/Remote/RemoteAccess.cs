@@ -380,6 +380,23 @@ public sealed class RemoteAccess : IAccessAdmin, IDisposable
         await RefreshPhonesAsync().ConfigureAwait(false);
     }
 
+    /// <summary>The Screen row for this account, from the service.</summary>
+    public async Task<PipeScreenRow?> ScreenRowAsync() => (await _admin.ScreenAsync().ConfigureAwait(false)).ScreenRow;
+
+    /// <summary>
+    /// Screen's setup, its consent for this account, and the owner's choices about an open Remote Desktop: one
+    /// administrator prompt each (<c>--configure screen</c>, <c>screen-close</c>, <c>screen-open</c>).
+    /// </summary>
+    public async Task<string?> ConfigureScreenAsync(string what)
+    {
+        if (InstalledExe() is not { } installed) return "Remote access isn't set up on this PC.";
+        var result = await ElevatedSetup.RunAsync(installed, ["--configure", what], new SetupInput(), _ => { }, _log).ConfigureAwait(false);
+        StatusChanged?.Invoke();
+        return Sentence(result);
+    }
+
+    public Task<PipeAdminReply> StopScreenAsync(string phoneId) => _admin.StopScreenAsync(phoneId);
+
     /// <summary>Stay awake while plugged in and the sleep timer, from the service.</summary>
     public Task<PipeAdminReply> PowerAsync() => _admin.PowerAsync();
 

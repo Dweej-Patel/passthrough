@@ -15,14 +15,14 @@ public sealed class WindowsFirewallRules : IFirewallRules
     private static dynamic Policy() =>
         Activator.CreateInstance(Type.GetTypeFromProgID("HNetCfg.FwPolicy2", throwOnError: true)!)!;
 
-    public IReadOnlyList<FirewallRule> InGroup()
+    public IReadOnlyList<FirewallRule> InGroup(string group = ServiceDefinition.FirewallGroup)
     {
         var found = new List<FirewallRule>();
         foreach (dynamic rule in Policy().Rules)
         {
-            if (rule.Grouping as string != ServiceDefinition.FirewallGroup) continue;
+            if (rule.Grouping as string != group) continue;
             found.Add(new FirewallRule((string)rule.Name, (int)rule.Protocol, (string?)rule.LocalPorts ?? "*", (string?)rule.ApplicationName ?? "",
-                (string?)rule.ServiceName, (string?)rule.RemoteAddresses ?? "*", (bool)rule.Enabled));
+                (string?)rule.ServiceName, (string?)rule.RemoteAddresses ?? "*", (bool)rule.Enabled, group, (int)rule.Action == 0));
         }
         return found;
     }
@@ -31,13 +31,13 @@ public sealed class WindowsFirewallRules : IFirewallRules
     {
         dynamic created = Activator.CreateInstance(Type.GetTypeFromProgID("HNetCfg.FWRule", throwOnError: true)!)!;
         created.Name = rule.Name;
-        created.Grouping = ServiceDefinition.FirewallGroup;
+        created.Grouping = rule.Group;
         created.Description = "Added by Passthrough's Remote access. Turn it off in Passthrough's settings.";
         created.Direction = DirectionIn;
-        created.Action = ActionAllow;
+        created.Action = rule.Block ? 0 : ActionAllow;
         created.Protocol = rule.Protocol;
         if (rule.LocalPorts != "*") created.LocalPorts = rule.LocalPorts;
-        created.ApplicationName = rule.Program;
+        if (rule.Program.Length > 0) created.ApplicationName = rule.Program;
         if (rule.Service is { } service) created.ServiceName = service;
         created.Profiles = ProfilesAll;
         created.RemoteAddresses = rule.RemoteAddresses;
@@ -46,11 +46,11 @@ public sealed class WindowsFirewallRules : IFirewallRules
         Policy().Rules.Add(created);
     }
 
-    public void Remove(string name)
+    public void Remove(string name, string group = ServiceDefinition.FirewallGroup)
     {
         var rules = Policy().Rules;
         // Rules.Remove takes the first with the name; ours are removed until none is left in the group.
-        for (var i = 0; i < 16 && InGroup().Any(r => r.Name == name); i++) rules.Remove(name);
+        for (var i = 0; i < 16 && InGroup(group).Any(r => r.Name == name); i++) rules.Remove(name);
     }
 
     public void SetEnabled(string name, bool enabled)

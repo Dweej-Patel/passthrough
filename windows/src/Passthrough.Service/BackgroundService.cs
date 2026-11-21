@@ -65,7 +65,7 @@ internal sealed class BackgroundService
             ? new ServiceRemote.TlsOptions(Path.Combine(_machine.StoreFolder, "tls.cer"))
             : null;
         if (tls is null) Log("tls: this Windows has no TLS 1.3 server; phones use the built-in connection only");
-        Remote = new ServiceRemote(store, _installed.InstallFolder, Trays!, () => _state.Relay.Url, Log, tls: tls);
+        Remote = new ServiceRemote(store, _installed.InstallFolder, Trays!, () => _state.Relay.Url, Log, tls: tls, screenSetup: () => _state.Rdp);
         Trays!.Admin = Remote.Admin.Handle;
         Remote.Start();
     }

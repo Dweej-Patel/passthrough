@@ -10,7 +10,7 @@ namespace Passthrough.Core.Pipe;
 public sealed record PipeAdminRequest
 {
     public const string List = "list", GrantInfo = "grantInfo", AddKey = "addKey", SetScreen = "setScreen", Revoke = "revoke",
-        RevokeSlot = "revokeSlot", Relabel = "relabel", Disconnect = "disconnect", HandOver = "handOver", SetStayAwake = "setStayAwake", Power = "power";
+        RevokeSlot = "revokeSlot", Relabel = "relabel", Disconnect = "disconnect", HandOver = "handOver", SetStayAwake = "setStayAwake", Power = "power", Screen = "screen";
 
     public uint Id { get; init; }
     public string Op { get; init; } = "";
@@ -20,6 +20,8 @@ public sealed record PipeAdminRequest
     /// <summary>A phone's shell key, base64 (<see cref="AddKey"/>).</summary>
     public string? Key { get; init; }
     public bool? On { get; init; }
+    /// <summary><see cref="Disconnect"/>: <c>all</c> (its shells and views) or <c>screen</c> (its views only).</summary>
+    public string? What { get; init; }
     /// <summary>The access records stage 3 kept in the tray app, moved into the service once (<see cref="HandOver"/>).</summary>
     public List<ShellPhone>? Records { get; init; }
 }
@@ -41,7 +43,12 @@ public sealed record PipeAdminReply
     /// <summary>The PC's sleep timer on the current power source, in seconds (0: never).</summary>
     public int? SleepAfter { get; init; }
     public bool? OnMains { get; init; }
+    /// <summary>The Screen row for the caller's account (<see cref="PipeAdminRequest.Screen"/>).</summary>
+    public PipeScreenRow? ScreenRow { get; init; }
 }
+
+/// <summary>Settings' Screen row: <c>host.rdp</c>'s value, the row's state (done, needed, problem), its sentence and its button.</summary>
+public sealed record PipeScreenRow(string Rdp, string State, string Text, string? Action, string? Reason);
 
 /// <summary>One phone with access, as Settings shows it.</summary>
 public sealed record PipeDevice
@@ -93,6 +100,12 @@ public sealed class PipeAdminHandler(AccessDirectory directory, Func<GrantConten
     public Func<(bool StayAwake, int SleepAfter, bool OnMains)>? PowerState { get; init; }
     public Action<bool>? SetStayAwake { get; init; }
 
+    /// <summary>Ends a phone's views of the screen, keeping its shells, and tells its other connections why (<c>screenEnded</c>).</summary>
+    public Action<string, string>? EndScreen { get; init; }
+
+    /// <summary>The Screen row for an account; null when this PC has no relay.</summary>
+    public Func<string, PipeScreenRow?>? ScreenRow { get; init; }
+
     public PipeAdminReply Handle(string account, PipeAdminRequest request)
     {
         var store = directory.For(account);
@@ -122,7 +135,10 @@ public sealed class PipeAdminHandler(AccessDirectory directory, Func<GrantConten
             case PipeAdminRequest.SetScreen:
                 if (request.Phone is not { } screenPhone || request.On is not { } on) return reply with { Error = PipeAdminReply.BadRequest };
                 if (!store.IsKnown(screenPhone)) return reply with { Error = PipeAdminReply.Unknown };
-                return store.SetScreenAllowed(screenPhone, on) ? reply : reply with { Error = PipeAdminReply.StoreFailed };
+                // Off holds in memory even if it can't be written; its views end at once.
+                var set = store.SetScreenAllowed(screenPhone, on);
+                if (!on) EndScreen?.Invoke(screenPhone, "switched_off");
+                return set ? reply : reply with { Error = PipeAdminReply.StoreFailed };
             case PipeAdminRequest.Revoke:
                 if (request.Phone is not { } revoked || !store.IsKnown(revoked)) return reply with { Error = PipeAdminReply.Unknown };
                 return Removed(reply, store.Revoke(revoked));
@@ -135,7 +151,8 @@ public sealed class PipeAdminHandler(AccessDirectory directory, Func<GrantConten
                 return reply;
             case PipeAdminRequest.Disconnect:
                 if (request.Phone is not { } stopped || !store.IsKnown(stopped)) return reply with { Error = PipeAdminReply.Unknown };
-                disconnect(stopped);
+                if (request.What == "screen") EndScreen?.Invoke(stopped, "stopped");
+                else disconnect(stopped);
                 return reply;
             case PipeAdminRequest.HandOver:
                 return HandOver(account, request.Records ?? [], reply);
@@ -143,6 +160,8 @@ public sealed class PipeAdminHandler(AccessDirectory directory, Func<GrantConten
                 if (request.On is not { } awake || SetStayAwake is null) return reply with { Error = PipeAdminReply.BadRequest };
                 SetStayAwake(awake);
                 return reply;
+            case PipeAdminRequest.Screen:
+                return reply with { ScreenRow = ScreenRow?.Invoke(account) ?? new PipeScreenRow("service", "problem", "This copy of the service can't relay the screen.", null, null) };
             case PipeAdminRequest.Power:
                 if (PowerState?.Invoke() is not { } power) return reply with { Error = PipeAdminReply.BadRequest };
                 return reply with { StayAwake = power.StayAwake, SleepAfter = power.SleepAfter, OnMains = power.OnMains };

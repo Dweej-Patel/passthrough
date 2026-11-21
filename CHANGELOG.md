@@ -24,6 +24,19 @@ the **Before you rebuild** notes first. The Mac and phone apps update together.
   only, with a key that can't leave the PC, and names itself on the network as
   the PC's host name. The firewall rule lets in the local subnet and the
   private and Tailscale ranges only.
+* **Windows: the PC's screen, through Remote Desktop** (the PC side; the
+  iPhone's viewer comes next). Settings ▸ Remote access ▸ *Screen* sets it up
+  behind one administrator prompt. If Remote Desktop was off, Passthrough turns
+  it on blocked from the network (its own firewall rules, which a block makes
+  win over any allow rule), with Network Level Authentication required. If you
+  already use Remote Desktop open on your network, it is left exactly as it is,
+  and Settings offers to close it to the network. Each phone gets a *Screen*
+  box, off at first. The service relays only to Windows' own Remote Desktop
+  (it checks who answers on the port), tells the phone which certificate to
+  expect, refuses any connection that doesn't use Network Level
+  Authentication, and caps quick sign-in attempts below Windows' own lockout.
+  Removing Passthrough puts back every Remote Desktop setting it changed and
+  nothing else.
 * **Windows: Stay awake while plugged in**, and phones are told when the PC
   goes to sleep, shuts down or has Remote access turned off. A connected phone
   keeps the idle timer off for as long as it is connected and a minute after.

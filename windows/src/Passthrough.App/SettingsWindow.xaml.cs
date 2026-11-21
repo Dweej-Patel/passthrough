@@ -220,17 +220,79 @@ public sealed partial class SettingsWindow : Window
             RemoteSwitch.Toggled += OnRemoteToggled;
         }
         _ = ShowAwakeAsync();
+        _ = ShowScreenAsync();
         var shells = _remote.Catalog.Shells.Select(s => s.Name).ToList();
         ShellsText.Text = (shells.Count == 0 ? "" : $"Shells: {string.Join(", ", shells)}. They open as you, never as administrator.")
             + (_isAdministrator ? " Your Windows account is an administrator, so a phone with access can do anything you can, including approving administrator prompts." : "");
         var connected = _remote.ConnectedPhones.ToHashSet();
         WithAccess.Clear();
         foreach (var phone in _remote.Phones)
-            WithAccess.Add(new RemotePhoneRow(phone.Phone, phone.Label, phone.PairingSlot, connected.Contains(phone.Phone), _remote.Sessions.RunningSessions(phone.Phone)));
+            WithAccess.Add(new RemotePhoneRow(phone.Phone, phone.Label, phone.PairingSlot, connected.Contains(phone.Phone), _remote.Sessions.RunningSessions(phone.Phone),
+                phone.Screen, _screenReady));
         NoAccessText.Visibility = WithAccess.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
     }
 
     private bool _settingAwake;
+    private bool _screenReady;
+    private string? _screenAction;
+
+    /// <summary>The Screen row: what the service says this PC's Remote Desktop can do for this account, and the one fix.</summary>
+    private async Task ShowScreenAsync()
+    {
+        if (_remote?.State != RemoteAccessState.On || await _remote.ScreenRowAsync() is not { } row)
+        {
+            ScreenText.Text = "Turn Remote access on first.";
+            ScreenButton.Visibility = Visibility.Collapsed;
+            return;
+        }
+        var ready = row.Rdp == "ready";
+        if (ready != _screenReady)
+        {
+            _screenReady = ready;
+            ShowRemote();
+        }
+        ScreenText.Text = row.Reason is { } reason ? $"{row.Text} {reason}" : row.Text;
+        // Each fix is one administrator prompt.
+        _screenAction = row.Action switch
+        {
+            "Set up…" => "screen",
+            "Close it" or "Close it to the network" => "screen-close",
+            "Turn on" or "Require it" or "Try again" => "screen",
+            _ => null,
+        };
+        ScreenButton.Content = row.Action;
+        ScreenButton.Visibility = _screenAction is null ? Visibility.Collapsed : Visibility.Visible;
+    }
+
+    private async void OnScreenActionClick(object sender, RoutedEventArgs e)
+    {
+        if (_remote is null || _screenAction is null) return;
+        try
+        {
+            if (await _remote.ConfigureScreenAsync(_screenAction) is { } said) ShowError(said);
+            else ErrorBox.Visibility = Visibility.Collapsed;
+        }
+        catch (Exception ex)
+        {
+            LogFile.Error(ex);
+            ShowError("Could not set up the screen. See the log for details.");
+        }
+        await ShowScreenAsync();
+    }
+
+    private async void OnScreenClick(object sender, RoutedEventArgs e)
+    {
+        if (_remote is null) return;
+        var box = (CheckBox)sender;
+        var phone = (RemotePhoneRow)box.DataContext;
+        try { await _remote.SetScreenAllowedAsync(phone.PhoneId, box.IsChecked == true); }
+        catch (Exception ex)
+        {
+            LogFile.Error(ex);
+            ShowError("Could not change what it may see. See the log for details.");
+        }
+        ShowRemote();
+    }
 
     /// <summary>Staying reachable: the service's power facts, and the switch (no prompt: any allowed account may change it).</summary>
     private async Task ShowAwakeAsync()

@@ -22,8 +22,8 @@ public sealed record InstallState
     /// <summary>Install folders that were in use when replaced, queued for deletion at the next restart.</summary>
     public IReadOnlyList<string> StaleFolders { get; init; } = [];
     public RelayState Relay { get; init; } = new();
-    /// <summary>Stage 5's: what Remote Desktop was before Passthrough changed it.</summary>
-    public JsonElement? Rdp { get; init; }
+    /// <summary>Screen (stage 5): the mode, who consented, and what Remote Desktop was before Passthrough changed it; null when not set up.</summary>
+    public Screen.RemoteDesktopSetup? Rdp { get; init; }
 
     public sealed record CreatedThings
     {

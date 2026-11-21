@@ -17,6 +17,22 @@ public static class ServiceDefinition
     public const string Account = @"NT SERVICE\" + Name;
     public const string RegistryKey = @"SOFTWARE\Passthrough";
     public const string FirewallGroup = "Passthrough";
+    /// <summary>
+    /// The rules that keep Remote Desktop closed to the network live in a group of their own, so an update or repair
+    /// (which replaces the <see cref="FirewallGroup"/> rules) never takes them away while Remote Desktop stays on.
+    /// </summary>
+    public const string RemoteDesktopFirewallGroup = "Passthrough Remote Desktop";
+    public const string BlockTcpRuleName = "Passthrough: keep Remote Desktop closed (TCP-In)";
+    public const string BlockUdpRuleName = "Passthrough: keep Remote Desktop closed (UDP-In)";
+
+    /// <summary>Inbound block rules for Remote Desktop's port, every profile, every address: a block wins over any allow rule.</summary>
+    public static IReadOnlyList<FirewallRule> BlockRules(int port) =>
+    [
+        new FirewallRule(BlockTcpRuleName, Protocol: 6, LocalPorts: port.ToString(System.Globalization.CultureInfo.InvariantCulture), Program: "", Service: null,
+            RemoteAddresses: "*", Group: RemoteDesktopFirewallGroup, Block: true),
+        new FirewallRule(BlockUdpRuleName, Protocol: 17, LocalPorts: port.ToString(System.Globalization.CultureInfo.InvariantCulture), Program: "", Service: null,
+            RemoteAddresses: "*", Group: RemoteDesktopFirewallGroup, Block: true),
+    ];
     public const string ShortcutName = "Passthrough.lnk";
     /// <summary>At most this many Windows accounts may use the service (RECONCILIATION: up to 4).</summary>
     public const int MaxAccounts = 4;
@@ -89,5 +105,6 @@ public static class ServiceDefinition
     public static readonly IReadOnlyList<string> RuleNames = [TcpRuleName, UdpRuleName, PairingRuleName];
 }
 
-/// <summary>One inbound allow rule, in every profile, no edge traversal, in <see cref="ServiceDefinition.FirewallGroup"/>.</summary>
-public sealed record FirewallRule(string Name, int Protocol, string LocalPorts, string Program, string? Service, string RemoteAddresses, bool Enabled = true);
+/// <summary>One inbound rule, in every profile, no edge traversal: allow (or <paramref name="Block"/>), in <paramref name="Group"/>.</summary>
+public sealed record FirewallRule(string Name, int Protocol, string LocalPorts, string Program, string? Service, string RemoteAddresses, bool Enabled = true,
+    string Group = ServiceDefinition.FirewallGroup, bool Block = false);

@@ -47,13 +47,13 @@ public interface IServiceControl
 
 public interface IFirewallRules
 {
-    /// <summary>The rules in <see cref="ServiceDefinition.FirewallGroup"/>, by name.</summary>
-    IReadOnlyList<FirewallRule> InGroup();
+    /// <summary>The rules in <paramref name="group"/> (<see cref="ServiceDefinition.FirewallGroup"/> when not given), by name.</summary>
+    IReadOnlyList<FirewallRule> InGroup(string group = ServiceDefinition.FirewallGroup);
 
     void Add(FirewallRule rule);
 
-    /// <summary>Removes every rule of the group with this name.</summary>
-    void Remove(string name);
+    /// <summary>Removes every rule of <paramref name="group"/> with this name.</summary>
+    void Remove(string name, string group = ServiceDefinition.FirewallGroup);
 
     void SetEnabled(string name, bool enabled);
 }

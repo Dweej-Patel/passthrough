@@ -78,6 +78,21 @@
             </Border>
             <TextBlock x:Name="ShellsText" Style="{StaticResource CaptionTextBlockStyle}" TextWrapping="Wrap"
                        Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+            <Border Style="{StaticResource PtCardStyle}" Padding="16,12">
+                <Grid ColumnSpacing="12">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="Auto" />
+                    </Grid.ColumnDefinitions>
+                    <StackPanel VerticalAlignment="Center">
+                        <TextBlock Text="Screen, through Remote Desktop" />
+                        <TextBlock x:Name="ScreenText" Style="{StaticResource CaptionTextBlockStyle}" TextWrapping="Wrap"
+                                   Foreground="{ThemeResource TextFillColorSecondaryBrush}" AutomationProperties.LiveSetting="Polite"
+                                   Text="Turn Remote access on first." />
+                    </StackPanel>
+                    <Button x:Name="ScreenButton" Grid.Column="1" Visibility="Collapsed" Click="OnScreenActionClick" />
+                </Grid>
+            </Border>
             <Border x:Name="AwakeCard" Style="{StaticResource PtCardStyle}" Padding="16,12" Visibility="Collapsed">
                 <Grid ColumnSpacing="12">
                     <Grid.ColumnDefinitions>
@@ -151,6 +166,7 @@
                                     <ColumnDefinition Width="*" />
                                     <ColumnDefinition Width="Auto" />
                                     <ColumnDefinition Width="Auto" />
+                                    <ColumnDefinition Width="Auto" />
                                 </Grid.ColumnDefinitions>
                                 <Grid Width="32" Height="32">
                                     <Ellipse Fill="{ThemeResource ControlFillColorSecondaryBrush}" />
@@ -161,9 +177,12 @@
                                     <TextBlock Text="{x:Bind Detail}" Style="{StaticResource CaptionTextBlockStyle}"
                                                Foreground="{ThemeResource TextFillColorSecondaryBrush}" TextTrimming="CharacterEllipsis" />
                                 </StackPanel>
-                                <Button Grid.Column="2" Content="Stop" Click="OnStopClick" IsEnabled="{x:Bind CanStop}"
+                                <CheckBox Grid.Column="2" Content="Screen" MinWidth="0" IsChecked="{x:Bind Screen}" IsEnabled="{x:Bind ScreenSwitchEnabled}"
+                                          Click="OnScreenClick" AutomationProperties.Name="Let it see the screen"
+                                          ToolTipService.ToolTip="Let it see and control this PC's screen. Windows still asks for your password." />
+                                <Button Grid.Column="3" Content="Stop" Click="OnStopClick" IsEnabled="{x:Bind CanStop}"
                                         ToolTipService.ToolTip="End its connection and the shells it opened. It keeps its access." />
-                                <Button Grid.Column="3" Content="Revoke" Click="OnRevokeClick" />
+                                <Button Grid.Column="4" Content="Revoke" Click="OnRevokeClick" />
                             </Grid>
                         </Border>
                     </DataTemplate>

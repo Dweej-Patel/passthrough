@@ -49,7 +49,7 @@ public sealed class ServiceRemote : IDisposable
     public string? NetworkProblem { get; private set; }
 
     public ServiceRemote(ISecretStore secrets, string installFolder, ITrayHosts trays, Func<string?> relayUrl, Action<string> log, string? hostName = null, IrohRelay? relayOverride = null,
-        TlsOptions? tls = null)
+        TlsOptions? tls = null, Func<Passthrough.Core.Screen.RemoteDesktopSetup?>? screenSetup = null)
     {
         _secrets = secrets;
         _trays = trays;
@@ -60,10 +60,15 @@ public sealed class ServiceRemote : IDisposable
         _relayOverride = relayOverride;
         Directory = new AccessDirectory(_secrets, log: log);
         IrohEndpoint.UseLibraryIn(installFolder);
+        // Screen through Remote Desktop, when it is set up (install.json's rdp); a PC without it answers rdp_unavailable.
+        RemoteDesktop = screenSetup is null ? null : new Passthrough.Windows.Screen.RemoteDesktopGate(screenSetup, IsWorkAccount, log);
         Gate = new ShellGate(HostFor, Directory, new HandshakeLimiter(TimeSpan.FromSeconds(10), TimeProvider.System), Hooks(), log: log);
+        Gate.RelayRate.LockoutThreshold = LockoutThreshold();
         Admin = new PipeAdminHandler(Directory, Grant, ConnectionsOf, Disconnect, log)
         {
             PowerState = () => (StayAwake, SleepAfter(), PowerFacts.OnMains),
+            EndScreen = (phone, reason) => Gate.DisconnectScreen(phone, reason),
+            ScreenRow = account => RemoteDesktop?.Verdict(account) is { } v ? new PipeScreenRow(v.Rdp, v.RowState, v.Text, v.Action, v.Reason) : null,
             SetStayAwake = on =>
             {
                 _secrets.Set(StayAwakeSlot, on ? "true" : "false");
@@ -89,6 +94,26 @@ public sealed class ServiceRemote : IDisposable
     }
 
     public AccessDirectory Directory { get; }
+
+    /// <summary>This PC's Remote Desktop, when Screen is set up.</summary>
+    public Passthrough.Windows.Screen.RemoteDesktopGate? RemoteDesktop { get; }
+
+    /// <summary>An Entra (work) account, from its SID alone: no tray app is needed to know it.</summary>
+    internal static bool IsWorkAccount(string? sid) => sid?.StartsWith("S-1-12-1-", StringComparison.Ordinal) == true;
+
+    /// <summary>Windows' account lockout threshold (0: none), so the relay's cap stays below it.</summary>
+    private static int LockoutThreshold()
+    {
+        if (NetUserModalsGet(null, 3, out var buffer) != 0) return 0;
+        try { return Marshal.ReadInt32(buffer, 8); } // USER_MODALS_INFO_3: duration, observation window, threshold
+        finally { NetApiBufferFree(buffer); }
+    }
+
+    [DllImport("netapi32.dll", CharSet = CharSet.Unicode)]
+    private static extern int NetUserModalsGet(string? server, int level, out IntPtr buffer);
+
+    [DllImport("netapi32.dll")]
+    private static extern int NetApiBufferFree(IntPtr buffer);
 
     /// <summary>This PC's iroh id, and where a phone on this PC reaches it (for tests).</summary>
     internal string? IrohId => _endpoint?.Id;
@@ -261,6 +286,7 @@ public sealed class ServiceRemote : IDisposable
         {
             var state = OwnerHost(phone)?.State;
             var screen = Directory.ScreenAllowed(phone);
+            var rdp = RemoteDesktop?.Verdict(Directory.Owner(phone)).Rdp ?? "service";
             return new HostInfo
             {
                 Kind = HostInfo.KindWindows,
@@ -269,8 +295,8 @@ public sealed class ServiceRemote : IDisposable
                 SignedIn = state is not null,
                 App = state is not null,
                 Shells = state?.Shells ?? [],
-                Screens = [],
-                Rdp = "service",
+                Screens = rdp == Passthrough.Core.Screen.RemoteDesktopVerdict.Ready ? [HostInfo.ScreenRdp] : [],
+                Rdp = rdp,
                 Access = new HostAccess { Shell = true, Screen = screen },
                 Lock = true,
                 User = screen ? state?.User : null,
@@ -282,8 +308,15 @@ public sealed class ServiceRemote : IDisposable
             : new HostState { Control = false },
         Label = phone => Directory.Owner(phone) is { } owner ? Directory.For(owner).Phones.FirstOrDefault(p => p.PhoneId == phone)?.Label ?? "A phone" : "A phone",
         Lock = phone => OwnerHost(phone)?.Lock() ?? ShellError.SignedOut,
+        RemoteDesktop = RemoteDesktop,
+        AccountOf = phone => Directory.Owner(phone),
+        ViewStarted = v => _log($"screen: \"{v.Label}\" ({Short(v.PhoneId)}) account …{Tail(v.Account)} opened a view"),
+        ViewEnded = v => _log($"screen: \"{v.Label}\" ({Short(v.PhoneId)}) account …{Tail(v.Account)} view ended after {(v.End - v.Start)?.ToString(@"h\:mm\:ss")}; {v.BytesOut / 1e6:F1} MB out, {v.BytesIn / 1e6:F1} MB in; ended by {v.EndedBy}"),
         Event = e => _log($"shell: {e}"),
     };
+
+    private static string Short(string id) => id.Length > 8 ? id[..8] : id;
+    private static string Tail(string? sid) => sid?.Split('-')[^1] ?? "?";
 
     public void Dispose()
     {

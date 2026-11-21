@@ -23,10 +23,20 @@ public sealed class ShellGateHooks
     public Func<string, ShellError?>? Lock { get; init; }
 
     /// <summary>
-    /// A phone asked for the screen through Remote Desktop (<c>rdp</c>), and may see it: why it can't be had now, in
-    /// <see cref="HostInfo.Rdp"/>'s words, until the relay exists (stage 5).
+    /// A phone asked for the screen through Remote Desktop (<c>rdp</c>) and may see it, but there is no relay here:
+    /// why, in <see cref="HostInfo.Rdp"/>'s words.
     /// </summary>
     public Func<string, string> RdpUnavailable { get; init; } = _ => "service";
+
+    /// <summary>This PC's Remote Desktop, when the relay runs here (the service); null: none (<see cref="RdpUnavailable"/> answers).</summary>
+    public Screen.IRemoteDesktopGate? RemoteDesktop { get; init; }
+
+    /// <summary>The account that granted a phone (whose consent to Screen counts, whose caps it shares).</summary>
+    public Func<string, string?> AccountOf { get; init; } = _ => null;
+
+    /// <summary>A view of the screen started and ended (the log, the after-view notice).</summary>
+    public Action<Screen.RelayRecord>? ViewEnded { get; init; }
+    public Action<Screen.RelayRecord>? ViewStarted { get; init; }
 
     /// <summary>Something a person would want in the log ("iPhone opened a session"). Never secrets.</summary>
     public Action<string>? Event { get; init; }
@@ -78,6 +88,37 @@ public sealed class ShellGate
     internal ShellGateHooks Hooks { get; }
     internal TimeProvider Time { get; }
     internal Action<string>? Log { get; }
+
+    /// <summary>Views at once: 2 a phone, 4 in all, shared by every path.</summary>
+    internal Screen.ScreenViewLimit Views { get; } = new();
+
+    /// <summary>How often a grant may open the screen (RECONCILIATION's relay caps).</summary>
+    public Screen.RelayRateLimit RelayRate { get; } = new();
+
+    private readonly Dictionary<string, DateTimeOffset> _stoppedUntil = [];
+
+    /// <summary>After Stop (or Screen turned off), a phone's next <c>rdp</c> for 30 s answers <c>try_later</c>.</summary>
+    internal int StoppedFor(string phoneId)
+    {
+        lock (_lock)
+            return _stoppedUntil.TryGetValue(phoneId, out var until) && until > Time.GetUtcNow() ? (int)Math.Ceiling((until - Time.GetUtcNow()).TotalSeconds) : 0;
+    }
+
+    /// <summary>
+    /// Ends <paramref name="phoneId"/>'s views of the screen and keeps its shell connections (Stop, Screen turned off);
+    /// its other connections are told why (<c>screenEnded</c>).
+    /// </summary>
+    public void DisconnectScreen(string phoneId, string reason)
+    {
+        List<ShellConnection> all;
+        lock (_lock)
+        {
+            all = [.. _connections.Where(c => c.PhoneId == phoneId)];
+            _stoppedUntil[phoneId] = Time.GetUtcNow().AddSeconds(30);
+        }
+        foreach (var c in all.Where(c => c.IsRelaying)) c.Close();
+        foreach (var c in all.Where(c => !c.IsRelaying)) c.SendScreenEnded(reason);
+    }
 
     /// <summary>The phones connected now, one entry per connection.</summary>
     public IReadOnlyList<string> ConnectedPhones { get { lock (_lock) return [.. _connections.Select(c => c.PhoneId)]; } }

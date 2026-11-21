@@ -11,6 +11,9 @@ public sealed class ShellLineReader(Stream stream, int limit)
 
     public int Limit { get; set; } = limit;
 
+    /// <summary>Bytes read off the stream that no line has taken yet (a phone sent more than it should have).</summary>
+    public bool HasBuffered => _count > 0;
+
     /// <summary>The next line, without its newline; null once the stream ends between lines.</summary>
     public async Task<byte[]?> ReadLineAsync(CancellationToken ct = default)
     {

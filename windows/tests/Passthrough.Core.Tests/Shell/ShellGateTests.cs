@@ -25,6 +25,8 @@ public class ShellGateTests : IAsyncDisposable
     private readonly List<string> _events = [];
     private readonly CancellationTokenSource _stop = new();
     private Func<string, ShellError?>? _lock;
+    /// <summary>This PC's Remote Desktop as the relay sees it: not available until a test says otherwise.</summary>
+    private protected readonly FakeDesktop Desktop = new();
     /// <summary>Over the pipe: the service's view of the shells, and the tray app's end serving them.</summary>
     protected readonly PipeSessionHost? PipeHost;
     protected PipeLink? TrayLink, ServiceLink;
@@ -50,6 +52,8 @@ public class ShellGateTests : IAsyncDisposable
             Label = id => id == "phone-a" ? "iPhone" : id,
             Lock = id => _lock?.Invoke(id),
             Event = e => { lock (_events) _events.Add(e); },
+            RemoteDesktop = Desktop,
+            AccountOf = _ => "S-1-5-21-1",
         };
         var limiter = new HandshakeLimiter(handshakeTimeout, TimeProvider.System);
         if (overPipe)
@@ -109,6 +113,43 @@ public class ShellGateTests : IAsyncDisposable
 
     private FakePty Pty() { lock (_ptys) return _ptys[^1]; }
 
+    private protected void AllowScreen() => _access.SetScreenAllowed("phone-a", true);
+
+    /// <summary>
+    /// Remote Desktop behind the relay: a duplex stream whose far end answers the X.224 request with
+    /// <see cref="Selected"/>, then echoes.
+    /// </summary>
+    private protected sealed class FakeDesktop : Passthrough.Core.Screen.IRemoteDesktopGate
+    {
+        public Passthrough.Core.Screen.RelayVerdict Verdict = Passthrough.Core.Screen.RelayVerdict.No("service");
+        public bool Genuine = true;
+        public uint Selected = 2;
+        public string Pin = new('a', 64);
+        public int Dials;
+
+        public Task<Passthrough.Core.Screen.RelayVerdict> CheckAsync(string? account, CancellationToken cancel) => Task.FromResult(Verdict);
+
+        public Task<Stream?> DialAsync(int port, CancellationToken cancel)
+        {
+            Interlocked.Increment(ref Dials);
+            if (!Genuine) return Task.FromResult<Stream?>(null);
+            var (ours, theirs) = Pipe.DuplexStreams.Create();
+            _ = Task.Run(async () =>
+            {
+                var request = new byte[19];
+                await theirs.ReadExactlyAsync(request);
+                await theirs.WriteAsync(global::Passthrough.Core.Tests.Screen.ScreenTests.Confirm(Selected));
+                var buffer = new byte[4096];
+                int n;
+                try { while ((n = await theirs.ReadAsync(buffer)) > 0) await theirs.WriteAsync(buffer.AsMemory(0, n)); }
+                catch (Exception e) when (e is IOException or ObjectDisposedException) { }
+            });
+            return Task.FromResult<Stream?>(ours);
+        }
+
+        public Task<string?> CertificateSha256Async(CancellationToken cancel) => Task.FromResult<string?>(Pin);
+    }
+
     /// <summary>A phone's end of a connection.</summary>
     private protected sealed class Phone : IDisposable
     {
@@ -126,6 +167,9 @@ public class ShellGateTests : IAsyncDisposable
         }
 
         public Task Send(string json) => _stream.WriteAsync(Encoding.UTF8.GetBytes(json + "\n")).AsTask();
+
+        /// <summary>After <c>rdpReady</c>: the connection is Remote Desktop's bytes.</summary>
+        public NetworkStream Raw => _stream;
         public Task Send(ShellEnvelope e) => _stream.WriteAsync(e.EncodeLine()).AsTask();
 
         public async Task<ShellEnvelope?> Next()

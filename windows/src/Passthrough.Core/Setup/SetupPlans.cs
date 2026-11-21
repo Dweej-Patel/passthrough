@@ -147,8 +147,10 @@ public static class SetupPlans
     /// <c>--remove</c>: undoes everything, in reverse, each step running whatever failed before it. The service
     /// forgets its own key first (only its account can open it). Folders are deleted only when they are Passthrough's.
     /// </summary>
-    public static IReadOnlyList<ISetupStep> RemoveAll() =>
+    public static IReadOnlyList<ISetupStep> RemoveAll(IRemoteDesktopSystem? rdp = null) =>
     [
+        // Remote Desktop as it was, while install.json still says what Passthrough changed.
+        .. rdp is null ? Array.Empty<ISetupStep>() : [RemoteDesktopSetupPlans.Restore(rdp)],
         new SetupStep("public-state", c =>
         {
             if (!c.System.Registry.Exists) return StepState.Skipped;

@@ -70,10 +70,13 @@ internal static class Elevated
         var continuePastFailure = false;
         switch (verb)
         {
-            case "--install": plan = SetupPlans.InstallOrUpdate(update: false); break;
-            case "--update": plan = SetupPlans.InstallOrUpdate(update: true); break;
+            case "--install" or "--update":
+                plan = SetupPlans.InstallOrUpdate(update: verb == "--update");
+                // The second box on the turn-on sheet: Screen, through Remote Desktop, in the same prompt.
+                if (args.Contains("--screen")) plan = [.. plan, .. Passthrough.Core.Setup.RemoteDesktopSetupPlans.SetUp(new Passthrough.Windows.Screen.WindowsRemoteDesktop())];
+                break;
             case "--off": plan = SetupPlans.TurnOff(); break;
-            case "--remove": plan = SetupPlans.RemoveAll(); continuePastFailure = true; break;
+            case "--remove": plan = SetupPlans.RemoveAll(new Passthrough.Windows.Screen.WindowsRemoteDesktop()); continuePastFailure = true; break;
             case "--configure":
                 switch (args.ElementAtOrDefault(1))
                 {
@@ -81,6 +84,9 @@ internal static class Elevated
                     case "disallow" when args.ElementAtOrDefault(2) is { } sid && IsSid(sid): plan = SetupPlans.DisallowAccount(sid); break;
                     case "relay": plan = SetupPlans.ConfigureRelay(); break;
                     case "reset-identity": plan = SetupPlans.ResetIdentity(); break;
+                    case "screen": plan = Passthrough.Core.Setup.RemoteDesktopSetupPlans.SetUp(new Passthrough.Windows.Screen.WindowsRemoteDesktop()); break;
+                    case "screen-close": plan = Passthrough.Core.Setup.RemoteDesktopSetupPlans.ChangeMode(new Passthrough.Windows.Screen.WindowsRemoteDesktop(), close: true); break;
+                    case "screen-open": plan = Passthrough.Core.Setup.RemoteDesktopSetupPlans.ChangeMode(new Passthrough.Windows.Screen.WindowsRemoteDesktop(), close: false); break;
                     default: return Refuse("Unknown setting.").ExitCode;
                 }
                 break;
