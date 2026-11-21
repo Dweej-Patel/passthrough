@@ -21,7 +21,7 @@ enum ScreenLoginStore {
     }
 
     /// Nil when none is saved or the context can't vouch for the user (no prompt is shown).
-    static func read(macID: String, context: LAContext) -> RFBClient.Login? {
+    static func read(macID: String, context: LAContext) -> ScreenLogin? {
         context.interactionNotAllowed = true
         var q = query(macID)
         q[kSecReturnData] = true
@@ -34,12 +34,12 @@ enum ScreenLoginStore {
             if status != errSecItemNotFound && status != errSecSuccess { log.info("Screen login not read (\(status, privacy: .public))") }
             return nil
         }
-        return RFBClient.Login(username: stored.username, password: stored.password)
+        return ScreenLogin(username: stored.username, password: stored.password)
     }
 
     /// Replaces any saved login for `macID`.
     @discardableResult
-    static func save(_ login: RFBClient.Login, macID: String, context: LAContext) -> Bool {
+    static func save(_ login: ScreenLogin, macID: String, context: LAContext) -> Bool {
         var error: Unmanaged<CFError>?
         guard let access = SecAccessControlCreateWithFlags(nil, kSecAttrAccessibleWhenPasscodeSetThisDeviceOnly, .userPresence, &error),
               let data = try? JSONEncoder().encode(Stored(username: login.username, password: login.password)) else { return false }

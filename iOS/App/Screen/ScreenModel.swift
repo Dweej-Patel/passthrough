@@ -9,11 +9,12 @@ import PassthroughCore
 import ScreenClient
 
 /// One view of the selected Mac's screen: its own shell connection, which asks
-/// for the screen. First the Mac's own H.264 stream (`ScreenVideoClient`,
+/// for the screen. First the Mac's own H.264 stream (`MacStreamBackend`,
 /// protocol/README.md "Screen video"): smooth, and no password. A Mac that
 /// can't stream (it lacks Screen Recording or Accessibility, or predates it)
 /// says so, and the same connection asks for Screen Sharing instead, handed
-/// to an `RFBClient` with the Mac's login ("Screen"). That fallback sends a
+/// to a `ScreenSharingBackend` with the Mac's login ("Screen"). Whichever it
+/// is, the view speaks to it as a `ScreenBackend`. That fallback sends a
 /// saved login only once the user agrees (`confirmScreenSharing`), or chose
 /// "Always" for that Mac: whatever answers as Screen Sharing gets it. While
 /// on Screen Sharing it keeps trying the stream on a second connection
@@ -63,12 +64,12 @@ final class ScreenModel: ObservableObject {
     /// The Mac says its own displays are hidden (black to whoever is at it) while this view shows the screen.
     @Published private(set) var macHidden = false
     /// Only the Mac's own stream can leave the black out of what it sends; Screen Sharing would show it.
-    var canHideMac: Bool { video != nil }
+    var canHideMac: Bool { macStream != nil }
     /// This device as the Mac's microphone (the Mac's "Passthrough Microphone" input device).
     enum Microphone: Equatable { case off, starting, on }
     @Published private(set) var microphone = Microphone.off
     /// Only the Mac's own stream carries voice (not Screen Sharing).
-    var canUseMicrophone: Bool { video != nil }
+    var canUseMicrophone: Bool { macStream != nil }
     private var voiceCapture: PhoneVoiceCapture?
     /// The Mac takes this device's voice: it should be recording.
     private var capturing = false
@@ -95,7 +96,7 @@ final class ScreenModel: ObservableObject {
     /// Pinch and rotate go to the app under the fingers on the Mac (its own stream only:
     /// Screen Sharing has no gestures): always on a display made for this device, where
     /// the text is already this device's size; on the Mac's own display if the user chose it.
-    var pinchesMac: Bool { video != nil && (fitsDevice || pinchesMacOnItsDisplay) }
+    var pinchesMac: Bool { macStream != nil && (fitsDevice || pinchesMacOnItsDisplay) }
     /// The other devices viewing the Mac's screen now (their names), for "Use Here".
     @Published private(set) var otherViewers: [String] = []
     /// "Use Here" was asked for before the stream was up (taking the view back): sent once it is.
@@ -109,12 +110,17 @@ final class ScreenModel: ObservableObject {
     private var macID: String?
     private var client: ShellClient?
     private var dialer: IrohShellDialer?
-    private var rfb: RFBClient?
-    private var video: ScreenVideoClient?
+    /// What shows the screen now: the Mac's own stream or Screen Sharing.
+    private var backend: (any ScreenBackend)?
+    /// Bumped by every backend this view makes its own (and by the stream taking
+    /// over from Screen Sharing), so what an earlier one still says is dropped.
+    private var backendToken = 0
+    /// The Mac's own stream's controls, while it shows the screen.
+    private var macStream: (any MacStreamControls)? { backend?.macStream }
+    /// Screen Sharing shows the screen (the stream is tried again meanwhile).
+    private var onScreenSharing: Bool { backend is ScreenSharingBackend }
     /// The connection is asking for the Mac's own stream (not Screen Sharing).
     private var wantsVideo = false
-    /// Scroll not yet sent: a fraction of a point (stream) or of a wheel notch (Screen Sharing).
-    private var scrollRemainder = CGPoint.zero
     /// Where the Mac last heard the pointer was, in screen pixels.
     private var lastPointer: CGPoint?
     /// The stream has shown its size: a stream ending before that never worked, so Screen Sharing is tried.
@@ -158,7 +164,7 @@ final class ScreenModel: ObservableObject {
     /// Another device took the view over, by this name (`movedAway`); the stream ends next.
     private var movedTo: String?
     /// What the upgrade's stream said before its size, for when it takes over.
-    private var upgradeEarly: [ScreenVideoClient.Event] = []
+    private var upgradeEarly: [ScreenBackendEvent] = []
     /// When this phone last moved the Mac's pointer: for a moment after, where the
     /// Mac says it is is an echo of that, already drawn.
     private var lastPointerAt: TimeInterval = 0
@@ -172,14 +178,12 @@ final class ScreenModel: ObservableObject {
     private var hiddenBeforeAway = false
     /// The answer to the background's ask isn't remarked on.
     private var quietCurtain = false
-    /// What Paste last put on the Mac over Screen Sharing, which may send it back.
-    private var lastPaste: String?
     /// Bumped by every start and stop, so a stale connection's events are dropped.
     private var generation = 0
-    private var pendingLogin: (login: RFBClient.Login, remember: Bool)?
+    private var pendingLogin: (login: ScreenLogin, remember: Bool)?
     /// While on Screen Sharing: a second connection trying the Mac's own
     /// stream, swapped in once it shows its size (`promote`).
-    private var upgrade: (client: ShellClient?, dialer: IrohShellDialer?, video: ScreenVideoClient?)?
+    private var upgrade: (client: ShellClient?, dialer: IrohShellDialer?, video: MacStreamBackend?)?
     private var upgradeTask: Task<Void, Never>?
     /// Bumped per upgrade attempt; the promoted one's stream keeps its token.
     private var upgradeToken = 0
@@ -237,10 +241,10 @@ final class ScreenModel: ObservableObject {
         // Not listening while no one is looking at the Mac, nor playing its sound.
         stopMicrophone()
         if soundLive {
-            video?.sound(false)
+            macStream?.sound(false)
             stopSound()
         }
-        guard video != nil, macHidden || askedHidden == true else { return }
+        guard macStream != nil, macHidden || askedHidden == true else { return }
         hiddenBeforeAway = true
         quietCurtain = true
         // Long enough for the ask to get out before iOS suspends the app.
@@ -253,14 +257,14 @@ final class ScreenModel: ObservableObject {
     }
 
     private func appCameBack() {
-        if playsSound, phase == .live { video?.sound(true) }
+        if playsSound, phase == .live { macStream?.sound(true) }
         guard hiddenBeforeAway else { return }
         hiddenBeforeAway = false
-        if video != nil, Self.hidesMac { askMacHidden(true, saysIfUnanswered: false) }
+        if macStream != nil, Self.hidesMac { askMacHidden(true, saysIfUnanswered: false) }
     }
 
     /// Screen Sharing, with the Mac account's login.
-    func connect(_ login: RFBClient.Login, remember: Bool) {
+    func connect(_ login: ScreenLogin, remember: Bool) {
         #if DEBUG
         if Self.demoState != nil { return applyDemo("live") }
         #endif
@@ -370,12 +374,11 @@ final class ScreenModel: ObservableObject {
         connectionPath = nil
         upgradeStream = nil
         relayoutTask?.cancel()
-        rfb?.close()
-        rfb = nil
         stopMicrophone()
         stopSound()
-        video?.close()
-        video = nil
+        backend?.close()
+        backend = nil
+        backendToken += 1
         copyTimeout?.cancel()
         copying = false
         hideTimeout?.cancel()
@@ -404,10 +407,12 @@ final class ScreenModel: ObservableObject {
         case let .screen(stream, initialBytes) where wantsVideo:
             client = nil   // it let go of the stream; the dialer stays up for it
             watchPath(of: stream, dialer: dialer, startingAt: readyPath)
-            let video = ScreenVideoClient(stream: stream, initialBytes: initialBytes, layout: layout()) { [weak self] event in
-                MainActor.assumeIsolated { self?.handle(event, generation: gen) }
+            backendToken += 1
+            let token = backendToken
+            let video = MacStreamBackend(stream: stream, initialBytes: initialBytes, layout: layout()) { [weak self] event in
+                MainActor.assumeIsolated { self?.handle(event, generation: gen, token: token) }
             }
-            self.video = video
+            backend = video
             video.start()
             if usesHereOnStart {
                 usesHereOnStart = false
@@ -419,11 +424,13 @@ final class ScreenModel: ObservableObject {
             client = nil   // it let go of the stream; the dialer stays up for it
             guard let login = pendingLogin?.login else { return stream.cancel() }
             watchPath(of: stream, dialer: dialer, startingAt: readyPath)
-            let rfb = RFBClient(stream: stream, initialBytes: initialBytes, login: login) { [weak self] event in
-                MainActor.assumeIsolated { self?.handle(event, generation: gen) }
+            backendToken += 1
+            let token = backendToken
+            let screenSharing = ScreenSharingBackend(stream: stream, initialBytes: initialBytes, login: login) { [weak self] event in
+                MainActor.assumeIsolated { self?.handle(event, generation: gen, token: token) }
             }
-            self.rfb = rfb
-            rfb.start()
+            backend = screenSharing
+            screenSharing.start()
         case let .failed(error, _):
             phase = .failed(error.message ?? "Your Mac refused the connection.")
             stop()
@@ -440,21 +447,37 @@ final class ScreenModel: ObservableObject {
         }
     }
 
-    private func handle(_ event: ScreenVideoClient.Event, generation gen: Int) {
-        guard gen == generation else { return }
+    private func handle(_ event: ScreenBackendEvent, generation gen: Int, token: Int) {
+        // Not this view's backend now (Screen Sharing after the stream took over and closed it): nothing it still says counts.
+        guard gen == generation, token == backendToken, let backend else { return }
+        let isStream = backend.macStream != nil
         switch event {
         case let .size(width, height):
             screenSize = CGSize(width: width, height: height)
-            let first = !videoStarted
-            videoStarted = true
-            if first { liveSince = ProcessInfo.processInfo.systemUptime }
             phase = .live
-            if first, Self.hidesMac { askMacHidden(true, saysIfUnanswered: false) }
-            if first, playsSound { video?.sound(true) }
-        case let .frame(sample, number):
+            if isStream {
+                let first = !videoStarted
+                videoStarted = true
+                if first { liveSince = ProcessInfo.processInfo.systemUptime }
+                if first, Self.hidesMac { askMacHidden(true, saysIfUnanswered: false) }
+                if first, playsSound { macStream?.sound(true) }
+            } else {
+                // Screen Sharing logged in.
+                if let pending = pendingLogin, pending.remember, let macID, let context {
+                    ScreenLoginStore.save(pending.login, macID: macID, context: context)
+                }
+                pendingLogin = nil
+                scheduleUpgrade()
+            }
+        case let .image(image):
+            self.image = image
+            let size = CGSize(width: image.width, height: image.height)
+            if size != screenSize { screenSize = size }
+            onFrame?(image)
+        case let .sample(sample, number):
             // Not shown (no canvas yet, or its display failed): what follows needs a new keyframe.
-            if onVideoFrame?(sample) != true { video?.requestKeyframe() }
-            video?.shown(number)
+            if onVideoFrame?(sample) != true { backend.needsKeyframe() }
+            backend.presented(number)
         case let .copied(result):
             // An answer after Copy timed out (and said so) changes nothing now.
             guard copying else { return }
@@ -465,6 +488,34 @@ final class ScreenModel: ObservableObject {
             case .tooLong: copyFailed("That's too long to copy to this \(ThisDevice.name).")
             case .notText: copyFailed("Only text can be copied to this \(ThisDevice.name).")
             }
+        case let .clipboardChanged(text):
+            // Screen Sharing sends the Mac's clipboard whenever it changes, whatever is on it:
+            // taken only as the answer to Copy's ⌘C (the backend already leaves out the phone's own paste).
+            if copying, !text.isEmpty { copied(text) }
+        case .bell:
+            UINotificationFeedbackGenerator().notificationOccurred(.warning)
+        case let .pointerPosition(point, visible):
+            guard screenSize.width > 0 else { return }
+            // Echoes of this phone's own moves are drawn already (only whether it's on this display
+            // counts then); the Mac's own moves (its trackpad) aren't.
+            let echo = ProcessInfo.processInfo.systemUptime - lastPointerAt <= 1.5
+            macPointer = (echo ? macPointer?.point ?? point : point, visible)
+            onMacPointer?(echo ? nil : point, visible)
+        case let .pointerShape(image, size, hotSpot):
+            pointerShape = (image, size, hotSpot)
+            onPointerShape?(image, size, hotSpot)
+        case .pointerHidden, .phase:
+            break
+        case let .macStream(event):
+            handle(event)
+        case let .ended(end):
+            if isStream { streamEnded() } else { screenSharingEnded(end) }
+        }
+    }
+
+    /// What only the Mac's own stream says.
+    private func handle(_ event: MacStreamEvent) {
+        switch event {
         case let .microphone(state):
             microphoneAnswered(state)
         case let .sound(state):
@@ -489,99 +540,68 @@ final class ScreenModel: ObservableObject {
             if fit == .mac, fitsDevice, before != .mac {
                 show("\(macName) couldn't make a display for this \(ThisDevice.name), so this is its own.")
             }
-        case let .cursor(x, y, visible):
-            guard screenSize.width > 0 else { return }
-            // Echoes of this phone's own moves are drawn already (only whether it's on this display
-            // counts then); the Mac's own moves (its trackpad) aren't.
-            let echo = ProcessInfo.processInfo.systemUptime - lastPointerAt <= 1.5
-            let point = CGPoint(x: x * (screenSize.width - 1), y: y * (screenSize.height - 1))
-            macPointer = (echo ? macPointer?.point ?? point : point, visible)
-            onMacPointer?(echo ? nil : point, visible)
-        case let .cursorShape(image, size, hotSpot):
-            pointerShape = (image, size, hotSpot)
-            onPointerShape?(image, size, hotSpot)
         case let .viewers(names):
             otherViewers = names
         case let .movedAway(name):
             movedTo = name
-        case .closed:
-            if let movedTo {
-                stop()
-                phase = .movedAway(to: movedTo)
-                return
-            }
-            let worked = videoStarted
-            stop()
-            guard worked else {
-                // The Mac said yes but couldn't capture or encode after all
-                // (its display didn't come on in time, say). `upgrade` tries again.
-                slowReason = "Slower: \(macName) couldn't stream its screen just then. This switches to the smooth view once it can."
-                if let macID, Self.alwaysUsesScreenSharing(macID: macID), let context,
-                   let saved = ScreenLoginStore.read(macID: macID, context: context) {
-                    return connect(saved, remember: false)
-                }
-                phase = .confirmScreenSharing
-                return
-            }
-            // A view that worked and dropped (the network changed, a tunnel, the Mac's stream
-            // ending) comes back by itself; only a few drops in a row ask the user.
-            if let liveSince, ProcessInfo.processInfo.systemUptime - liveSince > Self.steadyAfter { reconnects = 0 }
-            guard reconnects < Self.maxReconnects else {
-                phase = .failed("The connection to \(macName) was lost.")
-                return
-            }
-            reconnects += 1
-            phase = .connecting
-            let attempt = reconnects, gen = generation
-            Task { [weak self] in
-                try? await Task.sleep(for: .milliseconds(300 * attempt))
-                guard let self, gen == self.generation, self.phase == .connecting else { return }
-                self.open(video: true)
-            }
         }
     }
 
-    private func handle(_ event: RFBClient.Event, generation gen: Int) {
-        // No `rfb`: the stream took over and closed it; nothing it still says counts.
-        guard gen == generation, rfb != nil else { return }
-        switch event {
-        case let .connected(width, height, _):
-            screenSize = CGSize(width: width, height: height)
-            phase = .live
-            if let pending = pendingLogin, pending.remember, let macID, let context {
-                ScreenLoginStore.save(pending.login, macID: macID, context: context)
-            }
-            pendingLogin = nil
-            scheduleUpgrade()
-        case let .frame(image):
-            self.image = image
-            let size = CGSize(width: image.width, height: image.height)
-            if size != screenSize { screenSize = size }
-            onFrame?(image)
-        case let .clipboard(text):
-            // Screen Sharing sends the Mac's clipboard whenever it changes, whatever is on it:
-            // taken only as the answer to Copy's ⌘C, and never the phone's own paste coming back.
-            if copying, !text.isEmpty, text != lastPaste { copied(text) }
-        case .bell:
-            UINotificationFeedbackGenerator().notificationOccurred(.warning)
-        case let .closed(failure):
+    /// The Mac's own stream ended.
+    private func streamEnded() {
+        if let movedTo {
             stop()
-            switch failure {
-            case nil:
-                break
-            case .loginFailed?:
-                if let macID { ScreenLoginStore.delete(macID: macID) }
-                image = nil
-                phase = .login(error: "Your Mac didn't accept that name and password.")
-            case .unsupportedServer?:
-                phase = .failed("Screen Sharing on your Mac answered in a way this app doesn't understand.")
-            case .noLoginOffered?:
-                phase = .failed("What answered as Screen Sharing on \(macName) didn't ask for a login, which your Mac's Screen Sharing always does. Passthrough didn't connect.")
-            case .protocolError?:
-                phase = .failed("The screen connection broke. Try again.")
-            case .connectionLost?:
-                phase = .failed("The connection to \(macName) was lost.")
+            phase = .movedAway(to: movedTo)
+            return
+        }
+        let worked = videoStarted
+        stop()
+        guard worked else {
+            // The Mac said yes but couldn't capture or encode after all
+            // (its display didn't come on in time, say). `upgrade` tries again.
+            slowReason = "Slower: \(macName) couldn't stream its screen just then. This switches to the smooth view once it can."
+            if let macID, Self.alwaysUsesScreenSharing(macID: macID), let context,
+               let saved = ScreenLoginStore.read(macID: macID, context: context) {
+                return connect(saved, remember: false)
             }
+            phase = .confirmScreenSharing
+            return
+        }
+        // A view that worked and dropped (the network changed, a tunnel, the Mac's stream
+        // ending) comes back by itself; only a few drops in a row ask the user.
+        if let liveSince, ProcessInfo.processInfo.systemUptime - liveSince > Self.steadyAfter { reconnects = 0 }
+        guard reconnects < Self.maxReconnects else {
+            phase = .failed("The connection to \(macName) was lost.")
+            return
+        }
+        reconnects += 1
+        phase = .connecting
+        let attempt = reconnects, gen = generation
+        Task { [weak self] in
+            try? await Task.sleep(for: .milliseconds(300 * attempt))
+            guard let self, gen == self.generation, self.phase == .connecting else { return }
+            self.open(video: true)
+        }
+    }
+
+    /// Screen Sharing ended.
+    private func screenSharingEnded(_ end: ScreenEnd) {
+        stop()
+        switch end {
+        case .closedHere:
+            break
+        case .signIn:
+            if let macID { ScreenLoginStore.delete(macID: macID) }
+            image = nil
+            phase = .login(error: "Your Mac didn't accept that name and password.")
+        case .unsupported:
+            phase = .failed("Screen Sharing on your Mac answered in a way this app doesn't understand.")
+        case .identityMismatch:
+            phase = .failed("What answered as Screen Sharing on \(macName) didn't ask for a login, which your Mac's Screen Sharing always does. Passthrough didn't connect.")
+        case .protocolError:
+            phase = .failed("The screen connection broke. Try again.")
+        case .connectionLost, .takenOver, .signedOut, .hostEnded:
+            phase = .failed("The connection to \(macName) was lost.")
         }
     }
 
@@ -591,7 +611,7 @@ final class ScreenModel: ObservableObject {
     /// Sharing shows the screen. Whatever kept it from streaming (a display
     /// that was off, permissions granted since) may be gone by then.
     private func scheduleUpgrade() {
-        guard rfb != nil, upgrade == nil, upgradeTask == nil else { return }
+        guard onScreenSharing, upgrade == nil, upgradeTask == nil else { return }
         let delay = Self.upgradeDelays[min(upgradeAttempts, Self.upgradeDelays.count - 1)]
         upgradeAttempts += 1
         let gen = generation
@@ -606,7 +626,7 @@ final class ScreenModel: ObservableObject {
     /// A second connection asks for the stream; Screen Sharing carries on
     /// meanwhile (the Mac allows two views per phone).
     private func startUpgrade() {
-        guard rfb != nil, phase == .live, let shell else { return }
+        guard onScreenSharing, phase == .live, let shell else { return }
         upgradeToken += 1
         let gen = generation, token = upgradeToken
         guard let connection = shell.screenConnection(onEvent: { [weak self] event in
@@ -628,7 +648,7 @@ final class ScreenModel: ObservableObject {
         case let .screen(stream, initialBytes):
             upgrade?.client = nil   // it let go of the stream; the dialer stays up for it
             upgradeStream = stream
-            let video = ScreenVideoClient(stream: stream, initialBytes: initialBytes, layout: layout()) { [weak self] event in
+            let video = MacStreamBackend(stream: stream, initialBytes: initialBytes, layout: layout()) { [weak self] event in
                 MainActor.assumeIsolated { self?.handleUpgrade(event, token: token, generation: gen) }
             }
             upgrade?.video = video
@@ -640,10 +660,10 @@ final class ScreenModel: ObservableObject {
         }
     }
 
-    private func handleUpgrade(_ event: ScreenVideoClient.Event, token: Int, generation gen: Int) {
+    private func handleUpgrade(_ event: ScreenBackendEvent, token: Int, generation gen: Int) {
         guard gen == generation else { return }
         // Promoted: this is the view's own stream now.
-        if token == promotedToken { return handle(event, generation: gen) }
+        if token == promotedToken { return handle(event, generation: gen, token: backendToken) }
         guard token == upgradeToken, upgrade?.video != nil else { return }
         switch event {
         case .size:
@@ -651,21 +671,21 @@ final class ScreenModel: ObservableObject {
             // Said once, before the size: what it shows, the pointer's look, who else views.
             let early = upgradeEarly
             upgradeEarly = []
-            early.forEach { handle($0, generation: gen) }
-            handle(event, generation: gen)
-        case .fitted, .cursorShape, .viewers:
+            early.forEach { handle($0, generation: gen, token: backendToken) }
+            handle(event, generation: gen, token: backendToken)
+        case .macStream(.fitted), .pointerShape, .macStream(.viewers):
             upgradeEarly.append(event)
-        case let .movedAway(name):
+        case let .macStream(.movedAway(name)):
             // Another device took over: this device's whole view goes, Screen Sharing too.
             movedTo = name
-        case .closed:
+        case .ended:
             if let movedTo {
                 stop()
                 phase = .movedAway(to: movedTo)
                 return
             }
             upgradeFailed()
-        case .frame, .copied, .curtained, .cursor, .microphone, .sound, .soundPacket:
+        case .phase, .image, .sample, .pointerPosition, .pointerHidden, .copied, .clipboardChanged, .bell, .macStream:
             break   // the pointer's place goes again after the first format
         }
     }
@@ -675,20 +695,19 @@ final class ScreenModel: ObservableObject {
         guard let candidate = upgrade, let stream = candidate.video else { return }
         upgrade = nil
         promotedToken = token
-        let screenSharing = rfb
-        rfb = nil
+        let screenSharing = backend
+        // What Screen Sharing still says is dropped from here.
+        backendToken += 1
         screenSharing?.close()
         dialer?.shutdown()
         dialer = candidate.dialer
         if let upgradeStream { watchPath(of: upgradeStream, dialer: candidate.dialer, startingAt: upgradeReadyPath) }
         upgradeStream = nil
-        video = stream
+        backend = stream
         wantsVideo = true
         slowReason = nil
         image = nil
         lastPointer = nil
-        scrollRemainder = .zero
-        lastPaste = nil
         if copying { copyTimeout?.cancel(); copying = false }
         show("Switched to the smooth view")
     }
@@ -711,17 +730,13 @@ final class ScreenModel: ObservableObject {
     // MARK: Input
 
     /// `point` in screen pixels.
-    func pointer(at point: CGPoint, buttons: RFBClient.Buttons) {
+    func pointer(at point: CGPoint, buttons: ScreenButtons) {
         lastPointer = point
         lastPointerAt = ProcessInfo.processInfo.systemUptime
-        if let video, screenSize.width > 0 {
-            video.pointer(x: point.x / max(screenSize.width - 1, 1), y: point.y / max(screenSize.height - 1, 1), buttons: buttons)
-        } else {
-            rfb?.pointer(x: Int(point.x), y: Int(point.y), buttons: buttons)
-        }
+        backend?.pointer(at: point, buttons: buttons)
     }
 
-    func click(at point: CGPoint, button: RFBClient.Buttons = .left) {
+    func click(at point: CGPoint, button: ScreenButtons = .left) {
         pointer(at: point, buttons: button)
         pointer(at: point, buttons: [])
     }
@@ -730,63 +745,32 @@ final class ScreenModel: ObservableObject {
     /// The stream scrolls by as much (its pixels are about the Mac's points); Screen Sharing
     /// only knows wheel notches, one per `notch` pixels.
     func scroll(at point: CGPoint, by delta: CGPoint, notch: CGFloat) {
-        scrollRemainder.x += delta.x
-        scrollRemainder.y += delta.y
-        if let video {
-            // Scrolling goes where the pointer is: there first (a direct-mode scroll is under the fingers).
-            if lastPointer != point { pointer(at: point, buttons: []) }
-            let dx = Int(scrollRemainder.x), dy = Int(scrollRemainder.y)
-            scrollRemainder.x -= CGFloat(dx)
-            scrollRemainder.y -= CGFloat(dy)
-            video.scroll(dx: dx, dy: dy)
-        } else {
-            let notches = Int(scrollRemainder.y / notch)
-            guard notches != 0 else { return }
-            scrollRemainder = CGPoint(x: 0, y: scrollRemainder.y - CGFloat(notches) * notch)
-            // Fingers down (positive) bring earlier content in: the wheel turns up.
-            let button: RFBClient.Buttons = notches > 0 ? .wheelUp : .wheelDown
-            for _ in 0..<abs(notches) { click(at: point, button: button) }
+        // The stream moves the pointer there first: an echo of that is drawn already.
+        if macStream != nil, lastPointer != point {
+            lastPointer = point
+            lastPointerAt = ProcessInfo.processInfo.systemUptime
         }
+        backend?.scroll(at: point, by: delta, notch: notch)
     }
 
-    func scrollEnded() { scrollRemainder = .zero }
+    func scrollEnded() { backend?.scrollEnded() }
 
     /// A key with modifiers held around it.
     func key(_ keysym: UInt32, modifiers: [UInt32] = []) {
-        if let video { return video.key(keysym, modifiers: Self.mask(modifiers)) }
-        modifiers.forEach { rfb?.key($0, down: true) }
-        rfb?.key(keysym, down: true)
-        rfb?.key(keysym, down: false)
-        modifiers.reversed().forEach { rfb?.key($0, down: false) }
+        backend?.key(keysym, modifiers: ScreenModifiers(keysyms: modifiers))
     }
 
     func type(_ text: String, modifiers: [UInt32] = []) {
-        if let video, modifiers.isEmpty {
-            // Long text (a paste, dictation) is pasted: the Mac types only short text as keys,
-            // and apps that read keys, not characters (Windows App's RDP), get nothing else right.
-            if text.utf16.count > ScreenVideoWire.typedAsKeys, video.clipboard(text) {
-                return key(0x76, modifiers: [RFBKeys.command])   // ⌘V
-            }
-            // Return and Tab are keys, not characters, to the apps on the Mac.
-            var run = ""
-            for character in text {
-                if character == "\n" || character == "\r" || character == "\t", let keysym = RFBKeys.keysym(for: character) {
-                    if !run.isEmpty { video.text(run); run = "" }
-                    video.key(keysym, modifiers: [])
-                } else {
-                    run.append(character)
-                }
-            }
-            if !run.isEmpty { video.text(run) }
-            return
-        }
+        guard let backend else { return }
+        if modifiers.isEmpty { return backend.text(text) }
+        let held = ScreenModifiers(keysyms: modifiers)
         for character in text {
-            if let keysym = RFBKeys.keysym(for: character) { key(keysym, modifiers: modifiers) }
+            if let keysym = RFBKeys.keysym(for: character) { backend.key(keysym, modifiers: held) }
         }
     }
 
     /// The Mac's Fn (globe) key, down for as long as the phone's key is held (the Mac's own stream only).
-    func function(_ down: Bool) { video?.function(down) }
+    func function(_ down: Bool) { macStream?.function(down) }
 
     /// Mission Control's shortcuts, as macOS sets them by default (System
     /// Settings › Keyboard › Keyboard Shortcuts › Mission Control).
@@ -813,18 +797,12 @@ final class ScreenModel: ObservableObject {
     /// Puts the phone's clipboard on the Mac's and pastes it there.
     func pastePhoneClipboard() {
         onCaretMayMove?()
-        guard let text = UIPasteboard.general.string, !text.isEmpty else { return }
-        if let video {
-            // Longer than the Mac takes: pasting would paste what was there before.
-            guard video.clipboard(text) else {
-                UINotificationFeedbackGenerator().notificationOccurred(.error)
-                return show("That's too long to paste on \(macName).")
-            }
-        } else {
-            rfb?.clipboard(text)
-            lastPaste = text
+        guard let text = UIPasteboard.general.string, !text.isEmpty, let backend else { return }
+        // Longer than the Mac takes: pasting would paste what was there before.
+        guard backend.paste(text) else {
+            UINotificationFeedbackGenerator().notificationOccurred(.error)
+            return show("That's too long to paste on \(macName).")
         }
-        key(0x76, modifiers: [RFBKeys.command])   // ⌘V
     }
 
     /// ⌘C on the Mac, and what it copied onto this iPhone's clipboard
@@ -833,18 +811,20 @@ final class ScreenModel: ObservableObject {
     /// with that (a second at most), and Screen Sharing's clipboard is taken
     /// only in the two seconds after it.
     func copyFromMac() {
-        guard !copying, video != nil || rfb != nil else { return }
+        guard !copying, let backend else { return }
         copying = true
-        if let video { video.copySelection() } else { key(0x63, modifiers: [RFBKeys.command]) }   // ⌘C
+        backend.copySelection()
         copyTimeout?.cancel()
         // The stream's ⌘C may wait for typing to finish on the Mac.
-        let wait: Duration = video != nil ? .seconds(5) : .seconds(2)
+        let answers = backend.macStream != nil
+        let wait: Duration = answers ? .seconds(5) : .seconds(2)
         copyTimeout = Task { [weak self] in
             try? await Task.sleep(for: wait)
             guard !Task.isCancelled, let self, self.copying else { return }
-            self.copyFailed(self.video != nil ? "\(self.macName) didn't answer. Update Passthrough on it to copy from it."
-                                             : "Nothing was copied. Select something on \(self.macName) first.")
+            self.copyFailed(answers ? "\(self.macName) didn't answer. Update Passthrough on it to copy from it."
+                                    : "Nothing was copied. Select something on \(self.macName) first.")
         }
+
     }
 
     /// Hides the Mac's own displays while this view shows the screen (black to
@@ -857,7 +837,7 @@ final class ScreenModel: ObservableObject {
     /// `saysIfUnanswered`: false for the ask every view starts with, so a Mac that
     /// predates hiding isn't remarked on each time; choosing it in the menu says so.
     private func askMacHidden(_ hidden: Bool, saysIfUnanswered: Bool = true) {
-        guard let video else { return }
+        guard let video = macStream else { return }
         video.curtain(hidden)
         askedHidden = hidden
         hideTimeout?.cancel()
@@ -876,7 +856,7 @@ final class ScreenModel: ObservableObject {
     /// microphone (the first time), then the Mac; recording starts once the Mac takes it.
     func toggleMicrophone() {
         guard microphone == .off else { return stopMicrophone() }
-        guard video != nil else { return }
+        guard macStream != nil else { return }
         microphone = .starting
         let gen = generation
         Task { [weak self] in
@@ -886,7 +866,7 @@ final class ScreenModel: ObservableObject {
                 self.microphone = .off
                 return self.show("Allow the microphone for Passthrough in Settings.")
             }
-            guard let video = self.video else { self.microphone = .off; return }
+            guard let video = self.macStream else { self.microphone = .off; return }
             video.microphone(true)
             self.microphoneTimeout?.cancel()
             self.microphoneTimeout = Task { [weak self] in
@@ -902,7 +882,7 @@ final class ScreenModel: ObservableObject {
         microphoneTimeout?.cancel()
         switch state {
         case .on:
-            guard microphone == .starting, let video else { return }
+            guard microphone == .starting, let video = macStream else { return }
             capturing = true
             if let error = applyAudio() {
                 microphone = .off
@@ -937,7 +917,7 @@ final class ScreenModel: ObservableObject {
             capturing = false
             _ = applyAudio()
         }
-        if tellMac { video?.microphone(false) }
+        if tellMac { macStream?.microphone(false) }
     }
 
     // MARK: The Mac's sound
@@ -946,7 +926,7 @@ final class ScreenModel: ObservableObject {
     func setPlaysSound(_ on: Bool) {
         UserDefaults.standard.set(on, forKey: Self.playsSoundKey)
         playsSound = on
-        guard let video else { return }
+        guard let video = macStream else { return }
         video.sound(on)
         if !on { stopSound() }
     }
@@ -955,7 +935,7 @@ final class ScreenModel: ObservableObject {
         switch state {
         case .on:
             // Turned off again meanwhile.
-            guard playsSound else { video?.sound(false); return }
+            guard playsSound else { macStream?.sound(false); return }
             guard !soundLive else { return }
             soundLive = true
             _ = applyAudio()
@@ -976,7 +956,7 @@ final class ScreenModel: ObservableObject {
     /// The audio is this app's again after an interruption: what played is started again,
     /// and sound that had to be given up meanwhile is asked for again.
     private func audioCameBack() {
-        guard playsSound, phase == .live, let video else { return }
+        guard playsSound, phase == .live, let video = macStream else { return }
         if soundLive { _ = applyAudio() } else { video.sound(true) }
     }
 
@@ -985,7 +965,7 @@ final class ScreenModel: ObservableObject {
     private func soundCantPlay(_ error: Error) {
         ptLog(.warning, "screen: the Mac's sound can't be played: \(error.localizedDescription)")
         soundLive = false
-        video?.sound(false)
+        macStream?.sound(false)
     }
 
     /// One audio session for both directions, and changing it stops whatever runs: so
@@ -997,7 +977,7 @@ final class ScreenModel: ObservableObject {
         soundPlayer?.stop()
         soundPlayer = nil
         var failure: Error?
-        if capturing, let video {
+        if capturing, let video = macStream {
             do {
                 try ScreenAudioSession.apply(recording: true, playing: soundLive)
                 let capture = PhoneVoiceCapture(onSamples: { [video] in video.voice($0) }, onStopped: { [weak self] in
@@ -1061,7 +1041,7 @@ final class ScreenModel: ObservableObject {
     }
 
     /// The display lost its place (it was in the background, say): ask for a keyframe.
-    func videoNeedsKeyframe() { video?.requestKeyframe() }
+    func videoNeedsKeyframe() { backend?.needsKeyframe() }
 
     // MARK: Connection path
 
@@ -1097,7 +1077,7 @@ final class ScreenModel: ObservableObject {
         guard on != fitsDevice else { return }
         fitsDevice = on
         UserDefaults.standard.set(on, forKey: Self.fitsDeviceKey)
-        video?.relayout(layout())
+        macStream?.relayout(layout())
     }
 
     /// This screen's top frame rate, as Smooth and Fast ask for it.
@@ -1108,7 +1088,7 @@ final class ScreenModel: ObservableObject {
         guard quality != self.quality else { return }
         self.quality = quality
         UserDefaults.standard.set(Int(quality.rawValue), forKey: Self.qualityKey)
-        video?.relayout(layout())
+        macStream?.relayout(layout())
     }
 
     /// Text size on a display made for this device; kept for the next view.
@@ -1116,7 +1096,7 @@ final class ScreenModel: ObservableObject {
         guard space != self.space, Self.spaces.contains(space) else { return }
         self.space = space
         UserDefaults.standard.set(space, forKey: Self.spaceKey)
-        video?.relayout(layout())
+        macStream?.relayout(layout())
     }
 
     func setPinchesMacOnItsDisplay(_ on: Bool) {
@@ -1127,13 +1107,13 @@ final class ScreenModel: ObservableObject {
     /// A pinch or rotation for the Mac, at its pointer.
     func gesture(_ gesture: ScreenVideoWire.Gesture, phase: ScreenVideoWire.GesturePhase, value: Double) {
         lastPointerAt = ProcessInfo.processInfo.systemUptime
-        video?.gesture(gesture, phase: phase, value: value)
+        macStream?.gesture(gesture, phase: phase, value: value)
     }
 
     /// This device is used here now: the Mac ends the other devices' views.
     func useHere() {
         otherViewers = []
-        video?.useHere()
+        macStream?.useHere()
     }
 
     /// Back from another device that took the view over: a new view, which takes it back.
@@ -1159,7 +1139,7 @@ final class ScreenModel: ObservableObject {
         relayoutTask = Task { [weak self] in
             try? await Task.sleep(for: .milliseconds(400))
             guard !Task.isCancelled, let self else { return }
-            self.video?.relayout(self.layout())
+            self.macStream?.relayout(self.layout())
         }
     }
 
@@ -1177,18 +1157,6 @@ final class ScreenModel: ObservableObject {
         let fit = min(1, 4096 / max(pixels.width, pixels.height))
         return .init(width: Int(pixels.width * fit) & ~1, height: Int(pixels.height * fit) & ~1, fit: .device, fps: fps, quality: quality,
                      space: space)
-    }
-
-    private static func mask(_ modifiers: [UInt32]) -> ScreenVideoWire.Modifiers {
-        modifiers.reduce(into: []) { mask, keysym in
-            switch keysym {
-            case RFBKeys.command: mask.insert(.command)
-            case RFBKeys.shift: mask.insert(.shift)
-            case RFBKeys.option: mask.insert(.option)
-            case RFBKeys.control: mask.insert(.control)
-            default: break
-            }
-        }
     }
 }
 

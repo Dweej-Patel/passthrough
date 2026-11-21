@@ -640,7 +640,7 @@ struct ScreenSharingPrompt: View {
 struct ScreenLoginForm: View {
     let macName: String
     let error: String?
-    let onConnect: (RFBClient.Login, Bool) -> Void
+    let onConnect: (ScreenLogin, Bool) -> Void
     @State private var username = ""
     @State private var password = ""
     @State private var remember = true
@@ -691,6 +691,6 @@ struct ScreenLoginForm: View {
 
     private func connect() {
         guard !username.isEmpty, !password.isEmpty else { return }
-        onConnect(RFBClient.Login(username: username, password: password), remember)
+        onConnect(ScreenLogin(username: username, password: password), remember)
     }
 }

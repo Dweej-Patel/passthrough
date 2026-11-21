@@ -21,8 +21,8 @@ enum ScreenTouchMode: String, CaseIterable {
 /// keyboard's text input while the keyboard is up.
 final class ScreenCanvasView: UIView, UIScrollViewDelegate, UITextInput, UIGestureRecognizerDelegate, UIPointerInteractionDelegate,
                               UIPencilInteractionDelegate {
-    var onPointer: ((CGPoint, RFBClient.Buttons) -> Void)?
-    var onClick: ((CGPoint, RFBClient.Buttons) -> Void)?
+    var onPointer: ((CGPoint, ScreenButtons) -> Void)?
+    var onClick: ((CGPoint, ScreenButtons) -> Void)?
     /// Two fingers moved by a delta (screen pixels) with the pointer at a point; then the
     /// screen pixels a wheel notch is worth, for Screen Sharing.
     var onScroll: ((CGPoint, CGPoint, CGFloat) -> Void)?
@@ -602,7 +602,7 @@ final class ScreenCanvasView: UIView, UIScrollViewDelegate, UITextInput, UIGestu
         movePointer(by: translation, buttons: [])
     }
 
-    private func movePointer(by translation: CGPoint, buttons: RFBClient.Buttons) {
+    private func movePointer(by translation: CGPoint, buttons: ScreenButtons) {
         guard content.frame.width > 0 else { return }
         let pixelsPerPoint = screenSize.width / content.frame.width
         let speed: CGFloat = 1.6

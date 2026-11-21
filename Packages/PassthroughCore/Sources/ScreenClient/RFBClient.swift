@@ -12,11 +12,8 @@ import PassthroughCore
 /// own queue; events arrive on the queue given to `init`, at most one frame
 /// at a time (a frame that is still waiting there is replaced, not queued).
 public final class RFBClient: @unchecked Sendable {
-    public struct Login: Sendable {
-        public var username: String
-        public var password: String
-        public init(username: String, password: String) { self.username = username; self.password = password }
-    }
+    /// The Mac account's name and password.
+    public typealias Login = ScreenLogin
 
     public enum Failure: Error, Equatable, Sendable {
         /// Not an RFB server this client speaks to, or no login method it knows.
@@ -51,6 +48,8 @@ public final class RFBClient: @unchecked Sendable {
         public static let right = Buttons(rawValue: 4)
         public static let wheelUp = Buttons(rawValue: 8)
         public static let wheelDown = Buttons(rawValue: 16)
+        /// The same buttons: `ScreenButtons` keeps RFB's numbers.
+        public init(_ buttons: ScreenButtons) { self.init(rawValue: buttons.rawValue) }
     }
 
     static let encodings: [Int32] = [16, 6, 1, 0, -223]   // ZRLE, Zlib, CopyRect, Raw, DesktopSize
