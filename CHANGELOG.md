@@ -110,6 +110,18 @@ these steps as written and check each one before building.
 
 ### Added
 
+* **The iPhone and iPad app knows a PC from a Mac.** A paired PC shows as a
+  PC: its own words, only the rows a PC has (no Internet, Keep awake, VPN or
+  Share screen), its Lock when it allows it, its own setup steps, why its
+  shell can't start (nobody signed in, someone else signed in, Passthrough
+  not open there, Shell off for this phone), and why it can't be reached
+  when it said so (asleep, Remote access turned off, shut down). New shell
+  becomes a split control when the computer lists several shells, and
+  remembers the last one per computer. A PC's Screen row is dimmed: its
+  screen comes in a later version, and the app never offers it the Mac's
+  Screen Sharing login. The switcher is *Your computers*; "New session" is
+  "New shell" everywhere. A Mac reads as before. Nothing to do when you
+  rebuild.
 * **A Windows tray app (first stage).** `windows/` holds a C# port of the host
   side: a tray flyout that lists the phones on the cable, pairs an iPhone or an
   Android phone with the six-digit code and shows its live status. An iPad is
