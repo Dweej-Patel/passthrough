@@ -330,11 +330,11 @@ private fun MacsCard(vm: AppViewModel, onPair: () -> Unit) {
                 }
             }
             if (clients.isEmpty()) {
-                Text("No Mac paired yet. To pair one:", style = PT.display(15.sp, FontWeight.Normal), color = c.secondary)
+                Text("No Mac or PC paired yet. To pair one:", style = PT.display(15.sp, FontWeight.Normal), color = c.secondary)
                 PTSteps(listOf(
                     "Start sharing with the power button above.",
-                    "Plug this phone into your Mac with a USB cable.",
-                    "Tap Pair and type the code into Passthrough on the Mac.",
+                    "Plug this phone into your Mac or PC with a USB cable.",
+                    "Tap Pair and type the code into Passthrough on the computer.",
                 ))
             } else {
                 clients.forEach { client -> MacRow(vm, client, live = client.id in connected, now = now) }

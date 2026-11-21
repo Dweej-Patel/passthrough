@@ -79,14 +79,14 @@ fun PairSheet(vm: AppViewModel, onDismiss: () -> Unit) {
                         .drawWithContent { drawContent(); drawRect(PT.accent, blendMode = BlendMode.SrcIn) },
                 )
                 Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                    Text("Pair a Mac", style = PT.display(28.sp), color = c.primary)
-                    Text("Open Passthrough in the menu bar on your Mac, plug in the cable, and enter this code.",
+                    Text("Pair a Mac or PC", style = PT.display(28.sp), color = c.primary)
+                    Text("Open Passthrough on your Mac or PC, plug in the cable, and enter this code.",
                         style = PT.display(15.sp, FontWeight.Normal), color = c.secondary, textAlign = TextAlign.Center,
                         modifier = Modifier.padding(horizontal = 24.dp))
                 }
                 if (state != ServiceState.Running) {
                     Box(Modifier.padding(horizontal = 24.dp)) {
-                        PTNotice("Start the proxy first", PT.warning, Icons.Filled.Warning, detail = "The Mac can only reach this phone while the proxy is on.")
+                        PTNotice("Start the proxy first", PT.warning, Icons.Filled.Warning, detail = "The computer can only reach this phone while the proxy is on.")
                     }
                 }
                 val current = code
@@ -121,4 +121,4 @@ fun PairSheet(vm: AppViewModel, onDismiss: () -> Unit) {
 }
 
 /** Why the code on screen went away early. Same words as the iPhone app's. */
-const val PAIRING_CODE_WITHDRAWN = "Too many wrong codes were entered, so it no longer works. If that wasn't you, something on this phone or the Mac tried to guess it. Generate a new code to pair."
+const val PAIRING_CODE_WITHDRAWN = "Too many wrong codes were entered, so it no longer works. If that wasn't you, something on this phone or the computer tried to guess it. Generate a new code to pair."

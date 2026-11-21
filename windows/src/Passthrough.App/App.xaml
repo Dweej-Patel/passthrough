@@ -1,0 +1,49 @@
+<Application
+    x:Class="Passthrough.App.App"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+    <Application.Resources>
+        <ResourceDictionary>
+            <ResourceDictionary.MergedDictionaries>
+                <XamlControlsResources xmlns="using:Microsoft.UI.Xaml.Controls" />
+            </ResourceDictionary.MergedDictionaries>
+
+            <!-- The apps' mint (PTColor in the Mac and iPhone apps) in place of the Windows accent, so buttons, switches
+                 and focus marks match them. A dark theme fills with Light2 under dark text; a light theme fills with
+                 Dark1 under white text, since white on the bright mint can't be read. -->
+            <Color x:Key="SystemAccentColor">#3DD9A0</Color>
+            <Color x:Key="SystemAccentColorLight1">#4FE0AB</Color>
+            <Color x:Key="SystemAccentColorLight2">#5EE6B5</Color>
+            <Color x:Key="SystemAccentColorLight3">#8AF0CB</Color>
+            <Color x:Key="SystemAccentColorDark1">#0B7A55</Color>
+            <Color x:Key="SystemAccentColorDark2">#096346</Color>
+            <Color x:Key="SystemAccentColorDark3">#064A35</Color>
+
+            <!-- A filled-in picture (the phone in use, connected): mint under dark ink, the same in both themes. -->
+            <SolidColorBrush x:Key="PtTintBrush" Color="#3DD9A0" />
+            <SolidColorBrush x:Key="PtOnTintBrush" Color="#06281C" />
+            <!-- Behind a line that needs a person: amber, faint enough for either theme's text. -->
+            <SolidColorBrush x:Key="PtAttentionFillBrush" Color="#26FFB84D" />
+
+            <!-- A small round button that is only its glyph until the pointer is over it. -->
+            <Style x:Key="PtIconButtonStyle" TargetType="Button" BasedOn="{StaticResource DefaultButtonStyle}">
+                <Setter Property="Background" Value="Transparent" />
+                <Setter Property="BorderThickness" Value="0" />
+                <Setter Property="Padding" Value="0" />
+                <Setter Property="Width" Value="32" />
+                <Setter Property="Height" Value="32" />
+                <Setter Property="CornerRadius" Value="16" />
+                <Setter Property="Foreground" Value="{ThemeResource TextFillColorSecondaryBrush}" />
+            </Style>
+
+            <!-- A card: one phone in the flyout, one group in Settings. -->
+            <Style x:Key="PtCardStyle" TargetType="Border">
+                <Setter Property="Background" Value="{ThemeResource CardBackgroundFillColorDefaultBrush}" />
+                <Setter Property="BorderBrush" Value="{ThemeResource CardStrokeColorDefaultBrush}" />
+                <Setter Property="BorderThickness" Value="1" />
+                <Setter Property="CornerRadius" Value="10" />
+                <Setter Property="Padding" Value="12" />
+            </Style>
+        </ResourceDictionary>
+    </Application.Resources>
+</Application>
