@@ -376,6 +376,10 @@ public sealed class RemoteAccess : IAccessAdmin, IDisposable
         catch (System.Security.Cryptography.CryptographicException e) { _log?.Invoke($"trust: no identity key ({e.HResult:X8})"); return null; }
     }
 
+    /// <summary>A new shell on another computer this PC can reach, in a terminal (its own connection, signed with this PC's identity).</summary>
+    public Task OpenShellAsync(Passthrough.Core.Trust.ReachableComputer computer) =>
+        Identity() is { } identity ? Passthrough.Windows.Client.TermBridge.OpenAsync(computer, identity, null, _log) : Task.CompletedTask;
+
     /// <summary>Fires when this PC was handed access to another computer.</summary>
     public event Action<string>? ComputerReceived;
 

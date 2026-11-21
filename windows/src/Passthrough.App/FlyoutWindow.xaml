@@ -63,6 +63,36 @@
                     </DataTemplate>
                 </ItemsControl.ItemTemplate>
             </ItemsControl>
+            <!-- Your computers: other computers this PC can reach, opened with Windows Hello -->
+            <Button Content="Your computers" HorizontalAlignment="Stretch" Click="OnShowComputers"
+                    Visibility="{x:Bind ViewModel.ShowComputersVisibility, Mode=OneWay}"
+                    ToolTipService.ToolTip="Other computers this PC can reach. Windows asks for your PIN or fingerprint." />
+            <ItemsControl ItemsSource="{x:Bind ViewModel.Computers}" Visibility="{x:Bind ViewModel.ComputersVisibility, Mode=OneWay}">
+                <ItemsControl.ItemsPanel>
+                    <ItemsPanelTemplate>
+                        <StackPanel Spacing="8" />
+                    </ItemsPanelTemplate>
+                </ItemsControl.ItemsPanel>
+                <ItemsControl.ItemTemplate>
+                    <DataTemplate x:DataType="local:ComputerRow">
+                        <Border Style="{StaticResource PtCardStyle}">
+                            <Grid ColumnSpacing="10">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="Auto" />
+                                </Grid.ColumnDefinitions>
+                                <StackPanel VerticalAlignment="Center">
+                                    <TextBlock Text="{x:Bind Title}" Style="{StaticResource BodyStrongTextBlockStyle}" TextTrimming="CharacterEllipsis" />
+                                    <TextBlock Text="{x:Bind Detail}" Style="{StaticResource CaptionTextBlockStyle}"
+                                               Foreground="{ThemeResource TextFillColorSecondaryBrush}" TextTrimming="CharacterEllipsis" />
+                                </StackPanel>
+                                <Button Grid.Column="1" Content="New shell" IsEnabled="{x:Bind CanOpenShell}" Click="OnNewShell"
+                                        AutomationProperties.Name="New shell on this computer" />
+                            </Grid>
+                        </Border>
+                    </DataTemplate>
+                </ItemsControl.ItemTemplate>
+            </ItemsControl>
             <ItemsControl x:Name="Body" ItemsSource="{x:Bind ViewModel.Rows}" Visibility="{x:Bind ViewModel.RowsVisibility, Mode=OneWay}">
                 <ItemsControl.ItemsPanel>
                     <ItemsPanelTemplate>

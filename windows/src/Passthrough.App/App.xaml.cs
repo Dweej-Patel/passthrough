@@ -129,6 +129,8 @@ public partial class App : Application
             var remote = _remote;
             remote.NoticesChanged += () => viewModel.ShowNotices(remote.Notices);
             viewModel.AnswerNotice = remote.AnswerNoticeAsync;
+            viewModel.OpenComputers = async () => await remote.Reach.UnlockAsync() ? remote.Reach.Computers : null;
+            viewModel.NewShell = remote.OpenShellAsync;
             remote.HandOffWanted += launcher => DispatcherQueue.GetForCurrentThread()?.TryEnqueue(() => HandOff(launcher));
             _ui = DispatcherQueue.GetForCurrentThread();
 
