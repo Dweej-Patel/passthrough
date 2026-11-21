@@ -255,6 +255,12 @@ these steps as written and check each one before building.
   64 MiB with a marker, pruned by age and by a 2 GiB folder cap, never touching
   a session still recording. Session ids that Windows would read as a device
   name or a path are refused.
+* Windows: the session manager is ported from the Mac with its tests, over a
+  pseudo-terminal seam ConPTY will fill: sessions that outlive their phone, a
+  replay on attach with takeover by generation, the eight-session cap, titles
+  from the first echoed command, "needs you" questions, Claude Code status, and
+  revoking a phone ending what it opened. Shells come only from the PC's own
+  catalog. Still nothing starts a real shell.
 * Remote shell: coming back to a session no longer plays it back from the
   top. The phone holds the Mac's replay until it is complete and draws it in
   one go, keeping what was on screen meanwhile, and says "Loading session…"

@@ -23,4 +23,8 @@ public sealed record ShellStatus
     [JsonPropertyName("since")] public double Since { get; init; }
     /// <summary>Done or error, and someone has had the session in front of them since.</summary>
     [JsonPropertyName("seen")] public bool Seen { get; init; }
+
+    [JsonIgnore] public bool IsBlocked => State == Blocked;
+    /// <summary>Finished (done or failed) and not seen yet.</summary>
+    [JsonIgnore] public bool IsUnseenResult => State is Done or Failed && !Seen;
 }
