@@ -223,6 +223,11 @@ these steps as written and check each one before building.
   exists yet, so no grant goes out. The PC's `hello` now says it is a PC. The
   log filter also removes shell keys (as JSON escapes them too), secret JSON
   fields (the pairing code among them), `Bearer` headers, and any secret registered with it (the relay token, from the stage that loads one).
+* Windows: the rules for when a phone is granted a shell key, granted again or
+  left alone (one grant in flight per phone, re-granted only when what grants
+  carry changes, a growing wait for a phone that doesn't answer, nothing for a
+  revoked phone until it reconnects) are ported from the Mac with its tests.
+  Nothing uses them yet.
 * Remote shell: coming back to a session no longer plays it back from the
   top. The phone holds the Mac's replay until it is complete and draws it in
   one go, keeping what was on screen meanwhile, and says "Loading session…"
