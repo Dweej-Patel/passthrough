@@ -264,6 +264,18 @@ public sealed class ServiceRemoteTests : IDisposable
     }
 
     [Fact]
+    public async Task StayAwakeIsAnyAccountsToSetAndSaysWhatItDoes()
+    {
+        await LinkTrayAsync();
+        Assert.False((await _admin.PowerAsync()).StayAwake);
+        Assert.Null((await _admin.SetStayAwakeAsync(true)).Error);
+        var power = await _admin.PowerAsync();
+        Assert.True(power.StayAwake);
+        if (power.OnMains == true) Assert.Equal(0, power.SleepAfter);
+        Assert.Equal("true", _serviceSecrets.Get(ServiceRemote.StayAwakeSlot));
+    }
+
+    [Fact]
     public async Task TheServiceMakesItsOwnIdentityAndKeepsIt()
     {
         var stored = _serviceSecrets.Get(ServiceRemote.IrohKeySlot);

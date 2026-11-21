@@ -101,6 +101,17 @@ public sealed class WindowsMachineRegistry : IMachineRegistry
 
     public void DeleteKey() => Root.DeleteSubKeyTree(ServiceDefinition.RegistryKey, throwOnMissingSubKey: false);
 
+    /// <summary>An update or repair is stopping the service (it tells phones nothing; they reconnect).</summary>
+    public static bool IsUpdating()
+    {
+        try
+        {
+            using var key = Root.OpenSubKey(ServiceDefinition.RegistryKey);
+            return key?.GetValue("Updating") is 1;
+        }
+        catch (Exception e) when (e is System.Security.SecurityException or UnauthorizedAccessException or IOException) { return false; }
+    }
+
     /// <summary>What every account reads: where the install is and whether Remote access is on. Null when not installed.</summary>
     public static (string InstallFolder, string Build, bool Enabled, int PipeProtocol)? Read()
     {

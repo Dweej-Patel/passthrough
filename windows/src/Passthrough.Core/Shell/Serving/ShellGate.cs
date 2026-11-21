@@ -307,15 +307,21 @@ public sealed class ShellGate
         foreach (var connection in Connections()) connection.SendHost();
     }
 
-    /// <summary>Tells every phone why the host is about to go (<c>sleeping</c>, <c>turned_off</c>, <c>shutting_down</c>).</summary>
-    public async Task GoingAwayAsync(string reason)
+    /// <summary>
+    /// Tells every phone why the host is about to go (<c>sleeping</c>, <c>turned_off</c>, <c>shutting_down</c>), waits for
+    /// the lines to be written up to <paramref name="limit"/> (2 s when not given), and with <paramref name="close"/>
+    /// closes every connection. The gate keeps accepting (a PC that wakes takes phones again).
+    /// </summary>
+    public async Task GoingAwayAsync(string reason, TimeSpan? limit = null, bool close = false)
     {
+        var connections = Connections();
         try
         {
-            await Task.WhenAll(Connections().Select(c => c.SendAndWaitAsync(new ShellEnvelope(ShellEnvelope.GoingAway) { Reason = reason })))
-                .WaitAsync(TimeSpan.FromSeconds(2), Time).ConfigureAwait(false);
+            await Task.WhenAll(connections.Select(c => c.SendAndWaitAsync(new ShellEnvelope(ShellEnvelope.GoingAway) { Reason = reason })))
+                .WaitAsync(limit ?? TimeSpan.FromSeconds(2), Time).ConfigureAwait(false);
         }
         catch (TimeoutException) { } // going anyway
+        if (close) connections.ForEach(c => c.Close());
     }
 
     private List<ShellConnection> Connections()

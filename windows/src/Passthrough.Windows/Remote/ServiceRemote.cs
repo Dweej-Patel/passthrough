@@ -6,6 +6,7 @@ using Passthrough.Core.Shell.Serving;
 using Passthrough.Core.Storage;
 using Passthrough.Windows.Iroh;
 using Passthrough.Windows.Net;
+using Passthrough.Windows.Power;
 using Passthrough.Windows.Storage;
 
 namespace Passthrough.Windows.Remote;
@@ -34,6 +35,12 @@ public sealed class ServiceRemote : IDisposable
     private ServiceIdentity? _identity;
     private TlsListener? _tlsListener;
     private DnsSd? _dnsSd;
+    private readonly PowerRequest? _connectedRequest, _awakeRequest;
+    private readonly Timer _power;
+    private DateTime _lastConnected = DateTime.MinValue;
+    internal const string StayAwakeSlot = "settings.stayAwake";
+    /// <summary>How long the PC is kept awake after the last phone goes.</summary>
+    private static readonly TimeSpan AwakeAfterLast = TimeSpan.FromSeconds(60);
 
     /// <summary>Where the TLS identity lives and how the door is opened (null: no listener on the network, as on Windows 10).</summary>
     public sealed record TlsOptions(string CertificateFile, string KeyName = ServiceIdentity.KeyName, int Port = RemoteShell.DefaultPort, bool Advertise = true);
@@ -54,7 +61,24 @@ public sealed class ServiceRemote : IDisposable
         Directory = new AccessDirectory(_secrets, log: log);
         IrohEndpoint.UseLibraryIn(installFolder);
         Gate = new ShellGate(HostFor, Directory, new HandshakeLimiter(TimeSpan.FromSeconds(10), TimeProvider.System), Hooks(), log: log);
-        Admin = new PipeAdminHandler(Directory, Grant, ConnectionsOf, Disconnect, log);
+        Admin = new PipeAdminHandler(Directory, Grant, ConnectionsOf, Disconnect, log)
+        {
+            PowerState = () => (StayAwake, SleepAfter(), PowerFacts.OnMains),
+            SetStayAwake = on =>
+            {
+                _secrets.Set(StayAwakeSlot, on ? "true" : "false");
+                _log($"power: Stay awake while plugged in {(on ? "on" : "off")}");
+                UpdatePower();
+                Gate.PushHost();
+            },
+        };
+        try
+        {
+            _connectedRequest = new PowerRequest("A phone is connected to this PC through Passthrough.");
+            _awakeRequest = new PowerRequest("Stay awake while plugged in is on in Passthrough.");
+        }
+        catch (System.ComponentModel.Win32Exception e) { _log($"power: no power requests ({e.NativeErrorCode})"); }
+        _power = new Timer(_ => UpdatePower(), null, TimeSpan.FromSeconds(5), TimeSpan.FromSeconds(5));
         trays.Changed += host =>
         {
             Gate.PushSessions(host);
@@ -107,6 +131,44 @@ public sealed class ServiceRemote : IDisposable
         {
             _log($"iroh: couldn't start ({e.GetType().Name})");
         }
+    }
+
+    public bool StayAwake => _secrets.Get(StayAwakeSlot) == "true";
+
+    /// <summary>What <c>host.sleepAfter</c> says: the sleep timer on the current power source, 0 while Stay awake holds it.</summary>
+    private static int SleepAfter(bool stayAwake) => GoingAway.SleepAfter(PowerFacts.SleepAfterSeconds() ?? 0, PowerFacts.OnMains, stayAwake);
+
+    private int SleepAfter() => SleepAfter(StayAwake);
+
+    /// <summary>
+    /// While a phone is connected (and for a minute after), the idle timer is held off; while Stay awake is on and the
+    /// PC is on mains, too. Nothing in the power plan is changed, so there's nothing to put back.
+    /// </summary>
+    private void UpdatePower()
+    {
+        if (Gate.ConnectedPhones.Count > 0) _lastConnected = DateTime.UtcNow;
+        _connectedRequest?.Set(DateTime.UtcNow - _lastConnected < AwakeAfterLast);
+        _awakeRequest?.Set(StayAwake && PowerFacts.OnMains);
+    }
+
+    /// <summary>
+    /// Windows is about to sleep, shut down, or Remote access is being turned off: phones are told why, within the
+    /// limit, and their connections closed. Before sleep the DNS-SD record goes too. Null reason: say nothing.
+    /// </summary>
+    public async Task GoingAwayAsync(GoingAway.Signal signal, bool enabled, bool updating)
+    {
+        if (GoingAway.For(signal, enabled, updating) is not { } going) return;
+        if (signal == GoingAway.Signal.Suspend) _dnsSd?.Withdraw();
+        _log($"service: telling phones {going.Reason}");
+        await Gate.GoingAwayAsync(going.Reason, going.Limit, close: true).ConfigureAwait(false);
+    }
+
+    /// <summary>The PC woke: addresses may have changed; the DNS-SD record comes back.</summary>
+    public void Resumed()
+    {
+        _adapters.Invalidate();
+        if (_dnsSd is { } dnsSd && _tlsListener is { } listener) _ = Task.Run(() => dnsSd.RegisterAsync(_hostName, listener.Port, TimeSpan.FromSeconds(10)));
+        UpdatePower();
     }
 
     /// <summary>The same network and Tailscale: TLS 1.3 on 7893, and the DNS-SD record phones look for.</summary>
@@ -212,6 +274,7 @@ public sealed class ServiceRemote : IDisposable
                 Access = new HostAccess { Shell = true, Screen = screen },
                 Lock = true,
                 User = screen ? state?.User : null,
+                SleepAfter = SleepAfter(),
             }.Cleaned();
         },
         State = phone => OwnerHost(phone)?.State is { } state
@@ -224,6 +287,9 @@ public sealed class ServiceRemote : IDisposable
 
     public void Dispose()
     {
+        _power.Dispose();
+        _connectedRequest?.Dispose();
+        _awakeRequest?.Dispose();
         _dnsSd?.Dispose();
         _tlsListener?.Dispose();
         _identity?.Dispose();

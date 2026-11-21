@@ -219,6 +219,7 @@ public sealed partial class SettingsWindow : Window
             RemoteSwitch.IsOn = _remote.Enabled;
             RemoteSwitch.Toggled += OnRemoteToggled;
         }
+        _ = ShowAwakeAsync();
         var shells = _remote.Catalog.Shells.Select(s => s.Name).ToList();
         ShellsText.Text = (shells.Count == 0 ? "" : $"Shells: {string.Join(", ", shells)}. They open as you, never as administrator.")
             + (_isAdministrator ? " Your Windows account is an administrator, so a phone with access can do anything you can, including approving administrator prompts." : "");
@@ -227,6 +228,41 @@ public sealed partial class SettingsWindow : Window
         foreach (var phone in _remote.Phones)
             WithAccess.Add(new RemotePhoneRow(phone.Phone, phone.Label, phone.PairingSlot, connected.Contains(phone.Phone), _remote.Sessions.RunningSessions(phone.Phone)));
         NoAccessText.Visibility = WithAccess.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
+    }
+
+    private bool _settingAwake;
+
+    /// <summary>Staying reachable: the service's power facts, and the switch (no prompt: any allowed account may change it).</summary>
+    private async Task ShowAwakeAsync()
+    {
+        if (_remote?.State != RemoteAccessState.On || await _remote.PowerAsync() is not { Error: null } power)
+        {
+            AwakeCard.Visibility = Visibility.Collapsed;
+            return;
+        }
+        AwakeCard.Visibility = Visibility.Visible;
+        var minutes = (power.SleepAfter ?? 0) / 60;
+        AwakeText.Text = power.StayAwake == true
+            ? power.OnMains == true ? "Stays awake while plugged in." : $"On battery this PC sleeps after {minutes} minutes."
+            : minutes > 0 ? $"This PC sleeps after {minutes} minutes. A sleeping PC can't answer." : "This PC doesn't sleep by itself.";
+        _settingAwake = true;
+        AwakeSwitch.IsOn = power.StayAwake == true;
+        _settingAwake = false;
+    }
+
+    private async void OnAwakeToggled(object sender, RoutedEventArgs e)
+    {
+        if (_settingAwake || _remote is null) return;
+        try
+        {
+            if ((await _remote.SetStayAwakeAsync(AwakeSwitch.IsOn)).Error is { } error) ShowError($"Could not change Stay awake ({error}).");
+        }
+        catch (Exception ex)
+        {
+            LogFile.Error(ex);
+            ShowError("Could not change Stay awake. See the log for details.");
+        }
+        await ShowAwakeAsync();
     }
 
     private static readonly (int Days, string Name)[] HistoryNames = [(7, "1 week"), (30, "30 days"), (365, "1 year"), (0, "Forever")];

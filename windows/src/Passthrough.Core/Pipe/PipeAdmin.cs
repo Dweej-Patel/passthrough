@@ -10,7 +10,7 @@ namespace Passthrough.Core.Pipe;
 public sealed record PipeAdminRequest
 {
     public const string List = "list", GrantInfo = "grantInfo", AddKey = "addKey", SetScreen = "setScreen", Revoke = "revoke",
-        RevokeSlot = "revokeSlot", Relabel = "relabel", Disconnect = "disconnect", HandOver = "handOver";
+        RevokeSlot = "revokeSlot", Relabel = "relabel", Disconnect = "disconnect", HandOver = "handOver", SetStayAwake = "setStayAwake", Power = "power";
 
     public uint Id { get; init; }
     public string Op { get; init; } = "";
@@ -36,6 +36,11 @@ public sealed record PipeAdminReply
     public List<string>? Taken { get; init; }
     public List<string>? Kept { get; init; }
     public List<string>? Refused { get; init; }
+    /// <summary>Stay awake while plugged in (<see cref="PipeAdminRequest.Power"/>).</summary>
+    public bool? StayAwake { get; init; }
+    /// <summary>The PC's sleep timer on the current power source, in seconds (0: never).</summary>
+    public int? SleepAfter { get; init; }
+    public bool? OnMains { get; init; }
 }
 
 /// <summary>One phone with access, as Settings shows it.</summary>
@@ -84,6 +89,10 @@ public sealed record PipeAdminEvent
 /// </summary>
 public sealed class PipeAdminHandler(AccessDirectory directory, Func<GrantContents?> grant, Func<string, int> connections, Action<string> disconnect, Action<string>? log = null)
 {
+    /// <summary>Stay awake while plugged in: what it is and the power facts beside it, and setting it (any allowed account, no prompt).</summary>
+    public Func<(bool StayAwake, int SleepAfter, bool OnMains)>? PowerState { get; init; }
+    public Action<bool>? SetStayAwake { get; init; }
+
     public PipeAdminReply Handle(string account, PipeAdminRequest request)
     {
         var store = directory.For(account);
@@ -130,6 +139,13 @@ public sealed class PipeAdminHandler(AccessDirectory directory, Func<GrantConten
                 return reply;
             case PipeAdminRequest.HandOver:
                 return HandOver(account, request.Records ?? [], reply);
+            case PipeAdminRequest.SetStayAwake:
+                if (request.On is not { } awake || SetStayAwake is null) return reply with { Error = PipeAdminReply.BadRequest };
+                SetStayAwake(awake);
+                return reply;
+            case PipeAdminRequest.Power:
+                if (PowerState?.Invoke() is not { } power) return reply with { Error = PipeAdminReply.BadRequest };
+                return reply with { StayAwake = power.StayAwake, SleepAfter = power.SleepAfter, OnMains = power.OnMains };
             default:
                 return reply with { Error = PipeAdminReply.BadRequest };
         }

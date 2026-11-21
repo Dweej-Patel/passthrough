@@ -78,6 +78,22 @@
             </Border>
             <TextBlock x:Name="ShellsText" Style="{StaticResource CaptionTextBlockStyle}" TextWrapping="Wrap"
                        Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+            <Border x:Name="AwakeCard" Style="{StaticResource PtCardStyle}" Padding="16,12" Visibility="Collapsed">
+                <Grid ColumnSpacing="12">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="Auto" />
+                    </Grid.ColumnDefinitions>
+                    <StackPanel VerticalAlignment="Center">
+                        <TextBlock Text="Stay awake while plugged in" />
+                        <TextBlock x:Name="AwakeText" Style="{StaticResource CaptionTextBlockStyle}" TextWrapping="Wrap"
+                                   Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                   AutomationProperties.LiveSetting="Polite" />
+                    </StackPanel>
+                    <ToggleSwitch x:Name="AwakeSwitch" Grid.Column="1" MinWidth="0" OnContent="" OffContent=""
+                                  AutomationProperties.Name="Stay awake while plugged in" Toggled="OnAwakeToggled" />
+                </Grid>
+            </Border>
 
             <Border Style="{StaticResource PtCardStyle}" Padding="16,12">
                 <Grid ColumnSpacing="12" RowSpacing="8">

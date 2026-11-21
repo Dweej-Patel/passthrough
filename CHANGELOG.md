@@ -24,6 +24,9 @@ the **Before you rebuild** notes first. The Mac and phone apps update together.
   only, with a key that can't leave the PC, and names itself on the network as
   the PC's host name. The firewall rule lets in the local subnet and the
   private and Tailscale ranges only.
+* **Windows: Stay awake while plugged in**, and phones are told when the PC
+  goes to sleep, shuts down or has Remote access turned off. A connected phone
+  keeps the idle timer off for as long as it is connected and a minute after.
 
 * **Phone notifications now take their push key from the build, not from
   Settings.** The *Team ID*, *Key ID* and *Choose .p8* fields in

@@ -398,4 +398,15 @@ public class ShellGateTests : IAsyncDisposable
         await _gate.GoingAwayAsync("sleeping");
         Assert.Equal("sleeping", (await phone.Next(ShellEnvelope.GoingAway)).Reason);
     }
+
+    [Fact]
+    public async Task GoingAwaySaysWhyThenCloses()
+    {
+        using var phone = await Proven();
+        await _gate.GoingAwayAsync("shutting_down", TimeSpan.FromSeconds(2), close: true);
+        Assert.Equal("shutting_down", (await phone.Next(ShellEnvelope.GoingAway)).Reason);
+        Assert.Null(await phone.NextOrNullAfterOthers());
+        // Still accepting: a PC that wakes takes phones again.
+        using var again = await Proven();
+    }
 }

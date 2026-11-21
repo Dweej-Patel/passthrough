@@ -99,5 +99,9 @@ public sealed class PipeAccessAdmin : IAccessAdmin
 
     public Task<PipeAdminReply> DisconnectAsync(string phoneId) => AskAsync(new PipeAdminRequest { Op = PipeAdminRequest.Disconnect, Phone = phoneId });
 
+    public Task<PipeAdminReply> PowerAsync() => AskAsync(new PipeAdminRequest { Op = PipeAdminRequest.Power });
+
+    public Task<PipeAdminReply> SetStayAwakeAsync(bool on) => AskAsync(new PipeAdminRequest { Op = PipeAdminRequest.SetStayAwake, On = on });
+
     public Task<PipeAdminReply> HandOverAsync(IReadOnlyList<ShellPhone> records) => AskAsync(new PipeAdminRequest { Op = PipeAdminRequest.HandOver, Records = [.. records] });
 }

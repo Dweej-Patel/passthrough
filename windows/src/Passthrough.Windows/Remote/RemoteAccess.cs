@@ -380,6 +380,11 @@ public sealed class RemoteAccess : IAccessAdmin, IDisposable
         await RefreshPhonesAsync().ConfigureAwait(false);
     }
 
+    /// <summary>Stay awake while plugged in and the sleep timer, from the service.</summary>
+    public Task<PipeAdminReply> PowerAsync() => _admin.PowerAsync();
+
+    public Task<PipeAdminReply> SetStayAwakeAsync(bool on) => _admin.SetStayAwakeAsync(on);
+
     public async Task SetScreenAllowedAsync(string phoneId, bool allowed)
     {
         await _admin.SetScreenAsync(phoneId, allowed).ConfigureAwait(false);

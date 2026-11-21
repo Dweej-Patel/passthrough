@@ -97,6 +97,17 @@ internal sealed class BackgroundService
         catch (Exception e) when (e is IOException or UnauthorizedAccessException) { Log($"service: couldn't take what --configure left ({e.GetType().Name})"); }
     }
 
+    private const int PbtApmSuspend = 4, PbtApmResumeAutomatic = 18;
+
+    private void Going(Passthrough.Core.Shell.GoingAway.Signal signal, TimeSpan wait)
+    {
+        if (Remote is not { } remote) return;
+        var installed = WindowsMachineRegistry.Read();
+        var updating = WindowsMachineRegistry.IsUpdating();
+        try { remote.GoingAwayAsync(signal, installed?.Enabled ?? false, updating).Wait(wait); }
+        catch (AggregateException) { }
+    }
+
     /// <summary>install.json: which accounts may use the service (only administrators can change it).</summary>
     private bool ReadState()
     {
@@ -122,11 +133,25 @@ internal sealed class BackgroundService
                     StartRemote();
                 });
                 return true;
+            case ServiceControl.PowerEvent when control.EventType == PbtApmSuspend:
+                // Blocks Windows only this long: it gives a service about 2 s.
+                Going(Passthrough.Core.Shell.GoingAway.Signal.Suspend, TimeSpan.FromSeconds(1.8));
+                return true;
+            case ServiceControl.PowerEvent when control.EventType == PbtApmResumeAutomatic:
+                Remote?.Resumed();
+                return true;
             case ServiceControl.PowerEvent:
             case ServiceControl.SessionChange:
                 return true;
+            case ServiceControl.PreShutdown:
+                Going(Passthrough.Core.Shell.GoingAway.Signal.PreShutdown, TimeSpan.FromSeconds(2.5));
+                return true;
+            case ServiceControl.Stop:
+                // --off and --remove set Enabled=0 before stopping: "turned off". An update says nothing.
+                Going(Passthrough.Core.Shell.GoingAway.Signal.Stop, TimeSpan.FromSeconds(2.5));
+                return true;
             default:
-                return control.Control is ServiceControl.Stop or ServiceControl.PreShutdown;
+                return false;
         }
     }
 }
