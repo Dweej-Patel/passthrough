@@ -73,6 +73,24 @@ public class LogTextTests
     }
 
     [Fact]
+    public void RegisteredSecrets_AreNeverDroppedToMakeRoom()
+    {
+        var secrets = Enumerable.Range(0, 40).Select(i => $"rotated-relay-token-{i:00}-x").ToList();
+        foreach (var s in secrets) LogText.Register(s);
+        try
+        {
+            Assert.Equal("(redacted)", LogText.Redact(secrets[0])); // the first is still there after 40 more forms
+        }
+        finally { foreach (var s in secrets) LogText.Unregister(s); }
+    }
+
+    [Fact]
+    public void PairingCodes_InALoggedPairLine()
+    {
+        Assert.DoesNotContain("042917", LogText.Redact("{\"t\":\"pair\",\"code\":\"042917\"}"));
+    }
+
+    [Fact]
     public void ShortRegisteredSecrets_OnlyAsWholeWords()
     {
         LogText.Register("q7Zk1");

@@ -19,11 +19,10 @@ namespace Passthrough.Core.Logging;
 public static partial class LogText
 {
     private const string Replacement = "(redacted)";
-    private const int MaxRegistered = 16;
 
     /// <summary>JSON field names whose value is a secret. A stage that adds such a field adds its name here.</summary>
     public static readonly IReadOnlyList<string> SecretFields =
-        ["shellKey", "key", "previousKey", "linkKey", "secretKey", "relayToken", "token", "mac", "proof", "password"];
+        ["shellKey", "key", "previousKey", "linkKey", "secretKey", "relayToken", "token", "mac", "proof", "password", "code"];
 
     private static readonly Lock RegisteredLock = new();
     private static readonly List<string> Registered = [];
@@ -44,8 +43,9 @@ public static partial class LogText
     }
 
     /// <summary>
-    /// Adds an exact secret that <see cref="Redact"/> removes wherever it appears (at most 16 are kept; the oldest
-    /// goes). Register a secret when it is loaded, before anything that might log it runs, and again on change.
+    /// Adds an exact secret that <see cref="Redact"/> removes wherever it appears, until <see cref="Unregister"/>; none
+    /// is ever dropped to make room. Register a secret when it is loaded, before anything that might log it runs, and
+    /// unregister the old one when it changes.
     /// </summary>
     public static void Register(string secret)
     {
@@ -54,9 +54,7 @@ public static partial class LogText
         lock (RegisteredLock)
             foreach (var form in forms)
             {
-                if (Registered.Contains(form)) continue;
-                if (Registered.Count == MaxRegistered) Registered.RemoveAt(0);
-                Registered.Add(form);
+                if (!Registered.Contains(form)) Registered.Add(form);
             }
     }
 
@@ -77,7 +75,7 @@ public static partial class LogText
     [GeneratedRegex(@"(?<![A-Za-z0-9+/_-])(?:[A-Za-z0-9_-]|\+|/|\\u002[BbFf]|\\/){43}=(?![A-Za-z0-9+/=_-])")]
     private static partial Regex KeyShape();
 
-    [GeneratedRegex(@"""(?<name>shellKey|key|previousKey|linkKey|secretKey|relayToken|token|mac|proof|password)""\s*:\s*""(?:[^""\\]|\\.)*""")]
+    [GeneratedRegex(@"""(?<name>shellKey|key|previousKey|linkKey|secretKey|relayToken|token|mac|proof|password|code)""\s*:\s*""(?:[^""\\]|\\.)*""")]
     private static partial Regex SecretField();
 
     [GeneratedRegex(@"Bearer\s+\S+", RegexOptions.IgnoreCase)]

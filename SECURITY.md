@@ -123,7 +123,8 @@ an item under Passthrough's name.
 The Windows app's log (`%LOCALAPPDATA%\Passthrough\passthrough.log`) must
 never hold a pairing token, a shell key, a relay token or a proof: everything
 written to it passes through a filter that removes them by shape (including
-as JSON escapes them), by field name, and by value for the relay token. Endpoint
+as JSON escapes them), by field name (the pairing code among them), and by
+value once a relay token is loaded and registered with it. Endpoint
 ids and certificate hashes are public and are logged, so no secret is ever
 written as hexadecimal. A secret that reaches the log is a vulnerability.
 
