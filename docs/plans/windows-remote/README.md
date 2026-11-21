@@ -68,8 +68,27 @@ facts measured on a real PC.
   connection; `hostKind` takes only `mac` and `windows`; C# decodes a little
   more leniently than Swift and Kotlin; Swift and Kotlin tests for `hostKind`
   on the grant and `host` ordering are not written.
-* Next on the PC: stage 3 PRs 7–8 (history retention, relay settings and
-  reset identity), then stages 4 and 5.
+  * #57–#58 stage 3, PRs 7–8 and its review fixes: history retention, relay
+    settings, reset identity; the security fixes B-1 to B-17.
+  * #59–#63 stage 4, PRs 1–5, the service (its plan review applied): install,
+    update, off and remove behind one prompt; the pipe; phones in the service
+    (records-only hand-over, the service's own iroh key); TLS 1.3 and DNS-SD
+    on the same network; Stay awake and going-away messages. CI's install
+    round trip runs it for real on the runner.
+  * #64 stage 5, the Remote Desktop relay (its plan review applied): NLA
+    enforced per relayed connection, the far-end check, the certificate pin,
+    caps, and Screen's setup in closed, owner and policy modes.
+* Changed by the stage 4 and 5 reviews (beyond the reconciliation): no service
+  control deletes anything (removal deletes the service's profile); one exe at
+  a fixed path launches the installed app, so Start at login never dangles;
+  logs are administrators-only; the Remote Desktop block rules have a firewall
+  group of their own; the relay reads the first PDU each way and closes any
+  connection without NLA.
+* Not yet on the PC: stage 5's exposure notice to tray apps, the after-view
+  and "Allow screen" notices, `host.console`; the quit dialog and the hand-off
+  to the installed copy after Turn on.
+* Not run for real on this PC (each changes it; left for the owner):
+  `--install`, Screen setup, stock FreeRDP through the relay, `--remove`.
 * Needs the Mac and a phone: spikes 0.1, 0.3, 0.5, 0.6; stage 2 (the phones
   call the PC a PC: until then a PC works but is named a Mac); the first real
   test of #56 (turn on, plug in, open a shell from cellular).
