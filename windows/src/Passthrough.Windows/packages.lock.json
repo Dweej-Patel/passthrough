@@ -1,0 +1,24 @@
+{
+  "version": 1,
+  "dependencies": {
+    "net10.0-windows10.0.19041": {
+      "Microsoft.Windows.Console.ConPTY": {
+        "type": "Direct",
+        "requested": "[1.25.261109001, )",
+        "resolved": "1.25.261109001",
+        "contentHash": "FH1MRt/Tp3fbu+9qKs02YPZC5I7x5gx/1MmARdiHHAmkjklDdpIDgfwW1A3d70LbeIgx5KgMcLjzipwbquKViw=="
+      },
+      "passthrough.core": {
+        "type": "Project"
+      }
+    },
+    "net10.0-windows10.0.19041/win-x64": {
+      "Microsoft.Windows.Console.ConPTY": {
+        "type": "Direct",
+        "requested": "[1.25.261109001, )",
+        "resolved": "1.25.261109001",
+        "contentHash": "FH1MRt/Tp3fbu+9qKs02YPZC5I7x5gx/1MmARdiHHAmkjklDdpIDgfwW1A3d70LbeIgx5KgMcLjzipwbquKViw=="
+      }
+    }
+  }
+}

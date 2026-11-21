@@ -24,6 +24,9 @@ Third-party components distributed with this repository keep their own licences:
   libiroh_ffi.so for arm64-v8a and armeabi-v7a (plus x86_64 in debug builds), and brings JNA 5.15.0
   (https://github.com/java-native-access/jna) — LGPL-2.1 OR Apache-2.0, used here under
   Apache-2.0 (android/licenses/APACHE-2.0.txt).
+* Microsoft.Windows.Console.ConPTY (https://github.com/microsoft/terminal), 1.25.261109001 — MIT.
+  Fetched from nuget.org (pinned in windows/src/Passthrough.Windows/packages.lock.json); its
+  conpty.dll and x64\OpenConsole.exe, signed by Microsoft, ship beside the Windows app.
 * android/app/src/main/res/font/nunito.ttf — Nunito, SIL Open Font License 1.1.
   See android/licenses/NUNITO-OFL.txt.
 * Termux terminal-view and terminal-emulator (https://github.com/termux/termux-app),

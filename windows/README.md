@@ -68,6 +68,16 @@ This runs anywhere, macOS included: Core has no Windows dependency, and the
 tests use fakes for sockets, processes and time. The app itself builds only on
 Windows (WinUI 3).
 
+```
+dotnet test windows/tests/Passthrough.Windows.Tests
+```
+
+Windows only, and not as administrator: real sessions in the bundled
+pseudoconsole (Microsoft.Windows.Console.ConPTY, whose `conpty.dll` and
+`x64\OpenConsole.exe` are copied beside the app and the tests), the job object
+that ends what a shell started, the shell catalog on this PC, and the session
+manager over them (titles, questions, Claude Code's status).
+
 ## First things to try on a real PC
 
 The app has not been built or run yet; the Core tests are all that have run.

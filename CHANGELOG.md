@@ -261,6 +261,13 @@ these steps as written and check each one before building.
   from the first echoed command, "needs you" questions, Claude Code status, and
   revoking a phone ending what it opened. Shells come only from the PC's own
   catalog. Still nothing starts a real shell.
+* Windows: real shells. Passthrough.Windows runs a session's shell in Microsoft's
+  bundled ConPTY (never the inbox one, which breaks Claude Code's status), in a
+  kill-on-close job so ending it ends everything it started, with the account's
+  own environment. The shell catalog lists PowerShell 7, Windows PowerShell,
+  Command Prompt, each WSL distribution and Git Bash from fixed paths and the
+  registry, never PATH. The pseudoconsole's own start-up modes never reach a
+  phone. New Windows-only tests run real sessions, in CI too.
 * Remote shell: coming back to a session no longer plays it back from the
   top. The phone holds the Mac's replay until it is complete and draws it in
   one go, keeping what was on screen meanwhile, and says "Loading session…"

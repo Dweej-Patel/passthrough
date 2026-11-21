@@ -94,6 +94,8 @@ jobs:
         run: dotnet restore windows/Passthrough.Windows.sln --locked-mode
       - name: dotnet test
         run: dotnet test windows/tests/Passthrough.Core.Tests -c Release --no-restore
+      - name: Real ConPTY sessions
+        run: dotnet test windows/tests/Passthrough.Windows.Tests -c Release --no-restore
       - name: Build the app
         run: dotnet build windows/src/Passthrough.App -c Release --no-restore
 
