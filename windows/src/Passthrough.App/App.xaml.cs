@@ -11,6 +11,8 @@ using Passthrough.Core.Protocol;
 using Passthrough.Core.Session;
 using Passthrough.Core.Storage;
 using Passthrough.Core.Transport;
+using Passthrough.Windows.Cable;
+using Passthrough.Windows.Remote;
 
 namespace Passthrough.App;
 
@@ -22,6 +24,7 @@ public partial class App : Application
 
     private Mutex? _singleInstance;
     private HostSession? _session;
+    private RemoteAccess? _remote;
     private TrayIcon? _tray;
     private FlyoutWindow? _flyout;
     private SettingsWindow? _settings;
@@ -92,11 +95,15 @@ public partial class App : Application
             });
             directory.Error += LogFile.Error; // watcher failures (adb that won't start, a daemon that falls silent), once each
 
+            // Remote access: phones' shells on this PC, from anywhere (over iroh; the local path comes with the service).
+            _remote = new RemoteAccess(settings, secrets, Path.Combine(AppFolder.Path, "ShellHistory"), Environment.MachineName, LogFile.Write);
             _session = new HostSession(
                 directory, secrets, settings, Environment.MachineName,
+                // The cable peer check: only a channel whose far end is Apple's device service or this user's adb carries a shell grant.
                 (device, identity) => new ControlClient(
-                    ct => device.Connect(ProtocolConstants.ControlPort, ct), identity, device.Kind.Label(), TimeProvider.System),
-                TimeProvider.System);
+                    ct => device.Connect(ProtocolConstants.ControlPort, ct), identity, device.Kind.Label(), TimeProvider.System,
+                    stream => CablePeerCheck.Check(stream, device.Kind)),
+                TimeProvider.System, _remote);
             _session.Error += LogFile.Error;
             _session.Log += LogFile.Write;
             _session.StateChanged += LogChanges;
@@ -108,6 +115,7 @@ public partial class App : Application
             _flyout = new FlyoutWindow(viewModel, ShowSettings, Quit);
 
             await _session.StartAsync();
+            await _remote.StartIfEnabledAsync();
         }
         catch (Exception e)
         {
@@ -151,7 +159,7 @@ public partial class App : Application
         if (_session is null || _flyout is null || _shuttingDown) return;
         if (_settings is null)
         {
-            _settings = new SettingsWindow(_flyout.ViewModel);
+            _settings = new SettingsWindow(_flyout.ViewModel, _remote);
             _settings.Closed += (_, _) => _settings = null;
         }
         _settings.BringToFront();
@@ -178,6 +186,8 @@ public partial class App : Application
         try
         {
             if (_session is not null) await _session.DisposeAsync().AsTask().WaitAsync(QuitLimit);
+            // Phones are dropped and every session ends (each transcript finished): nothing runs once Passthrough is gone.
+            if (_remote is not null) await Task.Run(_remote.Dispose).WaitAsync(QuitLimit);
         }
         catch (TimeoutException)
         {

@@ -59,6 +59,64 @@
                 </Grid>
             </Border>
 
+            <TextBlock Text="Remote access" Style="{StaticResource BodyStrongTextBlockStyle}" Margin="0,16,0,0" />
+            <Border Style="{StaticResource PtCardStyle}" Padding="16,12">
+                <Grid ColumnSpacing="12">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="Auto" />
+                    </Grid.ColumnDefinitions>
+                    <StackPanel VerticalAlignment="Center">
+                        <TextBlock Text="Use this PC's shell from your phones" />
+                        <TextBlock x:Name="RemoteStatusText" Style="{StaticResource CaptionTextBlockStyle}" TextWrapping="Wrap"
+                                   Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                   AutomationProperties.LiveSetting="Polite" />
+                    </StackPanel>
+                    <ToggleSwitch x:Name="RemoteSwitch" Grid.Column="1" MinWidth="0" OnContent="" OffContent=""
+                                  AutomationProperties.Name="Remote access" />
+                </Grid>
+            </Border>
+            <TextBlock x:Name="ShellsText" Style="{StaticResource CaptionTextBlockStyle}" TextWrapping="Wrap"
+                       Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+
+            <TextBlock Text="Phones with access" Style="{StaticResource BodyStrongTextBlockStyle}" Margin="0,16,0,0" />
+            <Border x:Name="NoAccessText" Style="{StaticResource PtCardStyle}" Padding="16,14" Visibility="Collapsed">
+                <TextBlock Text="No phone can open shells here yet. With Remote access on, plug a paired phone in once."
+                           TextWrapping="Wrap" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+            </Border>
+            <ItemsControl ItemsSource="{x:Bind WithAccess}">
+                <ItemsControl.ItemsPanel>
+                    <ItemsPanelTemplate>
+                        <StackPanel Spacing="8" />
+                    </ItemsPanelTemplate>
+                </ItemsControl.ItemsPanel>
+                <ItemsControl.ItemTemplate>
+                    <DataTemplate x:DataType="local:RemotePhoneRow">
+                        <Border Style="{StaticResource PtCardStyle}" Padding="16,12">
+                            <Grid ColumnSpacing="8">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="Auto" />
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="Auto" />
+                                    <ColumnDefinition Width="Auto" />
+                                </Grid.ColumnDefinitions>
+                                <Grid Width="32" Height="32">
+                                    <Ellipse Fill="{ThemeResource ControlFillColorSecondaryBrush}" />
+                                    <FontIcon Glyph="{x:Bind Glyph}" FontSize="15" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                                </Grid>
+                                <StackPanel Grid.Column="1" VerticalAlignment="Center" Margin="4,0,0,0">
+                                    <TextBlock Text="{x:Bind Title}" TextTrimming="CharacterEllipsis" />
+                                    <TextBlock Text="{x:Bind Detail}" Style="{StaticResource CaptionTextBlockStyle}"
+                                               Foreground="{ThemeResource TextFillColorSecondaryBrush}" TextTrimming="CharacterEllipsis" />
+                                </StackPanel>
+                                <Button Grid.Column="2" Content="Stop" Click="OnStopClick" IsEnabled="{x:Bind CanStop}"
+                                        ToolTipService.ToolTip="End its connection and the shells it opened. It keeps its access." />
+                                <Button Grid.Column="3" Content="Revoke" Click="OnRevokeClick" />
+                            </Grid>
+                        </Border>
+                    </DataTemplate>
+                </ItemsControl.ItemTemplate>
+            </ItemsControl>
             <TextBlock Text="Paired phones" Style="{StaticResource BodyStrongTextBlockStyle}" Margin="0,16,0,0" />
             <TextBlock Text="Every phone this PC holds a pairing for, attached or not. Forget one you no longer use."
                        Style="{StaticResource CaptionTextBlockStyle}" TextWrapping="Wrap"

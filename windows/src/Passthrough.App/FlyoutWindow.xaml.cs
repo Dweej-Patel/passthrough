@@ -120,7 +120,7 @@ public sealed partial class FlyoutWindow : Window
     {
         var scale = Scale();
         var chrome = AppWindow.Size.Height - AppWindow.ClientSize.Height;
-        Root.Measure(new Windows.Foundation.Size(AppWindow.ClientSize.Width / scale, double.PositiveInfinity));
+        Root.Measure(new global::Windows.Foundation.Size(AppWindow.ClientSize.Width / scale, double.PositiveInfinity));
         var height = (int)Math.Ceiling(Root.DesiredSize.Height + chrome / scale);
         // That measure was a question, not the layout: have the next pass measure for the real size again.
         Root.InvalidateMeasure();
@@ -145,7 +145,7 @@ public sealed partial class FlyoutWindow : Window
 
     private async void OnCodeKeyDown(object sender, KeyRoutedEventArgs e)
     {
-        if (e.Key != Windows.System.VirtualKey.Enter) return;
+        if (e.Key != global::Windows.System.VirtualKey.Enter) return;
         e.Handled = true;
         var box = (TextBox)sender;
         var row = (PhoneRow)box.DataContext;

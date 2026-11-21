@@ -8,20 +8,24 @@ using Passthrough.Core.Desktop;
 using Windows.Graphics;
 using Passthrough.App.Platform;
 using Passthrough.Core.Presentation;
+using Passthrough.Windows.Remote;
 
 namespace Passthrough.App;
 
-/// <summary>Android support, start at login, and forgetting any stored pairing (its phone attached or not).</summary>
+/// <summary>Android support, start at login, Remote access and the phones it lets in, and forgetting any stored pairing.</summary>
 public sealed partial class SettingsWindow : Window
 {
     private const int WidthDip = 560;
-    private const int HeightDip = 620;
+    private const int HeightDip = 760;
 
     private bool _forgetting;
+    private bool _revoking;
+    private readonly RemoteAccess? _remote;
 
-    public SettingsWindow(SessionViewModel viewModel)
+    public SettingsWindow(SessionViewModel viewModel, RemoteAccess? remote = null)
     {
         ViewModel = viewModel;
+        _remote = remote;
         InitializeComponent();
         AppWindow.SetIcon(AppIcon.Path); // the taskbar button and Alt+Tab; without it Windows shows a blank default
         SystemBackdrop = new MicaBackdrop();
@@ -37,6 +41,24 @@ public sealed partial class SettingsWindow : Window
         StartAtLoginSwitch.IsOn = ReadStartAtLogin();
         AndroidSwitch.Toggled += OnAndroidToggled;
         StartAtLoginSwitch.Toggled += OnStartAtLoginToggled;
+        RemoteSwitch.IsOn = remote?.Enabled ?? false;
+        RemoteSwitch.IsEnabled = remote is not null;
+        RemoteSwitch.Toggled += OnRemoteToggled;
+        if (remote is not null)
+        {
+            // Fired on any thread; shown on this one.
+            void Refresh() => DispatcherQueue.TryEnqueue(ShowRemote);
+            remote.StatusChanged += Refresh;
+            remote.PhonesChanged += Refresh;
+            remote.Sessions.Changed += Refresh;
+            Closed += (_, _) =>
+            {
+                remote.StatusChanged -= Refresh;
+                remote.PhonesChanged -= Refresh;
+                remote.Sessions.Changed -= Refresh;
+            };
+        }
+        ShowRemote();
 
         // The setting and the pairings can change while the window is open; follow them until it closes.
         viewModel.PropertyChanged += OnViewModelChanged;
@@ -50,6 +72,9 @@ public sealed partial class SettingsWindow : Window
     }
 
     public SessionViewModel ViewModel { get; }
+
+    /// <summary>The phones allowed to open shells here.</summary>
+    public ObservableCollection<RemotePhoneRow> WithAccess { get; } = new();
 
     /// <summary>The stored pairings, as Core's <see cref="PairedPhone.List"/> names them.</summary>
     public ObservableCollection<PairedPhoneRow> Paired { get; } = new();
@@ -165,6 +190,95 @@ public sealed partial class SettingsWindow : Window
             _forgetting = false;
         }
         OnPairingsChanged();
+    }
+
+    /// <summary>The switch's state, its line, the shells offered and the phones let in, as they are now.</summary>
+    private void ShowRemote()
+    {
+        if (_remote is null)
+        {
+            RemoteStatusText.Text = "Not available in this copy of Passthrough.";
+            return;
+        }
+        RemoteStatusText.Text = _remote.State switch
+        {
+            RemoteAccessState.Off => "Off. Phones can't reach this PC's shell.",
+            RemoteAccessState.Starting => "Starting…",
+            RemoteAccessState.On when _remote.HomeRelay is { } relay =>
+                $"On. Phones you've plugged in once reach this PC from anywhere, directly or through {RelayName(relay)}. Works while Passthrough is open and you're signed in.",
+            RemoteAccessState.On => "On. Phones you've plugged in once reach this PC directly; looking for a relay for when they're away. Works while Passthrough is open and you're signed in.",
+            _ => _remote.Problem ?? "Remote access couldn't start. See the log for details.",
+        };
+        if (RemoteSwitch.IsOn != _remote.Enabled)
+        {
+            RemoteSwitch.Toggled -= OnRemoteToggled;
+            RemoteSwitch.IsOn = _remote.Enabled;
+            RemoteSwitch.Toggled += OnRemoteToggled;
+        }
+        var shells = _remote.Catalog.Shells.Select(s => s.Name).ToList();
+        ShellsText.Text = shells.Count == 0 ? "" : $"Shells: {string.Join(", ", shells)}. They open as you, never as administrator.";
+        var connected = _remote.ConnectedPhones.ToHashSet();
+        WithAccess.Clear();
+        foreach (var phone in _remote.Access.Phones)
+            WithAccess.Add(new RemotePhoneRow(phone.PhoneId, phone.Label, phone.PairingSlot, connected.Contains(phone.PhoneId), _remote.Sessions.RunningSessions(phone.PhoneId)));
+        NoAccessText.Visibility = WithAccess.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
+    }
+
+    /// <summary>"use1-1.relay.n0.iroh.link" for "https://use1-1.relay.n0.iroh.link./".</summary>
+    private static string RelayName(string url) =>
+        Uri.TryCreate(url, UriKind.Absolute, out var uri) ? uri.Host.TrimEnd('.') : url;
+
+    private async void OnRemoteToggled(object sender, RoutedEventArgs e)
+    {
+        if (_remote is null) return;
+        try
+        {
+            await _remote.SetEnabledAsync(RemoteSwitch.IsOn);
+            ErrorBox.Visibility = Visibility.Collapsed;
+        }
+        catch (Exception ex)
+        {
+            LogFile.Error(ex);
+            ShowError("Could not change Remote access. See the log for details.");
+        }
+        ShowRemote();
+    }
+
+    private void OnStopClick(object sender, RoutedEventArgs e)
+    {
+        var phone = (RemotePhoneRow)((FrameworkElement)sender).DataContext;
+        _remote?.Disconnect(phone.PhoneId);
+        ShowRemote();
+    }
+
+    private async void OnRevokeClick(object sender, RoutedEventArgs e)
+    {
+        if (_revoking || _remote is null) return;
+        _revoking = true;
+        var phone = (RemotePhoneRow)((FrameworkElement)sender).DataContext;
+        try
+        {
+            var dialog = new ContentDialog
+            {
+                XamlRoot = Content.XamlRoot,
+                Title = $"Take away {phone.Title}'s access?",
+                Content = "Its shells on this PC end now, and it can't open new ones. Plug it in again with Remote access on to give it back.",
+                PrimaryButtonText = "Revoke",
+                CloseButtonText = "Cancel",
+                DefaultButton = ContentDialogButton.Close,
+            };
+            if (await dialog.ShowAsync() == ContentDialogResult.Primary) _remote.Revoke(phone.PhoneId);
+        }
+        catch (Exception ex)
+        {
+            LogFile.Error(ex);
+            ShowError("Could not revoke its access. See the log for details.");
+        }
+        finally
+        {
+            _revoking = false;
+        }
+        ShowRemote();
     }
 
     /// <summary>In front of whatever is there: opened from the tray, the window would otherwise come up behind it.</summary>

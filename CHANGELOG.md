@@ -281,6 +281,14 @@ these steps as written and check each one before building.
   take over, typing, resizes, history and transcripts, lock, and what a PC
   answers to what only a Mac does. A phone that stops reading is dropped at
   8 MiB.
+* Windows: Remote access. Turn it on in Settings ▸ Remote access, plug a paired
+  phone in once, and it can open PowerShell, Command Prompt, WSL or Git Bash on
+  this PC from anywhere (over iroh, directly or through a relay) while
+  Passthrough is open. Settings lists the phones with access, with Stop (end
+  their shells) and Revoke. Grants go only over a cable whose far end is Apple's
+  device service or your own adb; Passthrough refuses to host shells when it
+  runs as administrator. Not yet: the phones' PC wording (they still say Mac),
+  the PC's own listener on the network, and the screen.
 * Remote shell: coming back to a session no longer plays it back from the
   top. The phone holds the Mac's replay until it is complete and draws it in
   one go, keeping what was on screen meanwhile, and says "Loading session…"
