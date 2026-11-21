@@ -70,7 +70,7 @@ In this order:
    first at the `x:Bind` code the XAML compiler generates.
 2. **It starts, or says why not.** The log starts with a line naming the app,
    Windows and .NET versions, then where adb was found. Make startup fail (for
-   example, rename `Assets\tray.ico`): a message box should name the error and
+   example, rename `Assets\app.ico`): a message box should name the error and
    the process should end, so a second launch works once it is fixed. A crash
    inside native code never reaches the app and can't be shown this way.
 3. **Apple Devices.** Install it from the Microsoft Store. Plug in an iPhone:

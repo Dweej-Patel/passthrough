@@ -13,6 +13,8 @@
     <WindowsPackageType>None</WindowsPackageType>
     <WindowsAppSDKSelfContained>true</WindowsAppSDKSelfContained>
     <ApplicationManifest>app.manifest</ApplicationManifest>
+    <!-- The exe's own icon (Explorer, the taskbar, Task Manager); the same file is loaded at run time for the tray and the windows. -->
+    <ApplicationIcon>Assets\app.ico</ApplicationIcon>
   </PropertyGroup>
 
   <ItemGroup>
@@ -26,6 +28,6 @@
   </ItemGroup>
 
   <ItemGroup>
-    <Content Include="Assets\tray.ico" CopyToOutputDirectory="PreserveNewest" />
+    <Content Include="Assets\app.ico" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 </Project>

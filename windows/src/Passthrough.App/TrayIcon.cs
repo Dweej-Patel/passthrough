@@ -21,7 +21,9 @@ public sealed class TrayIcon : IDisposable
 
         // Loaded here, not through IconSource: H.NotifyIcon loads an IconSource in an async void callback, where a missing
         // or damaged file would be an unhandled exception instead of a startup failure. Reading the handle decodes it now.
-        _image = new System.Drawing.Icon(Path.Combine(AppContext.BaseDirectory, "Assets", "tray.ico"));
+        // At the size the notification area draws (16 pixels at 100 %), so Windows doesn't shrink a bigger one into a blur.
+        var size = NativeMethods.SmallIconSize();
+        _image = new System.Drawing.Icon(AppIcon.Path, size, size);
         _ = _image.Handle;
 
         _icon = new TaskbarIcon
