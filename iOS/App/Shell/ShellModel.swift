@@ -121,6 +121,8 @@ final class ShellModel: ObservableObject {
     /// (`replay` true: its scrollback comes first) and when a session was just
     /// opened, so a terminal can clear first.
     let streamStarting = PassthroughSubject<(session: String, replay: Bool), Never>()
+    /// The Mac's replay for an attach begins: output since the request was not part of it.
+    let replayStarting = PassthroughSubject<String, Never>()
     /// The scrollback replay of an attach is complete; later output is live.
     let replayFinished = PassthroughSubject<String, Never>()
 
@@ -790,6 +792,8 @@ final class ShellModel: ObservableObject {
             lastError = error
         case let .output(session, data):
             output.send((session, data))
+        case let .replaying(session):
+            replayStarting.send(session)
         case let .attached(session):
             replayFinished.send(session)
         case let .ended(session, exitStatus):

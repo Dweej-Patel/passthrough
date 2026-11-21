@@ -93,6 +93,7 @@ public struct ShellEnvelope: Codable, Equatable, Sendable {
     public static let opened = "opened"
     public static let attach = "attach"
     public static let attached = "attached"
+    public static let replaying = "replaying"
     public static let input = "input"
     public static let resize = "resize"
     public static let output = "output"

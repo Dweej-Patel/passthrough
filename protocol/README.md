@@ -382,8 +382,10 @@ After `ready` a line over the 262144-byte limit closes the connection.
 
 A connection is attached to at most one session: `open` attaches it to the
 new session, `attach` to another session leaves the previous one first.
-After an `attach` the Mac sends the scrollback as `output`, then `attached`,
-then live output. A phone's terminal should not answer terminal queries
+After an `attach` the Mac sends `replaying`, the scrollback as `output`, then
+`attached`, then live output. Output a phone receives between its `attach`
+and `replaying` was live output of a session it was already attached to; the
+scrollback holds it too, so a phone that draws the replay drops it. A phone's terminal should not answer terminal queries
 (device attributes, cursor position, color reports…) found in the replay:
 the program that asked is long gone, and the answer would arrive as input.
 `input` must name the attached session, else `bad_request`. `resize` is for

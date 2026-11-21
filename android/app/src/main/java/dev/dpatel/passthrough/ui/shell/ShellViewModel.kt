@@ -60,6 +60,8 @@ interface ShellStreamListener {
     /** A session's output is about to start over (replay first when [replay]): clear. */
     fun streamStarting(session: String, replay: Boolean)
     fun output(session: String, data: ByteArray)
+    /** The Mac's replay for an attach begins: output since the request was not part of it. */
+    fun replayStarting(session: String)
     /** The scrollback replay of an attach is complete; later output is live. */
     fun replayFinished(session: String)
 }
@@ -792,6 +794,7 @@ class ShellViewModel(app: Application) : AndroidViewModel(app) {
                 if (event.session !in _openTabs.value) shownTabs = _openTabs.value + event.session
             }
             is ShellEvent.Output -> listeners.toList().forEach { it.output(event.session, event.data) }
+            is ShellEvent.Replaying -> listeners.toList().forEach { it.replayStarting(event.session) }
             is ShellEvent.Attached -> listeners.toList().forEach { it.replayFinished(event.session) }
             is ShellEvent.Ended -> {
                 _ended.value = _ended.value.ended(event.session, event.exitStatus)

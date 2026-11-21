@@ -116,6 +116,9 @@ public final class ShellClient: @unchecked Sendable {
         /// The Mac refused an `open` this client made: no `opened` comes for it.
         case openFailed(ShellError)
         case output(session: String, Data)
+        /// The replay after an `attach` begins: output since the request and
+        /// before this is not part of it (the replay holds it already).
+        case replaying(session: String)
         /// The replay after an `attach` is complete; later output is live.
         case attached(session: String)
         case ended(session: String, exitStatus: Int32)
@@ -727,6 +730,9 @@ public final class ShellClient: @unchecked Sendable {
         case ShellEnvelope.output:
             guard let id = message.session, let data = message.data.flatMap({ Data(base64Encoded: $0) }) else { return }
             emit(.output(session: id, data))
+        case ShellEnvelope.replaying:
+            guard let id = message.session else { return }
+            emit(.replaying(session: id))
         case ShellEnvelope.attached:
             guard let id = message.session else { return }
             emit(.attached(session: id))

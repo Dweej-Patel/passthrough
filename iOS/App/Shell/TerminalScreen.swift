@@ -17,7 +17,8 @@ enum TerminalIntent: Identifiable, Equatable {
 }
 
 /// Connects the live terminal to `ShellModel`: shows one session at a time,
-/// clears before each (re)attach so replays don't stack, and forwards input
+/// replaces what it shows with each (re)attach's replay once that is complete
+/// (so replays don't stack, and aren't watched arriving), and forwards input
 /// and size changes.
 @MainActor
 final class ShellTerminalController: ObservableObject {
@@ -33,22 +34,55 @@ final class ShellTerminalController: ObservableObject {
     private var subscriptions: Set<AnyCancellable> = []
     /// The colours the terminal draws with now (the shown session's; nil: the app's own).
     private var theme: ShellTheme?
+    /// An attach's replay, held until it is complete and then drawn in one go:
+    /// fed as it arrives, the session is seen scrolling past from its top on
+    /// every return to the app. Nil when what arrives is live.
+    private var pendingReplay: Data?
+    /// A replay has been awaited long enough to say so (a quick one is not announced).
+    @Published private(set) var loadingReplay = false
+    private var loadingTask: Task<Void, Never>?
 
     init(shell: ShellModel) {
         self.shell = shell
         shell.streamStarting
             .sink { [weak self] start in self?.show(start.session, replay: start.replay) }
             .store(in: &subscriptions)
+        // What arrived since the attach was asked for was live output the replay
+        // holds too (drawn, it would show twice). Also a second replay of the
+        // session on screen (two attaches in a row): held like the first, and
+        // drawn in its place.
+        shell.replayStarting
+            .sink { [weak self] id in
+                guard let self, id == self.shown else { return }
+                self.pendingReplay = Data()
+                self.driver.replaying = true
+            }
+            .store(in: &subscriptions)
         shell.replayFinished
             .sink { [weak self] id in
                 guard let self, id == self.shown else { return }
-                self.driver.replaying = false
+                self.finishReplay()
             }
+            .store(in: &subscriptions)
+        // The replay's end will not come (the connection dropped, another
+        // device took the session, the attach was refused): draw what arrived.
+        // `@Published` fires before the change lands: use the values it carries.
+        shell.$reach.dropFirst()
+            .sink { [weak self] reach in if reach != .ready { self?.finishReplay() } }
+            .store(in: &subscriptions)
+        shell.$detachedSession.dropFirst()
+            .sink { [weak self] detached in
+                guard let self, let detached, detached == self.shown else { return }
+                self.finishReplay()
+            }
+            .store(in: &subscriptions)
+        shell.$lastError.dropFirst()
+            .sink { [weak self] error in if error != nil { self?.finishReplay() } }
             .store(in: &subscriptions)
         shell.output
             .sink { [weak self] session, data in
                 guard let self, session == self.shown else { return }
-                self.driver.feed(data)
+                if self.pendingReplay != nil { self.pendingReplay?.append(data) } else { self.driver.feed(data) }
             }
             .store(in: &subscriptions)
         // The list can come after the session is shown (a session just opened).
@@ -114,13 +148,38 @@ final class ShellTerminalController: ObservableObject {
     /// Shows `id`, attaching to it (and so taking it back from another device).
     func attach(_ id: String) { shell.attach(id, cols: driver.cols, rows: driver.rows) }
 
+    /// Draws the held replay (all of it, or what arrived before it was cut short) in place of the screen.
+    private func finishReplay() {
+        loadingTask?.cancel()
+        loadingReplay = false
+        guard let replay = pendingReplay else { return }
+        // Cleared and redrawn in one turn of the run loop: nothing in between is seen.
+        pendingReplay = nil
+        driver.reset()
+        driver.feed(replay)
+        driver.replaying = false
+    }
+
     private func show(_ id: String, replay: Bool) {
+        // The same session attached again (back from the background, a
+        // reconnect): what is on screen stays until its replay replaces it.
+        let keepScreen = replay && id == shown
         shown = id
         driver.replaying = false
         // Before anything is drawn: a Mac terminal's session in that terminal's colours.
         theme = shell.sessions.first { $0.id == id }?.theme
         driver.apply(theme)
-        driver.reset()
+        if !keepScreen { driver.reset() }
+        pendingReplay = replay ? Data() : nil
+        loadingTask?.cancel()
+        loadingReplay = false
+        if replay {
+            loadingTask = Task { [weak self] in
+                try? await Task.sleep(for: .milliseconds(250))
+                guard !Task.isCancelled, let self, self.pendingReplay != nil else { return }
+                self.loadingReplay = true
+            }
+        }
         driver.replaying = replay
         // An ended session's replay is its log: show it read-only.
         driver.setReadOnly(!shell.ended.isWritable(id, openTabs: shell.openTabs))
@@ -167,6 +226,9 @@ struct TerminalScreen: View {
                         if let status = statusText { statusBanner(status) }
                         if shell.reach == .ready, controller.shown == nil, shell.detachedSession == nil, shell.lastError == nil {
                             statusBanner("Opening a session…", busy: true)
+                        }
+                        if shell.reach == .ready, controller.loadingReplay, shell.lastError == nil {
+                            statusBanner("Loading session…", busy: true)
                         }
                         if let message = shell.lastError?.message { errorBanner(message) }
                     }

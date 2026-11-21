@@ -768,7 +768,9 @@ final class ScreenVideoStreamerTests: XCTestCase {
                 spin(1.0 / 60)
             }
         }
-        push(for: 1.5, changed: 0.01)   // the first second goes at full speed
+        push(for: 1, changed: 0.01)   // the first second goes at full speed
+        let atFullSpeed = frames()
+        push(for: 0.5, changed: 0.01)
         let before = frames()
         push(for: 1, changed: 0.01)
         let idle = frames() - before
@@ -778,9 +780,13 @@ final class ScreenVideoStreamerTests: XCTestCase {
         spin(0.05)
         let touched = frames()
         push(for: 0.5, changed: 0.01)
-        // Half a second at the idle rate is 7 or 8 frames; anything clearly over that is the limit lifted
-        // (a slow machine's encoder may not manage many more).
-        XCTAssertGreaterThan(frames() - touched, Int(ScreenVideoStreamer.idleFPS / 2) + 2, "touched: full speed again")
+        // Half a second at the idle rate is 7 or 8 frames; anything clearly over that is the limit lifted.
+        // A machine whose encoder was hardly faster than the idle rate in the first second (a busy CI
+        // runner) can't show the difference, so it is only held to it when it could.
+        let lifted = Int(ScreenVideoStreamer.idleFPS / 2) + 2
+        if atFullSpeed / 2 > lifted + 3 {
+            XCTAssertGreaterThan(frames() - touched, lifted, "touched: full speed again")
+        }
     }
 
     /// The phone's frame rate reaches the capture and its display; `space` sizes

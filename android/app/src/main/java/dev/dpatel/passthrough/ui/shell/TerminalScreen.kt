@@ -85,10 +85,12 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.view.WindowCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import dev.dpatel.passthrough.core.ShellError
 import dev.dpatel.passthrough.ui.LocalPT
 import dev.dpatel.passthrough.ui.PT
 import dev.dpatel.passthrough.ui.PTColors
 import dev.dpatel.passthrough.ui.lock.HideFromCapture
+import java.io.ByteArrayOutputStream
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.combine
@@ -104,7 +106,8 @@ object TerminalIntent {
 
 /**
  * Connects a live terminal view to [ShellViewModel]: shows one session at a
- * time, clears before each (re)attach so replays don't stack, and forwards
+ * time, replaces what it shows with each (re)attach's replay once that is
+ * complete (so replays don't stack, and aren't watched arriving), and forwards
  * input and size changes. Mirrors ShellTerminalController on iOS.
  */
 class ShellTerminalController(context: Context, private val vm: ShellViewModel) : ShellStreamListener {
@@ -118,6 +121,18 @@ class ShellTerminalController(context: Context, private val vm: ShellViewModel) 
     /** The shown session ended (or its tab closed): its output is a read-only log. */
     var readOnly by mutableStateOf(false)
         private set
+    /** A replay has been awaited long enough to say so (a quick one is not announced). */
+    var loadingReplay by mutableStateOf(false)
+        private set
+    /**
+     * An attach's replay, held until it is complete and then drawn in one go: fed as it
+     * arrives, the session is seen scrolling past from its top on every return to the app.
+     * Null when what arrives is live.
+     */
+    private var pendingReplay: ByteArrayOutputStream? = null
+    private val announceLoading = Runnable { if (pendingReplay != null) loadingReplay = true }
+    /** The error showing when the replay was asked for: only a later one is about it. */
+    private var errorAtStart: ShellError? = null
 
     init {
         view.onInput = { data ->
@@ -158,20 +173,61 @@ class ShellTerminalController(context: Context, private val vm: ShellViewModel) 
     fun attach(id: String) = vm.attach(id, view.columns, view.rows)
 
     override fun streamStarting(session: String, replay: Boolean) {
+        // The same session attached again (back from the background, a reconnect): what is
+        // on screen stays until its replay replaces it.
+        val keepScreen = replay && session == shown
         shown = session
         view.replaying = false
-        view.reset()
+        if (!keepScreen) view.reset()
+        pendingReplay = if (replay) ByteArrayOutputStream() else null
+        errorAtStart = vm.lastError.value
+        view.removeCallbacks(announceLoading)
+        loadingReplay = false
+        if (replay) view.postDelayed(announceLoading, 250)
         view.replaying = replay
         // An ended session's replay is its log: show it read-only.
         update(vm.ended.value, vm.openTabs.value)
     }
 
     override fun output(session: String, data: ByteArray) {
-        if (session == shown) view.feed(data)
+        if (session != shown) return
+        pendingReplay?.write(data) ?: view.feed(data)
+    }
+
+    /**
+     * What arrived since the attach was asked for was live output the replay holds too (drawn,
+     * it would show twice). Also a second replay of the session on screen (two attaches in a
+     * row): held like the first, and drawn in its place.
+     */
+    override fun replayStarting(session: String) {
+        if (session != shown) return
+        pendingReplay = ByteArrayOutputStream()
+        view.replaying = true
     }
 
     override fun replayFinished(session: String) {
-        if (session == shown) view.replaying = false
+        if (session == shown) finishReplay()
+    }
+
+    /**
+     * The replay's end will not come (the connection dropped, another device took the
+     * session, the attach was refused): draws what arrived.
+     */
+    fun settle(reach: ShellReach, detached: String?, error: ShellError?) {
+        if (pendingReplay == null) return
+        if (reach != ShellReach.READY || (detached != null && detached == shown) || (error != null && error != errorAtStart)) finishReplay()
+    }
+
+    /** Draws the held replay (all of it, or what arrived before it was cut short) in place of the screen. */
+    private fun finishReplay() {
+        view.removeCallbacks(announceLoading)
+        loadingReplay = false
+        val replay = pendingReplay ?: return
+        // Cleared and redrawn before the next frame: nothing in between is seen.
+        pendingReplay = null
+        view.reset()
+        view.feed(replay.toByteArray())
+        view.replaying = false
     }
 }
 
@@ -193,6 +249,9 @@ fun TerminalScreen(vm: ShellViewModel, intent: String, onIntentStarted: () -> Un
         }
     }
     LaunchedEffect(controller) { controller.start(startIntent, onIntentStarted) }
+    LaunchedEffect(controller) {
+        combine(vm.reach, vm.detachedSession, vm.lastError, ::Triple).collect { (reach, detached, error) -> controller.settle(reach, detached, error) }
+    }
     LaunchedEffect(controller) {
         combine(vm.ended, vm.openTabs, ::Pair).collect { (ended, tabs) -> controller.update(ended, tabs) }
     }
@@ -251,6 +310,9 @@ fun TerminalScreen(vm: ShellViewModel, intent: String, onIntentStarted: () -> Un
                                     it, spinner = reach == ShellReach.CONNECTING, warning = reach == ShellReach.UNREACHABLE,
                                     onRetry = if (reach == ShellReach.UNREACHABLE) vm::connect else null,
                                 )
+                            }
+                            if (reach == ShellReach.READY && controller.loadingReplay && lastError == null) {
+                                StatusBanner("Loading session…", spinner = true)
                             }
                             lastError?.message()?.let { StatusBanner(it, warning = true) }
                         }
