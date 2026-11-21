@@ -308,7 +308,7 @@ private fun LockScreenContent(reason: LockReason, method: UnlockMethod, error: S
                 Spacer(Modifier.height(24.dp))
                 Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                     Icon(Icons.Filled.Shield, null, tint = c.tertiary, modifier = Modifier.size(14.dp))
-                    Text("Locking doesn't stop sharing with your Mac.", style = PT.display(12.sp, FontWeight.Normal), color = c.tertiary,
+                    Text("Locking doesn't stop sharing with your Mac.", // mac-only style = PT.display(12.sp, FontWeight.Normal), color = c.tertiary,
                         textAlign = TextAlign.Center)
                 }
             }
@@ -354,9 +354,9 @@ internal fun AppIcon(size: Dp) {
 
 private val LockReason.message: String
     get() = when (this) {
-        LockReason.STARTUP -> "Your Macs and Remote shell stay private until you unlock."
-        LockReason.AWAY -> "Locked after a minute away, to keep your Macs and Remote shell private."
-        LockReason.SHELL_KEY -> "A Mac just shared Remote shell with this phone. Unlock to finish setting it up."
+        LockReason.STARTUP -> "Your computers and Remote shell stay private until you unlock."
+        LockReason.AWAY -> "Locked after a minute away, to keep your computers and Remote shell private."
+        LockReason.SHELL_KEY -> "A computer just shared its shell with this phone. Unlock to finish setting it up."
     }
 
 /** What the Unlock button names, from what the device can check. */
@@ -405,7 +405,7 @@ private fun hasSecureLock(activity: FragmentActivity): Boolean {
 private fun promptInfo(): BiometricPrompt.PromptInfo {
     val builder = BiometricPrompt.PromptInfo.Builder()
         .setTitle("Unlock Passthrough")
-        .setSubtitle("Confirm it's you to open your Macs and Remote shell")
+        .setSubtitle("Confirm it's you to open your computers and Remote shell")
     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
         builder.setAllowedAuthenticators(AUTHENTICATORS)
     } else {

@@ -27,14 +27,16 @@ internal class ServingNotification(private val context: Context) {
             PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
         val stop = PendingIntent.getService(context, 1, Intent(context, PassthroughService::class.java).setAction(PassthroughService.ACTION_STOP),
             PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
-        val macs = stats.macs
+        // Only Macs are served; a PC on the cable just pairs and renews its access.
+        val macs = stats.onlineMacs
         val title = when {
             !serving -> "Starting Passthrough"
-            macs.isEmpty() -> "Waiting for a Mac on USB"
+            stats.macs.isEmpty() -> "Waiting for a computer on USB"
+            macs.isEmpty() -> "A computer is plugged in"
             macs.size == 1 -> "${macs.first().name} is online through this phone"
-            else -> "Serving ${macs.size} Macs over USB"
+            else -> "Serving ${macs.size} Macs over USB" // mac-only
         }
-        val text = if (macs.isEmpty()) "Connect from Passthrough in the Mac's menu bar." else {
+        val text = if (macs.isEmpty()) "Plug in your Mac or PC." else {
             val month = Runtime.usage.usage.value.monthTotal
             "${radio ?: "Cellular"} · ${stats.active} open · ${ByteFormat.bytes(stats.rx + stats.tx)} this session · ${ByteFormat.bytes(month)} this month"
         }

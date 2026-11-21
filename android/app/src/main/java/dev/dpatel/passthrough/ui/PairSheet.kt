@@ -112,7 +112,7 @@ fun PairSheet(vm: AppViewModel, onDismiss: () -> Unit) {
                     }
                 }
                 Spacer(Modifier.height(40.dp))
-                Text("Codes are single use and only work over USB. Each Mac gets its own key you can revoke at any time.",
+                Text("Codes are single use and only work over USB. Each computer gets its own key you can revoke at any time.",
                     style = PT.display(12.sp, FontWeight.Normal), color = c.tertiary, textAlign = TextAlign.Center,
                     modifier = Modifier.padding(horizontal = 30.dp))
             }

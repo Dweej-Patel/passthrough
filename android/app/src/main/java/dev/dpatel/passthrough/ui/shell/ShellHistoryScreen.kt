@@ -65,6 +65,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import dev.dpatel.passthrough.core.HostWords
 import dev.dpatel.passthrough.core.ShellHistoryEntry
 import dev.dpatel.passthrough.core.ShellReplay
 import dev.dpatel.passthrough.core.ShellReplayChunk
@@ -105,13 +106,15 @@ private fun HistoryList(vm: ShellViewModel, history: List<ShellHistoryEntry>, on
     val sessions by vm.sessions.collectAsStateWithLifecycle()
     val reach by vm.reach.collectAsStateWithLifecycle()
     val loading by vm.historyLoading.collectAsStateWithLifecycle()
+    val kind by vm.selectedKind.collectAsStateWithLifecycle()
+    val w = HostWords(kind, null)
     PTBackground(glow = 0.45f) {
         Column(Modifier.windowInsetsPadding(WindowInsets.safeDrawing)) {
             PTTopBar("History", onDone = onDone)
             Column(Modifier.verticalScroll(rememberScrollState()).fillMaxWidth().wrapContentWidth().widthIn(max = 640.dp).padding(horizontal = 18.dp).padding(top = 8.dp, bottom = 32.dp)) {
                 PTCard {
                     Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                        PTSectionTitle("Sessions on this Mac", icon = Icons.Filled.History)
+                        PTSectionTitle("Sessions on ${w.thisOne}", icon = Icons.Filled.History)
                         when {
                             history.isNotEmpty() -> Column {
                                 history.sortedByDescending { it.startedAt }.forEach { entry ->
@@ -127,11 +130,11 @@ private fun HistoryList(vm: ShellViewModel, history: List<ShellHistoryEntry>, on
                                 Text("Loading history…", style = PT.display(15.sp, FontWeight.Normal), color = c.secondary)
                             }
                             reach != ShellReach.READY -> Text(
-                                "Connect to your Mac to see its history. ${reach.message(fromAnywhere = false).orEmpty()}".trim(),
+                                "Connect to ${w.your} to see its history. ${reach.message(w, fromAnywhere = false).orEmpty()}".trim(),
                                 style = PT.display(15.sp, FontWeight.Normal), color = c.secondary,
                             )
                             else -> Text(
-                                "No sessions yet. Sessions you open from any device are recorded on the Mac and show up here.",
+                                "No sessions yet. Sessions you open from any device are recorded on ${w.the} and show up here.",
                                 style = PT.display(15.sp, FontWeight.Normal), color = c.secondary,
                             )
                         }
@@ -263,7 +266,7 @@ private fun TranscriptScreen(vm: ShellViewModel, id: String, entry: ShellHistory
                             Modifier.padding(24.dp), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(8.dp),
                         ) {
                             Text("Couldn't load this session", style = PT.display(17.sp, FontWeight.SemiBold), color = c.primary, textAlign = TextAlign.Center)
-                            Text("The Mac didn't send its output. Check the connection and try again.", style = PT.display(15.sp, FontWeight.Normal),
+                            Text("${HostWords(vm.selectedKind.value, null).The} didn't send its output. Check the connection and try again.", style = PT.display(15.sp, FontWeight.Normal),
                                 color = c.secondary, textAlign = TextAlign.Center)
                             ShellPillButton(onClick = { attempt++ }) { Text("Try again", style = PT.display(13.sp, FontWeight.Bold)) }
                         }

@@ -54,6 +54,13 @@ object HostCopy {
     fun shutDown(w: HostWords, at: String): String =
         "${w.name} was shut down or restarted at $at. It is reachable again once ${if (w.isPC) "Windows" else "it"} has started."
 
+    /** A sleep timer of [seconds] in words ("30 minutes", "2 hours"); null when it doesn't sleep by itself. */
+    fun sleepTimer(seconds: Int?): String? {
+        if (seconds == null || seconds <= 0) return null
+        if (seconds % 3600 == 0) return (seconds / 3600).let { if (it == 1) "1 hour" else "$it hours" }
+        return maxOf(1, seconds / 60).let { if (it == 1) "1 minute" else "$it minutes" }
+    }
+
     /** Tried from anywhere, and its relay didn't answer. */
     fun noRelay(w: HostWords): String =
         "Can't reach ${w.name} from here. The relay isn't answering; it works on ${w.the}'s own network or Tailscale."

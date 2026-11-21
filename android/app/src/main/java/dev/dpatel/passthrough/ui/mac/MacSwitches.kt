@@ -15,7 +15,7 @@ enum class MacSwitch { AWAKE, VPN, LOCK }
 
 /** A fix this phone can make for what a note describes. */
 enum class SwitchFix(val label: String) {
-    PAIR("Pair your Mac"),
+    PAIR("Pair a Mac or PC"),
     RETRY("Try again"),
     USB_DEBUGGING("Open Developer options"),
 }
@@ -46,7 +46,7 @@ object MacSwitches {
     /** [macsOnline]: Macs online through this phone now; [elsewhere]: the Mac says it's online through a phone, but not this one. */
     fun internet(service: ServiceState, macsOnline: Int, paired: Boolean, usbDebugging: Boolean, elsewhere: Boolean = false): SwitchModel {
         val usbOff = SwitchNote(
-            "USB debugging is off, so your Mac can't reach this phone. Turn it on in Developer options " +
+            "USB debugging is off, so your Mac can't reach this phone. Turn it on in Developer options " + // mac-only: the internet row
                 "(tap Build number seven times in About phone to reveal them).",
             fix = SwitchFix.USB_DEBUGGING,
         )
@@ -54,14 +54,14 @@ object MacSwitches {
             ServiceState.Running -> SwitchModel(
                 on = true, enabled = true,
                 status = when (macsOnline) {
-                    0 -> "Sharing — waiting for the Mac"
-                    1 -> "Mac online through this phone"
-                    else -> "$macsOnline Macs online through this phone"
+                    0 -> "Sharing — waiting for the Mac" // mac-only
+                    1 -> "Mac online through this phone" // mac-only
+                    else -> "$macsOnline Macs online through this phone" // mac-only
                 },
                 note = when {
                     !usbDebugging -> usbOff
-                    !paired -> SwitchNote("Pair your Mac so it can use this phone's connection.", warning = false, fix = SwitchFix.PAIR)
-                    macsOnline == 0 -> SwitchNote("Plug this phone into your Mac with a USB cable, then pick it in Passthrough's menu bar on the Mac.", warning = false)
+                    !paired -> SwitchNote("Pair your Mac so it can use this phone's connection.", warning = false, fix = SwitchFix.PAIR) // mac-only
+                    macsOnline == 0 -> SwitchNote("Plug this phone into your Mac with a USB cable, then pick it in Passthrough's menu bar on the Mac.", warning = false) // mac-only
                     else -> null
                 },
             )
@@ -75,8 +75,8 @@ object MacSwitches {
                 on = false, enabled = true, status = "Off",
                 note = when {
                     !usbDebugging -> usbOff
-                    elsewhere -> SwitchNote("Your Mac is online through another phone.", warning = false)
-                    else -> SwitchNote("Your Mac uses its own connection. Turn this on to put it online through this phone.", warning = false)
+                    elsewhere -> SwitchNote("Your Mac is online through another phone.", warning = false) // mac-only
+                    else -> SwitchNote("Your Mac uses its own connection. Turn this on to put it online through this phone.", warning = false) // mac-only
                 },
             )
         }
@@ -89,18 +89,18 @@ object MacSwitches {
     fun macBlock(link: MacLink, state: MacState?, error: MacControlError?): SwitchNote? {
         val mac = link.macName
         return when {
-            !link.paired -> SwitchNote("Keep awake and the VPN can be changed from here once your Mac is paired.", warning = false, fix = SwitchFix.PAIR)
+            !link.paired -> SwitchNote("Keep awake and the VPN can be changed from here once your Mac is paired.", warning = false, fix = SwitchFix.PAIR) // mac-only
             link.reach == ShellReach.CONNECTING -> SwitchNote("Connecting to $mac…", warning = false)
             link.reach == ShellReach.UNREACHABLE -> SwitchNote("Keep awake and the VPN can't change while $mac can't be reached.", fix = SwitchFix.RETRY)
             link.reach == ShellReach.NO_ACCESS -> SwitchNote(
-                "To change Keep awake and the VPN from here, turn on Remote shell in Passthrough on your Mac, then connect this phone with the cable once.",
+                "To change Keep awake and the VPN from here, turn on Remote shell in Passthrough on your Mac, then connect this phone with the cable once.", // mac-only
                 warning = false,
             )
             link.reach != ShellReach.READY -> SwitchNote(link.reach.message ?: "Keep awake and the VPN can't change from this phone.")
             state == null -> SwitchNote("Waiting for $mac…", warning = false)
             state.control != true || error == MacControlError.NOT_ALLOWED -> SwitchNote(
-                "$mac lets you change Keep awake and the VPN, and lock its screen, only on the Mac. To do it here, turn on Awake & VPN " +
-                    "for this phone in Passthrough's Remote Shell settings on the Mac.",
+                "$mac lets you change Keep awake and the VPN, and lock its screen, only on the Mac. To do it here, turn on Awake & VPN " + // mac-only
+                    "for this phone in Passthrough's Remote Shell settings on the Mac.", // mac-only
                 warning = false,
             )
             else -> null
@@ -148,7 +148,7 @@ object MacSwitches {
         if (state == null) return SwitchModel(on = false, enabled = false, status = "Not known yet")
         if (state.vpn == null || error == MacControlError.VPN_NOT_SET_UP) return SwitchModel(
             on = false, enabled = false, status = "Not set up",
-            note = if (blocked) null else SwitchNote("$macName has no VPN set up. Add one in Passthrough's VPN settings on the Mac.", warning = false),
+            note = if (blocked) null else SwitchNote("$macName has no VPN set up. Add one in Passthrough's VPN settings on the Mac.", warning = false), // mac-only
         )
         if (blocked) return SwitchModel(on = state.vpnUp, enabled = false, status = vpnStatus(state))
         val change = pending.filterIsInstance<MacControl.Vpn>().firstOrNull()

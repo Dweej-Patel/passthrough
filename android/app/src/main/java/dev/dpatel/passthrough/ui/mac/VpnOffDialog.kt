@@ -49,7 +49,7 @@ internal fun VpnOffDialog(
                     "$macName's traffic will leave without the VPN${if (killSwitch) ", and the kill switch turns off too" else ""}.",
                     modifier = Modifier.fillMaxWidth().background(PT.attention.copy(alpha = 0.1f), RoundedCornerShape(12.dp)).padding(12.dp),
                 )
-                Text("Your fingerprint, face or screen lock confirms it. The Mac shows a notice. Turning the VPN back on never asks.",
+                Text("Your fingerprint, face or screen lock confirms it. The Mac shows a notice. Turning the VPN back on never asks.", // mac-only
                     style = PT.display(12.sp, FontWeight.Normal), color = c.secondary)
                 failure?.let { Text(it, color = c.attentionText, style = PT.display(12.sp, FontWeight.SemiBold)) }
             }
