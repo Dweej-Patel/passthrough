@@ -41,6 +41,12 @@ public sealed class ShellGateHooks
     /// <summary>A phone's screen grant for a computer waits for the owner at this host (a PC: Windows asks for a password).</summary>
     public bool ScreenNeedsOwner { get; init; } = true;
 
+    /// <summary>
+    /// A phone hands this host access to another computer (<c>computerPass</c>, stage 7): kept by the account the phone
+    /// belongs to. Null when kept, else the error the phone is told. Unset: refused.
+    /// </summary>
+    public Func<string, string, ShellEnvelope, Task<ShellError?>>? SaveComputerPass { get; init; }
+
     /// <summary>A phone gave a computer access here (the notice that stays until the owner answers it).</summary>
     public Action<string, Access.ShellComputer>? ComputerGranted { get; init; }
 

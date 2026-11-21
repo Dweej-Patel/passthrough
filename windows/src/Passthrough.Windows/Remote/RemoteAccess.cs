@@ -67,6 +67,14 @@ public sealed class RemoteAccess : IAccessAdmin, IDisposable
         _admin.Changed += () => _ = RefreshGrantAsync();
         _admin.AccessChanged += () => _ = RefreshPhonesAsync();
         _admin.NoticesChanged += () => _ = RefreshNoticesAsync();
+        Reach = new Passthrough.Core.Trust.ComputerReachStore(secrets, new Passthrough.Windows.Trust.HelloSigner());
+        _server.SavePass = KeepPassAsync;
+        _ = Task.Run(async () =>
+        {
+            // Only with Windows Hello can this PC keep access to other computers; then phones are told its identity key.
+            _canKeep = await new Passthrough.Windows.Trust.HelloSigner().IsAvailableAsync().ConfigureAwait(false);
+            _server.PushState();
+        });
         _server.LinkChanged += linked =>
         {
             if (linked) _ = Task.Run(AfterLinkAsync);
@@ -352,7 +360,48 @@ public sealed class RemoteAccess : IAccessAdmin, IDisposable
     {
         Shells = [.. Catalog.Shells],
         User = Environment.UserName,
+        IdKey = _canKeep && Identity() is { } identity ? Convert.ToBase64String(identity.PublicKey) : null,
     };
+
+    private volatile bool _canKeep;
+    private Passthrough.Windows.Trust.CngComputerIdentity? _identity;
+
+    /// <summary>The computers this PC can reach (stage 7 a.5), sealed behind Windows Hello.</summary>
+    public Passthrough.Core.Trust.ComputerReachStore Reach { get; }
+
+    /// <summary>This account's identity key as a viewer, made on first need.</summary>
+    public Passthrough.Core.Trust.IComputerIdentity? Identity()
+    {
+        try { return _identity ??= Passthrough.Windows.Trust.CngComputerIdentity.LoadOrCreate(); }
+        catch (System.Security.Cryptography.CryptographicException e) { _log?.Invoke($"trust: no identity key ({e.HResult:X8})"); return null; }
+    }
+
+    /// <summary>Fires when this PC was handed access to another computer.</summary>
+    public event Action<string>? ComputerReceived;
+
+    /// <summary>A phone handed this account access to another computer: kept behind Windows Hello, after one confirmation.</summary>
+    private async Task<string?> KeepPassAsync(PipeMessage m)
+    {
+        if (m.Pass is not { } pass) return ShellError.BadRequest.ToWire();
+        var result = await Reach.SaveAsync(new Passthrough.Core.Trust.ReachableComputer
+        {
+            Credential = pass, HostKind = m.HostKind, Scopes = m.Scopes ?? [], Pending = m.Pending, From = m.Label, FromPhoneId = m.Phone,
+            ReceivedAt = DateTimeOffset.UtcNow,
+        }).ConfigureAwait(false);
+        switch (result)
+        {
+            case Passthrough.Core.Trust.ComputerReachStore.SaveResult.Saved:
+                _log?.Invoke("trust: kept access to another computer");
+                ComputerReceived?.Invoke(pass.MacName);
+                return null;
+            case Passthrough.Core.Trust.ComputerReachStore.SaveResult.Conflict:
+                return ShellError.PassConflict.ToWire();
+            case Passthrough.Core.Trust.ComputerReachStore.SaveResult.NotUsable:
+                return ShellError.BadRequest.ToWire();
+            default:
+                return ShellError.PassNotSaved.ToWire();
+        }
+    }
 
     private static ShellError? LockScreen() => Native.LockWorkStation() ? null : ShellError.BadRequest;
 

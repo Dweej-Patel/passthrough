@@ -219,6 +219,54 @@ public sealed class ComputerAccessTests : IAsyncDisposable
         Assert.Null(_access.Computer(id));
     }
 
+    private sealed class Identity(ECDsa key) : Passthrough.Core.Trust.IComputerIdentity
+    {
+        public byte[] PublicKey { get { var q = key.ExportParameters(false).Q; return [0x04, .. q.X!, .. q.Y!]; } }
+        public byte[] Sign(byte[] message) => key.SignData(message, HashAlgorithmName.SHA256, DSASignatureFormat.IeeeP1363FixedFieldConcatenation);
+    }
+
+    /// <summary>TCP standing in for TLS: the gate here binds signatures to a fixed "certificate hash".</summary>
+    private sealed class PlainDialer : Passthrough.Core.Client.IPinnedTlsDialer
+    {
+        public async Task<Passthrough.Core.Client.IShellStream> ConnectAsync(Passthrough.Core.Client.ShellEndpoint endpoint, string certSha256, CancellationToken cancel)
+        {
+            var client = new TcpClient();
+            await client.ConnectAsync(endpoint.Host, endpoint.Port, cancel);
+            return new Plain(client);
+        }
+
+        private sealed class Plain(TcpClient client) : Passthrough.Core.Client.IShellStream
+        {
+            public Stream Stream => client.GetStream();
+            public IPAddress? LocalAddress => null;
+            public ValueTask DisposeAsync() { client.Dispose(); return ValueTask.CompletedTask; }
+        }
+    }
+
+    [Fact]
+    public async Task ThisPcsOwnClientConnectsAsAComputerAndSignsItsProof()
+    {
+        _access.For(Account).SetShareAllowed("phone-a", true);
+        var granted = await Grant("shell");
+        // On TLS the host speaks first: the client sends no hello, so the gate here must not expect one.
+        var tcp = new TcpListener(IPAddress.Loopback, 0);
+        tcp.Start();
+        _ = Task.Run(async () =>
+        {
+            var c = await tcp.AcceptTcpClientAsync();
+            if (_gate.Admit("127.0.0.1", c.Dispose) is { } admission) await _gate.ServeAsync(admission, c.GetStream(), expectHello: false, Binding);
+        });
+        var credential = new Passthrough.Core.Client.ShellCredential("host", "PC", Convert.ToHexStringLower(Binding.HostBinding), Convert.FromBase64String(granted.Key!),
+            granted.PhoneID!, ((IPEndPoint)tcp.LocalEndpoint).Port, ["127.0.0.1"]);
+        var events = System.Threading.Channels.Channel.CreateUnbounded<Passthrough.Core.Client.ShellClientEvent>();
+        await using var client = new Passthrough.Core.Client.ShellClient(credential, new PlainDialer(), null, e => events.Writer.TryWrite(e),
+            Passthrough.Core.Client.ShellConnectMode.LocalOnly, identity: new Identity(_identity));
+        client.Connect();
+        var first = await events.Reader.ReadAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(10));
+        Assert.IsType<Passthrough.Core.Client.ShellClientEvent.Ready>(first);
+        tcp.Stop();
+    }
+
     [Fact]
     public void TheDecoyIsARealPoint() => Assert.False(ComputerProof.IsValid(new byte[64], ComputerProof.DecoyKey, "x"u8));
 }

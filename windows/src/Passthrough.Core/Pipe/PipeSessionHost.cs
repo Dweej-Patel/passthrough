@@ -355,6 +355,20 @@ public sealed class PipeSessionHost : ISessionHost
 
     private static ShellError Wire(string error, ShellError otherwise) => ShellErrorWire.IsKnown(error) ? ShellErrorWire.Parse(error) : otherwise;
 
+    /// <summary>A phone handed this account access to another computer: the tray app keeps it (behind Windows Hello). Null when kept, else why not.</summary>
+    public async Task<ShellError?> SavePassAsync(string phone, string from, ShellEnvelope m)
+    {
+        try
+        {
+            var reply = await AskAsync(PipeKind.SavePass, id => new PipeMessage
+            {
+                Id = id, Phone = phone, Label = from, Pass = m.Pass, Scopes = m.Scopes, Pending = m.Pending, HostKind = m.Kind,
+            }, TimeSpan.FromSeconds(40)).ConfigureAwait(false);
+            return null;
+        }
+        catch (ShellException e) { return e.Error; }
+    }
+
     /// <summary>Asks the tray app to lock its Windows session; null when asked, else why not.</summary>
     public ShellError? Lock()
     {

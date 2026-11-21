@@ -277,6 +277,11 @@ public sealed class ShellConnection : IShellAttachment
             case ShellEnvelope.ComputerGrant:
                 GrantComputer(message);
                 break;
+            case ShellEnvelope.ComputerPass:
+                if (message.Pass is null || _gate.Hooks.SaveComputerPass is not { } save) { Fail(ShellError.BadRequest); break; }
+                if (await save(PhoneId, Label, message).ConfigureAwait(false) is { } notSaved) Fail(notSaved);
+                else Send(new ShellEnvelope(ShellEnvelope.ComputerPassSaved));
+                break;
             case ShellEnvelope.ComputerRevoke:
                 if (message.PhoneID is not { } revoking || !_gate.Access.RevokeComputer(revoking, PhoneId)) { Fail(ShellError.BadRequest); break; }
                 _gate.Disconnect(revoking);

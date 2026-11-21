@@ -321,6 +321,8 @@ public sealed class ServiceRemote : IDisposable
                 Access = new HostAccess { Shell = true, Screen = screen, Share = Directory.MayShare(phone) },
                 Lock = true,
                 User = screen ? state?.User : null,
+                // This account can keep access to other computers (stage 7): phones may hand it some.
+                IdKey = state?.IdKey,
                 SleepAfter = SleepAfter(),
             }.Cleaned();
         },
@@ -338,6 +340,7 @@ public sealed class ServiceRemote : IDisposable
                 Notices.Viewed(owner, v.PhoneId, v.Label, v.Start, end, t => t.ToLocalTime().ToString("HH:mm", System.Globalization.CultureInfo.CurrentCulture));
             ViewLog(v);
         },
+        SaveComputerPass = (phone, label, m) => OwnerHost(phone) is { } owner ? owner.SavePassAsync(phone, label, m) : Task.FromResult<ShellError?>(ShellError.SignedOut),
         ComputerGranted = (phone, c) =>
         {
             if (Directory.Owner(c.Id) is not { } owner) return;

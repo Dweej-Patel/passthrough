@@ -32,6 +32,11 @@ public sealed record PipeMessage
     /// <summary>The last chunk of a transcript.</summary>
     public bool? Last { get; init; }
     public PipeHostState? State { get; init; }
+    /// <summary>SavePass: access to another computer a phone handed this account (stage 7), what it may do, and from whom.</summary>
+    public ShellCredentialWire? Pass { get; init; }
+    public List<string>? Scopes { get; init; }
+    public List<string>? Pending { get; init; }
+    public string? HostKind { get; init; }
 }
 
 /// <summary>What the tray app says about its account's side of the PC (<see cref="PipeKind.HostState"/>): the service builds <c>host</c> and <c>macState</c> from it.</summary>
@@ -44,4 +49,6 @@ public sealed record PipeHostState
     public int? IdleSeconds { get; init; }
     public double? Battery { get; init; }
     public bool? Charging { get; init; }
+    /// <summary>This account's identity public key (base64), when it can keep access to other computers (Windows Hello is set up).</summary>
+    public string? IdKey { get; init; }
 }

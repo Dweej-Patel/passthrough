@@ -89,6 +89,7 @@ public sealed class ShellClient : IAsyncDisposable
     private readonly IPinnedTlsDialer? _tls;
     private readonly IShellIrohDialer? _iroh;
     private readonly ShellConnectMode _mode;
+    private readonly Trust.IComputerIdentity? _identity;
     private readonly TimeProvider _time;
     private readonly Channel<ShellClientEvent> _events = Channel.CreateUnbounded<ShellClientEvent>(new UnboundedChannelOptions { SingleReader = true });
     private readonly Channel<byte[]> _outgoing = Channel.CreateUnbounded<byte[]>(new UnboundedChannelOptions { SingleReader = true });
@@ -102,9 +103,10 @@ public sealed class ShellClient : IAsyncDisposable
     private int _connected;
 
     public ShellClient(ShellCredential credential, IPinnedTlsDialer? tls, IShellIrohDialer? iroh, Action<ShellClientEvent> onEvent,
-        ShellConnectMode mode = ShellConnectMode.Automatic, TimeProvider? time = null)
+        ShellConnectMode mode = ShellConnectMode.Automatic, TimeProvider? time = null, Trust.IComputerIdentity? identity = null)
     {
         _credential = credential;
+        _identity = identity;
         _tls = tls;
         _iroh = iroh;
         _mode = mode;
@@ -270,12 +272,26 @@ public sealed class ShellClient : IAsyncDisposable
         {
             PhoneID = _credential.ClientId,
             Mac = Convert.ToBase64String(RemoteShell.Proof(_credential.ShellKey, nonce)),
+            Sig = ComputerSignature(nonce, sayHello),
         }.EncodeLine(), cancel).ConfigureAwait(false);
         var answer = Decode(await reader.ReadLineAsync(cancel).ConfigureAwait(false));
         if (answer.T == ShellEnvelope.Error) throw new ShellRefusedException(Reason(answer.Reason));
         if (answer.T != ShellEnvelope.Ready) throw new IOException("The computer didn't say ready.");
         reader.Limit = RemoteShell.LineLimit;
         return reader;
+    }
+
+    /// <summary>
+    /// As a computer (a <c>computer.</c> id), the identity key's signature bound to this host: its certificate's hash
+    /// on TLS, its endpoint id on iroh (stage 7 a.1). Without the key nothing is sent.
+    /// </summary>
+    private string? ComputerSignature(byte[] nonce, bool iroh)
+    {
+        if (!Shell.Access.Computers.IsComputerId(_credential.ClientId)) return null;
+        if (_identity is null) throw new IOException("This computer has no identity key to prove itself with.");
+        var binding = Convert.FromHexString(iroh ? _credential.IrohId! : _credential.CertSha256);
+        var message = Shell.Access.ComputerProof.Message(nonce, iroh ? Shell.Access.ComputerProof.PathIroh : Shell.Access.ComputerProof.PathTls, binding, _credential.ClientId);
+        return Convert.ToBase64String(_identity.Sign(message));
     }
 
     private static ShellEnvelope Decode(byte[]? line) =>
