@@ -23,6 +23,15 @@
     <ProjectReference Include="..\Passthrough.Core\Passthrough.Core.csproj" />
   </ItemGroup>
 
+  <!-- passthrough_iroh.dll, built from windows/native/iroh-bridge (windows/native/build-iroh-bridge.ps1; CI builds it
+       before the .NET build). Copied beside the app, and beside anything referencing this project, when it has been built. -->
+  <PropertyGroup>
+    <IrohBridgeDll>$(MSBuildThisFileDirectory)..\..\native\iroh-bridge\target\release\passthrough_iroh.dll</IrohBridgeDll>
+  </PropertyGroup>
+  <ItemGroup Condition="Exists('$(IrohBridgeDll)')">
+    <None Include="$(IrohBridgeDll)" Link="passthrough_iroh.dll" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
   <ItemGroup>
     <InternalsVisibleTo Include="Passthrough.Windows.Tests" />
   </ItemGroup>

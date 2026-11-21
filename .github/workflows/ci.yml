@@ -90,12 +90,15 @@ jobs:
       - uses: actions/setup-dotnet@26b0ec14cb23fa6904739307f278c14f94c95bf1 # v5.4.0
         with:
           global-json-file: global.json
+      - name: Build the iroh bridge (toolchain and crates pinned by rust-toolchain.toml and Cargo.lock)
+        working-directory: windows/native/iroh-bridge
+        run: cargo build --release --locked
       - name: Restore (locked to packages.lock.json)
         run: dotnet restore windows/Passthrough.Windows.sln --locked-mode
       - name: dotnet test
         run: dotnet test windows/tests/Passthrough.Core.Tests -c Release --no-restore
       - name: Real ConPTY sessions
-        run: dotnet test windows/tests/Passthrough.Windows.Tests -c Release --no-restore
+        run: dotnet test windows/tests/Passthrough.Windows.Tests -c Release --no-restore --blame-hang-timeout 120s
       - name: Build the app
         run: dotnet build windows/src/Passthrough.App -c Release --no-restore
 

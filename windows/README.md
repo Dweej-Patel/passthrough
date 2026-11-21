@@ -32,6 +32,20 @@ On Windows 10 1809 or later, with the .NET 10 SDK:
 dotnet build windows/src/Passthrough.App -c Release
 ```
 
+Remote access from anywhere also needs `passthrough_iroh.dll`, Passthrough's
+iroh endpoint, built from `windows/native/iroh-bridge` (Rust). Install Rust with
+rustup (https://rustup.rs; it needs the MSVC build tools, which Visual Studio's
+C++ workload installs), then:
+
+```
+windows/native/build-iroh-bridge.ps1
+```
+
+`rust-toolchain.toml` pins the compiler and `Cargo.lock` every crate (built with
+`--locked`); the .NET build copies the DLL beside the app and the tests once it
+exists. The bridge pins iroh 1.0.2, the version iroh-ffi 1.1.0 (the phones' and
+the Mac's) locks.
+
 The app is a plain exe, with no installer or MSIX:
 `windows\src\Passthrough.App\bin\Release\net10.0-windows10.0.19041.0\win-x64\Passthrough.exe`.
 Building the solution, or passing `-p:Platform=x64`, puts it under
@@ -76,7 +90,8 @@ Windows only, and not as administrator: real sessions in the bundled
 pseudoconsole (Microsoft.Windows.Console.ConPTY, whose `conpty.dll` and
 `x64\OpenConsole.exe` are copied beside the app and the tests), the job object
 that ends what a shell started, the shell catalog on this PC, and the session
-manager over them (titles, questions, Claude Code's status).
+manager over them (titles, questions, Claude Code's status). The iroh tests
+need the bridge built first.
 
 ## First things to try on a real PC
 

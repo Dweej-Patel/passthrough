@@ -27,6 +27,10 @@ Third-party components distributed with this repository keep their own licences:
 * Microsoft.Windows.Console.ConPTY (https://github.com/microsoft/terminal), 1.25.261109001 — MIT.
   Fetched from nuget.org (pinned in windows/src/Passthrough.Windows/packages.lock.json); its
   conpty.dll and x64\OpenConsole.exe, signed by Microsoft, ship beside the Windows app.
+* iroh (https://github.com/n0-computer/iroh), 1.0.2 — MIT OR Apache-2.0 (used here under MIT), with
+  its Rust dependencies (MIT and/or Apache-2.0 licensed crates; versions pinned in
+  windows/native/iroh-bridge/Cargo.lock). Built from source into passthrough_iroh.dll by
+  windows/native/build-iroh-bridge.ps1 (and CI), which ships beside the Windows app.
 * android/app/src/main/res/font/nunito.ttf — Nunito, SIL Open Font License 1.1.
   See android/licenses/NUNITO-OFL.txt.
 * Termux terminal-view and terminal-emulator (https://github.com/termux/termux-app),

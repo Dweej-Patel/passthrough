@@ -268,6 +268,12 @@ these steps as written and check each one before building.
   Command Prompt, each WSL distribution and Git Bash from fixed paths and the
   registry, never PATH. The pseudoconsole's own start-up modes never reach a
   phone. New Windows-only tests run real sessions, in CI too.
+* Windows: Passthrough's own iroh endpoint, a small Rust library over iroh 1.0.2
+  (the version the phones and the Mac use) with a C ABI the app calls: a stable
+  id from a stored key, accepting and dialling shell connections, address
+  validation with retries, direct or relayed paths, and clean closes. Handles
+  can't be forged into memory, a panic never crosses into the app, and every
+  wait ends when its object is closed. Not yet listening for phones.
 * Remote shell: coming back to a session no longer plays it back from the
   top. The phone holds the Mac's replay until it is complete and draws it in
   one go, keeping what was on screen meanwhile, and says "Loading session…"
