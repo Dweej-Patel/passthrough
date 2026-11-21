@@ -245,6 +245,11 @@ these steps as written and check each one before building.
   connections may wait to prove a key (16 in all, 2 per address or network, 4
   kept for addresses that proved one lately) are ported from the Mac with its
   tests. Nothing listens yet.
+* Windows: the terminal logic a session needs is ported from the Mac with its
+  tests: the scrollback a late attach is replayed (with the modes a full-screen
+  program turned on before it), the "needs you" question heuristic, program
+  status (OSC 7501, which Claude Code speaks), and telling a terminal's own
+  answers from typing. Nothing runs a shell yet.
 * Remote shell: coming back to a session no longer plays it back from the
   top. The phone holds the Mac's replay until it is complete and draws it in
   one go, keeping what was on screen meanwhile, and says "Loading session…"
