@@ -160,6 +160,9 @@ final class ShellProtocolTests: XCTestCase {
         XCTAssertNil(HostInfo(os: "macOS 15").cleaned(), "no kind: not a host message")
         XCTAssertEqual(HostInfo(kind: "someday").cleaned()?.kind, "someday", "an unknown kind is kept")
         XCTAssertNil(HostInfo(kind: "windows", user: "a\nb").cleaned()?.user)
+        XCTAssertNil(HostInfo(kind: "windows", user: "\u{202E}evil").cleaned()?.user, "a bidi override")
+        XCTAssertNil(HostInfo(kind: "windows", os: "e" + String(repeating: "\u{0301}", count: 64)).cleaned()?.os,
+                     "counted in UTF-16 units, as Kotlin and C# count")
     }
 
     /// What a PC answers to what only a Mac serves: both lines of every row round-trip.

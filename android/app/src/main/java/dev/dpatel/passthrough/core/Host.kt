@@ -73,8 +73,13 @@ data class HostInfo(
         val CONSOLE_STATES = listOf("active", "locked", "signedOut", "otherUser")
         val GOING_AWAY_REASONS = listOf("sleeping", "turned_off", "shutting_down")
 
+        /** 1 to [max] UTF-16 units, with no control, format (bidi, zero-width) or line/paragraph separator characters. */
         internal fun isLine(text: String?, max: Int): Boolean =
-            text != null && text.isNotEmpty() && text.length <= max && text.none { it.isISOControl() }
+            text != null && text.isNotEmpty() && text.length <= max && text.none {
+                it.isISOControl() || Character.getType(it).toByte().let { t ->
+                    t == Character.FORMAT || t == Character.LINE_SEPARATOR || t == Character.PARAGRAPH_SEPARATOR
+                }
+            }
     }
 }
 

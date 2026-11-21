@@ -77,9 +77,16 @@ public struct HostInfo: Codable, Equatable, Sendable {
         return info
     }
 
-    /// One line of at least one character and at most `max`, with no control characters.
+    /// One line of 1 to `max` UTF-16 units (as Kotlin and C# count, so all three keep the same text), with no
+    /// control, format (bidi overrides, zero-width) or line and paragraph separator characters.
     static func isLine(_ text: String, max: Int) -> Bool {
-        !text.isEmpty && text.count <= max && !text.unicodeScalars.contains { $0.properties.generalCategory == .control }
+        let count = text.utf16.count
+        return count >= 1 && count <= max && !text.unicodeScalars.contains {
+            switch $0.properties.generalCategory {
+            case .control, .format, .lineSeparator, .paragraphSeparator: true
+            default: false
+            }
+        }
     }
 }
 

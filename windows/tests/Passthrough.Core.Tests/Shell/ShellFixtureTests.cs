@@ -206,6 +206,9 @@ public class ShellFixtureTests
         Assert.Null(new HostInfo { Kind = "" }.Cleaned());
         Assert.Equal("someday", new HostInfo { Kind = "someday" }.Cleaned()!.Kind);
         Assert.Null(new HostInfo { Kind = "windows", User = "a\nb" }.Cleaned()!.User);
+        Assert.Null(new HostInfo { Kind = "windows", User = "‮evil" }.Cleaned()!.User); // a bidi override
+        Assert.Null(new HostInfo { Kind = "windows", Os = "Win​11" }.Cleaned()!.Os); // zero-width
+        Assert.Null(new HostInfo { Kind = "windows", Os = "e" + new string('́', 64) }.Cleaned()!.Os); // counted in UTF-16 units
         Assert.Null(new HostInfo { Kind = "windows", IdKey = "ABCD" }.Cleaned()!.IdKey);
         var many = new HostInfo { Kind = "windows", Shells = Enumerable.Range(0, 40).Select(i => new HostShell { Id = $"s{i}", Name = $"S{i}" }).ToList() };
         Assert.Equal(HostInfo.MaxShells, many.Cleaned()!.Shells!.Count);

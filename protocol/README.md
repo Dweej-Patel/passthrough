@@ -486,7 +486,7 @@ opened is told `not_sharing` that way, so its own shell runs that command.
 | `screenPassSaved` | Mac | none | The Mac kept the pass. |
 | `screenRevoke` | phone | `phoneID` | Take back a pass this phone was granted (`phoneID`, the viewer's) and couldn't hand over. Answered `screenRevoked`, or `error` `bad_request` when it isn't one of this phone's passes. |
 | `screenRevoked` | Mac | none | The pass is gone. |
-| `host` | host | `host` | What the host is (*The host*, below): after `macInfo`, and again whenever it changes. Never sent to a screen pass. |
+| `host` | host | `host` | What the host is (*The host*, below): after `macInfo`; a PC sends it again whenever it changes. Never sent to a screen pass. |
 | `goingAway` | host | `reason` | The host is about to go away: `sleeping`, `turned_off` (Remote access) or `shutting_down`. Not sent for an update or a plain stop. A client shows "went to sleep" only after this. |
 | `rdp` | phone | none | See and control the screen through the host's Remote Desktop (*Remote Desktop relay*, below). |
 | `rdpReady` | host | `certSHA256` | Reply to `rdp`; every later byte, both ways, is Remote Desktop's. `certSHA256` is the SHA-256 of the certificate Remote Desktop will present, 64 lowercase hex; the viewer accepts only that one. |
@@ -571,12 +571,16 @@ so a phone offers neither until it has heard one.
 | `user` | The name its Windows sign-in takes; sent only to a device whose `access.screen` is true. |
 | `sleepAfter` | Seconds on mains until the host sleeps; 0 for never. |
 
-A `host` line is at most 16384 bytes. Clients drop what is malformed rather
-than the whole message: an over-long `os`, an unknown `console`, a negative
-number, a shell with a bad id or name or a repeated id, a second `default`
-(`HostInfo.cleaned`; the cases are in fixtures.json, `shell.host`). A host
-that sends no `host` is a Mac from before it, which has one shell, the screen
-by `video` or `rfb`, and Lock when `macState.control` is true.
+A host sends a `host` line of at most 16384 bytes. Clients drop the parts that
+are out of range rather than the whole message: an over-long `os`, an unknown
+`console`, a negative number, a shell with a bad id or name or a repeated id, a
+second `default` (`HostInfo.cleaned`; the cases are in fixtures.json,
+`shell.host`). Text fields are one line counted in UTF-16 units, with no
+control, format (bidi, zero-width) or separator characters. A field of the wrong
+JSON type still fails the whole line on the phones. A Mac sends `host` once per
+connection and no `lock`: on a Mac, Lock follows `macState.control`. A host
+that sends no `host` is a Mac from before it, which has one shell and the
+screen by `video` or `rfb`.
 
 ### A Windows PC as host
 

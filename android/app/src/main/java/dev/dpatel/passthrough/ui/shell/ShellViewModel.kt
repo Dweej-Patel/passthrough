@@ -838,7 +838,8 @@ class ShellViewModel(app: Application) : AndroidViewModel(app) {
                 _lastError.value = event.error
                 if (event.error == ShellError.NOT_AUTHORIZED) _reach.value = ShellReach.NO_ACCESS
                 // Only a failure naming the requested session ends that request.
-                if ((event.error == ShellError.NO_SUCH_SESSION || event.error == ShellError.BAD_REQUEST) &&
+                // SIGNED_OUT: a PC whose shells can't run answers `transcript` with it (older apps read it as BAD_REQUEST).
+                if ((event.error == ShellError.NO_SUCH_SESSION || event.error == ShellError.BAD_REQUEST || event.error == ShellError.SIGNED_OUT) &&
                     event.session != null && event.session == pendingTranscript?.id) finishTranscript(null)
             }
             is ShellEvent.Disconnected -> {

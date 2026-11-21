@@ -1071,8 +1071,9 @@ final class RemoteShellController: ObservableObject {
     }
 
     /// For both listeners: what this Mac says about itself to a phone (`host`). It names its one shell
-    /// (the login shell), both ways to see its screen, and what that phone may do. Nothing in it changes
-    /// while a phone is connected except Screen, whose switch ends the views anyway.
+    /// (the login shell), both ways to see its screen, and what that phone may do. It is sent once per
+    /// connection: a phone learns a changed Screen switch at its next connection (the switch ends views at
+    /// once either way). No `lock`: on a Mac, Lock follows `macState.control`, which is re-sent on change.
     nonisolated static func hostInfo(screenAllowed: Bool) -> HostInfo {
         let version = ProcessInfo.processInfo.operatingSystemVersion
         let shell = (ProcessInfo.processInfo.environment["SHELL"] as NSString?)?.lastPathComponent ?? "zsh"

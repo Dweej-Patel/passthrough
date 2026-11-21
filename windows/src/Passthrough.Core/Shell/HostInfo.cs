@@ -83,7 +83,12 @@ public sealed record HostInfo
         };
     }
 
-    /// <summary>One line of 1 to <paramref name="max"/> characters, with no control characters.</summary>
+    /// <summary>
+    /// One line of 1 to <paramref name="max"/> UTF-16 units, with no control, format (bidi overrides, zero-width) or
+    /// line and paragraph separator characters, as in Swift and Kotlin.
+    /// </summary>
     internal static bool IsLine(string? text, int max) =>
-        text is { Length: > 0 } && text.Length <= max && !text.Any(char.IsControl);
+        text is { Length: > 0 } && text.Length <= max && !text.Any(c => char.GetUnicodeCategory(c) is
+            System.Globalization.UnicodeCategory.Control or System.Globalization.UnicodeCategory.Format
+            or System.Globalization.UnicodeCategory.LineSeparator or System.Globalization.UnicodeCategory.ParagraphSeparator);
 }

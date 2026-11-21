@@ -826,7 +826,8 @@ final class ShellModel: ObservableObject {
             lastError = error
             if error == .notAuthorized { reach = .noAccess }
             // Only a failure naming the requested session ends that request.
-            if error == .noSuchSession || error == .badRequest, let session, session == pendingTranscript?.id { finishTranscript(nil) }
+            // `signedOut`: a PC whose shells can't run answers `transcript` with it (older apps read it as `badRequest`).
+            if error == .noSuchSession || error == .badRequest || error == .signedOut, let session, session == pendingTranscript?.id { finishTranscript(nil) }
         case let .disconnected(error):
             let dropped = reach == .ready
             client = nil
