@@ -153,6 +153,13 @@ public final class ShellClient: @unchecked Sendable {
         case screenPassSaved
         /// The answer to `revokeScreen`: the pass is gone.
         case screenRevoked
+        /// The answer to `grantComputer`: the computer's id and key on this host, the scopes it got,
+        /// and those waiting for the owner there.
+        case computerGranted(id: String, key: Data, scopes: [String], pending: [String])
+        /// The answer to `giveComputerPass`: this computer kept the access.
+        case computerPassSaved
+        /// The answer to `revokeComputer`: the computer's access is gone.
+        case computerRevoked
     }
 
     public enum ConnectError: Error, Sendable {
@@ -205,6 +212,8 @@ public final class ShellClient: @unchecked Sendable {
 
     private let credential: ShellCredential
     private let iroh: (any ShellIrohDialing)?
+    /// Signs the proof when `credential.phoneID` is a computer's (`ComputerProof`).
+    private let identity: (any ComputerIdentitySigning)?
     private let mode: ShellConnectMode
     private let liveness: Liveness
     private let callbackQueue: DispatchQueue
@@ -256,11 +265,15 @@ public final class ShellClient: @unchecked Sendable {
     private var probeToken = 0
 
     /// `iroh` dials the Mac from anywhere (nil: TLS only); `mode` is the
-    /// phone's "Connect using" setting.
+    /// phone's "Connect using" setting. `identity` is this computer's, for a
+    /// credential a phone handed it (a `computer.` id): every proof is also
+    /// signed with it, and without it nothing is sent.
     public init(credential: ShellCredential, queue: DispatchQueue = .main, iroh: (any ShellIrohDialing)? = nil,
-                mode: ShellConnectMode = .automatic, liveness: Liveness = Liveness(), onEvent: @escaping (Event) -> Void) {
+                mode: ShellConnectMode = .automatic, liveness: Liveness = Liveness(),
+                identity: (any ComputerIdentitySigning)? = nil, onEvent: @escaping (Event) -> Void) {
         self.credential = credential
         self.iroh = iroh
+        self.identity = identity
         self.mode = mode
         self.liveness = liveness
         self.callbackQueue = queue
@@ -471,6 +484,38 @@ public final class ShellClient: @unchecked Sendable {
     public func giveScreenPass(_ pass: ShellCredential) {
         var m = ShellEnvelope(t: ShellEnvelope.screenPass)
         m.pass = pass
+        command(m)
+    }
+
+    /// Asks this host to give another computer access (`computerGrant`): `name` is what the host lists it
+    /// as, `viewer` its own host id as this phone knows it (granting it again replaces it), `idKey` its
+    /// identity public key (from its `host`), `scopes` what it may do. `.computerGranted` answers, or
+    /// `.failed` (`.notAllowed` when this phone may not share, `.badRequest` from an older host).
+    public func grantComputer(name: String, viewer: String, scopes: [String], idKey: Data, kind: String?) {
+        var m = ShellEnvelope(t: ShellEnvelope.computerGrant)
+        m.name = name
+        m.viewer = viewer
+        m.scopes = scopes
+        m.idKey = idKey.base64EncodedString()
+        m.kind = kind
+        command(m)
+    }
+
+    /// Hands this computer access to another host (`computerPass`); `.computerPassSaved` answers, or
+    /// `.failed` (`.passConflict`, `.passNotSaved`, `.badRequest` from an older one).
+    public func giveComputerPass(_ pass: ShellCredential, scopes: [String], pending: [String]?) {
+        var m = ShellEnvelope(t: ShellEnvelope.computerPass)
+        m.pass = pass
+        m.scopes = scopes
+        m.pending = pending.flatMap { $0.isEmpty ? nil : $0 }
+        command(m)
+    }
+
+    /// Takes back access `grantComputer` got (`computerID`) that couldn't be handed over;
+    /// `.computerRevoked` answers, or `.failed`.
+    public func revokeComputer(_ computerID: String) {
+        var m = ShellEnvelope(t: ShellEnvelope.computerRevoke)
+        m.phoneID = computerID
         command(m)
     }
 
@@ -685,6 +730,13 @@ public final class ShellClient: @unchecked Sendable {
                 var proof = ShellEnvelope(t: ShellEnvelope.proof)
                 proof.phoneID = credential.phoneID
                 proof.mac = RemoteShell.proof(shellKey: credential.shellKey, nonce: nonce).base64EncodedString()
+                if Computers.isComputerID(credential.phoneID) {
+                    // A computer also signs, bound to this host; it can't without its identity key.
+                    guard let sig = computerSignature(nonce: nonce, iroh: attempt.isIroh) else {
+                        return attemptEnded(id, ConnectError.protocolViolation)
+                    }
+                    proof.sig = sig.base64EncodedString()
+                }
                 guard let stream = attempt.stream else { return }
                 send(proof, on: stream)
             case ShellEnvelope.ready where attempt.challenged:
@@ -790,6 +842,20 @@ public final class ShellClient: @unchecked Sendable {
                 return emit(.failed(.badRequest, session: nil))
             }
             emit(.screenGranted(viewerID: viewerID, key: key))
+        case ShellEnvelope.computerGranted:
+            let scopes = message.scopes ?? [], pending = message.pending ?? []
+            guard let computerID = message.phoneID, Computers.isComputerID(computerID),
+                  let key = message.key.flatMap({ Data(base64Encoded: $0) }), key.count == 32,
+                  !(scopes + pending).isEmpty, (scopes + pending).allSatisfy(Computers.allScopes.contains) else {
+                // Access that can't be handed over: the host takes back what it made, if it named it.
+                if let computerID = message.phoneID, Computers.isComputerID(computerID) { revokeComputer(computerID) }
+                return emit(.failed(.badRequest, session: nil))
+            }
+            emit(.computerGranted(id: computerID, key: key, scopes: scopes, pending: pending))
+        case ShellEnvelope.computerPassSaved:
+            emit(.computerPassSaved)
+        case ShellEnvelope.computerRevoked:
+            emit(.computerRevoked)
         case ShellEnvelope.screenPassSaved:
             emit(.screenPassSaved)
         case ShellEnvelope.screenRevoked:
@@ -801,6 +867,16 @@ public final class ShellClient: @unchecked Sendable {
         default:
             break
         }
+    }
+
+    /// As a computer: the identity key's signature over the challenge, bound to the host this attempt
+    /// dials (its certificate's hash on TLS, its endpoint id on iroh). Nil without a key or a binding.
+    private func computerSignature(nonce: Data, iroh: Bool) -> Data? {
+        guard let identity,
+              let binding = ComputerProof.binding(hex: iroh ? (credential.irohID ?? "") : credential.certSHA256) else { return nil }
+        let message = ComputerProof.message(nonce: nonce, path: iroh ? .iroh : .tls, hostBinding: binding, computerID: credential.phoneID)
+        guard let sig = try? identity.sign(message), sig.count == 64 else { return nil }
+        return sig
     }
 
     private static func isScreenReady(_ line: Data) -> Bool {

@@ -124,8 +124,11 @@ final class ShellProtocolTests: XCTestCase {
 
     func testErrorReasonsMatchFixtures() throws {
         let reasons = try XCTUnwrap(shell()["errors"] as? [String])
-        XCTAssertEqual(Set(reasons), Set(ShellError.allCases.map(\.rawValue)))
-        XCTAssertEqual(reasons.count, ShellError.allCases.count)
+        // The computers' two reasons join the fixtures with the Kotlin and C# enums that know them.
+        let computers: Set<String> = [ShellError.tooManyComputers.rawValue, ShellError.passConflict.rawValue]
+        let ours = ShellError.allCases.map(\.rawValue).filter { reasons.contains($0) || !computers.contains($0) }
+        XCTAssertEqual(Set(reasons), Set(ours))
+        XCTAssertEqual(reasons.count, ours.count)
     }
 
     /// The three `host` lines, the shared limits and shell ids, and what `cleaned()` keeps.

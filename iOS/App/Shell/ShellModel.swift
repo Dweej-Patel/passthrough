@@ -986,8 +986,8 @@ final class ShellModel: ObservableObject {
         case let .screen(stream, _):
             // The screen has its own client (`ScreenModel`); this one never asks.
             stream.cancel()
-        case .screenGranted, .screenPassSaved, .screenRevoked:
-            // Screen passes have their own clients (`ScreenShareModel`); this one never asks.
+        case .screenGranted, .screenPassSaved, .screenRevoked, .computerGranted, .computerPassSaved, .computerRevoked:
+            // Screen passes and computers' access have their own clients (`ScreenShareModel`, `ComputerShareModel`); this one never asks.
             break
         case let .host(info):
             guard let mac = clientMacID else { return }
