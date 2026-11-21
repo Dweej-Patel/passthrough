@@ -198,9 +198,11 @@ final class ScreenModel: ObservableObject {
         self.shell = shell
         self.context = context
         guard let mac = shell.macs.first(where: { $0.macID == shell.selectedMacID }) else {
-            phase = .failed("Choose a Mac first.")
+            phase = .failed("Choose a computer first.")
             return
         }
+        // Before anything is dialled: a PC is never asked for the Mac's screen.
+        if refusesNonMac(mac.macID, name: mac.macName) { return }
         macID = mac.macID
         macName = mac.macName
         slowReason = nil
@@ -262,6 +264,8 @@ final class ScreenModel: ObservableObject {
         #if DEBUG
         if Self.demoState != nil { return applyDemo("live") }
         #endif
+        // A Mac login is never sent to anything but a Mac.
+        if let macID, refusesNonMac(macID, name: macName) { return }
         pendingLogin = (login, remember)
         open(video: false)
     }
@@ -281,7 +285,7 @@ final class ScreenModel: ObservableObject {
         guard let connection = shell.screenConnection(onEvent: { [weak self] event in
             MainActor.assumeIsolated { self?.handle(event, generation: gen) }
         }) else {
-            phase = .failed("Choose a Mac first.")
+            phase = .failed("Choose a computer first.")
             return
         }
         client = connection.client
@@ -292,6 +296,8 @@ final class ScreenModel: ObservableObject {
     /// connection with a login typed for this view, or the saved one if the
     /// user chose "Always" for this Mac; otherwise they are asked first.
     private func fallBackToScreenSharing() {
+        // A kind learned late (its `host` came after the screen was asked for) still never gets here.
+        if let macID, refusesNonMac(macID, name: macName) { return }
         wantsVideo = false
         slowReason = "Slower: allow Passthrough Screen Recording and Accessibility on \(macName) for the smooth view."
         if pendingLogin == nil, let macID, Self.alwaysUsesScreenSharing(macID: macID), let context,
@@ -310,12 +316,28 @@ final class ScreenModel: ObservableObject {
     /// Mac, without asking): with the saved login, else the login form.
     func useScreenSharing(always: Bool) {
         guard let macID else { return }
+        if refusesNonMac(macID, name: macName) { return }
         if always { Self.setAlwaysUsesScreenSharing(macID: macID) }
         if let context, let saved = ScreenLoginStore.read(macID: macID, context: context) {
             connect(saved, remember: false)
         } else {
             phase = .login(error: nil)
         }
+    }
+
+    /// The Mac's screen path (its own stream, Screen Sharing and its login) is a Mac's
+    /// only: for a PC, or a computer of a kind this build doesn't know, it ends
+    /// here, says why, and nothing is dialled or sent. True when it ended.
+    private func refusesNonMac(_ id: String, name: String) -> Bool {
+        guard let shell else { return false }
+        let kind = shell.kind(of: id)
+        guard kind != .mac else { return false }
+        stop()
+        let words = HostWords(kind: kind, name: name, device: ThisDevice.name)
+        let state = id == shell.selectedMacID ? shell.page.screen : .notInThisVersion
+        phase = .failed(HostCopy.screen(state == .available || state == .noRow ? .notInThisVersion : state, words)
+                        ?? "\(words.name)'s screen isn't in this version of Passthrough yet.")
+        return true
     }
 
     private static let screenSharingAlwaysKey = "screenSharingAlwaysMacs"
@@ -408,6 +430,11 @@ final class ScreenModel: ObservableObject {
         case .disconnected:
             phase = .failed("Couldn't reach \(macName). Check that it's awake and Remote shell is on.")
             stop()
+        case let .host(info) where HostKind(wire: info.kind) != .mac:
+            // Told only now that this isn't a Mac: its screen path ends before anything more is asked.
+            stop()
+            phase = .failed(HostCopy.screen(.notInThisVersion, HostWords(kind: HostKind(wire: info.kind), name: macName, device: ThisDevice.name))
+                            ?? "Choose a computer first.")
         default:
             break
         }

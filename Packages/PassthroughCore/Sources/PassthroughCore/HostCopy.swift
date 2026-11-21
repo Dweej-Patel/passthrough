@@ -133,7 +133,7 @@ public enum HostCopy {
         case .windowsHome: "\(w.name) runs Windows Home, which has no Remote Desktop. The shell works."
         case .noPassword: "Your account on \(w.name) has no password Remote Desktop can use. Add one on \(w.the)."
         case .remoteDesktopProblem: "Remote Desktop on \(w.name) needs a look. Open Passthrough's settings on \(w.the)."
-        case .none: nil
+        case .noRow: nil
         }
     }
 

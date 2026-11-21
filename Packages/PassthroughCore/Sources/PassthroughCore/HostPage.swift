@@ -69,7 +69,7 @@ public enum HostScreenState: Equatable, Sendable {
     case notInThisVersion
     case switchedOff, remoteDesktopOff, windowsHome, noPassword, remoteDesktopProblem
     /// Nothing offered and no reason given: no row.
-    case none
+    case noRow
 }
 
 /// The page for one computer, from one pure function, so every state has a test.
@@ -128,10 +128,10 @@ public struct HostPage: Equatable, Sendable {
         switch input.kind {
         // A Mac's own refusals stay where they are (the screen view says them).
         case .mac: return .available
-        case .other: return .none
+        case .other: return .noRow
         case .windows: break
         }
-        guard let host = input.host else { return input.viewerScreens.isEmpty ? .notInThisVersion : .none }
+        guard let host = input.host else { return input.viewerScreens.isEmpty ? .notInThisVersion : .noRow }
         let offered = Set(host.screens ?? [])
         if !offered.isDisjoint(with: input.viewerScreens) { return .available }
         if input.viewerScreens.isEmpty, !offered.isEmpty { return .notInThisVersion }
@@ -142,6 +142,6 @@ public struct HostPage: Equatable, Sendable {
         case "service", "exposed", "policy": return .remoteDesktopProblem
         default: break
         }
-        return host.access?.screen == false ? .switchedOff : .none
+        return host.access?.screen == false ? .switchedOff : .noRow
     }
 }

@@ -65,7 +65,7 @@ final class HostCopyTests: XCTestCase {
         XCTAssertNil(HostCopy.shell(.available, pc))
         XCTAssertEqual(HostCopy.screen(.notInThisVersion, pc), "Office-PC's screen isn't in this version of Passthrough yet. Its shell works.")
         XCTAssertEqual(HostCopy.screen(.windowsHome, pc), "Office-PC runs Windows Home, which has no Remote Desktop. The shell works.")
-        XCTAssertNil(HostCopy.screen(.none, pc))
+        XCTAssertNil(HostCopy.screen(.noRow, pc))
         XCTAssertEqual(HostCopy.error(.signedOut, pc), HostCopy.shell(.appNotOpen, pc))
         XCTAssertEqual(HostCopy.error(.tooManySessions, pc), "Your PC already has \(RemoteShell.maxSessions) sessions open. End one to start another.")
         XCTAssertEqual(HostCopy.pairedNoShell(.windows), "Paired, no access yet")

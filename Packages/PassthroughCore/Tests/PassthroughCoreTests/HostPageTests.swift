@@ -122,7 +122,7 @@ final class HostPageTests: XCTestCase {
         XCTAssertEqual(pc(.ready(.local), host: host(screens: [], rdp: "service")).screen, .remoteDesktopProblem)
         XCTAssertEqual(pc(.ready(.local), host: host(screens: [], rdp: "exposed")).screen, .remoteDesktopProblem)
         XCTAssertEqual(pc(.ready(.local), host: host(screens: [], rdp: nil, access: HostAccess(screen: false))).screen, .switchedOff)
-        XCTAssertEqual(pc(.ready(.local), host: host(screens: nil, rdp: nil)).screen, HostScreenState.none)
+        XCTAssertEqual(pc(.ready(.local), host: host(screens: nil, rdp: nil)).screen, HostScreenState.noRow)
     }
 
     func testScreenAvailableOnceThisAppHasTheViewer() {
@@ -143,7 +143,7 @@ final class HostPageTests: XCTestCase {
 
     func testMacScreenIsAsBefore() {
         XCTAssertEqual(HostPage.make(HostPageInput(kind: .mac, reach: .ready(.local), now: now)).screen, .available)
-        XCTAssertEqual(HostPage.make(HostPageInput(kind: .other, reach: .ready(.local), now: now)).screen, HostScreenState.none)
+        XCTAssertEqual(HostPage.make(HostPageInput(kind: .other, reach: .ready(.local), now: now)).screen, HostScreenState.noRow)
     }
 
     // MARK: Kind

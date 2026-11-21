@@ -25,10 +25,10 @@ struct PairSheet: View {
                 if model.state != .running, !ThisDevice.isPad {
                     PTCard {
                         VStack(alignment: .leading, spacing: 10) {
-                            Label("This \(ThisDevice.name)'s internet sharing is off, so the computer can't reach it to pair.", systemImage: "exclamationmark.triangle.fill")
+                            Label("The cable link is off, so the computer can't reach this \(ThisDevice.name) to pair.", systemImage: "exclamationmark.triangle.fill")
                                 .font(.footnote).foregroundStyle(PTTheme.warning)
                                 .fixedSize(horizontal: false, vertical: true)
-                            Button(model.state == .starting ? "Turning on…" : "Turn on sharing") { model.start() }
+                            Button(model.state == .starting ? "Turning on…" : "Turn on the cable link") { model.start() }
                                 .buttonStyle(.bordered)
                                 .disabled(model.state == .starting || model.state == .stopping)
                         }
@@ -64,7 +64,7 @@ struct PairSheet: View {
                         .buttonStyle(.borderedProminent).tint(PTTheme.accentEnd)
                 }
                 Spacer(minLength: 0)
-                Text("Codes are single use and only work over USB. Each Mac gets its own key you can revoke at any time.")
+                Text("Codes are single use and only work over USB. Each computer gets its own key you can revoke at any time.")
                     .font(.caption).foregroundStyle(.tertiary).multilineTextAlignment(.center).padding(.horizontal, 30)
                     .padding(.bottom, 24)
             }

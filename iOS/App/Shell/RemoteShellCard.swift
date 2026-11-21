@@ -10,7 +10,12 @@ struct RemoteShellCard: View {
     @EnvironmentObject private var router: ShellRouter
 
     private var selectedMacName: String {
-        shell.macs.first { $0.macID == shell.selectedMacID }?.macName ?? "your Mac"
+        shell.macs.first { $0.macID == shell.selectedMacID }?.macName ?? shell.words.your
+    }
+
+    /// The setup steps' nouns: the selected computer's, or both kinds' with none paired.
+    private var setupWords: HostWords {
+        model.pairedClients.isEmpty ? .generic(device: ThisDevice.name) : shell.words
     }
 
     var body: some View {
@@ -38,17 +43,22 @@ struct RemoteShellCard: View {
     private var statusDetail: String {
         switch shell.reach {
         case .ready: shell.path?.label.map { "Connected \($0)" } ?? "Connected"
-        default: ShellStatusLabel.title(shell.reach)
+        default: ShellStatusLabel.title(shell.reach, kind: shell.selectedKind)
         }
     }
 
     @ViewBuilder private var content: some View {
         switch shell.reach {
         case .noAccess:
-            Text("Open your Mac's shell right from this \(ThisDevice.name). To set it up:")
-                .font(.subheadline).foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
-            ShellSetupSteps(paired: !model.pairedClients.isEmpty)
+            if shell.accessRefused, let message = shell.reachMessage {
+                // It let this phone in once and now refuses: no steps, they were done.
+                notice(message, icon: "exclamationmark.triangle.fill", tint: PTColor.attention)
+            } else {
+                Text("Open \(setupWords.your)'s shell right from this \(ThisDevice.name). To set it up:")
+                    .font(.subheadline).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                ShellSetupSteps(paired: !model.pairedClients.isEmpty, words: setupWords)
+            }
         case .connecting:
             HStack(spacing: 10) {
                 ProgressView()
@@ -57,7 +67,7 @@ struct RemoteShellCard: View {
             }
             .padding(.vertical, 4)
         case .unreachable:
-            notice(shell.reachMessage ?? "", icon: "wifi.exclamationmark", tint: PTColor.attention)
+            notice(shell.reachMessage ?? "", icon: shell.farewell == nil ? "wifi.exclamationmark" : "moon.zzz.fill", tint: PTColor.attention)
             Button { shell.connect() } label: {
                 Label("Try again", systemImage: "arrow.clockwise")
                     .font(.subheadline.weight(.semibold))
@@ -69,15 +79,16 @@ struct RemoteShellCard: View {
         case .locked, .needsPasscode, .keyUnavailable:
             notice(shell.reachMessage ?? "", icon: "exclamationmark.triangle.fill", tint: PTColor.attention)
         case .ready:
-            if shell.visibleSessions.isEmpty {
+            if let why = HostCopy.shell(page.shell, shell.words) {
+                // No shell can start there: why, in place of the list and New shell.
+                notice(why, icon: "person.crop.circle.badge.exclamationmark", tint: PTColor.attention)
+                    .onAppear { UIAccessibility.post(notification: .announcement, argument: why) }
+            } else if shell.visibleSessions.isEmpty {
                 VStack(alignment: .leading, spacing: 12) {
                     Text("No sessions open. Start one to run commands on \(selectedMacName).")
                         .font(.subheadline).foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
-                    Button { router.terminal = .new } label: {
-                        Label("New session", systemImage: "plus")
-                    }
-                    .buttonStyle(PTProminentButtonStyle())
+                    newShell(.prominent)
                 }
             } else {
                 TimelineView(.periodic(from: .now, by: 30)) { context in
@@ -88,22 +99,32 @@ struct RemoteShellCard: View {
                     }
                 }
             }
-            if let message = shell.lastError?.message {
+            // A refusal the shell notice already says isn't said twice.
+            if page.shell == .available, let message = shell.lastError?.message(for: shell.words) {
                 notice(message, icon: "exclamationmark.triangle.fill", tint: PTColor.attention)
             }
             Divider().opacity(0.5)
-            Button { router.showScreen = true } label: {
-                HStack(spacing: 10) {
-                    Image(systemName: "display").foregroundStyle(PTColor.tintText)
-                    Text("See and control the screen").foregroundStyle(.primary)
-                    Spacer()
-                    Image(systemName: "chevron.right").font(.caption.weight(.semibold)).foregroundStyle(.tertiary)
+            if page.screen != .noRow {
+                Button { router.openScreen(shell) } label: {
+                    HStack(spacing: 10) {
+                        Image(systemName: "display").foregroundStyle(PTColor.tintText)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("See and control the screen").foregroundStyle(.primary)
+                            if page.screen != .available, let why = HostCopy.screen(page.screen, shell.words) {
+                                Text(why).font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                            }
+                        }
+                        Spacer()
+                        Image(systemName: "chevron.right").font(.caption.weight(.semibold)).foregroundStyle(.tertiary)
+                    }
+                    .font(.subheadline.weight(.medium))
+                    .frame(minHeight: 44)
+                    .contentShape(Rectangle())
                 }
-                .font(.subheadline.weight(.medium))
-                .frame(minHeight: 44)
-                .contentShape(Rectangle())
+                .buttonStyle(.plain)
+                .disabled(!shell.canOpenScreen)
+                .opacity(shell.canOpenScreen ? 1 : 0.55)
             }
-            .buttonStyle(.plain)
             Button { router.showHistory = true } label: {
                 HStack(spacing: 10) {
                     Image(systemName: "clock.arrow.circlepath").foregroundStyle(PTColor.tintText)
@@ -117,6 +138,13 @@ struct RemoteShellCard: View {
             }
             .buttonStyle(.plain)
         }
+    }
+
+    private var page: HostPage { shell.page }
+
+    private func newShell(_ style: NewShellControl.Style) -> some View {
+        NewShellControl(shells: shell.shells(for: shell.selectedMacID), preferred: shell.preferredShell(for: shell.selectedMacID),
+                        hostName: selectedMacName, style: style) { router.terminal = .new(shell: $0) }
     }
 
     private func notice(_ text: String, icon: String, tint: Color) -> some View {
@@ -146,7 +174,7 @@ struct RemoteShellCard: View {
                     }
                     VStack(alignment: .leading, spacing: 2) {
                         Text(session.title).font(.subheadline.weight(.semibold)).lineLimit(1)
-                        Text(Self.status(session, now: now)).font(.caption).foregroundStyle(.secondary)
+                        Text(Self.status(session, now: now, kind: shell.selectedKind)).font(.caption).foregroundStyle(.secondary)
                     }
                     Spacer(minLength: 0)
                 }
@@ -175,13 +203,13 @@ struct RemoteShellCard: View {
     }
 
     /// "running · 4m" (since it started) or "exited 0 · 1h" (since its last output).
-    /// A session started in a terminal window on the Mac says so first ("on the Mac · running · 4m").
+    /// A session started in a terminal window on the computer says so first ("on the Mac · running · 4m").
     /// A program that reports its status (Claude Code) is described by it:
     /// "working · 3m · 2 agents", "done · 1m", "failed · 1m" (since it got there).
-    static func status(_ session: ShellSessionInfo, now: Date) -> String {
+    static func status(_ session: ShellSessionInfo, now: Date, kind: HostKind = .mac) -> String {
         if session.running, let question = session.waiting { return "needs you · " + question }
         if session.running {
-            let place = session.isOnMac ? "on the Mac · " : ""
+            let place = session.isOnMac ? "on \(HostWords(kind: kind, name: nil, device: "").the) · " : ""
             if let status = session.status {
                 let since = age(now.timeIntervalSince1970 - status.since)
                 if status.isWorking {
@@ -221,19 +249,20 @@ extension ShellPath {
 /// A short status for the shell's reach, with the colour of its dot.
 struct ShellStatusLabel: View {
     let reach: ShellModel.Reach
+    var kind: HostKind = .mac
 
     var body: some View {
         HStack(spacing: 6) {
             Circle().fill(Self.color(reach)).frame(width: 8, height: 8)
-            Text(Self.title(reach))
+            Text(Self.title(reach, kind: kind))
         }
     }
 
-    static func title(_ reach: ShellModel.Reach) -> String {
+    static func title(_ reach: ShellModel.Reach, kind: HostKind = .mac) -> String {
         switch reach {
         case .ready: "Connected"
         case .connecting: "Connecting…"
-        case .unreachable: "Can't reach Mac"
+        case .unreachable: HostCopy.cantReach(HostWords(kind: kind, name: nil, device: ThisDevice.name))
         case .locked: "Locked"
         case .needsPasscode: "Needs a passcode"
         case .keyUnavailable: "Access needs renewing"
@@ -251,18 +280,36 @@ struct ShellStatusLabel: View {
     }
 }
 
-/// How to give this iPhone the shell, as numbered steps; the first is ticked once a Mac is paired.
+/// How to give this device the shell, as numbered steps in the computer's words
+/// (`HostCopy.setupSteps`); the first is ticked once a computer is paired.
 struct ShellSetupSteps: View {
     let paired: Bool
+    /// The computer's nouns; `.generic` with nothing paired.
+    let words: HostWords
+    @EnvironmentObject private var model: AppModel
 
     var body: some View {
+        let steps = HostCopy.setupSteps(words, paired: paired, isPad: ThisDevice.isPad, cableLinkOn: model.state.isActive, needsVPNPrompt: false)
         VStack(alignment: .leading, spacing: 14) {
-            step(1, done: paired, title: "Pair this \(ThisDevice.name) with your Mac",
-                 detail: paired ? "Done." : "In the \(ThisDevice.name) tab, tap Pair under Paired devices, then Pair a Mac or PC.")
-            step(2, done: false, title: "Turn on Remote shell on your Mac",
-                 detail: "On the Mac, open Passthrough's Settings, go to Remote Shell and turn on \u{201C}Allow remote shell from paired phones\u{201D}.")
-            step(3, done: false, title: "Connect over USB once",
-                 detail: ThisDevice.isPad ? "With Passthrough open, plug this iPad into the Mac. Its shells then show up on the Mac and Shells tabs by themselves." : "With sharing on, plug this \(ThisDevice.name) into the Mac. Its shells then show up on the Mac and Shells tabs by themselves.")
+            ForEach(Array(steps.enumerated()), id: \.offset) { index, item in
+                VStack(alignment: .leading, spacing: 8) {
+                    step(index + 1, done: item.done, title: item.title, detail: item.detail)
+                    if item.action == .turnOnCableLink {
+                        Button { model.start() } label: { Label("Turn on the cable link", systemImage: "cable.connector") }
+                            .font(.subheadline.weight(.semibold))
+                            .buttonStyle(.bordered)
+                            .buttonBorderShape(.capsule)
+                            .tint(PTColor.tintText)
+                            .frame(minHeight: 44)
+                            .padding(.leading, 38)
+                    }
+                    if let note = item.note {
+                        Text(note).font(.footnote).foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                            .padding(.leading, 38)
+                    }
+                }
+            }
         }
     }
 
