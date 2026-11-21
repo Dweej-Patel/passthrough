@@ -1,5 +1,7 @@
 package dev.dpatel.passthrough.ui.shell
 
+import dev.dpatel.passthrough.core.HostInfo
+import dev.dpatel.passthrough.core.HostKind
 import dev.dpatel.passthrough.core.ShellCredential
 import dev.dpatel.passthrough.core.ShellSessionInfo
 import org.junit.Assert.assertEquals
@@ -98,7 +100,7 @@ class MacProfilesTests {
         assertEquals("Connected · 3 shells open", MacProfiles.statusText(MacStatus.Connected(3), now))
         assertEquals("claude is asking a question", MacProfiles.statusText(MacStatus.Asking("claude", "Edit?"), now))
         val fake = { then: Long, at: Long -> "fake(${at - then})" }
-        assertEquals("Last heard fake(7200000)", MacProfiles.statusText(MacStatus.LastHeard(now - 7_200_000L), now, fake))
+        assertEquals("Last heard fake(7200000)", MacProfiles.statusText(MacStatus.LastHeard(now - 7_200_000L), now, relative = fake))
         assertEquals("Paired, no Remote shell", MacProfiles.statusText(MacStatus.NoShell, now))
         assertEquals("Connecting…", MacProfiles.statusText(MacStatus.Connecting, now))
     }
@@ -207,5 +209,24 @@ class MacProfilesTests {
         changes = MacProfiles.watchChanges(mapOf("a" to a, "b" to b), emptyList())
         assertEquals(setOf("a", "b"), changes.stop)
         assertEquals(emptyList<ShellCredential>(), changes.start)
+    }
+
+    /** Phones know a PC: the kind leads the row only when the list is mixed. */
+    @Test fun kindPrefix() {
+        val now = 1_000_000_000_000L
+        assertEquals("PC · Connected", MacProfiles.statusText(MacStatus.Connected(0), now, HostKind.WINDOWS, showKind = true))
+        assertEquals("PC · Connected · 2 shells open", MacProfiles.statusText(MacStatus.Connected(2), now, HostKind.WINDOWS, showKind = true))
+        assertEquals("Mac · Connected · 1 shell open", MacProfiles.statusText(MacStatus.Connected(1), now, HostKind.MAC, showKind = true))
+        assertEquals("PC · Paired, no access yet", MacProfiles.statusText(MacStatus.NoShell, now, HostKind.WINDOWS, showKind = true))
+        assertEquals("PC · Sign in needed", MacProfiles.statusText(MacStatus.SignInNeeded, now, HostKind.WINDOWS, showKind = true))
+        assertEquals("Paired, no Remote shell", MacProfiles.statusText(MacStatus.NoShell, now, HostKind.MAC))
+        assertFalse(MacProfiles.showsKind(listOf(HostKind.MAC, HostKind.MAC)))
+        assertTrue(MacProfiles.showsKind(listOf(HostKind.MAC, HostKind.WINDOWS)))
+    }
+
+    @Test fun signInNeededWhenReachableButSignedOut() {
+        val host = HostInfo(kind = "windows", signedIn = false)
+        assertEquals(MacStatus.SignInNeeded, MacProfiles.status(null, reachable = true, lastHeardMillis = null, hasShell = true, host = host))
+        assertEquals(MacStatus.Connecting, MacProfiles.status(null, reachable = false, lastHeardMillis = null, hasShell = true, host = host))
     }
 }
