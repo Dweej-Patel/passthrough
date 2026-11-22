@@ -203,9 +203,12 @@ public sealed class WindowsSecuredFiles : ISecuredFiles
     public void WriteNew(string path, byte[] bytes)
     {
         Directory.CreateDirectory(Path.GetDirectoryName(path)!);
-        using var stream = new FileStream(path, FileMode.CreateNew, FileAccess.Write, FileShare.None);
-        stream.Write(bytes);
-        stream.Flush(flushToDisk: true);
+        using (var stream = new FileStream(path, FileMode.CreateNew, FileAccess.Write, FileShare.None))
+        {
+            stream.Write(bytes);
+            stream.Flush(flushToDisk: true);
+        }
+        OwnByAdministrators(path);
     }
 
     public void Write(string path, byte[] bytes)
@@ -216,7 +219,21 @@ public sealed class WindowsSecuredFiles : ISecuredFiles
             stream.Write(bytes);
             stream.Flush(flushToDisk: true);
         }
+        OwnByAdministrators(temp);
         File.Move(temp, path, overwrite: true);
+    }
+
+    /// <summary>
+    /// An elevated administrator's new files are owned by its own account unless Windows is set to give them to
+    /// Administrators; the owner may always rewrite a file's permissions, so the account unelevated could then change
+    /// install.json, and <see cref="Check"/> rightly refuses the data folder at the next update. Setup owns what it writes.
+    /// </summary>
+    public static void OwnByAdministrators(string path)
+    {
+        var info = new FileInfo(path);
+        var security = info.GetAccessControl(AccessControlSections.Owner);
+        security.SetOwner(new SecurityIdentifier(WellKnownSidType.BuiltinAdministratorsSid, null));
+        info.SetAccessControl(security);
     }
 
     public void DeleteFile(string path)

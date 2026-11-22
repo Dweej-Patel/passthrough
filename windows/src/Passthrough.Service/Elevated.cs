@@ -133,6 +133,7 @@ internal static class Elevated
             var text = new StringBuilder();
             foreach (var line in lines) text.Append(DateTimeOffset.UtcNow.ToString("u")).Append(' ').Append(verb).Append(' ').AppendLine(LogText.Redact(line));
             File.AppendAllText(path, text.ToString());
+            WindowsSecuredFiles.OwnByAdministrators(path);
         }
         catch (Exception e) when (e is IOException or UnauthorizedAccessException) { }
     }
