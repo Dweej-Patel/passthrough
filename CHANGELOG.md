@@ -56,8 +56,8 @@ the **Before you rebuild** notes first. The Mac and phone apps update together.
   app as a Release build (docs/GUIDE.md › Setup): the Release helper refuses a
   Debug app.
 * **Saved Windows logins: type the PC's password once more**, on the iPhone
-  and on the Mac. A saved login is now kept with the PC's keys (its Remote
-  Desktop certificate and iroh id) and used only while they are the same;
+  and on the Mac. A saved login is now kept with the PC's keys (the certificate
+  and iroh id its shell connection proves) and used only while they are the same;
   logins saved before this aren't used.
 * **A PC's screen needs the Remote Desktop engine, built by hand.** It isn't
   committed yet. Run `brew install cmake ninja`, then
@@ -329,6 +329,31 @@ these steps as written and check each one before building.
   a full-screen video or game.
 * The notice for a computer given only the screen no longer says it was given
   the shell.
+
+### Fixed (iPhone and Mac, from the security and code review)
+
+* **Saved Windows logins follow the PC, not just its id.** A login saved on
+  the iPhone or the Mac is used only while the PC's credential has the same
+  certificate and iroh id, so a host that later claimed the same id with its
+  own keys is never signed in to with it. Forgetting a computer on the
+  iPhone deletes its saved logins; on the Mac, the logins for computers a
+  revoked phone handed over go with them.
+* **The Mac's clipboard is written only when you ask.** After Copy from PC,
+  the PC's answer is taken within 3 seconds and only while the copy waits; a
+  PC that held its answer back could otherwise replace the Mac's clipboard
+  later. A paste offer is no longer withdrawn once you've copied something
+  on the PC itself (that emptied the PC's clipboard).
+* **The Mac's PC Screen window ends a session for the right reason.** Someone
+  signing in at the PC now says so instead of reconnecting and taking the
+  console back from them; a wrong password goes back to the sign-in form at
+  once and isn't sent again. Locked, disabled or expired accounts aren't
+  re-sent, reconnecting makes three tries (1, 4 and 10 seconds) that a
+  network still coming back doesn't cut short, and moving the window to a
+  display with another scale asks Windows for the right size.
+* Hardening: a host's `retryAfter` is capped (a huge one crashed the app), a
+  PC desktop past 16384 pixels a side or 50 million pixels isn't drawn on the
+  iPhone, a Remote Desktop request answered with a screen hand-over is
+  refused, and a shared computer's name loses control and format characters.
 
 ### Changed
 
