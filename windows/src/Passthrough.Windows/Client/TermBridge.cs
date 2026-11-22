@@ -22,7 +22,7 @@ public static class TermBridge
         var hex = Convert.ToHexStringLower(System.Security.Cryptography.RandomNumberGenerator.GetBytes(16));
         using var me = WindowsIdentity.GetCurrent();
         var pipe = PipeNative.CreateServer("Passthrough.Term." + hex, $"D:P(A;;GA;;;{me.User})", first: true, maxInstances: 1);
-        Launch(hex, $"{computer.Credential.MacName} · {shell ?? "shell"}");
+        Launch(hex);
         return Task.Run(async () =>
         {
             await using (pipe)
@@ -49,6 +49,9 @@ public static class TermBridge
             catch (IOException) { }
             finally { writeLock.Release(); }
         }
+        // The title is set from inside the terminal, never on wt's command line: wt reads a ";" there as the start of
+        // another command, and the name is the other computer's own choice.
+        await Write(new PipeFrame(TermWire.Status, System.Text.Encoding.UTF8.GetBytes(Title(computer.Credential.MacName, shell)))).ConfigureAwait(false);
         var c = computer.Credential;
         var credential = new ShellCredential(c.MacID, c.MacName, c.CertSHA256, Convert.FromBase64String(c.ShellKey), c.PhoneID, c.Port, c.Addresses,
             c.IrohID, c.IrohRelay, c.RelayToken, computer.HostKind);
@@ -102,14 +105,22 @@ public static class TermBridge
         catch (Exception e) when (e is ArgumentException or InvalidOperationException or System.ComponentModel.Win32Exception) { return false; }
     }
 
-    /// <summary>A new tab in the current Windows Terminal window, or a console window when there is none.</summary>
-    private static void Launch(string hex, string title)
+    /// <summary>"<i>MacBook</i> · zsh", with no control or format characters (a name could otherwise rewrite the terminal's title bar or more).</summary>
+    internal static string Title(string name, string? shell)
+    {
+        static string Clean(string s) => new([.. s.Where(c => !char.IsControl(c) && char.GetUnicodeCategory(c) != System.Globalization.UnicodeCategory.Format).Take(64)]);
+        return $"{Clean(name)} · {Clean(shell ?? "shell")}";
+    }
+
+    /// <summary>A new tab in the current Windows Terminal window, or a console window when there is none. Nothing the other computer chose is on the command line.</summary>
+    private static void Launch(string hex)
     {
         var term = Path.Combine(AppContext.BaseDirectory, "passthrough-term.exe");
         var wt = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Microsoft", "WindowsApps", "wt.exe");
         // From the tray app (no console of its own) the terminal gets a console window of its own.
         var start = new ProcessStartInfo(File.Exists(wt) ? wt : term) { UseShellExecute = false };
-        var arguments = File.Exists(wt) ? new[] { "-w", "0", "nt", "--title", title, term, "--pipe", hex } : ["--pipe", hex];
+        // The program's own path can't hold a ";" wt would split on (it is under Program Files); escaped anyway.
+        var arguments = File.Exists(wt) ? new[] { "-w", "0", "nt", term.Replace(";", "\\;", StringComparison.Ordinal), "--pipe", hex } : ["--pipe", hex];
         foreach (var a in arguments) start.ArgumentList.Add(a);
         using var _ = Process.Start(start);
     }

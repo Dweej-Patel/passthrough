@@ -129,6 +129,7 @@ internal sealed class BackgroundService
             case ServiceControl.UserDefined when control.Code == ServiceDefinition.ControlReload:
                 // Only what administrators wrote is re-read (install.json, the pending files); a stray control changes nothing.
                 Log(ReadState() ? "service: re-read its settings" : "service: couldn't re-read install.json");
+                Trays?.DropDisallowed();
                 _ = Task.Run(async () =>
                 {
                     await _reload.WaitAsync().ConfigureAwait(false);

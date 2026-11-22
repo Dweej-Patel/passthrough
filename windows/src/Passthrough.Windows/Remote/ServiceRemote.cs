@@ -394,9 +394,12 @@ public sealed class ServiceRemote : IDisposable
         ComputerGranted = (phone, c) =>
         {
             if (Directory.Owner(c.Id) is not { } owner) return;
-            Notices.Add(owner, c.ScreenPending == true ? PipeNotice.ComputerScreenPending : PipeNotice.ComputerGranted, c.ScreenPending == true
-                ? $"{phone} gave {c.Name} access to this PC's shell. Let it see the screen too? Windows still asks for your password."
-                : $"{phone} gave {c.Name} access to this PC's {(c.Shell == true ? "shell" : "screen")}.", c.Id);
+            Notices.Add(owner, c.ScreenPending == true ? PipeNotice.ComputerScreenPending : PipeNotice.ComputerGranted, (c.ScreenPending, c.Shell) switch
+            {
+                (true, true) => $"{phone} gave {c.Name} access to this PC's shell. Let it see the screen too? Windows still asks for your password.",
+                (true, _) => $"{phone} asked to let {c.Name} see this PC's screen. Allow it? Windows still asks for your password.",
+                _ => $"{phone} gave {c.Name} access to this PC's {(c.Shell == true ? "shell" : "screen")}.",
+            }, c.Id);
         },
         Event = e => _log($"shell: {e}"),
     };
