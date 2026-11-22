@@ -308,9 +308,7 @@ private fun LockScreenContent(reason: LockReason, method: UnlockMethod, error: S
                 Spacer(Modifier.height(24.dp))
                 Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                     Icon(Icons.Filled.Shield, null, tint = c.tertiary, modifier = Modifier.size(14.dp))
-                    // mac-only
-                    Text("Locking doesn't stop sharing with your Mac.", style = PT.display(12.sp, FontWeight.Normal), color = c.tertiary,
-                        textAlign = TextAlign.Center)
+                    Text("Locking doesn't stop sharing with your Mac.", style = PT.display(12.sp, FontWeight.Normal), color = c.tertiary, textAlign = TextAlign.Center) // mac-only
                 }
             }
         }
