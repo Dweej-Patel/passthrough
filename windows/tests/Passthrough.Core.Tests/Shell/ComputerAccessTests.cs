@@ -322,6 +322,40 @@ public sealed class ComputerAccessTests : IAsyncDisposable
     }
 
     [Fact]
+    public void SettingsListsAComputerAndItsScreenCanBeAllowedThenMadeToWaitAgain()
+    {
+        Assert.True(_access.For(Account).SetShareAllowed("phone-a", true));
+        Assert.True(_access.For(Account).SetScreenAllowed("phone-a", true));
+        var (c, error) = _access.GrantComputer("phone-a", "MacBook", "mac-1", "mac", IdKey(), new HashSet<string> { "shell", "screen" }, screenNeedsOwner: true);
+        Assert.Null(error);
+        var ended = new List<string>();
+        var admin = new Passthrough.Core.Pipe.PipeAdminHandler(_access, () => null, _ => 0, _ => { }) { EndScreen = (id, _) => ended.Add(id) };
+        Passthrough.Core.Pipe.PipeComputer Listed() =>
+            Assert.Single(admin.Handle(Account, new Passthrough.Core.Pipe.PipeAdminRequest { Op = Passthrough.Core.Pipe.PipeAdminRequest.List }).Computers!);
+
+        Assert.Equal(("MacBook", "mac", true, false, true), (Listed().Name, Listed().Kind, Listed().Shell, Listed().Screen, Listed().ScreenPending));
+        var allow = new Passthrough.Core.Pipe.PipeAdminRequest { Op = Passthrough.Core.Pipe.PipeAdminRequest.AllowComputerScreen, Phone = c!.Id };
+        Assert.Null(admin.Handle(Account, allow).Error);
+        Assert.Equal((true, false), (Listed().Screen, Listed().ScreenPending));
+        // Off: it waits for the owner again, and its views end now.
+        Assert.Null(admin.Handle(Account, allow with { On = false }).Error);
+        Assert.Equal((false, true), (Listed().Screen, Listed().ScreenPending));
+        Assert.Equal([c.Id], ended);
+        Assert.Null(admin.Handle(Account, allow).Error);
+        Assert.True(Listed().Screen);
+    }
+
+    [Fact]
+    public void AReplacedGrantsNoticesGo()
+    {
+        var board = new Passthrough.Core.Pipe.NoticeBoard();
+        board.Add(Account, Passthrough.Core.Pipe.PipeNotice.ComputerScreenPending, "old", "computer.old");
+        board.Add(Account, Passthrough.Core.Pipe.PipeNotice.ComputerScreenPending, "new", "computer.new");
+        board.Forget("computer.old");
+        Assert.Equal(["new"], board.For(Account).Select(n => n.Text));
+    }
+
+    [Fact]
     public void ADisallowedAccountsPhonesReachNothing()
     {
         Assert.Equal(Account, _access.Owner("phone-a"));

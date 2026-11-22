@@ -76,6 +76,7 @@ public sealed partial class SettingsWindow : Window
 
     /// <summary>The phones allowed to open shells here.</summary>
     public ObservableCollection<RemotePhoneRow> WithAccess { get; } = new();
+    public ObservableCollection<ComputerAccessRow> ComputersWithAccess { get; } = new();
 
     /// <summary>The stored pairings, as Core's <see cref="PairedPhone.List"/> names them.</summary>
     public ObservableCollection<PairedPhoneRow> Paired { get; } = new();
@@ -230,6 +231,9 @@ public sealed partial class SettingsWindow : Window
             WithAccess.Add(new RemotePhoneRow(phone.Phone, phone.Label, phone.PairingSlot, connected.Contains(phone.Phone), _remote.Sessions.RunningSessions(phone.Phone),
                 phone.Screen, _screenReady, phone.Share));
         NoAccessText.Visibility = WithAccess.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
+        ComputersWithAccess.Clear();
+        foreach (var computer in _remote.Computers) ComputersWithAccess.Add(new ComputerAccessRow(computer));
+        ComputersSection.Visibility = ComputersWithAccess.Count == 0 ? Visibility.Collapsed : Visibility.Visible;
     }
 
     private bool _settingAwake;
@@ -290,6 +294,43 @@ public sealed partial class SettingsWindow : Window
         {
             LogFile.Error(ex);
             ShowError("Could not change what it may see. See the log for details.");
+        }
+        ShowRemote();
+    }
+
+    private async void OnComputerScreenClick(object sender, RoutedEventArgs e)
+    {
+        if (_remote is null) return;
+        var box = (CheckBox)sender;
+        var computer = (ComputerAccessRow)box.DataContext;
+        try { await _remote.SetComputerScreenAsync(computer.Id, box.IsChecked == true); }
+        catch (Exception ex)
+        {
+            LogFile.Error(ex);
+            ShowError("Could not change what that computer may see. See the log for details.");
+        }
+        ShowRemote();
+    }
+
+    private async void OnComputerRevokeClick(object sender, RoutedEventArgs e)
+    {
+        if (_remote is null) return;
+        var computer = (ComputerAccessRow)((FrameworkElement)sender).DataContext;
+        var dialog = new ContentDialog
+        {
+            XamlRoot = Content.XamlRoot,
+            Title = $"Revoke {computer.Title}?",
+            Content = "Its shells and any view of the screen close, and it loses access to this PC. A phone can share it again.",
+            PrimaryButtonText = "Revoke",
+            CloseButtonText = "Cancel",
+            DefaultButton = ContentDialogButton.Close,
+        };
+        if (await dialog.ShowAsync() != ContentDialogResult.Primary) return;
+        try { await _remote.RevokeComputerAsync(computer.Id); }
+        catch (Exception ex)
+        {
+            LogFile.Error(ex);
+            ShowError("Could not revoke that computer. See the log for details.");
         }
         ShowRemote();
     }

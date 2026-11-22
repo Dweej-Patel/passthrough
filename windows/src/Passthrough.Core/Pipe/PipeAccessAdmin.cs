@@ -92,8 +92,14 @@ public sealed class PipeAccessAdmin : IAccessAdmin
 
     public Task RevokeSlotAsync(string pairingSlot) => AskAsync(new PipeAdminRequest { Op = PipeAdminRequest.RevokeSlot, PairingSlot = pairingSlot });
 
-    public async Task<IReadOnlyList<PipeDevice>> ListAsync() =>
-        (await AskAsync(new PipeAdminRequest { Op = PipeAdminRequest.List }).ConfigureAwait(false)).Devices ?? [];
+    public async Task<IReadOnlyList<PipeDevice>> ListAsync() => (await ListAllAsync().ConfigureAwait(false)).Phones;
+
+    /// <summary>The phones and the computers with access, from one answer.</summary>
+    public async Task<(IReadOnlyList<PipeDevice> Phones, IReadOnlyList<PipeComputer> Computers)> ListAllAsync()
+    {
+        var reply = await AskAsync(new PipeAdminRequest { Op = PipeAdminRequest.List }).ConfigureAwait(false);
+        return (reply.Devices ?? [], reply.Computers ?? []);
+    }
 
     public Task<PipeAdminReply> SetScreenAsync(string phoneId, bool on) => AskAsync(new PipeAdminRequest { Op = PipeAdminRequest.SetScreen, Phone = phoneId, On = on });
 
@@ -113,7 +119,7 @@ public sealed class PipeAccessAdmin : IAccessAdmin
 
     public Task<PipeAdminReply> RevokeComputerAsync(string id) => AskAsync(new PipeAdminRequest { Op = PipeAdminRequest.RevokeComputer, Phone = id });
 
-    public Task<PipeAdminReply> AllowComputerScreenAsync(string id) => AskAsync(new PipeAdminRequest { Op = PipeAdminRequest.AllowComputerScreen, Phone = id });
+    public Task<PipeAdminReply> AllowComputerScreenAsync(string id, bool on = true) => AskAsync(new PipeAdminRequest { Op = PipeAdminRequest.AllowComputerScreen, Phone = id, On = on });
 
     public Task<PipeAdminReply> ScreenAsync() => AskAsync(new PipeAdminRequest { Op = PipeAdminRequest.Screen });
 

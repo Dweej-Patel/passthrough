@@ -37,6 +37,8 @@ public sealed record PipeAdminReply
     public uint Id { get; init; }
     public string? Error { get; init; }
     public List<PipeDevice>? Devices { get; init; }
+    /// <summary>Computers a phone gave access to this PC (<see cref="PipeAdminRequest.List"/>), as Settings shows them.</summary>
+    public List<PipeComputer>? Computers { get; init; }
     public PipeGrant? Grant { get; init; }
     public List<string>? Removed { get; init; }
     public List<string>? Taken { get; init; }
@@ -64,6 +66,24 @@ public sealed record PipeDevice
     public bool Screen { get; init; }
     /// <summary>May share access with other computers (stage 7).</summary>
     public bool Share { get; init; }
+    public long GrantedAt { get; init; }
+    public int Connections { get; init; }
+}
+
+/// <summary>One computer with access to this PC, as Settings shows it (stage 7 a.7).</summary>
+public sealed record PipeComputer
+{
+    public string Id { get; init; } = "";
+    public string Name { get; init; } = "";
+    /// <summary><c>mac</c> or <c>windows</c>, when it said.</summary>
+    public string? Kind { get; init; }
+    public bool Shell { get; init; }
+    /// <summary>It may see the screen now.</summary>
+    public bool Screen { get; init; }
+    /// <summary>It was given the screen and waits for the owner here (Allow screen).</summary>
+    public bool ScreenPending { get; init; }
+    /// <summary>The phone that gave it access, by its label.</summary>
+    public string GrantedBy { get; init; } = "";
     public long GrantedAt { get; init; }
     public int Connections { get; init; }
 }
@@ -130,6 +150,13 @@ public sealed class PipeAdminHandler(AccessDirectory directory, Func<GrantConten
                         Phone = p.PhoneId, Label = p.Label, PairingSlot = p.PairingSlot, Screen = p.ScreenAllowed, Share = p.Share == true,
                         GrantedAt = p.GrantedAt.ToUnixTimeSeconds(), Connections = connections(p.PhoneId),
                     })],
+                    Computers = [.. directory.ComputersFor(account).All.Select(c => new PipeComputer
+                    {
+                        Id = c.Id, Name = c.Name, Kind = c.Kind, Shell = c.Shell == true,
+                        Screen = c.Screen == true && c.ScreenPending != true, ScreenPending = c.ScreenPending == true,
+                        GrantedBy = store.Phones.FirstOrDefault(p => p.PhoneId == c.GrantedBy)?.Label ?? "a phone",
+                        GrantedAt = c.GrantedAt.ToUnixTimeSeconds(), Connections = connections(c.Id),
+                    })],
                 };
             case PipeAdminRequest.GrantInfo:
                 return grant() is { } contents ? reply with { Grant = PipeGrant.From(contents) } : reply with { Error = PipeAdminReply.NoGrant };
@@ -188,6 +215,16 @@ public sealed class PipeAdminHandler(AccessDirectory directory, Func<GrantConten
                 disconnect(computerId);
                 return reply with { Removed = [computerId] };
             case PipeAdminRequest.AllowComputerScreen:
+                // On (the default): a screen waiting for the owner is allowed. Off: it waits again, so it can be
+                // allowed later, and its views end at once.
+                if (request.On == false)
+                {
+                    if (request.Phone is not { } paused || directory.ComputersFor(account).Find(paused) is not { Screen: true })
+                        return reply with { Error = PipeAdminReply.Unknown };
+                    var off = directory.ComputersFor(account).SetScreen(paused, on: false, pending: true);
+                    EndScreen?.Invoke(paused, "switched_off");
+                    return off ? reply : reply with { Error = PipeAdminReply.StoreFailed };
+                }
                 if (request.Phone is not { } allowed || directory.ComputersFor(account).Find(allowed) is not { ScreenPending: true })
                     return reply with { Error = PipeAdminReply.Unknown };
                 return directory.ComputersFor(account).SetScreen(allowed, on: true) ? reply : reply with { Error = PipeAdminReply.StoreFailed };
