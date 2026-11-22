@@ -330,6 +330,17 @@ public final class ShellAccessStore: @unchecked Sendable {
         return removing(where: matches)
     }
 
+    /// The owner takes back a computer's access, whichever phone gave it (Settings ▸ Computers with
+    /// access). Only that computer goes: its phone's own access and passes stay. Returns what it
+    /// removed (empty: no computer by that id), so the caller cuts its connections even when the
+    /// removal couldn't be saved.
+    @discardableResult
+    public func revokeComputer(_ id: String) -> (done: Bool, removed: [ShellPhone]) {
+        let matches = { (entry: ShellPhone) in entry.phoneID == id && entry.isComputer }
+        guard Computers.isComputerID(id), phones.contains(where: matches) else { return (true, []) }
+        return removing(where: matches)
+    }
+
     /// From memory: whether the phone may give other computers access ("May share access with other computers").
     public func shareAllowed(forPhone phoneID: String) -> Bool {
         phones.first { $0.phoneID == phoneID }?.shareAllowed ?? false

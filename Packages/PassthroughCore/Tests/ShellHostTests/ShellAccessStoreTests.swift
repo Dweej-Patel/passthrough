@@ -831,6 +831,19 @@ final class ShellAccessStoreTests: XCTestCase {
         XCTAssertNotNil(store.key(forPhone: "phone"))
     }
 
+    /// The owner takes a computer back whichever phone gave it; only that computer goes.
+    func testTheOwnerTakesAComputerBack() throws {
+        let store = ShellAccessStore(secrets: InMemorySecrets())
+        sharer(store)
+        let granted = try grant(store).get()
+        XCTAssertTrue(store.revokeComputer("computer.nothing").removed.isEmpty)
+        XCTAssertTrue(store.revokeComputer("phone").removed.isEmpty, "never a phone, by this path")
+        XCTAssertEqual(store.revokeComputer(granted.id).removed.map(\.phoneID), [granted.id])
+        XCTAssertNil(store.computerKey(granted.id))
+        XCTAssertNotNil(store.key(forPhone: "phone"))
+        XCTAssertTrue(store.computers(grantedBy: "phone").isEmpty)
+    }
+
     /// Turning sharing off holds in memory when it can't be saved, and the switch survives a re-grant.
     func testShareOffHoldsWhenTheWriteFails() throws {
         let secrets = OneItemFails()

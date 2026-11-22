@@ -3,14 +3,28 @@ import ShellHost
 import PassthroughCore
 import PassthroughUI
 
-/// The menu bar panel, read top to bottom: what the Mac is doing, the three
-/// switches (each saying why when it can't turn on, and what fixes it), what
-/// your phone is doing here, then the details: the link, speeds, top apps.
+/// The panel's two tabs: this Mac's own switches and link, and who else is on
+/// this Mac or reachable from it.
+enum PanelTab: String {
+    case thisMac, remote
+    static let storageKey = "menuPanelTab"
+}
+
+/// The menu bar panel, read top to bottom: what the Mac is doing, anything
+/// that needs you now (a shell asking, someone viewing the screen), then two
+/// tabs. This Mac: the three switches (each saying why when it can't turn on,
+/// and what fixes it) and the details: the link, speeds, top apps. Remote: who
+/// can reach this Mac, what phones and computers have open here, and the
+/// computers this Mac can reach.
 struct MenuPanelView: View {
     @EnvironmentObject private var session: SessionCoordinator
     @EnvironmentObject private var keepAwake: KeepAwakeController
     @EnvironmentObject private var vpnLayer: VPNLayer
+    @EnvironmentObject private var shell: RemoteShellController
     @Environment(\.openSettings) private var openSettings
+    /// Kept across openings of the panel. Nothing switches it but a click (and a
+    /// pairing code to type): what needs you now sits above the tabs instead.
+    @AppStorage(PanelTab.storageKey) private var tab = PanelTab.thisMac
 
     var body: some View {
         Group {
@@ -31,17 +45,15 @@ struct MenuPanelView: View {
         VStack(spacing: 12) {
             header
             AskingRows()
+            // Someone seeing this screen is never behind a tab.
+            ScreenViewerRows()
+            PanelTabPicker(tab: $tab, remoteCount: remoteCount)
             ScrollView {
                 VStack(spacing: 12) {
-                    if session.phase == .pairingRequired { PairingCard() }
-                    if session.pairingIPadID == nil, let iPad = session.unpairedIPad, session.device?.id != iPad.id || session.phase != .pairingRequired {
-                        UnpairedIPadRow()
+                    switch tab {
+                    case .thisMac: ThisMacTab()
+                    case .remote: RemoteTab()
                     }
-                    Switches()
-                    PhoneHereSection()
-                    OtherScreensSection()
-                    PCScreensSection()
-                    Details()
                 }
                 .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { bodyHeight = $0 }
             }
@@ -52,6 +64,25 @@ struct MenuPanelView: View {
         }
         .padding(14)
         .frame(width: 356)
+        // The pairing code is typed on This Mac: a phone waiting on it brings that tab forward.
+        .onAppear { if session.phase == .pairingRequired { tab = .thisMac } }
+        .onChange(of: session.phase == .pairingRequired) { _, needed in if needed { tab = .thisMac } }
+    }
+
+    /// Phones and computers on this Mac now: each one viewing the screen or
+    /// with a shell of its own running, counted once by the id it connected
+    /// with. A phone attached to one of this Mac's own terminals counts when
+    /// nothing else does.
+    private var remoteCount: Int {
+        var who = Set(shell.screenViewers.map(\.phoneID))
+        var attached = false
+        for terminal in shell.terminals {
+            switch terminal.origin {
+            case .phone: who.insert(terminal.openedBy ?? "session \(terminal.id)")
+            case .mac: attached = attached || terminal.phoneAttached
+            }
+        }
+        return who.count + (who.isEmpty && attached ? 1 : 0)
     }
 
     /// The middle of the panel scrolls once it's taller than the screen leaves
@@ -489,7 +520,7 @@ struct Details: View {
     }
 }
 
-// MARK: - Your phone is here
+// MARK: - Needs you now, and the Remote tab
 
 /// Shells waiting on a question, just under the header: the most urgent thing
 /// in the panel. The answer is typed on the phone.
@@ -520,9 +551,221 @@ struct AskingRows: View {
     }
 }
 
-/// What phones are doing on this Mac right now: someone viewing the screen
-/// (with Stop), shells running, or what Remote shell still needs.
-struct PhoneHereSection: View {
+/// Who is seeing this screen right now, each with Stop. Above the tabs: a
+/// phone or computer that can see and control this Mac is never out of sight.
+struct ScreenViewerRows: View {
+    @EnvironmentObject private var shell: RemoteShellController
+
+    var body: some View {
+        let viewers = shell.screenViewers
+        if !viewers.isEmpty {
+            VStack(spacing: 4) {
+                ForEach(viewers) { viewer in
+                    PanelRow(symbol: "eye", symbolColor: PTColor.tintText, fill: PTColor.surfaceOn) {
+                        Text("\(viewer.label) is viewing this screen")
+                            .font(.system(size: 12.5, weight: .medium)).lineLimit(1).truncationMode(.middle)
+                    } trailing: {
+                        Button("Stop") { shell.endScreen(for: viewer.phoneID) }
+                            .controlSize(.small)
+                            .help("Disconnect \(viewer.label) from the screen. Its shells stay open.")
+                            .accessibilityLabel("Stop \(viewer.label) viewing this screen")
+                    }
+                    .accessibilityElement(children: .contain)
+                }
+            }
+        }
+    }
+}
+
+/// "This Mac" and "Remote". Drawn here rather than a native segmented control,
+/// which greys out in a window that isn't key, as the switches are.
+struct PanelTabPicker: View {
+    @Binding var tab: PanelTab
+    /// Phones and computers on this Mac now; shown on Remote when there are any.
+    let remoteCount: Int
+
+    var body: some View {
+        HStack(spacing: 2) {
+            segment(.thisMac, title: "This Mac", spoken: "This Mac")
+            segment(.remote, title: remoteCount > 0 ? "Remote · \(remoteCount)" : "Remote",
+                    spoken: remoteCount > 0 ? "Remote, \(remoteCount) on this Mac now" : "Remote")
+        }
+        .padding(2)
+        .background(Color.primary.opacity(0.07), in: RoundedRectangle(cornerRadius: 9, style: .continuous))
+        .accessibilityElement(children: .contain)
+    }
+
+    private func segment(_ value: PanelTab, title: String, spoken: String) -> some View {
+        let selected = tab == value
+        return Button { tab = value } label: {
+            Text(title)
+                .font(.system(size: 12, weight: .semibold))
+                .lineLimit(1)
+                .foregroundStyle(selected ? Color.primary : Color.secondary)
+                .frame(maxWidth: .infinity, minHeight: 24)
+                .background {
+                    if selected {
+                        RoundedRectangle(cornerRadius: 7, style: .continuous)
+                            .fill(PTColor.surface)
+                            .shadow(color: .black.opacity(0.12), radius: 1, y: 0.5)
+                    }
+                }
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(spoken)
+        .accessibilityAddTraits(selected ? .isSelected : [])
+    }
+}
+
+/// This Mac's own: pairing a phone or an iPad, the three switches, and the details.
+struct ThisMacTab: View {
+    @EnvironmentObject private var session: SessionCoordinator
+
+    var body: some View {
+        if session.phase == .pairingRequired { PairingCard() }
+        if session.pairingIPadID == nil, let iPad = session.unpairedIPad, session.device?.id != iPad.id || session.phase != .pairingRequired {
+            UnpairedIPadRow()
+        }
+        Switches()
+        Details()
+    }
+}
+
+/// Who can reach this Mac, what phones and computers have open on it now, and
+/// the computers this Mac can reach in turn.
+struct RemoteTab: View {
+    var body: some View {
+        ReachSection()
+        OnThisMacSection()
+        YourComputersSection()
+    }
+}
+
+/// A small grey heading over a group of rows.
+private struct PanelSectionTitle: View {
+    let text: String
+    init(_ text: String) { self.text = text }
+
+    var body: some View {
+        Text(text)
+            .font(.system(size: 11, weight: .semibold))
+            .foregroundStyle(.secondary)
+            .padding(.horizontal, 4)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .accessibilityAddTraits(.isHeader)
+    }
+}
+
+/// One row of the panel's lists: a glyph, what it is, and what to do about it.
+private struct PanelRow<Content: View, Trailing: View>: View {
+    let symbol: String
+    var symbolColor: Color = .secondary
+    var fill: Color = .clear
+    @ViewBuilder var content: Content
+    @ViewBuilder var trailing: Trailing
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Image(systemName: symbol).font(.system(size: 12, weight: .semibold)).foregroundStyle(symbolColor)
+                .frame(width: 18)
+                .accessibilityHidden(true)
+            content
+            Spacer(minLength: 6)
+            trailing
+        }
+        .padding(.horizontal, 10)
+        .frame(minHeight: 36)
+        .background(fill, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+    }
+}
+
+/// A row's two lines: what it is, and its state, as text (amber when it needs someone).
+private struct RowText: View {
+    let title: String
+    let detail: String
+    var attention = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 1) {
+            Text(title).font(.system(size: 12.5, weight: .medium)).lineLimit(1).truncationMode(.middle)
+            Text(detail).font(.system(size: 10.5))
+                .foregroundStyle(attention ? PTColor.attentionText : .secondary)
+                .lineLimit(2)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+}
+
+// MARK: Who can reach this Mac
+
+/// One row saying whether Remote shell is on, how many phones and computers
+/// have access, and from where; it opens the Remote Shell settings, where
+/// each is listed. With Remote shell off it is the way to turn it on.
+private struct ReachSection: View {
+    @EnvironmentObject private var session: SessionCoordinator
+    @EnvironmentObject private var shell: RemoteShellController
+    @Environment(\.openSettings) private var openSettings
+
+    var body: some View {
+        let attention = session.remoteShellEnabled && shell.listenerError != nil
+        VStack(alignment: .leading, spacing: 4) {
+            PanelSectionTitle("Who can reach this Mac")
+            Button { SettingsWindow.show(openSettings, tab: .remoteShell) } label: {
+                PanelRow(symbol: symbol, symbolColor: attention ? PTColor.attentionText : session.remoteShellEnabled ? PTColor.tintText : .secondary) {
+                    RowText(title: title, detail: detail, attention: attention)
+                } trailing: {
+                    Image(systemName: "chevron.right").font(.caption.weight(.semibold))
+                        .foregroundStyle(attention ? PTColor.attentionText : .secondary)
+                        .accessibilityHidden(true)
+                }
+                .padding(.vertical, 3)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(PanelRowButtonStyle(attention: attention))
+            .help("Open Remote Shell settings: each phone and computer with access, and what it may do")
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel("\(title). \(detail)")
+            .accessibilityHint("Opens Remote Shell settings")
+            .accessibilityAddTraits(.isButton)
+        }
+    }
+
+    private var symbol: String { session.remoteShellEnabled ? "network" : "network.slash" }
+
+    private var title: String {
+        guard session.remoteShellEnabled else { return "Remote shell is off" }
+        return shell.listenerError != nil ? "Remote shell isn't running" : "Remote access is on"
+    }
+
+    private var detail: String {
+        guard session.remoteShellEnabled else { return "Turn it on in Settings to reach this Mac from your phones." }
+        if shell.listenerError != nil { return "Open Settings to see why." }
+        let phones = shell.phones.count, computers = shell.computerGuests.count
+        guard phones + computers > 0 else { return "No phones yet · plug in a paired phone to give it access" }
+        var who = [phones == 1 ? "1 phone" : "\(phones) phones"]
+        if computers > 0 { who.append(computers == 1 ? "1 computer" : "\(computers) computers") }
+        return who.joined(separator: ", ") + " · " + reach
+    }
+
+    /// From where, as it is now: the iroh endpoint only counts once it runs.
+    private var reach: String {
+        guard shell.reachAnywhere else { return "same Wi-Fi or Tailscale only" }
+        switch shell.irohStatus.state {
+        case .running: return "reachable from anywhere"
+        case .starting: return "starting reach from anywhere"
+        case .failed: return "same Wi-Fi or Tailscale · reach from anywhere failed"
+        case .off: return "same Wi-Fi or Tailscale"
+        }
+    }
+}
+
+// MARK: On this Mac now
+
+/// What phones and computers have running on this Mac: each session, by who
+/// opened it, with the way to it from here, and a line for what Remote shell
+/// still needs. Who is viewing the screen is above the tabs.
+private struct OnThisMacSection: View {
     @EnvironmentObject private var session: SessionCoordinator
     @EnvironmentObject private var shell: RemoteShellController
     @Environment(\.openSettings) private var openSettings
@@ -530,70 +773,15 @@ struct PhoneHereSection: View {
 
     var body: some View {
         let running = shell.sessions.filter(\.running)
-        if session.remoteShellEnabled || !running.isEmpty || !shell.screenViewers.isEmpty {
+        if session.remoteShellEnabled || !running.isEmpty {
             VStack(alignment: .leading, spacing: 2) {
-                HStack {
-                    Text("From your phone")
-                        .font(.system(size: 11, weight: .semibold))
-                        .foregroundStyle(.secondary)
-                    Spacer()
-                    Button("What phones may change") { SettingsWindow.show(openSettings, tab: .remoteShell) }
-                        .buttonStyle(.link)
-                        .font(.system(size: 11))
-                        .help("Keep awake, the VPN and the screen, for each phone: Settings ▸ Remote Shell")
-                }
-                .padding(.horizontal, 4)
-                .padding(.bottom, 2)
-                ForEach(shell.screenViewers) { viewer in
-                    row(symbol: "eye", attention: false) {
-                        Text("\(viewer.label) is viewing this screen").font(.system(size: 12.5, weight: .medium))
-                    } trailing: {
-                        Button("Stop") { shell.endScreen(for: viewer.phoneID) }
-                            .controlSize(.small)
-                            .help("Disconnect \(viewer.label) from the screen. Its shells stay open.")
-                    }
-                }
+                PanelSectionTitle("On this Mac now").padding(.bottom, 2)
                 // Each running session, with the way to it from here: a phone's
                 // shell opens in a terminal window, beside the phone.
                 ForEach(shell.terminals.prefix(Self.sessionRows)) { terminal in
-                    row(symbol: terminal.origin == .mac ? "macwindow" : "iphone", attention: false) {
-                        VStack(alignment: .leading, spacing: 1) {
-                            Text(terminal.info.title).font(.system(size: 12.5, weight: .medium)).lineLimit(1).truncationMode(.middle)
-                            Text(Self.where(terminal)).font(.system(size: 10.5)).foregroundStyle(.secondary).lineLimit(1)
-                        }
-                    } trailing: {
-                        if terminal.macViewers == 0 {
-                            Button("Open here") { shell.openInTerminal(terminal.id) }
-                                .controlSize(.small)
-                                .help("Show this session in a terminal window on this Mac. A phone attached to it keeps it too.")
-                        } else {
-                            HStack(spacing: 6) {
-                                if terminal.phoneAttached {
-                                    Image(systemName: "iphone").font(.caption.weight(.semibold)).foregroundStyle(PTColor.tintText)
-                                        .help("A phone is looking at this terminal")
-                                }
-                                // A phone's session shown here: take it off this Mac's windows at any time.
-                                if terminal.origin == .phone {
-                                    Button("Stop") { shell.stopShowingHere(terminal.id) }
-                                        .controlSize(.small)
-                                        .help("Stop showing this session in terminal windows here. It keeps running for the phone.")
-                                }
-                            }
-                        }
-                    }
+                    SessionRow(terminal: terminal)
                 }
-                Button { SettingsWindow.show(openSettings, tab: .remoteShell) } label: {
-                    row(symbol: "apple.terminal", symbolColor: shellNeedsSetup ? .secondary : PTColor.tintText, attention: shellNeedsSetup) {
-                        Text(shellStatus(open: running.count)).font(.system(size: 12.5, weight: .medium))
-                            .foregroundStyle(shellNeedsSetup ? PTColor.attentionText : .primary)
-                    } trailing: {
-                        Image(systemName: "chevron.right").font(.caption.weight(.semibold))
-                            .foregroundStyle(shellNeedsSetup ? PTColor.attentionText : .secondary)
-                    }
-                    .contentShape(Rectangle())
-                }
-                .buttonStyle(PanelRowButtonStyle(attention: shellNeedsSetup))
-                .help("Open Remote Shell settings")
+                statusLine(open: running.count)
             }
             .task { fullDiskAccess = FullDiskAccess.isGranted }
         }
@@ -602,77 +790,218 @@ struct PhoneHereSection: View {
     /// Most sessions listed one by one; the row under them counts them all.
     private static let sessionRows = 5
 
-    /// "From a phone", "In a terminal here · a phone is attached".
-    private static func `where`(_ terminal: ShellSessionDetail) -> String {
-        let place: String
-        switch (terminal.origin, terminal.macViewers > 0) {
-        case (.mac, _): place = "In a terminal here"
-        case (.phone, true): place = "From a phone · open here too"
-        case (.phone, false): place = "From a phone"
+    private func statusLine(open: Int) -> some View {
+        Button { SettingsWindow.show(openSettings, tab: .remoteShell) } label: {
+            PanelRow(symbol: "apple.terminal", symbolColor: needsSetup ? .secondary : PTColor.tintText,
+                     fill: needsSetup ? PTColor.attention.opacity(0.1) : .clear) {
+                Text(shellStatus(open: open)).font(.system(size: 12.5, weight: .medium))
+                    .foregroundStyle(needsSetup ? PTColor.attentionText : .primary)
+            } trailing: {
+                Image(systemName: "chevron.right").font(.caption.weight(.semibold))
+                    .foregroundStyle(needsSetup ? PTColor.attentionText : .secondary)
+                    .accessibilityHidden(true)
+            }
+            .contentShape(Rectangle())
         }
-        return terminal.phoneAttached ? place + " · a phone is attached" : place
+        .buttonStyle(PanelRowButtonStyle(attention: needsSetup))
+        .help("Open Remote Shell settings")
+        .accessibilityHint("Opens Remote Shell settings")
     }
 
-    private var shellNeedsSetup: Bool {
-        !shell.sessions.contains { $0.running && shell.isPhones($0) } && (shell.listenerError != nil || shell.phones.isEmpty || !fullDiskAccess)
+    /// Full Disk Access is the one thing left to set up that this line says;
+    /// a listener that failed, or no phones yet, is in the row above.
+    private var needsSetup: Bool {
+        !shell.sessions.contains { $0.running && shell.isPhones($0) } && session.remoteShellEnabled && !fullDiskAccess
     }
 
     private func shellStatus(open: Int) -> String {
         if open > 0 { return open == 1 ? "1 shell running" : "\(open) shells running" }
-        if shell.listenerError != nil { return "Remote shell isn't running. Open settings to see why." }
-        if shell.phones.isEmpty { return "Plug in a paired phone to give it shell access" }
-        if !fullDiskAccess { return "Remote shell ready · Full Disk Access recommended" }
-        return "Remote shell ready for \(shell.phones.count) phone\(shell.phones.count == 1 ? "" : "s")"
-    }
-
-    private func row<Content: View, Trailing: View>(symbol: String, symbolColor: Color = .secondary, attention: Bool,
-                                                    @ViewBuilder content: () -> Content,
-                                                    @ViewBuilder trailing: () -> Trailing) -> some View {
-        HStack(spacing: 10) {
-            Image(systemName: symbol).font(.system(size: 12, weight: .semibold)).foregroundStyle(symbolColor)
-                .frame(width: 18)
-            content()
-            Spacer(minLength: 6)
-            trailing()
-        }
-        .padding(.horizontal, 10)
-        .frame(minHeight: 36)
-        .background(attention ? PTColor.attention.opacity(0.1) : Color.clear, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+        if session.remoteShellEnabled, !fullDiskAccess { return "No shells running · Full Disk Access recommended" }
+        return "No shells running"
     }
 }
 
-/// Other Macs' screens this Mac may view (passes a phone handed over), each one click away.
-struct OtherScreensSection: View {
+/// One running session: its title, who opened it (a phone or a computer, by
+/// name once its recording says), and Open here or Stop.
+private struct SessionRow: View {
     @EnvironmentObject private var shell: RemoteShellController
-    @Environment(\.openWindow) private var openWindow
+    let terminal: ShellSessionDetail
 
     var body: some View {
-        if !shell.screenPasses.isEmpty {
-            VStack(alignment: .leading, spacing: 4) {
-                Text("Other Macs")
-                    .font(.system(size: 11, weight: .semibold))
-                    .foregroundStyle(.secondary)
-                    .padding(.horizontal, 4)
-                ForEach(shell.screenPasses) { pass in
-                    Button {
-                        openWindow(id: RemoteScreenWindow.id, value: pass.id)
-                        NSApp.activate()
-                    } label: {
-                        HStack(spacing: 10) {
-                            Image(systemName: "display").font(.system(size: 12, weight: .semibold)).foregroundStyle(.secondary)
-                                .frame(width: 18)
-                            Text("View \(pass.macName)'s screen").font(.system(size: 12.5, weight: .medium)).lineLimit(1)
-                            Spacer(minLength: 6)
-                            Image(systemName: "arrow.up.forward.app").font(.system(size: 11)).foregroundStyle(.secondary)
-                        }
-                        .padding(.horizontal, 10)
-                        .frame(minHeight: 36)
-                        .contentShape(Rectangle())
+        let opener = shell.opener(of: terminal)
+        PanelRow(symbol: symbol(opener)) {
+            RowText(title: terminal.info.title, detail: place(opener))
+        } trailing: {
+            if terminal.macViewers == 0 {
+                Button("Open here") { shell.openInTerminal(terminal.id) }
+                    .controlSize(.small)
+                    .help("Show this session in a terminal window on this Mac. Whoever is attached to it keeps it too.")
+                    .accessibilityLabel("Open \(terminal.info.title) in a terminal here")
+            } else {
+                HStack(spacing: 6) {
+                    if terminal.phoneAttached {
+                        Image(systemName: "dot.radiowaves.left.and.right").font(.caption.weight(.semibold)).foregroundStyle(PTColor.tintText)
+                            .help("\(someone.capitalizedFirst) is looking at this terminal")
+                            .accessibilityLabel("\(someone.capitalizedFirst) is attached")
                     }
-                    .buttonStyle(PanelRowButtonStyle(attention: false))
-                    .help("Open \(pass.macName)'s screen in a window. Handed over by \(pass.from).")
+                    // A phone's or computer's session shown here: take it off this Mac's windows at any time.
+                    if terminal.origin == .phone {
+                        Button("Stop") { shell.stopShowingHere(terminal.id) }
+                            .controlSize(.small)
+                            .help("Stop showing this session in terminal windows here. It keeps running for whoever opened it.")
+                            .accessibilityLabel("Stop showing \(terminal.info.title) here")
+                    }
                 }
             }
+        }
+        .accessibilityElement(children: .contain)
+    }
+
+    /// Whoever an attachment may be: a computer may attach too, once one has access.
+    private var someone: String { shell.computerGuests.isEmpty ? "a phone" : "a phone or computer" }
+
+    private func symbol(_ opener: RemoteShellController.SessionOpener?) -> String {
+        guard terminal.origin == .phone else { return "macwindow" }
+        switch opener?.isComputer {
+        case true?: return "desktopcomputer"
+        case false?: return "iphone"
+        case nil: return "apple.terminal"
+        }
+    }
+
+    /// "From Dweej's iPhone", "From Office PC · open here too", "In a terminal here · a phone is attached".
+    private func place(_ opener: RemoteShellController.SessionOpener?) -> String {
+        let place: String
+        switch terminal.origin {
+        case .mac: place = "In a terminal here"
+        case .phone:
+            let from = opener.map { "From \($0.name)" } ?? "From \(someone)"
+            place = terminal.macViewers > 0 ? from + " · open here too" : from
+        }
+        return terminal.phoneAttached ? place + " · \(someone) is attached" : place
+    }
+}
+
+private extension String {
+    /// "A phone", for the start of a sentence.
+    var capitalizedFirst: String { prefix(1).uppercased() + dropFirst() }
+}
+
+// MARK: Your computers
+
+/// The computers this Mac can reach, one click from their screen: other Macs
+/// (passes a phone handed over) and PCs (access a phone handed over, with the
+/// screen). Each says what it is and whether its screen is ready.
+private struct YourComputersSection: View {
+    @EnvironmentObject private var shell: RemoteShellController
+
+    /// One row: a pass to a Mac's screen, or access to a PC.
+    enum Item: Identifiable {
+        case mac(ReceivedScreenPass)
+        case pc(ReachableComputer)
+
+        var id: String {
+            switch self {
+            case .mac(let pass): "mac \(pass.id)"
+            case .pc(let computer): "pc \(computer.id)"
+            }
+        }
+
+        var receivedAt: Date {
+            switch self {
+            case .mac(let pass): pass.receivedAt
+            case .pc(let computer): computer.receivedAt
+            }
+        }
+    }
+
+    /// Newest first, as each list is.
+    private var items: [Item] {
+        let macs = shell.screenPasses.map(Item.mac)
+        let pcs = shell.reachableComputers.filter(\.mayAskForScreen).map(Item.pc)
+        return (macs + pcs).sorted { $0.receivedAt > $1.receivedAt }
+    }
+
+    var body: some View {
+        let items = self.items
+        if !items.isEmpty {
+            VStack(alignment: .leading, spacing: 4) {
+                PanelSectionTitle("Your computers")
+                ForEach(items) { ComputerRow(item: $0) }
+            }
+        }
+    }
+}
+
+/// "View Office PC's screen" over "PC · ready · from Dweej's iPhone"; opens that screen's window.
+private struct ComputerRow: View {
+    @Environment(\.openWindow) private var openWindow
+    let item: YourComputersSection.Item
+
+    var body: some View {
+        Button(action: open) {
+            PanelRow(symbol: symbol) {
+                RowText(title: "View \(name)'s screen", detail: state, attention: waiting)
+            } trailing: {
+                Image(systemName: "arrow.up.forward.app").font(.system(size: 11)).foregroundStyle(.secondary)
+                    .accessibilityHidden(true)
+            }
+            .padding(.vertical, 3)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(PanelRowButtonStyle(attention: false))
+        .help(help)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("View \(name)'s screen. \(state)")
+        .accessibilityAddTraits(.isButton)
+    }
+
+    private func open() {
+        switch item {
+        case .mac(let pass): openWindow(id: RemoteScreenWindow.id, value: pass.id)
+        case .pc(let computer): openWindow(id: PCScreenWindow.id, value: computer.id)
+        }
+        NSApp.activate()
+    }
+
+    private var name: String {
+        switch item {
+        case .mac(let pass): pass.macName
+        case .pc(let computer): computer.credential.macName
+        }
+    }
+
+    private var symbol: String {
+        switch item {
+        case .mac: "display"
+        case .pc: "pc"
+        }
+    }
+
+    /// The hand-over said the PC's owner still had to allow the screen; only the PC knows whether they have since.
+    private var waiting: Bool {
+        if case .pc(let computer) = item { return computer.screenWaitsForOwner }
+        return false
+    }
+
+    private var state: String {
+        switch item {
+        case .mac(let pass):
+            return "Mac · screen pass · from \(pass.from)"
+        case .pc(let computer):
+            let kind = computer.kindName
+            if computer.screenWaitsForOwner { return "\(kind) · waiting for its owner to allow the screen" }
+            return "\(kind) · ready" + (computer.from.map { " · from \($0)" } ?? "")
+        }
+    }
+
+    private var help: String {
+        switch item {
+        case .mac(let pass):
+            return "Open \(pass.macName)'s screen in a window. Handed over by \(pass.from)."
+        case .pc(let computer):
+            return "Open \(computer.credential.macName)'s screen in a window." + (computer.from.map { " Handed over by \($0)." } ?? "")
+                + (computer.screenWaitsForOwner ? " Its owner has to allow the screen at the PC first." : "")
         }
     }
 }

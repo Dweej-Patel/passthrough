@@ -41,6 +41,8 @@ public struct ShellSessionDetail: Equatable, Sendable, Identifiable {
     public var phoneAttached: Bool
     /// Terminal windows on the Mac showing it.
     public var macViewers: Int
+    /// The phone or computer that opened it (its shell id); nil for one of this Mac's own terminals.
+    public var openedBy: String? = nil
     public var id: String { info.id }
 }
 
@@ -252,7 +254,8 @@ public final class ShellSessionManager: @unchecked Sendable {
     public var details: [ShellSessionDetail] {
         queue.sync {
             order.compactMap { table[$0] }.map {
-                ShellSessionDetail(info: themed($0.info), origin: $0.origin, phoneAttached: $0.attachment != nil, macViewers: $0.viewers.count)
+                ShellSessionDetail(info: themed($0.info), origin: $0.origin, phoneAttached: $0.attachment != nil, macViewers: $0.viewers.count,
+                                   openedBy: $0.openedBy)
             }
         }
     }

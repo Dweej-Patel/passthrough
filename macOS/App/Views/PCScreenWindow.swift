@@ -151,7 +151,7 @@ struct PCScreenWindow: View {
 
     private func start() {
         // Access still waiting for the PC's owner is tried too: the PC says whether it has been allowed since.
-        guard let computer, PCScreensSection.mayAskForScreen(computer) else {
+        guard let computer, computer.mayAskForScreen else {
             model.end("This Mac has no access to that computer's screen. Share it again from your phone.")
             return
         }
@@ -967,49 +967,26 @@ private struct PCScreenCanvas: NSViewRepresentable {
     }
 }
 
-/// The PCs this Mac may see the screen of (access a phone handed over, with the screen scope), each one click away.
-struct PCScreensSection: View {
-    @EnvironmentObject private var shell: RemoteShellController
-    @Environment(\.openWindow) private var openWindow
-
-    /// Not a Mac (another Mac's screen is a pass, above), with the screen scope: given, or still waiting for the
+/// What the panel and Settings say about access to another computer.
+extension ReachableComputer {
+    /// Not a Mac (another Mac's screen is a pass), with the screen scope: given, or still waiting for the
     /// PC's owner to allow it. The hand-over records "waiting"; only the PC knows whether it has been allowed since.
-    static func mayAskForScreen(_ computer: ReachableComputer) -> Bool {
-        computer.credential.hostKind != HostInfo.kindMac
-            && (computer.scopes.contains(Computers.scopeScreen) || computer.pending?.contains(Computers.scopeScreen) == true)
+    var mayAskForScreen: Bool {
+        credential.hostKind != HostInfo.kindMac
+            && (scopes.contains(Computers.scopeScreen) || pending?.contains(Computers.scopeScreen) == true)
     }
 
-    private var computers: [ReachableComputer] { shell.reachableComputers.filter(Self.mayAskForScreen) }
+    /// The hand-over said the screen waits for the PC's owner to allow it.
+    var screenWaitsForOwner: Bool {
+        !scopes.contains(Computers.scopeScreen) && pending?.contains(Computers.scopeScreen) == true
+    }
 
-    var body: some View {
-        if !computers.isEmpty {
-            VStack(alignment: .leading, spacing: 4) {
-                Text("Your computers")
-                    .font(.system(size: 11, weight: .semibold))
-                    .foregroundStyle(.secondary)
-                    .padding(.horizontal, 4)
-                ForEach(computers) { computer in
-                    Button {
-                        openWindow(id: PCScreenWindow.id, value: computer.id)
-                        NSApp.activate()
-                    } label: {
-                        HStack(spacing: 10) {
-                            Image(systemName: "pc").font(.system(size: 12, weight: .semibold)).foregroundStyle(.secondary)
-                                .frame(width: 18)
-                            Text("View \(computer.credential.macName)'s screen").font(.system(size: 12.5, weight: .medium)).lineLimit(1)
-                            Spacer(minLength: 6)
-                            Image(systemName: "arrow.up.forward.app").font(.system(size: 11)).foregroundStyle(.secondary)
-                        }
-                        .padding(.horizontal, 10)
-                        .frame(minHeight: 36)
-                        .contentShape(Rectangle())
-                    }
-                    .buttonStyle(.plain)
-                    .background(Color.primary.opacity(0.05), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
-                    .help("Open \(computer.credential.macName)'s screen in a window." + (computer.from.map { " Handed over by \($0)." } ?? "")
-                          + (computer.scopes.contains(Computers.scopeScreen) ? "" : " Its owner has to allow the screen at the PC first."))
-                }
-            }
+    /// "PC", "Mac", or "Computer" when it didn't say.
+    var kindName: String {
+        switch credential.hostKind {
+        case HostInfo.kindWindows: "PC"
+        case HostInfo.kindMac: "Mac"
+        default: "Computer"
         }
     }
 }

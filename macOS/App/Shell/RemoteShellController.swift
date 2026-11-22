@@ -988,7 +988,71 @@ final class RemoteShellController: ObservableObject {
         reachableComputers = reachStore.computers
     }
 
+    /// The owner forgets this Mac's access to another computer, and the Windows login saved for it.
+    /// That computer still lists this Mac until it is removed there too.
+    func removeReachableComputer(_ hostID: String) {
+        if !reachStore.remove(hostID: hostID) {
+            listenerError = "Could not remove the access to that computer from the Keychain."
+        }
+        WindowsLoginStore.delete(hostID: hostID)
+        refreshReachableComputers()
+    }
+
     // MARK: Computers
+
+    /// Who opened a running session: by the id it opened with (a computer's id says so, whatever its
+    /// name), named as it is now, else as the session's recording has it. Nil for one of this Mac's own
+    /// terminals.
+    func opener(of terminal: ShellSessionDetail) -> SessionOpener? {
+        guard terminal.origin == .phone else { return nil }
+        if let id = terminal.openedBy {
+            let computer = Computers.isComputerID(id)
+            let name = (computer ? computerGuests : phones).first { $0.phoneID == id }?.label
+                ?? history.first { $0.id == terminal.id }?.phoneLabel
+            return name.map { SessionOpener(name: $0, isComputer: computer) }
+        }
+        guard let name = history.first(where: { $0.id == terminal.id })?.phoneLabel else { return nil }
+        let computer = computerGuests.contains { $0.label == name }, phone = phones.contains { $0.label == name }
+        return SessionOpener(name: name, isComputer: computer == phone ? nil : computer)
+    }
+
+    struct SessionOpener: Equatable {
+        let name: String
+        /// Nil when a phone and a computer with access share that name, or neither has it any more.
+        let isComputer: Bool?
+    }
+
+    /// What a computer with access may do now (`Computers.scopeShell`, `scopeScreen`), as each of its requests is checked.
+    func computerScopes(_ id: String) -> Set<String> {
+        store.scopes(of: id)
+    }
+
+    /// Stop: ends a computer's connections, its view of the screen and the shells it opened, now.
+    /// Its access stays, so it may connect again; `revokeComputer` takes that away.
+    func disconnectComputer(_ id: String) {
+        guard Computers.isComputerID(id) else { return }
+        ptLog(.info, "shell: ended \(computerGuests.first { $0.phoneID == id }?.label ?? "a computer")'s connections")
+        disconnectAll([id])
+    }
+
+    /// The owner takes a computer's access away, whichever phone gave it. As `revoke`: the key goes
+    /// first, so it cannot prove itself again, then its connections and the shells it opened; the
+    /// phones that asked for their computers hear the new list.
+    func revokeComputer(_ id: String) {
+        guard Computers.isComputerID(id) else { return }
+        let label = computerGuests.first { $0.phoneID == id }?.label ?? "that computer"
+        let (done, removed) = store.revokeComputer(id)
+        if !done {
+            ptLog(.error, "shell: could not remove \(label)'s access")
+            listenerError = "Could not remove \(label)'s access."
+        } else {
+            ptLog(.info, "shell: revoked access for \(label)")
+        }
+        // Cut even if the removal couldn't be saved: the store keeps it out in memory.
+        disconnectAll(Set(removed.map(\.phoneID) + [id]))
+        notifications.forget([id])
+        refreshPhones()
+    }
 
     /// "May share access with other computers": lets the phone give another of its computers access
     /// to this Mac, or stops it. Stopping removes nothing it already gave, and holds even when it
@@ -1023,11 +1087,12 @@ final class RemoteShellController: ObservableObject {
                     self.refreshPhones()
                     // Stays until dismissed: whoever is at this Mac learns another computer can now get in.
                     let id = granted.id
+                    let remove = "Remove it in Passthrough's settings ▸ Remote Shell ▸ Computers with access."
                     self.passNotice.show(.lowered(
                         title: shell ? "\(label) gave \(request.name) access to this Mac" : "\(label) gave \(request.name) access to this Mac's screen",
-                        detail: shell ? "It can open shells as you\(granted.scopes.contains(Computers.scopeScreen) ? " and see the screen" : ""). Remove it in Passthrough's settings."
-                                      : "It can see and control this Mac. Remove it in Passthrough's settings.",
-                        action: "Revoke") { [weak self] in self?.revoke(id) })
+                        detail: shell ? "It can open shells as you\(granted.scopes.contains(Computers.scopeScreen) ? " and see the screen" : ""). \(remove)"
+                                      : "It can see and control this Mac. \(remove)",
+                        action: "Revoke") { [weak self] in self?.revokeComputer(id) })
                 }
                 return .success((granted.id, granted.key, granted.scopes))
             case let .failure(error):
