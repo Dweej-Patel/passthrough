@@ -47,17 +47,17 @@ internal static class NativeMethods
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool IsHungAppWindow(IntPtr hwnd);
 
-    private const uint LoadLibrarySearchApplicationDir = 0x00000200, LoadLibrarySearchSystem32 = 0x00000800;
-
-    [DllImport("kernel32.dll", SetLastError = true)]
+    [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
     [return: MarshalAs(UnmanagedType.Bool)]
-    private static extern bool SetDefaultDllDirectories(uint flags);
+    private static extern bool SetDllDirectoryW(string? path);
 
     /// <summary>
-    /// Every DLL this process loads by name from now on comes from beside the app or from System32, never from the
-    /// current folder or PATH (B-3): nobody can plant a conpty.dll, a vcruntime or a WinUI dependency where it would be found first.
+    /// A DLL this process loads by name is never looked for in the current folder (B-3): the app's folder and System32
+    /// come first, and PATH last. Not SetDefaultDllDirectories, which would also keep PATH out: once a process calls
+    /// it, any LoadLibraryEx with LOAD_WITH_ALTERED_SEARCH_PATH fails with E_INVALIDARG, and WinUI's resources make
+    /// one, so App.xaml's XamlControlsResources couldn't find themeresources.xaml and the app never started.
     /// </summary>
-    public static void RestrictDllSearch() => SetDefaultDllDirectories(LoadLibrarySearchApplicationDir | LoadLibrarySearchSystem32);
+    public static void RestrictDllSearch() => SetDllDirectoryW("");
 
     [DllImport("user32.dll")]
     [return: MarshalAs(UnmanagedType.Bool)]
