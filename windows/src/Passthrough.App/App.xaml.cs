@@ -26,6 +26,7 @@ public partial class App : Application
     private HostSession? _session;
     private RemoteAccess? _remote;
     private TrayIcon? _tray;
+    private TaskbarKeeper? _taskbar;
     private FlyoutWindow? _flyout;
     private SettingsWindow? _settings;
     private bool _shuttingDown;
@@ -125,6 +126,8 @@ public partial class App : Application
                 settings.Get("androidEnabled") != "false", settings.Notice);
             // The icon first: if the flyout fails to build, the failure path below still has something to take down.
             _tray = new TrayIcon(ToggleFlyout, ShowSettings, Quit, () => _ui?.TryEnqueue(() => _flyout?.OpenFromNotification()));
+            // A phone's view resizing this session can leave the taskbar under other windows; it is put back on top.
+            _taskbar = new TaskbarKeeper(LogFile.Write);
             _flyout = new FlyoutWindow(viewModel, ShowSettings, Quit);
             var remote = _remote;
             remote.NoticesChanged += () =>
@@ -295,6 +298,7 @@ public partial class App : Application
             _flyout?.Close();
         });
         Try(() => _tray?.Dispose());
+        Try(() => _taskbar?.Dispose());
         Try(() => _singleInstance?.ReleaseMutex());
         _singleInstance?.Dispose();
         _singleInstance = null;
