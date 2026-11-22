@@ -118,14 +118,12 @@ public final class RemoteDesktopBackend: ScreenBackend, @unchecked Sendable {
         lock.lock()
         let wasClosing = closing
         closing = true
-        let rdp = self.rdp, started = self.started
+        let started = self.started
+        // Aborted under the lock: the engine thread frees the session only after taking it (pt_rdp_abort only signals).
+        let aborted = !wasClosing && rdp.map { pt_rdp_abort($0); return true } == true
         lock.unlock()
-        guard !wasClosing else { return }
-        if let rdp {
-            pt_rdp_abort(rdp)
-        } else if !started {
-            finish(.closedHere)
-        }
+        guard !wasClosing, !aborted, !started else { return }
+        finish(.closedHere)
     }
 
     private func makeSession() -> OpaquePointer? {
@@ -387,8 +385,12 @@ public final class RemoteDesktopBackend: ScreenBackend, @unchecked Sendable {
 
     // MARK: Input (main)
 
+    /// Runs `body` with the session held: the engine thread can't free it meanwhile. The `pt_rdp_*` input calls only
+    /// queue a command, so nothing waits under the lock.
     private func withSession(_ body: (OpaquePointer) -> Void) {
-        guard let rdp = currentSession() else { return }
+        lock.lock()
+        defer { lock.unlock() }
+        guard let rdp else { return }
         body(rdp)
     }
 

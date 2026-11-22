@@ -667,10 +667,24 @@ final class ScreenModel: ObservableObject {
         let gen = generation
         lastPointer = nil
         phase = .connecting
+        // The login is this PC's: a connection to whichever computer is selected now (it may have changed while
+        // this view retried) must not get it.
+        guard let macID, shell.selectedMacID == macID, shell.kind(of: macID) == .windows else {
+            windowsLogin = nil
+            phase = .failed("Choose \(macName) again to see its screen.")
+            return
+        }
         guard let connection = shell.screenConnection(onEvent: { [weak self] event in
             MainActor.assumeIsolated { self?.handleWindows(event, generation: gen) }
         }) else {
             phase = .failed("Choose a computer first.")
+            return
+        }
+        guard connection.mac.macID == macID else {
+            connection.client.disconnect()
+            connection.dialer?.shutdown()
+            windowsLogin = nil
+            phase = .failed("Choose \(macName) again to see its screen.")
             return
         }
         client = connection.client
