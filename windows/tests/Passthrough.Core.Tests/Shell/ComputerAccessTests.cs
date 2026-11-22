@@ -249,7 +249,10 @@ public sealed class ComputerAccessTests : IAsyncDisposable
         Assert.Equal("not_allowed", (await computer.Next(ShellEnvelope.Error)).Reason);
 
         await phone.Send(new ShellEnvelope(ShellEnvelope.ComputerRevoke) { PhoneID = id });
-        Assert.Empty((await phone.Next(ShellEnvelope.ComputerList)).Computers!);
+        // Its first use is written too (the grant is no longer fresh), which may be heard first.
+        var emptied = false;
+        for (var i = 0; i < 3 && !emptied; i++) emptied = (await phone.Next(ShellEnvelope.ComputerList)).Computers!.Count == 0;
+        Assert.True(emptied);
     }
 
     [Fact]
@@ -389,6 +392,61 @@ public sealed class ComputerAccessTests : IAsyncDisposable
         Assert.Equal([first.Id], replaced);
         Assert.Null(_access.Computer(first.Id));
         Assert.NotNull(_access.Computer(second.Id));
+    }
+
+    [Fact]
+    public void AGrantThatWasUsedKeepsWorkingUntilItsReplacementIs()
+    {
+        var replaced = new List<string>();
+        _access.Replaced += replaced.Add;
+        var first = GrantMac();
+        _access.ComputerUsed(first.Id);
+        var second = GrantMac();
+        // The hand-over to the computer may still fail: the access it has stays.
+        Assert.Empty(replaced);
+        Assert.NotNull(_access.Computer(first.Id));
+        Assert.Equal([second.Id], _access.ComputersFor(Account).Current.Select(c => c.Id));
+        // A third share before the second was used replaces only the second.
+        var third = GrantMac();
+        Assert.Equal([second.Id], replaced);
+        _access.ComputerUsed(third.Id);
+        Assert.Equal([second.Id, first.Id], replaced);
+        Assert.Null(_access.Computer(first.Id));
+        Assert.NotNull(_access.Computer(third.Id));
+    }
+
+    [Fact]
+    public void RevokingAComputerAlsoTakesTheGrantItWasReplacing()
+    {
+        var first = GrantMac();
+        _access.ComputerUsed(first.Id);
+        var second = GrantMac();
+        Assert.True(_access.RevokeComputer(second.Id, "phone-a"));
+        Assert.Null(_access.Computer(first.Id));
+        Assert.Empty(_access.ComputersFor(Account).All);
+    }
+
+    [Fact]
+    public void AnotherAccountsComputersDontCountAgainstThisOnes()
+    {
+        const string other = "S-1-5-21-77";
+        for (var p = 0; p < 2; p++)
+        {
+            var id = $"other-{p}";
+            Assert.Equal(AccessDirectory.AddResult.Added, _access.Add(other, new ShellPhone { PhoneId = id, Label = "x", PairingSlot = $"token.x.{p}", Key = PhoneKey, GrantedAt = DateTimeOffset.UtcNow }));
+            _access.For(other).SetShareAllowed(id, true);
+            for (var i = 0; i < Computers.MaxPerGranter; i++)
+                Assert.Null(_access.GrantComputer(id, $"PC {i}", $"v-{p}-{i}", "windows", IdKey(), new HashSet<string> { "shell" }, false).Error);
+        }
+        GrantMac();
+    }
+
+    [Fact]
+    public void ADisallowedAccountsPhoneCantBeTakenByAnother()
+    {
+        _access.IsAllowed = account => account != Account;
+        Assert.Equal(AccessDirectory.AddResult.NotYours,
+            _access.Add("S-1-5-21-77", new ShellPhone { PhoneId = "phone-a", Label = "x", PairingSlot = "token.x", Key = PhoneKey, GrantedAt = DateTimeOffset.UtcNow }));
     }
 
     [Fact]

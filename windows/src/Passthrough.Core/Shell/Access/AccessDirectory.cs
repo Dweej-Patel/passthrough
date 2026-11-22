@@ -29,6 +29,9 @@ public interface IShellAccess
     /// <summary>Takes back a computer <paramref name="granter"/> gave access to; false when it isn't one of its.</summary>
     bool RevokeComputer(string id, string granter) => false;
 
+    /// <summary>A computer proved its key: a grant it replaces retires now (not when it was granted, so a hand-over that fails keeps the old one).</summary>
+    void ComputerUsed(string id) { }
+
     /// <summary>The computers <paramref name="granter"/> gave access to, each with its effective scopes (none while its granter can't share them).</summary>
     IReadOnlyList<ShellComputer> ComputersGrantedBy(string granter) => [];
 }
@@ -98,6 +101,16 @@ public sealed class AccessDirectory : IShellAccess
         return null;
     }
 
+    /// <summary>The account holding <paramref name="phoneId"/>, allowed or not (what <see cref="Owner"/> hides from the gate).</summary>
+    public string? AnyOwner(string phoneId)
+    {
+        List<KeyValuePair<string, ShellAccessStore>> stores;
+        lock (_lock) stores = [.. _stores];
+        foreach (var (account, store) in stores)
+            if (Computers.IsComputerId(phoneId) ? ComputersFor(account).Find(phoneId) is not null : store.IsKnown(phoneId)) return account;
+        return null;
+    }
+
     public enum AddResult { Added, NotYours, Failed }
 
     /// <summary>Keeps a phone's key for <paramref name="account"/>; refused when another account already has that phone.</summary>
@@ -105,7 +118,8 @@ public sealed class AccessDirectory : IShellAccess
     {
         lock (_lock)
         {
-            if (Owner(phone.PhoneId) is { } owner && !string.Equals(owner, account, StringComparison.OrdinalIgnoreCase)) return AddResult.NotYours;
+            // Every account's store, also one an administrator disallowed for now: an id has one owner, even after it is allowed again.
+            if (AnyOwner(phone.PhoneId) is { } owner && !string.Equals(owner, account, StringComparison.OrdinalIgnoreCase)) return AddResult.NotYours;
             return For(account).Record(phone) ? AddResult.Added : AddResult.Failed;
         }
     }
@@ -155,7 +169,7 @@ public sealed class AccessDirectory : IShellAccess
     public IReadOnlyList<ShellComputer> ComputersGrantedBy(string granter)
     {
         if (Computers.IsComputerId(granter) || Owner(granter) is not { } owner) return [];
-        return [.. ComputersFor(owner).All.Where(c => c.GrantedBy == granter).OrderBy(c => c.GrantedAt)
+        return [.. ComputersFor(owner).Current.Where(c => c.GrantedBy == granter).OrderBy(c => c.GrantedAt)
             .Select(c => Computer(c.Id) ?? c with { Shell = false, Screen = false })];
     }
 
@@ -171,7 +185,8 @@ public sealed class AccessDirectory : IShellAccess
         if (scopes.Contains(Computers.ScopeScreen) && !phones.ScreenAllowed(granter)) return (null, ShellError.ScreenNotAllowed);
         lock (_lock)
         {
-            var all = _stores.Keys.SelectMany(a => ComputersFor(a).All).ToList();
+            // Per account: another account's phones can't use up this one's computers.
+            var all = ComputersFor(owner).All.ToList();
             // An older grant by the same phone for the same viewer is replaced, so it doesn't count.
             var others = all.Where(c => !(c.GrantedBy == granter && c.ViewerOf == viewer)).ToList();
             if (others.Count(c => c.GrantedBy == granter) >= Computers.MaxPerGranter || others.Count >= Computers.MaxTotal)
@@ -198,8 +213,19 @@ public sealed class AccessDirectory : IShellAccess
         }
     }
 
-    public bool RevokeComputer(string id, string granter) =>
-        Owner(granter) is { } owner && ComputersFor(owner).Remove(c => c.Id == id && c.GrantedBy == granter).Count > 0;
+    public bool RevokeComputer(string id, string granter)
+    {
+        if (Owner(granter) is not { } owner || ComputersFor(owner).Find(id) is not { } c || c.GrantedBy != granter) return false;
+        // With the grant it was replacing, if that one hadn't retired yet: revoking a computer takes all of its access.
+        foreach (var gone in ComputersFor(owner).Remove(o => o.GrantedBy == granter && o.ViewerOf == c.ViewerOf).Where(o => o.Id != id)) Replaced?.Invoke(gone.Id);
+        return true;
+    }
+
+    public void ComputerUsed(string id)
+    {
+        if (Owner(id) is not { } owner) return;
+        foreach (var retired in ComputersFor(owner).Used(id)) Replaced?.Invoke(retired);
+    }
 
     public void ConfirmCurrentKey(string phoneId, ReadOnlySpan<byte> proven)
     {

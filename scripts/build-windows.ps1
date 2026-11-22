@@ -10,6 +10,7 @@
   A service account can't use a .NET that lives in one user's profile, so a framework-dependent build can't be
   installed: build with this script, then run windows/artifacts/Passthrough/Passthrough.exe and turn Remote access on.
 #>
+#Requires -Version 7.2
 param(
     [string]$Output = (Join-Path $PSScriptRoot '..\windows\artifacts\Passthrough'),
     [string]$Configuration = 'Release'

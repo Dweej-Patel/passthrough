@@ -82,6 +82,8 @@ public sealed record ShellComputer
     [JsonPropertyName("viewerOf")] public string ViewerOf { get; init; } = "";
     [JsonPropertyName("pairingSlot")] public string PairingSlot { get; init; } = "";
     [JsonPropertyName("grantedAt")] public DateTimeOffset GrantedAt { get; init; }
+    /// <summary>Not used yet: an earlier grant to the same computer from the same phone keeps working until this one is.</summary>
+    [JsonPropertyName("fresh")] public bool? Fresh { get; init; }
 }
 
 /// <summary>
@@ -113,6 +115,29 @@ public sealed class ComputerAccessStore(ISecretStore secrets, Action<string>? lo
 
     public ShellComputer? Find(string id) => All.FirstOrDefault(c => c.Id == id);
 
+    /// <summary>One per computer and phone: the newest grant (an older one still working until it is used is left out).</summary>
+    public IReadOnlyList<ShellComputer> Current =>
+        [.. All.GroupBy(c => (c.GrantedBy, c.ViewerOf)).Select(g => g.OrderByDescending(c => c.GrantedAt).First())];
+
+    /// <summary>
+    /// <paramref name="id"/> was used: it is no longer fresh, and the grants it replaced (same computer, same phone) go;
+    /// their ids come back so their connections can be cut.
+    /// </summary>
+    public IReadOnlyList<string> Used(string id)
+    {
+        List<string> retired;
+        lock (_lock)
+        {
+            if (All.FirstOrDefault(c => c.Id == id) is not { Fresh: true } used) return [];
+            retired = [.. All.Where(c => c.Id != id && c.ViewerOf == used.ViewerOf && c.GrantedBy == used.GrantedBy).Select(c => c.Id)];
+            var next = All.Where(c => !retired.Contains(c.Id)).Select(c => c.Id == id ? c with { Fresh = null } : c).ToList();
+            _cached = next;
+            if (!Write(next)) log?.Invoke("shell: could not store that a computer's new access was used; the old one is gone from memory");
+        }
+        Changed?.Invoke();
+        return retired;
+    }
+
     private List<ShellComputer> Read()
     {
         try
@@ -136,15 +161,18 @@ public sealed class ComputerAccessStore(ISecretStore secrets, Action<string>? lo
     }
 
     /// <summary>
-    /// Keeps <paramref name="computer"/>, replacing any earlier one for the same viewer from the same granter; the ids it
-    /// replaced come back so their connections can be cut. Null when it couldn't be stored.
+    /// Keeps <paramref name="computer"/> (fresh), replacing an earlier one for the same viewer from the same granter that
+    /// was never used; one that was used keeps working until the new one is (<see cref="Used"/>), so a hand-over that
+    /// fails on the phone's way leaves the computer its access. The ids replaced now come back so their connections can
+    /// be cut. Null when it couldn't be stored.
     /// </summary>
     public IReadOnlyList<string>? Add(ShellComputer computer)
     {
         List<string> replaced;
+        computer = computer with { Fresh = true };
         lock (_lock)
         {
-            replaced = [.. All.Where(c => c.ViewerOf == computer.ViewerOf && c.GrantedBy == computer.GrantedBy).Select(c => c.Id)];
+            replaced = [.. All.Where(c => c.ViewerOf == computer.ViewerOf && c.GrantedBy == computer.GrantedBy && c.Fresh == true).Select(c => c.Id)];
             var next = All.Where(c => !replaced.Contains(c.Id)).Append(computer).ToList();
             if (!Write(next)) return null;
             _cached = next;

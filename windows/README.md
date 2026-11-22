@@ -65,7 +65,7 @@ To work in Visual Studio, use Visual Studio 2026 (18.0 or later) with the WinUI 
 
 ## Install, update and remove: one command
 
-`scripts/windows.ps1` does each job in one command, from the repo root in PowerShell. Claude or you can run it as it is.
+`scripts/windows.ps1` does each job in one command, from the repo root in PowerShell 7 (`pwsh`; Windows PowerShell 5.1 isn't enough, and `winget install Microsoft.PowerShell` adds it). Claude or you can run it as it is. `install` and `update` need an administrator account: a standard account turns Remote access on from the tray app instead (Settings ▸ Remote access), which tells setup who asked.
 
 | Command | What it does |
 |---|---|

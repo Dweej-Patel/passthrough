@@ -159,7 +159,7 @@ public sealed class PipeAdminHandler(AccessDirectory directory, Func<GrantConten
                         Phone = p.PhoneId, Label = p.Label, PairingSlot = p.PairingSlot, Screen = p.ScreenAllowed, Share = p.Share == true,
                         GrantedAt = p.GrantedAt.ToUnixTimeSeconds(), Connections = connections(p.PhoneId), Viewing = Viewing?.Invoke(p.PhoneId) == true,
                     })],
-                    Computers = [.. directory.ComputersFor(account).All.Select(c => new PipeComputer
+                    Computers = [.. directory.ComputersFor(account).Current.Select(c => new PipeComputer
                     {
                         Id = c.Id, Name = c.Name, Kind = c.Kind, Shell = c.Shell == true,
                         // What it may do now: its granter's Screen switch counts too.
@@ -212,8 +212,9 @@ public sealed class PipeAdminHandler(AccessDirectory directory, Func<GrantConten
                 // A phone of this account, or a computer one of its phones let in (the flyout's Stop works for both).
                 if (request.Phone is not { } stopped || !(store.IsKnown(stopped) || directory.ComputersFor(account).Find(stopped) is not null))
                     return reply with { Error = PipeAdminReply.Unknown };
-                if (request.What == "screen") EndScreen?.Invoke(stopped, "stopped");
-                else disconnect(stopped);
+                // Either way its view ends and stays closed for a moment (try_later), as Stop on the phone's own screen does.
+                EndScreen?.Invoke(stopped, "stopped");
+                if (request.What != "screen") disconnect(stopped);
                 return reply;
             case PipeAdminRequest.HandOver:
                 return HandOver(account, request.Records ?? [], reply);
@@ -223,10 +224,11 @@ public sealed class PipeAdminHandler(AccessDirectory directory, Func<GrantConten
                 return reply;
             case PipeAdminRequest.RevokeComputer:
                 if (request.Phone is not { } computerId || !Computers.IsComputerId(computerId)) return reply with { Error = PipeAdminReply.BadRequest };
-                var gone = directory.ComputersFor(account).Remove(c => c.Id == computerId);
-                if (gone.Count == 0) return reply with { Error = PipeAdminReply.Unknown };
-                disconnect(computerId);
-                return reply with { Removed = [computerId] };
+                // With the grant it was replacing, if that one hadn't retired yet.
+                if (directory.ComputersFor(account).Find(computerId) is not { } revokedComputer) return reply with { Error = PipeAdminReply.Unknown };
+                var gone = directory.ComputersFor(account).Remove(c => c.GrantedBy == revokedComputer.GrantedBy && c.ViewerOf == revokedComputer.ViewerOf);
+                foreach (var c in gone) disconnect(c.Id);
+                return reply with { Removed = [.. gone.Select(c => c.Id)] };
             case PipeAdminRequest.AllowComputerScreen:
                 // On (the default): a screen waiting for the owner is allowed. Off: it waits again, so it can be
                 // allowed later, and its views end at once.
