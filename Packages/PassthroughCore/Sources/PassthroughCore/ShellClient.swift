@@ -29,6 +29,13 @@ public struct ShellCredential: Codable, Equatable, Sendable {
     }
 }
 
+extension ShellCredential {
+    /// What proves it is this computer and no other: its certificate and its iroh id. A login saved for a computer
+    /// is kept with this and used only while the credential still says the same, so a host that later claims the
+    /// same id with its own keys is never sent it.
+    public var loginPin: String { certSHA256.lowercased() + "/" + (irohID ?? "") }
+}
+
 /// Printing a credential never shows its secrets: the shell key is left out
 /// and the relay token only said to be there.
 extension ShellCredential: CustomStringConvertible, CustomDebugStringConvertible {
@@ -892,6 +899,9 @@ public final class ShellClient: @unchecked Sendable {
             emit(.screenRevoked)
         case ShellEnvelope.ping:
             send(ShellEnvelope(t: ShellEnvelope.pong))
+        case ShellEnvelope.screenReady where rdpRequested, ShellEnvelope.screenVideoReady where rdpRequested:
+            // Asked for Remote Desktop, answered with something else: nothing is handed over.
+            return attemptEnded(id, ConnectError.protocolViolation)
         case ShellEnvelope.screenReady where screenRequested, ShellEnvelope.screenVideoReady where screenRequested:
             handOver(id)
         case ShellEnvelope.rdpReady where rdpRequested:

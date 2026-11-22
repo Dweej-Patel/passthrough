@@ -150,6 +150,16 @@ final class RDPClipboardTests: XCTestCase {
         XCTAssertNil(clipboard.pasteReady())
     }
 
+    func testAnOfferIsNotWithdrawnOnceThePCCopiedSomethingItself() {
+        var clipboard = RDPClipboard()
+        let offer = clipboard.pasteAsked(units: 5)!
+        XCTAssertEqual(clipboard.pasteReady(), .paste)
+        // The user copies on the PC within the offer's lifetime: the PC owns its clipboard again.
+        XCTAssertNil(clipboard.changed(hasText: true, now: 105))
+        // Withdrawing now would empty what they just copied there.
+        XCTAssertNil(clipboard.offerExpired(offer))
+    }
+
     func testSizeCaps() {
         var clipboard = RDPClipboard()
         XCTAssertNil(clipboard.pasteAsked(units: 0))

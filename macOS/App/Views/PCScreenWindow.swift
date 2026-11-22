@@ -25,9 +25,10 @@ struct PCScreenWindow: View {
     @State private var shown = false
     /// The context that prompt satisfied: it reads and writes the saved Windows login without a second prompt.
     @State private var context = LAContext()
-    /// The picture's area in pixels: the desktop Windows is asked for.
-    @State private var viewPixels = CGSize.zero
+    /// The picture's area in points; in pixels at this display's scale, it is the desktop Windows is asked for.
+    @State private var viewPoints = CGSize.zero
     @Environment(\.displayScale) private var displayScale
+    private var viewPixels: CGSize { CGSize(width: viewPoints.width * displayScale, height: viewPoints.height * displayScale) }
 
     private var computer: ReachableComputer? { shell.reachableComputers.first { $0.id == hostID } }
 
@@ -39,10 +40,8 @@ struct PCScreenWindow: View {
                 .background {
                     GeometryReader { geometry in
                         Color.clear
-                            .onAppear { viewPixels = CGSize(width: geometry.size.width * displayScale, height: geometry.size.height * displayScale) }
-                            .onChange(of: geometry.size) { _, size in
-                                viewPixels = CGSize(width: size.width * displayScale, height: size.height * displayScale)
-                            }
+                            .onAppear { viewPoints = geometry.size }
+                            .onChange(of: geometry.size) { _, size in viewPoints = size }
                     }
                 }
             switch model.phase {
@@ -105,7 +104,9 @@ struct PCScreenWindow: View {
         .animation(.easeInOut(duration: 0.25), value: model.showsLockedNote)
         .frame(minWidth: 480, minHeight: 300)
         .focusedSceneValue(\.pcScreen, model)
-        .onChange(of: viewPixels) { _, pixels in model.viewChanged(pixels: pixels, scale: displayScale) }
+        .onChange(of: viewPoints) { _, _ in model.viewChanged(pixels: viewPixels, scale: displayScale) }
+        // Moved to a display with another scale: the same points are other pixels.
+        .onChange(of: displayScale) { _, _ in model.viewChanged(pixels: viewPixels, scale: displayScale) }
         .navigationTitle(model.name)
         .navigationSubtitle(model.subtitle)
         .toolbar {
@@ -156,10 +157,11 @@ struct PCScreenWindow: View {
         }
         guard unlocked else { return unlock(computer) }
         let context = self.context
+        let pin = computer.credential.loginPin
         model.begin(computer, identity: shell.identityForReaching,
-                    remembered: { WindowsLoginStore.read(hostID: hostID, context: context) },
+                    remembered: { WindowsLoginStore.read(hostID: hostID, pin: pin, context: context) },
                     remember: { login in
-                        if let login { WindowsLoginStore.save(login, hostID: hostID, context: context) } else { WindowsLoginStore.delete(hostID: hostID) }
+                        if let login { WindowsLoginStore.save(login, hostID: hostID, pin: pin, context: context) } else { WindowsLoginStore.delete(hostID: hostID) }
                     })
         // A login saved for this PC signs in without asking; the picture's area is known by now.
         model.connectRemembered(pixels: viewPixels, scale: displayScale)
@@ -318,8 +320,12 @@ final class PCScreenModel: ObservableObject, RemoteScreenSource {
     private var retries = 0
     private var liveSince: TimeInterval?
     private var retryTask: Task<Void, Never>?
-    /// The waits between tries after a view that worked dropped.
-    static let retryWaits: [TimeInterval] = [1, 2, 4, 8, 15]
+    /// The waits between tries after a view that worked dropped: three, under the PC's four quick opens in ten minutes.
+    static let retryWaits: [TimeInterval] = [1, 4, 10]
+    /// The bytes stopped before the helper said why: what it says within a moment wins.
+    private var lostTask: Task<Void, Never>?
+    /// Copy from PC was asked until then: the helper's answer is taken only while it waits.
+    private var copyUntil: TimeInterval?
     @Published private(set) var showsLockedNote = false
     private var saidLockedNote = false
     private var noteTask: Task<Void, Never>?
@@ -464,6 +470,9 @@ final class PCScreenModel: ObservableObject, RemoteScreenSource {
         reshapeTask?.cancel()
         retryTask?.cancel()
         noteTask?.cancel()
+        lostTask?.cancel()
+        lostTask = nil
+        copyUntil = nil
         showsLockedNote = false
         asked = nil
         askedAt = nil
@@ -529,6 +538,9 @@ final class PCScreenModel: ObservableObject, RemoteScreenSource {
             fail(refusal?.sentence ?? HostCopy.error(error, words) ?? "\(name) refused the connection.")
         case let .failed(error, _):
             fail(HostCopy.error(error, words) ?? "\(name) refused the connection.")
+        case .disconnected where retries > 0 && held != nil:
+            // A reconnect that couldn't reach the PC yet (the network is still coming back): the next wait.
+            ended(.connectionLost, generation: gen)
         case .disconnected:
             fail("Can't reach \(name). It may be asleep, off, or offline.")
         default:
@@ -556,9 +568,9 @@ final class PCScreenModel: ObservableObject, RemoteScreenSource {
         splice = StreamSplice(stream, initialBytes: initialBytes, FileDescriptorStream(descriptor: pair.0)) { [weak self] _ in
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
-                    // The helper says why a session ended; this is the connection going first.
-                    guard let self, gen == self.generation, self.phase == .live || self.phase == .connecting else { return }
-                    self.ended(.connectionLost, generation: gen)
+                    // The helper says why a session ended, a moment after the bytes stop (it reads them through
+                    // this splice): wait for it, or Windows ending the session reads as a dropped connection.
+                    self?.lostUnlessTold(generation: gen)
                 }
             }
         }
@@ -572,10 +584,7 @@ final class PCScreenModel: ObservableObject, RemoteScreenSource {
         if let requirement = ScreenEngineService.sameTeamRequirement() { connection.setCodeSigningRequirement(requirement) }
         let gone: @Sendable () -> Void = { [weak self] in
             DispatchQueue.main.async {
-                MainActor.assumeIsolated {
-                    guard let self, gen == self.generation, self.phase == .live || self.phase == .connecting else { return }
-                    self.ended(.connectionLost, generation: gen)
-                }
+                MainActor.assumeIsolated { self?.lostUnlessTold(generation: gen) }
             }
         }
         connection.interruptionHandler = gone
@@ -599,6 +608,17 @@ final class PCScreenModel: ObservableObject, RemoteScreenSource {
             }
         }
         engine.setActive(visible)
+    }
+
+    /// The connection or the helper went before the helper said why the session ended: it usually says within a
+    /// moment, and what it says wins; else the connection was lost.
+    private func lostUnlessTold(generation gen: Int) {
+        guard gen == generation, phase == .live || phase == .connecting, lostTask == nil else { return }
+        lostTask = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(2))
+            guard !Task.isCancelled, let self, gen == self.generation, self.phase == .live || self.phase == .connecting else { return }
+            self.ended(.connectionLost, generation: gen)
+        }
     }
 
     // MARK: What the helper says (checked in `EngineReceiver`, then here on main)
@@ -656,7 +676,9 @@ final class PCScreenModel: ObservableObject, RemoteScreenSource {
     }
 
     fileprivate func copied(_ result: ScreenCopyResult, generation gen: Int) {
-        guard gen == generation else { return }
+        // Only an answer to Copy from PC, while it waits: the helper runs the engine, and the PC can't push here.
+        guard gen == generation, let until = copyUntil, ProcessInfo.processInfo.systemUptime <= until else { return }
+        copyUntil = nil
         switch result {
         case let .text(text) where !text.isEmpty:
             NSPasteboard.general.clearContents()
@@ -678,9 +700,20 @@ final class PCScreenModel: ObservableObject, RemoteScreenSource {
             held = nil
             remember?(nil)
             phase = .signIn(error: WindowsScreenCopy.signInError(end))
-        case .connectionLost where liveFor != nil && held != nil:
+        case .signIn(.passwordExpired):
+            // Windows wants a new one: this password won't sign in again.
+            held = nil
+            remember?(nil)
+            phase = .failed(WindowsScreenCopy.ending(end, words)?.sentence ?? "Windows refused the sign-in.")
+        case .signIn:
+            // Locked, turned off, or not allowed remotely: fixed on the PC, then Try Again with the saved login (if any);
+            // this window doesn't keep re-sending its own.
+            held = nil
+            phase = .failed(WindowsScreenCopy.ending(end, words)?.sentence ?? "Windows refused the sign-in.")
+        case .connectionLost where (liveFor != nil || retries > 0) && held != nil:
             // A view that worked and dropped (the network, this Mac's sleep, the helper) comes back by itself, a few
-            // times; one that lasted half a minute starts the count again. Nothing else reconnects on its own.
+            // times, a try that didn't get through counting as one; one that lasted half a minute starts the count
+            // again. Nothing else reconnects on its own.
             if let liveFor, liveFor > 30 { retries = 0 }
             guard retries < Self.retryWaits.count, let held else {
                 phase = .failed("The connection to \(name) was lost.")
@@ -778,7 +811,12 @@ final class PCScreenModel: ObservableObject, RemoteScreenSource {
         }
     }
 
-    func copyFromPC() { engine?.copySelection() }
+    func copyFromPC() {
+        guard let engine else { return }
+        // The PC's copy window and its answer's wait (RDPClipboard's 2 s and 3 s, in the helper), and a moment.
+        copyUntil = ProcessInfo.processInfo.systemUptime + 6
+        engine.copySelection()
+    }
 }
 
 /// The model of the PC window in front, for the menu bar's Windows menu.

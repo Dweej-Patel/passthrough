@@ -361,10 +361,14 @@ public final class RemoteDesktopBackend: ScreenBackend, @unchecked Sendable {
             pixelsLock.unlock()
             return emit(.size(width: width, height: height))
         }
+        // The PC chooses the size: one past the limits the Mac's helper keeps too is never drawn (a black view, not
+        // gigabytes on the phone).
+        let valid = width > 0 && height > 0 && width <= 16384 && height <= 16384 && width * height <= 50_000_000
         pixelsLock.lock()
-        desktop = (width, height)
-        pixels = [UInt8](repeating: 0, count: width * height * 4)
+        desktop = valid ? (width, height) : (0, 0)
+        pixels = valid ? [UInt8](repeating: 0, count: width * height * 4) : []
         pixelsLock.unlock()
+        guard valid else { return ptLog(.error, "screen: the PC's desktop size \(width)x\(height) is past the limits; not drawn") }
         emit(.size(width: width, height: height))
     }
 

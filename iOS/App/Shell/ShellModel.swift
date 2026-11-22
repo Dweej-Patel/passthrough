@@ -542,6 +542,8 @@ final class ShellModel: ObservableObject {
     /// The phone forgot this Mac: drop its key, address, tabs and any connection to it.
     func forget(macID: String) {
         ShellKeyVault.delete(macID: macID, context: lock?.isUnlocked == true ? lock?.context : nil)
+        // Its screen logins too: a computer paired later under the same id is never signed in with them.
+        ScreenLoginStore.deleteAll(hostID: macID)
         UserDefaults.standard.removeObject(forKey: Self.manualAddressPrefix + macID)
         granted[macID] = nil
         if clientMacID == macID { dropConnection(); resetSessions() }
@@ -579,6 +581,7 @@ final class ShellModel: ObservableObject {
 
     func forgetAll() {
         ShellKeyVault.deleteAll()
+        for id in Set(macs.map(\.macID) + granted.keys + paired.map(\.id)) { ScreenLoginStore.deleteAll(hostID: id) }
         for id in macs.map(\.macID) + granted.keys {
             UserDefaults.standard.removeObject(forKey: Self.manualAddressPrefix + id)
         }

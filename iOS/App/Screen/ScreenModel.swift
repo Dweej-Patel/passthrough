@@ -109,6 +109,8 @@ final class ScreenModel: ObservableObject {
     private var shell: ShellModel?
     private var context: LAContext?
     private var macID: String?
+    /// The PC's keys as its credential says now: a Windows login is saved with them and read only while they match.
+    private var windowsPin: String?
     private var client: ShellClient?
     private var dialer: IrohShellDialer?
     /// What shows the screen now: the Mac's own stream or Screen Sharing.
@@ -662,6 +664,7 @@ final class ScreenModel: ObservableObject {
         windowsView = true
         macID = pc.macID
         macName = pc.macName
+        windowsPin = pc.loginPin
         windowsShapeChoice = UserDefaults.standard.string(forKey: Self.windowsShapeKey(pc.macID)).flatMap(WindowsDisplay.Shape.init) ?? .fit
         let space = UserDefaults.standard.integer(forKey: Self.windowsSpaceKey(pc.macID))
         windowsSpace = WindowsDisplay.spaces.contains(space) ? space : 100
@@ -674,7 +677,8 @@ final class ScreenModel: ObservableObject {
         // The account last used here, else the one the PC says Remote Desktop takes; its saved
         // login is read with the app lock's context, so it never prompts.
         let account = ScreenLoginStore.lastAccount(hostID: pc.macID) ?? shell?.factsByMac[pc.macID]?.user
-        if let account, let context, let saved = ScreenLoginStore.readWindows(hostID: pc.macID, account: account, context: context) {
+        if let account, let context,
+           let saved = ScreenLoginStore.readWindows(hostID: pc.macID, account: account, pin: pc.loginPin, context: context) {
             return connectWindows(saved, remember: true)
         }
         stop()
@@ -770,8 +774,8 @@ final class ScreenModel: ObservableObject {
         ScreenLoginStore.setLastAccount(held.login.username, hostID: macID)
         if !held.remember {
             ScreenLoginStore.deleteWindows(hostID: macID, account: held.login.username)
-        } else if let context {
-            ScreenLoginStore.saveWindows(held.login, hostID: macID, context: context)
+        } else if let context, let windowsPin {
+            ScreenLoginStore.saveWindows(held.login, hostID: macID, pin: windowsPin, context: context)
         }
     }
 

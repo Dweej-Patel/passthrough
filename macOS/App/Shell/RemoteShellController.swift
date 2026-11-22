@@ -969,10 +969,14 @@ final class RemoteShellController: ObservableObject {
         if !done { listenerError = "Could not remove the screen passes that phone handed over." }
         macIDs.forEach(Self.passChanged)
         refreshScreenPasses()
-        if !reachStore.remove(fromPhones: phoneIDs).done {
+        let reach = reachStore.remove(fromPhones: phoneIDs)
+        if !reach.done {
             listenerError = "Could not remove the access to other computers that phone handed over."
         }
         refreshReachableComputers()
+        // The Windows logins saved for computers this Mac can no longer reach go with them.
+        let kept = Set(reachableComputers.map(\.id))
+        for hostID in Set(reach.hostIDs) where !kept.contains(hostID) { WindowsLoginStore.delete(hostID: hostID) }
     }
 
     func refreshReachableComputers() {

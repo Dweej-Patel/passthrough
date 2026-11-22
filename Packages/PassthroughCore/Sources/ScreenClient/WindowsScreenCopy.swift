@@ -51,7 +51,8 @@ public enum WindowsScreenCopy {
     static func wait(_ seconds: Int?) -> String {
         guard let seconds, seconds > 0 else { return "later" }
         if seconds < 60 { return "in \(seconds) seconds" }
-        let minutes = (seconds + 59) / 60
+        // The host's number: at most a day, so the sum can't overflow.
+        let minutes = (min(seconds, 86_400) + 59) / 60
         return minutes == 1 ? "in a minute" : "in \(minutes) minutes"
     }
 

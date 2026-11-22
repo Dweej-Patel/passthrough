@@ -367,10 +367,17 @@ public enum ScreenPass {
     /// Whether an id is one a Mac minted for a pass.
     public static func isViewerID(_ id: String) -> Bool { id.hasPrefix(idPrefix) }
 
-    /// A device's name as a pass may carry it: one line, at most `maxName` characters.
+    /// A device's name as a pass may carry it: one line with no control or format characters (tabs, bidi and
+    /// zero-width marks), at most `maxName` characters.
     public static func cleanName(_ name: String) -> String {
-        let line = name.split(whereSeparator: \.isNewline).joined(separator: " ").trimmingCharacters(in: .whitespaces)
-        return String(line.prefix(maxName))
+        let line = name.split(whereSeparator: \.isNewline).joined(separator: " ")
+        let visible = String(String.UnicodeScalarView(line.unicodeScalars.map {
+            switch $0.properties.generalCategory {
+            case .control, .format: " "
+            default: $0
+            }
+        }))
+        return String(visible.trimmingCharacters(in: .whitespaces).prefix(maxName))
     }
 
     public static func isValidName(_ name: String) -> Bool {

@@ -54,6 +54,9 @@ public struct RDPClipboard: Sendable {
 
     /// The PC's clipboard changed.
     public mutating func changed(hasText: Bool, now: TimeInterval) -> Effect? {
+        // The PC owns its clipboard again: an offer still standing is no longer this side's to withdraw (that would
+        // empty what was just copied there).
+        offered = false
         guard let until = copyUntil, now <= until else { return nil }
         copyUntil = nil
         guard hasText else { return .copied(.notText) }
