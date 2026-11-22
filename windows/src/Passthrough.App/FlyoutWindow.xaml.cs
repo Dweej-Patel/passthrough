@@ -203,22 +203,22 @@ public sealed partial class FlyoutWindow : Window
     public async Task<QuitChoice> AskQuitAsync(string question, bool remoteOn)
     {
         if (!AppWindow.IsVisible) ShowAtTray();
+        // Two buttons and a box: three buttons share the flyout's 360 px and cut "Quit and turn off Remote access" short.
+        var body = new StackPanel { Spacing = 12 };
+        body.Children.Add(new TextBlock { Text = question, TextWrapping = TextWrapping.Wrap });
+        var turnOff = new CheckBox { Content = "Also turn off Remote access (Windows asks for an administrator)" };
+        if (remoteOn) body.Children.Add(turnOff);
         var dialog = new ContentDialog
         {
             XamlRoot = Content.XamlRoot,
             Title = "Quit Passthrough?",
-            Content = new TextBlock { Text = question, TextWrapping = TextWrapping.Wrap },
+            Content = body,
             PrimaryButtonText = "Quit",
-            SecondaryButtonText = remoteOn ? "Quit and turn off Remote access" : "",
             CloseButtonText = "Cancel",
             DefaultButton = ContentDialogButton.Close,
         };
-        return await dialog.ShowAsync() switch
-        {
-            ContentDialogResult.Primary => QuitChoice.Quit,
-            ContentDialogResult.Secondary => QuitChoice.QuitAndTurnOff,
-            _ => QuitChoice.Cancel,
-        };
+        if (await dialog.ShowAsync() != ContentDialogResult.Primary) return QuitChoice.Cancel;
+        return remoteOn && turnOff.IsChecked == true ? QuitChoice.QuitAndTurnOff : QuitChoice.Quit;
     }
 
     /// <summary>Quit and turn off didn't turn it off (the prompt was declined, or setup failed): quit anyway, or stay.</summary>
