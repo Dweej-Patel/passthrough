@@ -99,6 +99,8 @@ public sealed class ServiceRemote : IDisposable
             Gate.PushState();
         };
         Directory.Replaced += Disconnect;
+        // A phone handing the same computer access again replaces the grant: the old grant's notices go with it.
+        Directory.Replaced += Notices.Forget;
         Directory.Changed += account =>
         {
             trays.Tell(account, new PipeAdminEvent { What = PipeAdminEvent.Access });
@@ -365,7 +367,9 @@ public sealed class ServiceRemote : IDisposable
         State = phone => OwnerHost(phone)?.State is { } state
             ? new HostState { Battery = state.Battery, Charging = state.Charging, Locked = state.Locked, Control = false }
             : new HostState { Control = false },
-        Label = phone => Directory.Owner(phone) is { } owner ? Directory.For(owner).Phones.FirstOrDefault(p => p.PhoneId == phone)?.Label ?? "A phone" : "A phone",
+        Label = phone => Directory.Owner(phone) is not { } owner ? "A phone"
+            : Computers.IsComputerId(phone) ? Directory.ComputersFor(owner).Find(phone)?.Name ?? "A computer"
+            : Directory.For(owner).Phones.FirstOrDefault(p => p.PhoneId == phone)?.Label ?? "A phone",
         Lock = phone => OwnerHost(phone)?.Lock() ?? ShellError.SignedOut,
         RemoteDesktop = RemoteDesktop,
         AccountOf = phone => Directory.Owner(phone),
