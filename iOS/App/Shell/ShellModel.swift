@@ -77,6 +77,8 @@ final class ShellModel: ObservableObject {
     @Published private(set) var lastError: ShellError?
     /// What each computer last said about itself (`host`), kept across launches in the app's own defaults.
     @Published private(set) var factsByMac: [String: HostInfo]
+    /// The last `screenEnded` this connection heard: which computer, why, and when.
+    private(set) var screenEnded: (macID: String, reason: String, at: Date)?
     /// Why each computer last said it was leaving (`goingAway`); dropped at its next `ready`.
     @Published private(set) var farewells: [String: HostFarewell]
     /// The shell last chosen per computer (a `HostShell.id`).
@@ -983,9 +985,15 @@ final class ShellModel: ObservableObject {
                 redialsMade = nil
                 reach = .unreachable
             }
-        case let .screen(stream, _):
+        case let .screen(stream, _), let .rdp(stream, _, _):
             // The screen has its own client (`ScreenModel`); this one never asks.
             stream.cancel()
+        case .rdpRefused:
+            break
+        case let .screenEnded(reason):
+            // Why a PC's screen view ended, for the view whose relay just closed (`ScreenModel`).
+            guard let mac = clientMacID else { return }
+            screenEnded = (mac, reason, Date())
         case .screenGranted, .screenPassSaved, .screenRevoked:
             // Screen passes have their own clients (`ScreenShareModel`); this one never asks.
             break
