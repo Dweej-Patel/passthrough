@@ -21,6 +21,8 @@ public partial class App : Application
 {
     /// <summary>How long Quit waits for the session to close its channel and stop the watchers before exiting anyway.</summary>
     private static readonly TimeSpan QuitLimit = TimeSpan.FromSeconds(3);
+    /// <summary>Longer than the 5 seconds the session manager gives the shells to end.</summary>
+    private static readonly TimeSpan RemoteQuitLimit = TimeSpan.FromSeconds(7);
 
     private Mutex? _singleInstance;
     private HostSession? _session;
@@ -140,8 +142,9 @@ public partial class App : Application
             viewModel.OpenComputers = async () => await remote.Reach.UnlockAsync() ? remote.Reach.Computers : null;
             viewModel.NewShell = remote.OpenShellAsync;
             viewModel.OpenScreen = ShowScreen;
-            remote.HandOffWanted += launcher => DispatcherQueue.GetForCurrentThread()?.TryEnqueue(() => HandOff(launcher));
             _ui = DispatcherQueue.GetForCurrentThread();
+            // Raised after the elevated setup, on a pool thread: the UI's queue is the one captured here.
+            remote.HandOffWanted += launcher => _ui?.TryEnqueue(() => HandOff(launcher));
 
             await _session.StartAsync();
             await _remote.StartIfEnabledAsync();
@@ -278,13 +281,21 @@ public partial class App : Application
         _shuttingDown = true;
         try
         {
-            if (_session is not null) await _session.DisposeAsync().AsTask().WaitAsync(QuitLimit);
+            try
+            {
+                if (_session is not null) await _session.DisposeAsync().AsTask().WaitAsync(QuitLimit);
+            }
+            catch (TimeoutException)
+            {
+                LogFile.Write($"the session did not stop within {QuitLimit.TotalSeconds:0} seconds; quitting anyway");
+            }
             // Phones are dropped and every session ends (each transcript finished): nothing runs once Passthrough is gone.
-            if (_remote is not null) await Task.Run(_remote.Dispose).WaitAsync(QuitLimit);
+            // Run even when the cable session was slow, and given the time closing every shell may take.
+            if (_remote is not null) await Task.Run(_remote.Dispose).WaitAsync(RemoteQuitLimit);
         }
         catch (TimeoutException)
         {
-            LogFile.Write($"the session did not stop within {QuitLimit.TotalSeconds:0} seconds; quitting anyway");
+            LogFile.Write($"the shells did not all end within {RemoteQuitLimit.TotalSeconds:0} seconds; quitting anyway");
         }
         catch (Exception e)
         {

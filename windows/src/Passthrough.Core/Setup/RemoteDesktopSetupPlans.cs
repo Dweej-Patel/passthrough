@@ -53,7 +53,7 @@ public static class RemoteDesktopSetupPlans
             {
                 Mode = mode,
                 SetUpAt = c.System.Time.GetUtcNow().ToUnixTimeSeconds(),
-                Prior = new RemoteDesktopPrior { FDenyTSConnections = facts.Denied ? 1 : 0, UserAuthentication = facts.NlaRequired is { } n ? (n ? 1 : 0) : null, TermServiceStart = rdp.StartType() },
+                Prior = new RemoteDesktopPrior { FDenyTSConnections = facts.Denied ? 1 : 0, UserAuthentication = facts.NlaRequired is { } n ? (n ? 1 : 0) : null, TermServiceStart = rdp.StartType(), AllowRuleBefore = facts.AllowRuleForPort },
                 BlockedPort = facts.Port,
             };
             if (!setup.ConsentedBy.Contains(c.AskingAccount, StringComparer.OrdinalIgnoreCase)) setup = setup with { ConsentedBy = [.. setup.ConsentedBy, c.AskingAccount] };
@@ -132,7 +132,10 @@ public static class RemoteDesktopSetupPlans
         if (state?.Rdp is not { } setup) return RemoveBlockRules(c) ? StepState.Done : StepState.Skipped;
         var facts = rdp.Facts();
         foreach (var sid in setup.AddedToRemoteDesktopUsers) rdp.RemoveFromRemoteDesktopUsers(sid);
-        if (setup.WeTurnedOn && facts.AllowRuleForPort != true) rdp.SetAllowed(false); // throws: NLA and the block rules stay
+        // The owner chose to use it since only if a rule letting the network in is on now and wasn't at setup; a rule that
+        // was there all along (blocked by ours until now) would open the port the moment our block rules go.
+        var ownerOpenedIt = facts.AllowRuleForPort == true && setup.Prior.AllowRuleBefore != true;
+        if (setup.WeTurnedOn && !ownerOpenedIt) rdp.SetAllowed(false); // throws: NLA and the block rules stay
         // NLA goes back only when Remote Desktop ends up off: one left on (the owner uses it) keeps requiring it.
         if (setup.WeSetNla && rdp.Facts().Denied) rdp.SetNla(false, setup.Prior.UserAuthentication);
         if (setup.WeChangedStart) rdp.SetStartType(setup.Prior.TermServiceStart ?? 4);

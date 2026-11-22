@@ -202,6 +202,8 @@ public sealed class ShellConnection : IShellAttachment
             _gate.Log?.Invoke($"screen: {Label}'s view started");
             _gate.Hooks.ViewStarted?.Invoke(_view);
             released = true; // the view is the relay's now; it is freed when the splice ends
+            // Relaying from here, before _opening clears: Screen turned off or Stop in between closes this connection.
+            _relaying = true;
             _relay = dial;
             dial = null;
         }
@@ -313,6 +315,8 @@ public sealed class ShellConnection : IShellAttachment
             case ShellEnvelope.ComputerRevoke:
                 if (message.PhoneID is not { } revoking || !_gate.Access.RevokeComputer(revoking, PhoneId)) { Fail(ShellError.BadRequest); break; }
                 _gate.Disconnect(revoking);
+                // Its owner is this phone's account: the gate can no longer look that up, so its sessions are closed here.
+                _host.CloseSessions(revoking);
                 Send(new ShellEnvelope(ShellEnvelope.ComputerRevoked));
                 break;
             case ShellEnvelope.List:

@@ -32,7 +32,10 @@ public sealed class ComputerAccessTests : IAsyncDisposable
             () => new Dictionary<string, string>(), @"C:\Users\dev");
         _access.Add(Account, new ShellPhone { PhoneId = "phone-a", Label = "iPhone", PairingSlot = "token.iphone.A", Key = PhoneKey, GrantedAt = DateTimeOffset.UtcNow });
         var host = new LocalSessionHost(_manager, transcripts);
-        _gate = new ShellGate(_ => host, _access, new HandshakeLimiter(TimeSpan.FromSeconds(10), TimeProvider.System), new ShellGateHooks
+        // As on the service: an id with no owner (revoked) reaches an account with no shells, never this one.
+        var nobody = new LocalSessionHost(new ShellSessionManager(transcripts, _ => null!, start => new FakePty(start),
+            () => new Dictionary<string, string>(), @"C:\Users\dev"), transcripts);
+        _gate = new ShellGate(id => _access.Owner(id) is null ? nobody : host, _access, new HandshakeLimiter(TimeSpan.FromSeconds(10), TimeProvider.System), new ShellGateHooks
         {
             Host = _ => new HostInfo { Kind = "windows", Shells = [new HostShell { Id = "cmd", Name = "Command Prompt", Default = true }] },
             State = _ => new HostState { Control = false },
@@ -217,6 +220,28 @@ public sealed class ComputerAccessTests : IAsyncDisposable
         await phone.Send(new ShellEnvelope(ShellEnvelope.ComputerRevoke) { PhoneID = id });
         Assert.Equal(ShellEnvelope.ComputerRevoked, (await phone.Next(ShellEnvelope.ComputerRevoked)).T);
         Assert.Null(_access.Computer(id));
+    }
+
+    [Fact]
+    public async Task ARevokedComputersShellsEnd()
+    {
+        _access.For(Account).SetShareAllowed("phone-a", true);
+        var phone = await Connect("phone-a", PhoneKey);
+        await phone.Next(ShellEnvelope.Ready);
+        await phone.Send(new ShellEnvelope(ShellEnvelope.ComputerGrant) { Name = "MacBook", Viewer = "v", Scopes = ["shell"], IdKey = Convert.ToBase64String(IdKey()) });
+        var granted = await phone.Next(ShellEnvelope.ComputerGranted);
+        var id = granted.PhoneID!;
+        var computer = await Connect(id, Convert.FromBase64String(granted.Key!), Signer(id, Binding));
+        await computer.Next(ShellEnvelope.Sessions);
+        await computer.Send(new ShellEnvelope(ShellEnvelope.Open) { Cols = 80, Rows = 24, Ref = 1 });
+        await computer.Next(ShellEnvelope.Opened);
+        Assert.Equal(1, _manager.RunningSessions(id));
+
+        await phone.Send(new ShellEnvelope(ShellEnvelope.ComputerRevoke) { PhoneID = id });
+        await phone.Next(ShellEnvelope.ComputerRevoked);
+        var deadline = DateTime.UtcNow.AddSeconds(5);
+        while (_manager.RunningSessions(id) > 0 && DateTime.UtcNow < deadline) await Task.Delay(20);
+        Assert.Equal(0, _manager.RunningSessions(id));
     }
 
     private sealed class Identity(ECDsa key) : Passthrough.Core.Trust.IComputerIdentity
