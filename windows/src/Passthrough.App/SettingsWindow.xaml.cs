@@ -228,7 +228,7 @@ public sealed partial class SettingsWindow : Window
         WithAccess.Clear();
         foreach (var phone in _remote.Phones)
             WithAccess.Add(new RemotePhoneRow(phone.Phone, phone.Label, phone.PairingSlot, connected.Contains(phone.Phone), _remote.Sessions.RunningSessions(phone.Phone),
-                phone.Screen, _screenReady));
+                phone.Screen, _screenReady, phone.Share));
         NoAccessText.Visibility = WithAccess.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
     }
 
@@ -290,6 +290,20 @@ public sealed partial class SettingsWindow : Window
         {
             LogFile.Error(ex);
             ShowError("Could not change what it may see. See the log for details.");
+        }
+        ShowRemote();
+    }
+
+    private async void OnShareClick(object sender, RoutedEventArgs e)
+    {
+        if (_remote is null) return;
+        var box = (CheckBox)sender;
+        var phone = (RemotePhoneRow)box.DataContext;
+        try { await _remote.SetMayShareAsync(phone.PhoneId, box.IsChecked == true); }
+        catch (Exception ex)
+        {
+            LogFile.Error(ex);
+            ShowError("Could not change whether it may share access. See the log for details.");
         }
         ShowRemote();
     }

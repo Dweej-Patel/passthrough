@@ -99,7 +99,12 @@ public sealed class ServiceRemote : IDisposable
             Gate.PushState();
         };
         Directory.Replaced += Disconnect;
-        Directory.Changed += account => trays.Tell(account, new PipeAdminEvent { What = PipeAdminEvent.Access });
+        Directory.Changed += account =>
+        {
+            trays.Tell(account, new PipeAdminEvent { What = PipeAdminEvent.Access });
+            // What each phone may do is in host.access: a connected phone hears a change to Screen or Share at once.
+            Gate.PushHost();
+        };
     }
 
     public AccessDirectory Directory { get; }

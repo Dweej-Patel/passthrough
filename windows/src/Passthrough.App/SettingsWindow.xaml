@@ -171,6 +171,7 @@
                                     <ColumnDefinition Width="Auto" />
                                     <ColumnDefinition Width="Auto" />
                                     <ColumnDefinition Width="Auto" />
+                                    <ColumnDefinition Width="Auto" />
                                 </Grid.ColumnDefinitions>
                                 <Grid Width="32" Height="32">
                                     <Ellipse Fill="{ThemeResource ControlFillColorSecondaryBrush}" />
@@ -184,9 +185,12 @@
                                 <CheckBox Grid.Column="2" Content="Screen" MinWidth="0" IsChecked="{x:Bind Screen}" IsEnabled="{x:Bind ScreenSwitchEnabled}"
                                           Click="OnScreenClick" AutomationProperties.Name="Let it see the screen"
                                           ToolTipService.ToolTip="Let it see and control this PC's screen. Windows still asks for your password." />
-                                <Button Grid.Column="3" Content="Stop" Click="OnStopClick" IsEnabled="{x:Bind CanStop}"
+                                <CheckBox Grid.Column="3" Content="Share" MinWidth="0" IsChecked="{x:Bind Share}"
+                                          Click="OnShareClick" AutomationProperties.Name="May share access with other computers"
+                                          ToolTipService.ToolTip="Let it give your other computers access to this PC, from Share with another computer on the phone. A computer's screen still waits for you to allow it here." />
+                                <Button Grid.Column="4" Content="Stop" Click="OnStopClick" IsEnabled="{x:Bind CanStop}"
                                         ToolTipService.ToolTip="End its connection and the shells it opened. It keeps its access." />
-                                <Button Grid.Column="4" Content="Revoke" Click="OnRevokeClick" />
+                                <Button Grid.Column="5" Content="Revoke" Click="OnRevokeClick" />
                             </Grid>
                         </Border>
                     </DataTemplate>

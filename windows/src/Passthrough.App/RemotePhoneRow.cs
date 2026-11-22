@@ -1,8 +1,11 @@
 namespace Passthrough.App;
 
 /// <summary>A phone allowed to open shells on this PC, as Settings ▸ Remote access lists it.</summary>
-public sealed class RemotePhoneRow(string phoneId, string label, string pairingSlot, bool connected, int sessions, bool screen = false, bool screenAvailable = false)
+public sealed class RemotePhoneRow(string phoneId, string label, string pairingSlot, bool connected, int sessions, bool screen = false, bool screenAvailable = false, bool share = false)
 {
+    /// <summary>It may give another of the owner's computers access to this PC (off unless the owner turns it on here).</summary>
+    public bool Share { get; } = share;
+
     /// <summary>It may see the screen (through Remote Desktop; Windows still asks for the password).</summary>
     public bool Screen { get; } = screen;
 
