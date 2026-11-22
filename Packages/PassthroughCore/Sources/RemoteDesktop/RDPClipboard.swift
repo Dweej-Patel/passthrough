@@ -6,7 +6,8 @@ import ScreenClient
 ///
 /// Copy: the PC is sent Control + Insert and a short window opens. If the PC's
 /// clipboard changes within it and holds text, that text is fetched; a change
-/// at any other time is never fetched, so the PC cannot push its clipboard here.
+/// at any other time is never fetched, and its answer is taken only within
+/// `fetchWait`, so the PC cannot push its clipboard here.
 ///
 /// Paste: the text is offered to the PC, Shift + Insert goes once the PC has
 /// taken the offer (or after a moment), and the offer is withdrawn soon after:
@@ -15,6 +16,8 @@ import ScreenClient
 public struct RDPClipboard: Sendable {
     /// How long after Copy the PC's clipboard may change and still be taken.
     public static let copyWindow: TimeInterval = 2
+    /// How long the PC has to answer a fetch; a later answer is dropped.
+    public static let fetchWait: TimeInterval = 3
     /// How long Shift + Insert waits for the PC to take the offer.
     public static let pasteWait: TimeInterval = 0.5
     /// How long pasted text stays on offer.
@@ -33,7 +36,7 @@ public struct RDPClipboard: Sendable {
     }
 
     private var copyUntil: TimeInterval?
-    private var fetching = false
+    private var fetchUntil: TimeInterval?
     private var pasteWaiting = false
     /// Counts offers, so an older offer's expiry doesn't withdraw a newer one.
     public private(set) var offer = 0
@@ -46,7 +49,7 @@ public struct RDPClipboard: Sendable {
     /// Copy was tapped at `now` (Control + Insert is sent by the caller).
     public mutating func copyAsked(now: TimeInterval) {
         copyUntil = now + Self.copyWindow
-        fetching = false
+        fetchUntil = nil
     }
 
     /// The PC's clipboard changed.
@@ -54,7 +57,7 @@ public struct RDPClipboard: Sendable {
         guard let until = copyUntil, now <= until else { return nil }
         copyUntil = nil
         guard hasText else { return .copied(.notText) }
-        fetching = true
+        fetchUntil = now + Self.fetchWait
         return .fetch
     }
 
@@ -65,11 +68,18 @@ public struct RDPClipboard: Sendable {
         return .copied(.nothing)
     }
 
-    /// The PC answered a fetch. An answer nobody asked for is dropped.
-    public mutating func fetched(_ result: ScreenCopyResult) -> Effect? {
-        guard fetching else { return nil }
-        fetching = false
+    /// The PC answered a fetch. An answer nobody asked for, or one after `fetchWait`, is dropped.
+    public mutating func fetched(_ result: ScreenCopyResult, now: TimeInterval) -> Effect? {
+        guard let until = fetchUntil, now <= until else { return nil }
+        fetchUntil = nil
         return .copied(result)
+    }
+
+    /// `fetchWait` passed since the fetch: if the PC still hasn't answered, nothing was copied.
+    public mutating func fetchDeadline(now: TimeInterval) -> Effect? {
+        guard let until = fetchUntil, now >= until else { return nil }
+        fetchUntil = nil
+        return .copied(.nothing)
     }
 
     // MARK: Paste

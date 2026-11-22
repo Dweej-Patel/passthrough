@@ -198,7 +198,7 @@ public final class RemoteDesktopBackend: ScreenBackend, @unchecked Sendable {
             case Int32(PT_CLIPBOARD_TOO_LONG): answer = .tooLong
             default: answer = .nothing
             }
-            backend.callbackQueue.async { backend.apply(backend.clipboard.fetched(answer)) }
+            backend.callbackQueue.async { backend.apply(backend.clipboard.fetched(answer, now: ProcessInfo.processInfo.systemUptime)) }
         }
         callbacks.outbox_ready = { user in
             guard let user else { return }
@@ -512,7 +512,12 @@ public final class RemoteDesktopBackend: ScreenBackend, @unchecked Sendable {
     /// Does what the clipboard's rules decided (callback queue).
     private func apply(_ effect: RDPClipboard.Effect?) {
         switch effect {
-        case .fetch: withSession { pt_rdp_clipboard_fetch($0) }
+        case .fetch:
+            withSession { pt_rdp_clipboard_fetch($0) }
+            callbackQueue.asyncAfter(deadline: .now() + RDPClipboard.fetchWait + 0.05) { [weak self] in
+                guard let self else { return }
+                self.apply(self.clipboard.fetchDeadline(now: ProcessInfo.processInfo.systemUptime))
+            }
         case let .copied(result): emit(.copied(result))
         case .paste: send(WindowsShortcut.paste.strokes)
         case .withdraw: withSession { pt_rdp_clipboard_offer($0, nil, 0) }

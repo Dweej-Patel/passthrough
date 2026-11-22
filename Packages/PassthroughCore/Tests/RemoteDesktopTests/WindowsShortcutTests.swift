@@ -72,7 +72,7 @@ final class RDPClipboardTests: XCTestCase {
         var clipboard = RDPClipboard()
         clipboard.copyAsked(now: 100)
         XCTAssertEqual(clipboard.changed(hasText: true, now: 100.3), .fetch)
-        XCTAssertEqual(clipboard.fetched(.text("hello")), .copied(.text("hello")))
+        XCTAssertEqual(clipboard.fetched(.text("hello"), now: 100.5), .copied(.text("hello")))
         // The window closed with the fetch: its deadline says nothing more.
         XCTAssertNil(clipboard.copyDeadline(now: 103))
     }
@@ -84,7 +84,7 @@ final class RDPClipboardTests: XCTestCase {
         // After the window.
         XCTAssertNil(clipboard.changed(hasText: true, now: 102.5))
         // And an answer nobody asked for is dropped.
-        XCTAssertNil(clipboard.fetched(.text("pushed")))
+        XCTAssertNil(clipboard.fetched(.text("pushed"), now: 102.6))
     }
 
     func testOneCopyFetchesOnce() {
@@ -93,8 +93,24 @@ final class RDPClipboardTests: XCTestCase {
         XCTAssertEqual(clipboard.changed(hasText: true, now: 100.1), .fetch)
         // A second change in the same window isn't fetched again.
         XCTAssertNil(clipboard.changed(hasText: true, now: 100.2))
-        XCTAssertEqual(clipboard.fetched(.text("a")), .copied(.text("a")))
-        XCTAssertNil(clipboard.fetched(.text("b")))
+        XCTAssertEqual(clipboard.fetched(.text("a"), now: 100.3), .copied(.text("a")))
+        XCTAssertNil(clipboard.fetched(.text("b"), now: 100.4))
+    }
+
+    func testAnAnswerAfterTheFetchWaitIsDropped() {
+        var clipboard = RDPClipboard()
+        clipboard.copyAsked(now: 100)
+        XCTAssertEqual(clipboard.changed(hasText: true, now: 100.5), .fetch)
+        // The PC holds its answer back: the wait ends with nothing copied...
+        XCTAssertNil(clipboard.fetchDeadline(now: 103))
+        XCTAssertEqual(clipboard.fetchDeadline(now: 103.5), .copied(.nothing))
+        // ...and the answer it sends later, when it chooses, is dropped.
+        XCTAssertNil(clipboard.fetched(.text("swapped"), now: 400))
+        // Same if the deadline hasn't run yet but the answer is late.
+        clipboard.copyAsked(now: 500)
+        XCTAssertEqual(clipboard.changed(hasText: true, now: 500.1), .fetch)
+        XCTAssertNil(clipboard.fetched(.text("late"), now: 503.2))
+        XCTAssertEqual(clipboard.fetchDeadline(now: 503.2), .copied(.nothing))
     }
 
     func testNothingSelectedAndNotText() {
@@ -108,7 +124,7 @@ final class RDPClipboardTests: XCTestCase {
         XCTAssertNil(clipboard.copyDeadline(now: 203))
         clipboard.copyAsked(now: 300)
         XCTAssertEqual(clipboard.changed(hasText: true, now: 300.5), .fetch)
-        XCTAssertEqual(clipboard.fetched(.tooLong), .copied(.tooLong))
+        XCTAssertEqual(clipboard.fetched(.tooLong, now: 301), .copied(.tooLong))
     }
 
     func testPasteGoesOnceWhenThePCTookTheOfferOrAfterAMoment() {
