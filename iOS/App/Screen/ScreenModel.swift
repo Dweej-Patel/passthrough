@@ -744,7 +744,8 @@ final class ScreenModel: ObservableObject {
             windowsAsked = shape
             let made = RemoteDesktop.backend(stream: stream, initialBytes: initialBytes, certSHA256: certSHA256, login: login,
                                              width: shape.width, height: shape.height, desktopScale: shape.desktopScale,
-                                             deviceScale: shape.deviceScale, clientName: ThisDevice.name) { [weak self] event in
+                                             deviceScale: shape.deviceScale, clientName: ThisDevice.name,
+                                             slowLink: readyPath == .relay) { [weak self] event in
                 MainActor.assumeIsolated { self?.handle(event, generation: gen, token: token) }
             }
             guard let made else {

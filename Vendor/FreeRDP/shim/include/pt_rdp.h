@@ -81,6 +81,9 @@ typedef struct {
     uint32_t desktop_scale, device_scale;
     /** 0: no H.264 (the fallback when it is slower than the progressive codec). */
     int allow_h264;
+    /** 1: tell Windows not to wait for each frame's acknowledgement (GFX queueDepth = SUSPEND). Over a relay
+        every acknowledgement is a full round trip, and Windows idles waiting for them ("skipped for client"). */
+    int suspend_frame_acks;
 } pt_rdp_config;
 
 /** The desktop's shape, as display control takes it. */

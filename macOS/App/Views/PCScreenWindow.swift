@@ -628,7 +628,7 @@ final class PCScreenModel: ObservableObject, RemoteScreenSource {
         self.engine = engine
         engine.start(username: login.username, password: login.password, certSHA256: certSHA256, clientName: "Mac",
                      width: shape.width, height: shape.height, desktopScale: shape.desktopScale, deviceScale: shape.deviceScale,
-                     transport: helperEnd) { [weak self] started in
+                     slowLink: path == .relay, transport: helperEnd) { [weak self] started in
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
                     guard let self, gen == self.generation, !started else { return }

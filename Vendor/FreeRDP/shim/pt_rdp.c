@@ -664,6 +664,7 @@ static BOOL configure(rdpSettings *settings, const pt_rdp_config *config) {
     SET_BOOL(GfxProgressiveV2, 1);
     SET_BOOL(GfxPlanar, 1);
     SET_BOOL(GfxSmallCache, 1);
+    SET_BOOL(GfxSuspendFrameAck, config->suspend_frame_acks);
     SET_UINT32(ColorDepth, 32);
     SET_BOOL(SoftwareGdi, 1);
     SET_BOOL(RemoteFxCodec, 0);

@@ -36,13 +36,13 @@ public enum RemoteDesktop {
     /// engine or with the kill switch off. Call `start()` on it.
     public static func backend(stream: any ByteStream, initialBytes: Data, certSHA256: String, login: ScreenLogin,
                                width: Int, height: Int, desktopScale: Int = 100, deviceScale: Int = 100, clientName: String,
-                               queue: DispatchQueue = .main, painter: (any RemoteDesktopPainter)? = nil,
+                               slowLink: Bool = false, queue: DispatchQueue = .main, painter: (any RemoteDesktopPainter)? = nil,
                                onEvent: @escaping (ScreenBackendEvent) -> Void) -> (any ScreenBackend)? {
         #if canImport(FreeRDP)
         guard isEnabled else { return nil }
         return RemoteDesktopBackend(stream: stream, initialBytes: initialBytes, certSHA256: certSHA256, login: login,
                                     layout: .init(width: width, height: height, desktopScale: desktopScale, deviceScale: deviceScale),
-                                    clientName: clientName, queue: queue, painter: painter, onEvent: onEvent)
+                                    clientName: clientName, slowLink: slowLink, queue: queue, painter: painter, onEvent: onEvent)
         #else
         return nil
         #endif

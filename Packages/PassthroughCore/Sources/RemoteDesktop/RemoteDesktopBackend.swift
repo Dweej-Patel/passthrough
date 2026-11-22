@@ -69,13 +69,18 @@ public final class RemoteDesktopBackend: ScreenBackend, @unchecked Sendable {
     private var scrollRemainder = CGPoint.zero
     private var buttons: ScreenButtons = []
 
+    private let slowLink: Bool
+
     /// The clipboard's rules; on the callback queue only (copy, paste and the engine's clipboard callbacks all arrive there).
     private var clipboard = RDPClipboard()
 
     /// `certSHA256`: `rdpReady`'s, 64 lowercase hex. `clientName`: the device's kind ("iPhone"), never its own name.
+    /// `slowLink`: the stream goes through a relay, where Windows waiting on each frame's acknowledgement stalls the
+    /// picture; it's told not to.
     public init(stream: any ByteStream, initialBytes: Data = Data(), certSHA256: String, login: ScreenLogin, layout: Layout,
-                clientName: String, queue: DispatchQueue = .main, painter: (any RemoteDesktopPainter)? = nil,
+                clientName: String, slowLink: Bool = false, queue: DispatchQueue = .main, painter: (any RemoteDesktopPainter)? = nil,
                 onEvent: @escaping (ScreenBackendEvent) -> Void) {
+        self.slowLink = slowLink
         self.stream = stream
         self.initialBytes = initialBytes
         self.certSHA256 = certSHA256
@@ -226,6 +231,7 @@ public final class RemoteDesktopBackend: ScreenBackend, @unchecked Sendable {
                         config.desktop_scale = UInt32(layout.desktopScale)
                         config.device_scale = UInt32(layout.deviceScale)
                         config.allow_h264 = 1
+                        config.suspend_frame_acks = slowLink ? 1 : 0
                         return pt_rdp_new(&config, &callbacks)
                     }
                 }

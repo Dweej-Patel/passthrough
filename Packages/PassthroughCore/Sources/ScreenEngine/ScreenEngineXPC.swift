@@ -10,8 +10,9 @@ import IOSurface
     /// Starts the one session this helper runs. `transport`: the helper's end of the socket pair that carries Remote
     /// Desktop's bytes. `certSHA256`: the certificate the PC's Remote Desktop must present (64 lowercase hex).
     /// The reply says whether the session started; what happens to it comes through `ScreenEngineClientXPC`.
+    /// `slowLink`: the connection goes through a relay (Windows is told not to wait for frame acknowledgements).
     func start(username: String, password: String, certSHA256: String, clientName: String, width: Int, height: Int,
-               desktopScale: Int, deviceScale: Int, transport: FileHandle, reply: @escaping (Bool) -> Void)
+               desktopScale: Int, deviceScale: Int, slowLink: Bool, transport: FileHandle, reply: @escaping (Bool) -> Void)
     /// The pointer at (x, y) in desktop pixels with `buttons` held (1 left, 2 middle, 4 right).
     func pointer(x: Int, y: Int, buttons: Int)
     /// Content follows the fingers by (dx, dy) desktop pixels, the pointer at (x, y); `notch`: pixels a wheel notch is worth.

@@ -99,7 +99,7 @@ final class EngineSession: NSObject, ScreenEngineXPC, @unchecked Sendable {
     }
 
     func start(username: String, password: String, certSHA256: String, clientName: String, width: Int, height: Int,
-               desktopScale: Int, deviceScale: Int, transport: FileHandle, reply: @escaping (Bool) -> Void) {
+               desktopScale: Int, deviceScale: Int, slowLink: Bool, transport: FileHandle, reply: @escaping (Bool) -> Void) {
         // The descriptor is this process's own copy from here on, whatever becomes of the handle.
         let descriptor = dup(transport.fileDescriptor)
         DispatchQueue.main.async { [self] in
@@ -114,7 +114,7 @@ final class EngineSession: NSObject, ScreenEngineXPC, @unchecked Sendable {
             guard let backend = RemoteDesktop.backend(
                 stream: stream, initialBytes: Data(), certSHA256: certSHA256,
                 login: ScreenLogin(username: username, password: password), width: width, height: height,
-                desktopScale: desktopScale, deviceScale: deviceScale, clientName: clientName, queue: .main, painter: painter,
+                desktopScale: desktopScale, deviceScale: deviceScale, clientName: clientName, slowLink: slowLink, queue: .main, painter: painter,
                 onEvent: { [weak self] event in self?.handle(event) }) else {
                 stream.cancel()
                 return reply(false)
