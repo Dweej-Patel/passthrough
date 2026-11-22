@@ -3,6 +3,21 @@ import Foundation
 /// What a host says about itself in `host`, sent right after `ready` (after
 /// `macInfo`) and again whenever it changes (protocol/README.md, "The host").
 /// Every field is optional; a host that sends no `host` is a Mac from before it.
+/// A host's own monitor (`host.display`): its pixels, and its scale in percent (100, 125, 150 and so on).
+public struct HostDisplay: Codable, Equatable, Sendable {
+    public var width: Int
+    public var height: Int
+    public var scale: Int
+    public init(width: Int, height: Int, scale: Int) {
+        self.width = width; self.height = height; self.scale = scale
+    }
+
+    /// Sides of 1 to 16384 pixels and a scale of 100 to 500 percent; anything else is dropped whole.
+    public var isValid: Bool {
+        (1...16384).contains(width) && (1...16384).contains(height) && (100...500).contains(scale)
+    }
+}
+
 public struct HostInfo: Codable, Equatable, Sendable {
     /// `mac` or `windows`; a client keeps a kind it doesn't know and treats it as neither.
     public var kind: String?
@@ -33,13 +48,16 @@ public struct HostInfo: Codable, Equatable, Sendable {
     public var user: String?
     /// Seconds on mains until the host sleeps; 0 for never.
     public var sleepAfter: Int?
+    /// A PC's own monitor (its pixels and its scale), read while the account's session is on the console. A Mac sends none.
+    public var display: HostDisplay?
 
     public init(kind: String? = nil, os: String? = nil, signedIn: Bool? = nil, app: Bool? = nil, console: String? = nil,
                 idleSeconds: Int? = nil, shells: [HostShell]? = nil, screens: [String]? = nil, rdp: String? = nil,
-                access: HostAccess? = nil, lock: Bool? = nil, idKey: String? = nil, user: String? = nil, sleepAfter: Int? = nil) {
+                access: HostAccess? = nil, lock: Bool? = nil, idKey: String? = nil, user: String? = nil, sleepAfter: Int? = nil,
+                display: HostDisplay? = nil) {
         self.kind = kind; self.os = os; self.signedIn = signedIn; self.app = app; self.console = console
         self.idleSeconds = idleSeconds; self.shells = shells; self.screens = screens; self.rdp = rdp; self.access = access
-        self.lock = lock; self.idKey = idKey; self.user = user; self.sleepAfter = sleepAfter
+        self.lock = lock; self.idKey = idKey; self.user = user; self.sleepAfter = sleepAfter; self.display = display
     }
 
     public static let kindMac = "mac", kindWindows = "windows"
@@ -61,6 +79,7 @@ public struct HostInfo: Codable, Equatable, Sendable {
         if let console, !HostInfo.consoleStates.contains(console) { info.console = nil }
         if let idleSeconds, idleSeconds < 0 { info.idleSeconds = nil }
         if let sleepAfter, sleepAfter < 0 { info.sleepAfter = nil }
+        if let display, !display.isValid { info.display = nil }
         if let rdp, !HostInfo.isLine(rdp, max: 32) { info.rdp = nil }
         if let user, !HostInfo.isLine(user, max: 256) { info.user = nil }
         if let idKey, !(idKey.utf8.count <= 512 && idKey.utf8.allSatisfy { ($0 >= 0x30 && $0 <= 0x39) || ($0 >= 0x61 && $0 <= 0x66) }) { info.idKey = nil }
