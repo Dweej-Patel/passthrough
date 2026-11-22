@@ -140,7 +140,7 @@ The other verbs are what Settings runs for you (`--configure screen`, `screen-cl
 - anyone viewing the screen, with **Stop**.
 
 Below that, two tabs, and the flyout remembers which one you left open:
-- **This PC:** the phones on the cable, with the pairing code box when one needs it, and *Stay awake while plugged in*.
+- **This PC:** the phones on the cable, with the pairing code box when one needs it (the tab reads *This PC · Pair* and comes forward then), and *Stay awake on mains power*.
 - **Remote** (*Remote · 2* while two devices are on the PC):
   - a line saying who can reach this PC, which opens Settings ▸ Remote access;
   - *On this PC now*: each phone or computer connected, with shells open or viewing, and **Stop**, which ends its shells and any view and keeps its access;
@@ -155,9 +155,9 @@ The tray icon gets an amber dot, and Windows shows a notification titled with wh
 - **Remote access:**
   - *Use this PC's shell from your phones* turns Remote access on or off, with a line saying how phones reach the PC. The first time, *Set up the screen too* (ticked) sets up Remote Desktop behind the same administrator prompt. Where the screen can't be set up (Windows Home, another firewall), Remote access still turns on and the line says why.
   - *Screen, through Remote Desktop*: its state in one sentence, and the one button that fixes it: **Set up…**, **Turn on**, **Close it**, **Require it** or **Try again**.
-  - *Stay awake while plugged in*: a PC that sleeps can't answer. While a phone is connected the PC stays awake anyway.
+  - *Stay awake on mains power*: a PC that sleeps can't answer. While a phone is connected the PC stays awake anyway.
   - *Phones*: one row per phone paired with this PC. Each row has *Screen* (may see the screen), *Share* (may give your other computers access here), **Stop**, **Revoke…** (takes its access away; it stays paired) and **Forget…** (forgets the pairing and the access).
-- **Your computers:** *Computers with access*, the computers a phone gave access to this PC. Each has **Allow screen** while its screen waits for you (**Turn off screen** once it may see it) and **Revoke…**.
+- **Computers with access:** the computers a phone gave access to this PC. Each has **Allow screen** while its screen waits for you (**Turn off screen** once it may see it) and **Revoke…**.
 - **Advanced:**
   - *Keep shell history*: what phones' shells showed, kept for you to look back at. Only your Windows account can open it. You can also delete it.
   - *Relay*: your own iroh relay and its token, or empty for the public relays.
@@ -234,7 +234,7 @@ In this order, from a clean PC.
    - Try it locked, signed out after a restart, with the monitor off, and with a UAC prompt up.
 6. **Share with a Mac.** On the phone, share this PC with your Mac.
    - The PC shows "*iPhone* gave *MacBook* access to this PC's shell. Let it see the screen too?"
-   - Allow it. The Mac opens a PC window. **Revoke…** in Settings ▸ Your computers ends it.
+   - Allow it. The Mac opens a PC window. **Revoke…** in Settings ▸ Computers with access ends it.
 7. **Your computers.** Share your Mac with this PC from the phone. Then, in the flyout's Remote tab, choose *Show your computers*:
    - Windows Hello asks first;
    - **New shell** opens a Windows Terminal tab titled with the Mac's name;

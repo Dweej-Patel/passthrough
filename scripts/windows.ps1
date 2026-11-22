@@ -334,7 +334,7 @@ function Assert-AdministratorAccount {
     $claims = [System.Security.Principal.WindowsIdentity]::GetCurrent().Claims
     if ($claims | Where-Object { $_.Value -eq 'S-1-5-32-544' }) { return }
     Fail ('Your Windows account isn''t an administrator, so setup run from here would be set up for whoever approves the prompt. ' +
-        'Build with: scripts/windows.ps1 build, then open the built Passthrough.exe and choose Settings ▸ Remote access ▸ Turn on.')
+        'Build with: scripts/windows.ps1 build, then open the built Passthrough.exe and turn on Settings ▸ Remote access ▸ Use this PC''s shell from your phones.')
 }
 
 <#
