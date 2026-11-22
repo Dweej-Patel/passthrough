@@ -463,6 +463,11 @@ these steps as written and check each one before building.
   builds before a clean reinstall removes anything, keeps your own changes to
   the lock files, and refuses `install` and `update` from a standard account
   (turn Remote access on from the tray app's Settings instead).
+* `scripts/windows.ps1` run from a PowerShell that is itself elevated restarted
+  the tray app as administrator, where it hosts no shells: phones connected but
+  couldn't open one. It now starts the tray app as you, through Explorer, and
+  `doctor` says when the tray app runs as administrator; the app logs why it
+  doesn't link to the service then.
 
 ### Changed (Windows, from the second review)
 

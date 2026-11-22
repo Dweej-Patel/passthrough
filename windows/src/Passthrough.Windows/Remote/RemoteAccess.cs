@@ -224,6 +224,7 @@ public sealed class RemoteAccess : IAccessAdmin, IDisposable
         if (UserEnvironment.IsElevated())
         {
             _problem = "Passthrough can't host shells when it runs as administrator. Close it and open it normally.";
+            _log?.Invoke("service: not linking, because this copy runs as administrator (it hosts no shells)");
             StatusChanged?.Invoke();
             return Task.CompletedTask;
         }
