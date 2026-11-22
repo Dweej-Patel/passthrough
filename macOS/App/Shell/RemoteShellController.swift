@@ -39,6 +39,8 @@ final class RemoteShellController: ObservableObject {
     /// actor, while Remote shell is on. Until then `host` carries no `idKey`, so phones don't hand
     /// this Mac access it couldn't prove.
     private let computerIdentity = Locked<ComputerIdentity?>(nil)
+    /// The key this Mac signs with when it reaches another computer (a `computer.` credential); nil until Remote shell made it.
+    nonisolated var identityForReaching: (any ComputerIdentitySigning)? { computerIdentity.get() }
     private let passNotice = NotchNotice()
     /// Notices to phones through Apple's push service.
     let notifications = PhoneNotifications()

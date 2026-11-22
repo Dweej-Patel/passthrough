@@ -1,9 +1,19 @@
+import CoreGraphics
 import Foundation
 import PassthroughCore
 import ScreenClient
 #if canImport(FreeRDP)
 import FreeRDP
 #endif
+
+/// Takes a PC's pixels straight from the engine, in place of the backend's own pictures (`.image`): a surface
+/// shared with another process, on a Mac. Called on the engine's threads, one call at a time.
+public protocol RemoteDesktopPainter: AnyObject, Sendable {
+    /// The desktop is now this size (first, and after every resize); `.size` follows.
+    func desktop(width: Int, height: Int)
+    /// `dirty` changed in the desktop's BGRA pixels (`stride` bytes a row); valid only during the call.
+    func painted(_ bgra: UnsafePointer<UInt8>, stride: Int, width: Int, height: Int, dirty: CGRect)
+}
 
 /// Whether this build can show a PC's screen.
 public enum RemoteDesktop {
@@ -26,12 +36,13 @@ public enum RemoteDesktop {
     /// engine or with the kill switch off. Call `start()` on it.
     public static func backend(stream: any ByteStream, initialBytes: Data, certSHA256: String, login: ScreenLogin,
                                width: Int, height: Int, desktopScale: Int = 100, deviceScale: Int = 100, clientName: String,
-                               queue: DispatchQueue = .main, onEvent: @escaping (ScreenBackendEvent) -> Void) -> (any ScreenBackend)? {
+                               queue: DispatchQueue = .main, painter: (any RemoteDesktopPainter)? = nil,
+                               onEvent: @escaping (ScreenBackendEvent) -> Void) -> (any ScreenBackend)? {
         #if canImport(FreeRDP)
         guard isEnabled else { return nil }
         return RemoteDesktopBackend(stream: stream, initialBytes: initialBytes, certSHA256: certSHA256, login: login,
                                     layout: .init(width: width, height: height, desktopScale: desktopScale, deviceScale: deviceScale),
-                                    clientName: clientName, queue: queue, onEvent: onEvent)
+                                    clientName: clientName, queue: queue, painter: painter, onEvent: onEvent)
         #else
         return nil
         #endif

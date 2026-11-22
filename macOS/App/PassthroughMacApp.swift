@@ -40,6 +40,15 @@ struct PassthroughMacApp: App {
         }
         .defaultSize(width: 1280, height: 820)
 
+        // A PC's screen, through its Remote Desktop: its own window kind, so another Mac's is untouched.
+        WindowGroup("PC Screen", id: PCScreenWindow.id, for: String.self) { $hostID in
+            if let hostID {
+                PCScreenWindow(hostID: hostID)
+                    .environmentObject(session.shell)
+            }
+        }
+        .defaultSize(width: 1280, height: 820)
+
         Window("Welcome to Passthrough", id: WelcomeView.id) {
             WelcomeView()
                 .environmentObject(session)

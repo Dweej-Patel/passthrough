@@ -16,15 +16,6 @@ import ScreenClient
 /// Threads: one engine thread per session makes every FreeRDP call; `io`
 /// owns the stream's reads and writes; input comes from main and events go
 /// to the queue given to `init` (main).
-/// Takes a PC's pixels straight from the engine, in place of the backend's own pictures (`.image`): a surface
-/// shared with another process, on a Mac. Called on the engine's threads, one call at a time.
-public protocol RemoteDesktopPainter: AnyObject, Sendable {
-    /// The desktop is now this size (first, and after every resize); `.size` follows.
-    func desktop(width: Int, height: Int)
-    /// `dirty` changed in the desktop's BGRA pixels (`stride` bytes a row); valid only during the call.
-    func painted(_ bgra: UnsafePointer<UInt8>, stride: Int, width: Int, height: Int, dirty: CGRect)
-}
-
 public final class RemoteDesktopBackend: ScreenBackend, @unchecked Sendable {
     public let capabilities: ScreenCapabilities = [.smoothScroll, .unicodeText, .resize, .drawsOwnPointer, .signIn, .windowsKeys]
     public var macStream: (any MacStreamControls)? { nil }

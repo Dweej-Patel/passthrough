@@ -40,6 +40,7 @@ struct MenuPanelView: View {
                     Switches()
                     PhoneHereSection()
                     OtherScreensSection()
+                    PCScreensSection()
                     Details()
                 }
                 .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { bodyHeight = $0 }
