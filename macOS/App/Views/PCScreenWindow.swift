@@ -149,7 +149,8 @@ struct PCScreenWindow: View {
     }
 
     private func start() {
-        guard let computer, computer.scopes.contains(Computers.scopeScreen) else {
+        // Access still waiting for the PC's owner is tried too: the PC says whether it has been allowed since.
+        guard let computer, PCScreensSection.mayAskForScreen(computer) else {
             model.end("This Mac has no access to that computer's screen. Share it again from your phone.")
             return
         }
@@ -930,9 +931,14 @@ struct PCScreensSection: View {
     @EnvironmentObject private var shell: RemoteShellController
     @Environment(\.openWindow) private var openWindow
 
-    private var computers: [ReachableComputer] {
-        shell.reachableComputers.filter { $0.credential.hostKind == HostInfo.kindWindows && $0.scopes.contains(Computers.scopeScreen) }
+    /// Not a Mac (another Mac's screen is a pass, above), with the screen scope: given, or still waiting for the
+    /// PC's owner to allow it. The hand-over records "waiting"; only the PC knows whether it has been allowed since.
+    static func mayAskForScreen(_ computer: ReachableComputer) -> Bool {
+        computer.credential.hostKind != HostInfo.kindMac
+            && (computer.scopes.contains(Computers.scopeScreen) || computer.pending?.contains(Computers.scopeScreen) == true)
     }
+
+    private var computers: [ReachableComputer] { shell.reachableComputers.filter(Self.mayAskForScreen) }
 
     var body: some View {
         if !computers.isEmpty {
@@ -959,7 +965,8 @@ struct PCScreensSection: View {
                     }
                     .buttonStyle(.plain)
                     .background(Color.primary.opacity(0.05), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
-                    .help("Open \(computer.credential.macName)'s screen in a window." + (computer.from.map { " Handed over by \($0)." } ?? ""))
+                    .help("Open \(computer.credential.macName)'s screen in a window." + (computer.from.map { " Handed over by \($0)." } ?? "")
+                          + (computer.scopes.contains(Computers.scopeScreen) ? "" : " Its owner has to allow the screen at the PC first."))
                 }
             }
         }
