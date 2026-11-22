@@ -108,14 +108,32 @@ public sealed class ServiceRemote : IDisposable
     public NoticeBoard Notices { get; } = new();
 
     private DateTime _lastExposureCheck = DateTime.MinValue;
+    private string? _lastVerdict;
 
-    /// <summary>Every minute: is Remote Desktop open to the network where Passthrough promised it isn't? The notice follows.</summary>
+    /// <summary>
+    /// Every minute: is Remote Desktop open to the network where Passthrough promised it isn't? The notice follows.
+    /// What phones are told (<c>host</c>'s <c>rdp</c>) is logged when it changes, with the read that failed if one did.
+    /// </summary>
     private void CheckExposure()
     {
-        if (RemoteDesktop is null || DateTime.UtcNow - _lastExposureCheck < TimeSpan.FromSeconds(60)) return;
+        if (DateTime.UtcNow - _lastExposureCheck < TimeSpan.FromSeconds(60)) return;
         _lastExposureCheck = DateTime.UtcNow;
+        if (RemoteDesktop is null)
+        {
+            LogVerdict("screen: Screen isn't set up on this PC");
+            return;
+        }
         var verdict = RemoteDesktop.Verdict(null);
+        var failed = RemoteDesktop.Facts().FailedRead;
+        LogVerdict($"screen: Remote Desktop is {verdict.Rdp}{(verdict.Reason is { } why ? $": {why}" : "")}{(failed is null ? "" : $" (couldn't read {failed})")}");
         Notices.Exposed(Directory.Accounts, verdict.Rdp == Passthrough.Core.Screen.RemoteDesktopVerdict.Exposed ? verdict.Reason ?? "" : null);
+    }
+
+    private void LogVerdict(string line)
+    {
+        if (line == _lastVerdict) return;
+        _lastVerdict = line;
+        _log(line);
     }
 
     /// <summary>This PC's Remote Desktop, when Screen is set up.</summary>

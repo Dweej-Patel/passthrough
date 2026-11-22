@@ -23,7 +23,7 @@ public static class RemoteDesktopProbe
 
     public static RemoteDesktopFacts Read()
     {
-        var failed = false;
+        string? failed = null;
         using var hklm = RegistryKey.OpenBaseKey(RegistryHive.LocalMachine, RegistryView.Registry64);
         int? Dword(string key, string name)
         {
@@ -32,7 +32,7 @@ public static class RemoteDesktopProbe
                 using var k = hklm.OpenSubKey(key);
                 return k?.GetValue(name) is int v ? v : null;
             }
-            catch (Exception e) when (e is System.Security.SecurityException or UnauthorizedAccessException or IOException) { failed = true; return null; }
+            catch (Exception e) when (e is System.Security.SecurityException or UnauthorizedAccessException or IOException) { failed ??= $"{name} ({e.GetType().Name})"; return null; }
         }
         var policyDeny = Dword(Policy, "fDenyTSConnections");
         var policyNla = Dword(Policy, "UserAuthentication");
@@ -45,7 +45,7 @@ public static class RemoteDesktopProbe
             status = service.Status();
             start = service.Query()?.StartType;
         }
-        catch (System.ComponentModel.Win32Exception) { failed = true; }
+        catch (System.ComponentModel.Win32Exception e) { failed ??= $"Remote Desktop's service (error {e.NativeErrorCode})"; }
         var port = Dword(RdpTcp, "PortNumber") is { } p and > 0 and < 65536 ? p : 3389;
         var firewall = FirewallFacts(port, ref failed);
         bool? localRulesIgnored = false;
@@ -66,7 +66,8 @@ public static class RemoteDesktopProbe
             OverridingAllowRule = firewall.OverridingAllowRule,
             FirewallManagedElsewhere = firewall.ManagedElsewhere,
             LocalRulesIgnored = localRulesIgnored,
-            ReadFailed = failed,
+            ReadFailed = failed is not null,
+            FailedRead = failed,
         };
     }
 
@@ -90,7 +91,7 @@ public static class RemoteDesktopProbe
 
     private const int ProfilesAll = 0x7FFFFFFF, Inbound = 1, Block = 0, Allow = 1;
 
-    private static Firewall FirewallFacts(int port, ref bool failed)
+    private static Firewall FirewallFacts(int port, ref string? failed)
     {
         try
         {
@@ -132,7 +133,7 @@ public static class RemoteDesktopProbe
         }
         catch (Exception e) when (e is COMException or InvalidCastException or Microsoft.CSharp.RuntimeBinder.RuntimeBinderException or TypeLoadException)
         {
-            failed = true;
+            failed ??= $"the firewall ({e.GetType().Name} 0x{e.HResult:x8})";
             return new Firewall(null, null, null, null, null);
         }
     }
