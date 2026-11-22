@@ -39,9 +39,10 @@ Third-party components distributed with this repository keep their own licences:
   its Rust dependencies (MIT and/or Apache-2.0 licensed crates; versions pinned in
   windows/native/iroh-bridge/Cargo.lock). Built from source into passthrough_iroh.dll by
   windows/native/build-iroh-bridge.ps1 (and CI), which ships beside the Windows app.
-<!-- TODO: the Windows app also ships Microsoft.WindowsAppSDK 1.8.251106002, H.NotifyIcon.WinUI 2.2.0,
-     System.Security.Cryptography.ProtectedData 10.0.0 (MIT) and, in a self-contained build, the .NET runtime.
-     Confirm each licence and add them here (the Windows session owns those packages). -->
+* Microsoft.WindowsAppSDK (https://github.com/microsoft/windowsappsdk), 1.8.251106002 — Microsoft Software License Terms for the Windows App SDK (a redistributable runtime, not open source; the terms are in the package's license.txt, with its NOTICE.txt). Fetched from nuget.org (pinned in windows/src/Passthrough.App/packages.lock.json); its runtime DLLs and resources ship beside the Windows app (WinUI 3, unpackaged).
+* H.NotifyIcon.WinUI (https://github.com/HavenDV/H.NotifyIcon), 2.2.0 — MIT. The Windows tray icon.
+* System.Security.Cryptography.ProtectedData (https://dot.net), 10.0.0 — MIT. DPAPI for the Windows app's and service's stores.
+* .NET 10 runtime (https://github.com/dotnet/runtime) — MIT, with its own third-party notices (THIRD-PARTY-NOTICES.TXT in the runtime). Included in the self-contained Windows build that scripts/build-windows.ps1 makes.
 
 * android/app/src/main/res/font/nunito.ttf — Nunito, SIL Open Font License 1.1.
   See android/licenses/NUNITO-OFL.txt.

@@ -112,7 +112,11 @@ final class ComputerShareModel: ObservableObject {
                 case .failed(.badRequest, _):
                     self.failed(self.granted == nil ? "Couldn't ask \(viewerHost.macName). Try again." : tooOld)
                 case .failed(.passConflict, _):
-                    self.failed("\(viewerHost.macName) already has access to a computer called \(sharedHost.macName) with different details. Remove it under Other computers on \(viewerHost.macName), then try again.")
+                    let v = viewerHost.macName, h = sharedHost.macName
+                    // Where the viewer forgets its older copy: a PC lists it under Your computers; a Mac has no list yet.
+                    self.failed(shell.kind(of: viewerHost.macID) == .windows
+                        ? "\(v) already has different access to \(h). On \(v), remove \(h) under Your computers in Passthrough's tray icon, then share again."
+                        : "\(v) already has different access to \(h), and a Mac can't remove it on its own yet. On \(v), revoke this \(ThisDevice.name) in Settings ▸ Remote Shell, plug it in again, then share again.")
                 case let .failed(error, _):
                     self.failed(error.message ?? "\(viewerHost.macName) refused the access.")
                 case .disconnected:
