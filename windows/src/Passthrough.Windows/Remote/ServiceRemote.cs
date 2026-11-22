@@ -106,6 +106,8 @@ public sealed class ServiceRemote : IDisposable
             trays.Tell(account, new PipeAdminEvent { What = PipeAdminEvent.Access });
             // What each phone may do is in host.access: a connected phone hears a change to Screen or Share at once.
             Gate.PushHost();
+            // And the computers it gave access to (a grant, a revoke, the owner allowing a screen), to phones that asked.
+            Gate.PushComputers();
         };
     }
 

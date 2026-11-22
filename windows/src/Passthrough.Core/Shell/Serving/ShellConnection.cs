@@ -319,6 +319,10 @@ public sealed class ShellConnection : IShellAttachment
                 _host.CloseSessions(revoking);
                 Send(new ShellEnvelope(ShellEnvelope.ComputerRevoked));
                 break;
+            case ShellEnvelope.ListComputers:
+                _listsComputers = true;
+                SendComputers();
+                break;
             case ShellEnvelope.List:
                 SendSessions(_host.Sessions);
                 break;
@@ -504,6 +508,30 @@ public sealed class ShellConnection : IShellAttachment
     internal void SendState()
     {
         if (ShellScope && _gate.Hooks.State(PhoneId) is { } state) Send(new ShellEnvelope(ShellEnvelope.MacState) { State = state });
+    }
+
+    /// <summary>Asked for the computers this phone gave access to: from then on it hears each change.</summary>
+    private volatile bool _listsComputers;
+
+    /// <summary><c>computerList</c>, on a connection that asked for it once (older phones never see it).</summary>
+    internal void SendComputers()
+    {
+        if (!_listsComputers) return;
+        var connected = _gate.ConnectedPhones.ToHashSet(StringComparer.Ordinal);
+        Send(new ShellEnvelope(ShellEnvelope.ComputerList)
+        {
+            Computers = [.. _gate.Access.ComputersGrantedBy(PhoneId).Take(Access.Computers.MaxTotal).Select(c => new ComputerListEntry
+            {
+                PhoneID = c.Id,
+                Viewer = c.ViewerOf.Length > 0 ? c.ViewerOf : null,
+                Name = Access.ShellAccessStore.CleanLabel(c.Name),
+                Kind = c.Kind,
+                Scopes = [.. new[] { c.Shell == true ? Access.Computers.ScopeShell : null, c.Screen == true ? Access.Computers.ScopeScreen : null }.OfType<string>()],
+                Pending = c.ScreenPending == true ? [Access.Computers.ScopeScreen] : null,
+                Connected = connected.Contains(c.Id),
+                GrantedAt = c.GrantedAt.ToUnixTimeSeconds(),
+            })],
+        });
     }
 
     internal void SendHost()

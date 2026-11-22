@@ -77,6 +77,20 @@ data class ShellEnvelope(
     var retryAfter: Int? = null,
     /** rdpReady: SHA-256 of the certificate Remote Desktop presents, lowercase hex. */
     var certSHA256: String? = null,
+    /**
+     * Computers (stage 7): computerGrant's name, the viewing computer's id as the phone knows it (`viewer`), what it
+     * may do (`scopes`), its identity key and kind; computerGranted's key and the scopes waiting for the host's owner
+     * (`pending`). This app doesn't hand access to computers yet; the fields are modelled so the messages round-trip.
+     */
+    var name: String? = null,
+    var viewer: String? = null,
+    var key: String? = null,
+    var scopes: List<String>? = null,
+    var pending: List<String>? = null,
+    var idKey: String? = null,
+    var kind: String? = null,
+    /** computerList: the computers this phone gave access to. */
+    var computers: List<ComputerListEntry>? = null,
 ) {
     fun encodeLine(): ByteArray =
         (ControlEnvelope.json.encodeToString(serializer(), this) + "\n").toByteArray(Charsets.UTF_8)
@@ -122,10 +136,34 @@ data class ShellEnvelope(
         /** The host is about to go away (`reason`: `sleeping`, `turned_off`, `shutting_down`). */
         const val GOING_AWAY = "goingAway"
         const val VIEWING = "viewing"
+        const val COMPUTER_GRANT = "computerGrant"
+        const val COMPUTER_GRANTED = "computerGranted"
+        const val COMPUTER_PASS_SAVED = "computerPassSaved"
+        /** Takes back any computer this phone gave access to; answered `computerRevoked`. */
+        const val COMPUTER_REVOKE = "computerRevoke"
+        const val COMPUTER_REVOKED = "computerRevoked"
+        /** The computers this phone gave access to; answered `computerList`, which comes again on each change. */
+        const val LIST_COMPUTERS = "listComputers"
+        const val COMPUTER_LIST = "computerList"
 
         fun decode(line: String): ShellEnvelope = ControlEnvelope.json.decodeFromString(serializer(), line)
     }
 }
+
+/** One computer in `computerList` (protocol/README.md, *Computers*). */
+@Serializable
+data class ComputerListEntry(
+    val phoneID: String,
+    val viewer: String? = null,
+    val name: String,
+    val kind: String? = null,
+    /** Always sent (no defaults, so they are always written back too). */
+    val scopes: List<String>,
+    val pending: List<String>? = null,
+    val connected: Boolean,
+    /** Unix seconds. */
+    val grantedAt: Long,
+)
 
 /** What a phone accepts as the Mac's iroh details (grant and `macInfo`). Mirrors IrohInfo in ShellProtocol.swift. */
 object IrohInfo {

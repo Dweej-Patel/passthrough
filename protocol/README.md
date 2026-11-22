@@ -904,6 +904,31 @@ is ignored. The Mac shows a notice when a phone grants a pass. The owner sees
 each pass in the Mac's settings and can remove it like a phone. The viewing
 Mac asks for Touch ID or its password before each window it opens.
 
+### Computers
+
+A phone with shell access to a host may also give one of its other
+computers access there: the shell, the screen, or both. A screen pass
+(above) only ever sees the screen; a computer's access can be more. A host
+lets a phone do this only while its owner has allowed that phone to share
+(`host.access.share`), and it gives the screen only to a phone that may see
+the screen itself.
+
+| `t` | From | Fields | Notes |
+|---|---|---|---|
+| `computerGrant` | phone | `name`, `viewer`, `scopes`, `idKey`, `kind`? | `viewer` is the computer's own id as the phone knows it, `scopes` what it may do (`shell`, `screen`), `idKey` its identity public key (65-byte point, base64), `kind` `mac` or `windows`. |
+| `computerGranted` | host | `phoneID`, `key`, `scopes`, `pending`? | The new id (`computer.` and a UUID, minted only by the host) and its key (base64). `pending`: scopes waiting for the host's owner (`screen` on a PC, which asks its owner first). Refused with `too_many_computers` (8 a phone, 16 in all). |
+| `computerPass` | phone | `pass` | The credential for the computer to keep, as `screenPass`'s, under the new id. Answered `computerPassSaved`, or `error` (`pass_not_saved`, `pass_conflict`: it would replace access the computer already has to that host with different certificate or iroh details). |
+| `computerRevoke` | phone | `phoneID` | Takes back any computer this phone gave access to, at any time; its connections and the sessions it opened end. Answered `computerRevoked`, or `bad_request` for an id this phone didn't grant. |
+| `listComputers` | phone | | The computers this phone gave access to. Answered `computerList`, which the host sends again, unasked, whenever that list changes (a grant, a revoke, the owner allowing a screen, the computer connecting or leaving), but only on a connection that asked once, so older phones never see it. |
+| `computerList` | host | `computers` | At most 16 entries, oldest grant first, only this phone's: `phoneID`, `viewer`? (computerGrant's `viewer`), `name` (cleaned as a label), `kind`?, `scopes` (what it may do now; empty while the phone that gave it can't share it), `pending`?, `connected` (it has a live connection now), `grantedAt` (Unix seconds). |
+
+A computer granted this way also signs each proof with its identity key,
+bound to this host (the certificate's SHA-256 on TLS, the endpoint id on
+iroh), so a copied credential opens nothing. It may use what its scopes say
+and nothing else: no Keep awake or VPN, no history, no lock, no onward grant
+(`not_allowed`), and `listComputers` from a computer is `not_allowed` too.
+Removing the phone that gave it removes it.
+
 ### Address policy
 
 The Mac closes a connection from any peer outside these ranges before the TLS

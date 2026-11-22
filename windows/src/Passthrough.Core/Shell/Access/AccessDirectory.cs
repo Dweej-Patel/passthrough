@@ -28,6 +28,9 @@ public interface IShellAccess
 
     /// <summary>Takes back a computer <paramref name="granter"/> gave access to; false when it isn't one of its.</summary>
     bool RevokeComputer(string id, string granter) => false;
+
+    /// <summary>The computers <paramref name="granter"/> gave access to, each with its effective scopes (none while its granter can't share them).</summary>
+    IReadOnlyList<ShellComputer> ComputersGrantedBy(string granter) => [];
 }
 
 /// <summary>
@@ -148,6 +151,13 @@ public sealed class AccessDirectory : IShellAccess
     }
 
     public bool MayShare(string phoneId) => Owner(phoneId) is { } owner && For(owner).ShareAllowed(phoneId);
+
+    public IReadOnlyList<ShellComputer> ComputersGrantedBy(string granter)
+    {
+        if (Computers.IsComputerId(granter) || Owner(granter) is not { } owner) return [];
+        return [.. ComputersFor(owner).All.Where(c => c.GrantedBy == granter).OrderBy(c => c.GrantedAt)
+            .Select(c => Computer(c.Id) ?? c with { Shell = false, Screen = false })];
+    }
 
     public (ShellComputer? Computer, ShellError? Error) GrantComputer(string granter, string name, string viewer, string? kind, byte[] identityKey,
         IReadOnlySet<string> scopes, bool screenNeedsOwner)

@@ -110,6 +110,12 @@ these steps as written and check each one before building.
 
 ### Added
 
+* **A host tells a phone which computers it gave access to there**
+  (`listComputers` / `computerList`, protocol/README.md *Computers*), and tells
+  it again whenever that changes: what each may do now, what waits for the
+  host's owner, and whether it is connected. A phone can take any of them back
+  at any time. The PC answers in this build; the Mac and the iPhone's Share
+  sheet use it in theirs.
 * **The iPhone and iPad app knows a PC from a Mac.** A paired PC shows as a
   PC: its own words, only the rows a PC has (no Internet, Keep awake, VPN or
   Share screen), its Lock when it allows it, its own setup steps, why its

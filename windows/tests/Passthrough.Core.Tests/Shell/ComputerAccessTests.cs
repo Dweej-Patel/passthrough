@@ -41,6 +41,8 @@ public sealed class ComputerAccessTests : IAsyncDisposable
             State = _ => new HostState { Control = false },
             ComputerGranted = (phone, c) => { lock (_granted) _granted.Add((phone, c)); },
         });
+        // As the service does: a change to an account's phones or computers reaches the phones that asked.
+        _access.Changed += _ => _gate.PushComputers();
         _listener.Start();
         _ = Task.Run(async () =>
         {
@@ -221,6 +223,49 @@ public sealed class ComputerAccessTests : IAsyncDisposable
         Assert.Equal(ShellEnvelope.ComputerRevoked, (await phone.Next(ShellEnvelope.ComputerRevoked)).T);
         Assert.Null(_access.Computer(id));
     }
+
+    [Fact]
+    public async Task APhoneHearsTheComputersItGaveAccessToAndEachChange()
+    {
+        _access.For(Account).SetShareAllowed("phone-a", true);
+        var phone = await Connect("phone-a", PhoneKey);
+        await phone.Next(ShellEnvelope.Ready);
+        await phone.Send(new ShellEnvelope(ShellEnvelope.ListComputers));
+        Assert.Empty((await phone.Next(ShellEnvelope.ComputerList)).Computers!);
+
+        await phone.Send(new ShellEnvelope(ShellEnvelope.ComputerGrant) { Name = "Mac\u0007Book", Viewer = "v", Scopes = ["shell"], IdKey = Convert.ToBase64String(IdKey()), Kind = "mac" });
+        // The store's change is heard as it is written, before the grant's answer.
+        var entry = Assert.Single((await phone.Next(ShellEnvelope.ComputerList)).Computers!);
+        var id = (await phone.Next(ShellEnvelope.ComputerGranted)).PhoneID!;
+        Assert.Equal((id, "v", "MacBook", "mac", false), (entry.PhoneID, entry.Viewer, entry.Name, entry.Kind, entry.Connected));
+        Assert.Equal(["shell"], entry.Scopes);
+        Assert.Null(entry.Pending);
+
+        // The computer connects: the phone hears it; the computer itself may not ask.
+        var computer = await Connect(id, Convert.FromBase64String((await GrantKey(id))), Signer(id, Binding));
+        await computer.Next(ShellEnvelope.Ready);
+        Assert.True(Assert.Single((await phone.Next(ShellEnvelope.ComputerList)).Computers!).Connected);
+        await computer.Send(new ShellEnvelope(ShellEnvelope.ListComputers));
+        Assert.Equal("not_allowed", (await computer.Next(ShellEnvelope.Error)).Reason);
+
+        await phone.Send(new ShellEnvelope(ShellEnvelope.ComputerRevoke) { PhoneID = id });
+        Assert.Empty((await phone.Next(ShellEnvelope.ComputerList)).Computers!);
+    }
+
+    [Fact]
+    public async Task AnotherPhonesComputersArentListed()
+    {
+        _access.For(Account).SetShareAllowed("phone-a", true);
+        await Grant("shell");
+        _access.Add(Account, new ShellPhone { PhoneId = "phone-b", Label = "iPad", PairingSlot = "token.ipad.B", Key = PhoneKey, GrantedAt = DateTimeOffset.UtcNow });
+        var other = await Connect("phone-b", PhoneKey);
+        await other.Next(ShellEnvelope.Ready);
+        await other.Send(new ShellEnvelope(ShellEnvelope.ListComputers));
+        Assert.Empty((await other.Next(ShellEnvelope.ComputerList)).Computers!);
+    }
+
+    /// <summary>The key a computer was given, from the store (the grant's answer went to the phone).</summary>
+    private Task<string> GrantKey(string id) => Task.FromResult(Convert.ToBase64String(_access.ComputersFor(Account).Find(id)!.Key));
 
     [Fact]
     public async Task ARevokedComputersShellsEnd()

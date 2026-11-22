@@ -67,11 +67,17 @@ public sealed class ShellEnvelope
     public const string ScreenEnded = "screenEnded";
     /// <summary>
     /// Computers (stage 7): a phone gives another of its computers access (<c>computerGrant</c>, answered
-    /// <c>computerGranted</c>), hands it over (<c>computerPass</c>, answered <c>computerPassSaved</c>), or takes back one it
-    /// couldn't hand over (<c>computerRevoke</c>, answered <c>computerRevoked</c>).
+    /// <c>computerGranted</c>), hands it over (<c>computerPass</c>, answered <c>computerPassSaved</c>), or takes back any
+    /// computer it gave access to, at any time (<c>computerRevoke</c>, answered <c>computerRevoked</c>; its connections
+    /// and sessions end).
     /// </summary>
     public const string ComputerGrant = "computerGrant", ComputerGranted = "computerGranted", ComputerPass = "computerPass",
         ComputerPassSaved = "computerPassSaved", ComputerRevoke = "computerRevoke", ComputerRevoked = "computerRevoked";
+    /// <summary>
+    /// The computers this phone gave access to here (<c>listComputers</c>, answered <c>computerList</c>, which comes again
+    /// whenever that list changes, on a connection that asked once).
+    /// </summary>
+    public const string ListComputers = "listComputers", ComputerList = "computerList";
 
     private static readonly JsonSerializerOptions Options = new()
     {
@@ -139,6 +145,8 @@ public sealed class ShellEnvelope
     [JsonPropertyName("kind")] public string? Kind { get; set; }
     /// <summary>proof from a <c>computer.</c> id: the identity key's signature (raw r ‖ s, base64).</summary>
     [JsonPropertyName("sig")] public string? Sig { get; set; }
+    /// <summary>computerList: the computers this phone gave access to.</summary>
+    [JsonPropertyName("computers")] public List<ComputerListEntry>? Computers { get; set; }
 
     public ShellEnvelope() { }
     public ShellEnvelope(string t) { T = t; }
@@ -172,4 +180,19 @@ public sealed class ShellEnvelope
 
     /// <summary>The type only: keys, proofs, tokens and output never reach a log through this.</summary>
     public override string ToString() => $"ShellEnvelope({T})";
+}
+
+/// <summary>One computer in <c>computerList</c>: what it may do now, what waits for the owner, and whether it is connected.</summary>
+public sealed record ComputerListEntry
+{
+    [JsonPropertyName("phoneID")] public string PhoneID { get; init; } = "";
+    /// <summary>The computer's id as the phone knows it (computerGrant's <c>viewer</c>); null when the host kept none.</summary>
+    [JsonPropertyName("viewer")] public string? Viewer { get; init; }
+    [JsonPropertyName("name")] public string Name { get; init; } = "";
+    [JsonPropertyName("kind")] public string? Kind { get; init; }
+    [JsonPropertyName("scopes")] public List<string> Scopes { get; init; } = [];
+    [JsonPropertyName("pending")] public List<string>? Pending { get; init; }
+    [JsonPropertyName("connected")] public bool Connected { get; init; }
+    /// <summary>Unix seconds.</summary>
+    [JsonPropertyName("grantedAt")] public long GrantedAt { get; init; }
 }
