@@ -81,7 +81,7 @@ final class ComputerShareModel: ObservableObject {
         phase = .working("Asking \(viewerHost.macName)…")
         let tooOld = "\(viewerHost.macName) needs the latest Passthrough to use other computers."
         askedViewer = false
-        viewer =shell.oneOffConnection(to: viewerHost) { [weak self] event in
+        viewer = shell.oneOffConnection(to: viewerHost) { [weak self] event in
             MainActor.assumeIsolated {
                 guard let self, gen == self.generation else {
                     if case let .screen(stream, _) = event { stream.cancel() }

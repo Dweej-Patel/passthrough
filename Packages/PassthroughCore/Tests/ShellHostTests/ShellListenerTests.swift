@@ -1681,8 +1681,11 @@ extension ShellListenerTests {
         }
     }
 
-    private let computerID = "computer.0b1e2a3c-4d5e-4f60-8a71-92b3c4d5e6f7"
-    private let computerKey = WirelessLink.randomBytes(32)
+    // Static: an extension can't hold stored instance properties.
+    private static let computerIDValue = "computer.0b1e2a3c-4d5e-4f60-8a71-92b3c4d5e6f7"
+    private static let computerKeyValue = WirelessLink.randomBytes(32)
+    private var computerID: String { Self.computerIDValue }
+    private var computerKey: Data { Self.computerKeyValue }
 
     /// A listener that knows the phone and one computer, recorded with `recorded`'s key and `scopes`.
     private func computerListener(recorded: KeyIdentity, scopes: Set<String>) -> ShellListener {
