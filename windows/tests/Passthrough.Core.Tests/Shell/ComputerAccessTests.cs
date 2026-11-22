@@ -416,6 +416,25 @@ public sealed class ComputerAccessTests : IAsyncDisposable
     }
 
     [Fact]
+    public void TheFlyoutSeesWhoIsViewingAndCanStopAComputer()
+    {
+        Assert.True(_access.For(Account).SetShareAllowed("phone-a", true));
+        var (c, error) = _access.GrantComputer("phone-a", "MacBook", "mac-1", "mac", IdKey(), new HashSet<string> { "shell" }, screenNeedsOwner: true);
+        Assert.Null(error);
+        var cut = new List<string>();
+        var admin = new Passthrough.Core.Pipe.PipeAdminHandler(_access, () => null, _ => 1, cut.Add) { Viewing = id => id == c!.Id };
+        var list = admin.Handle(Account, new Passthrough.Core.Pipe.PipeAdminRequest { Op = Passthrough.Core.Pipe.PipeAdminRequest.List });
+        Assert.False(Assert.Single(list.Devices!).Viewing);
+        Assert.True(Assert.Single(list.Computers!).Viewing);
+
+        // Stop in the flyout's Remote tab works for a computer of this account, not for one of another's.
+        var stop = new Passthrough.Core.Pipe.PipeAdminRequest { Op = Passthrough.Core.Pipe.PipeAdminRequest.Disconnect, Phone = c!.Id };
+        Assert.Null(admin.Handle(Account, stop).Error);
+        Assert.Equal([c.Id], cut);
+        Assert.Equal(Passthrough.Core.Pipe.PipeAdminReply.Unknown, admin.Handle("S-1-5-21-9-9-9-1001", stop).Error);
+    }
+
+    [Fact]
     public void AReplacedGrantsNoticesGo()
     {
         var board = new Passthrough.Core.Pipe.NoticeBoard();

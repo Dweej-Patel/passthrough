@@ -132,6 +132,17 @@ public sealed class ShellGate
         foreach (var c in all.Where(c => !c.IsRelaying)) c.SendScreenEnded(reason);
     }
 
+    /// <summary>A phone or computer is viewing the screen now (one of its connections carries Remote Desktop's bytes).</summary>
+    public bool IsViewing(string phoneId)
+    {
+        lock (_lock) return _connections.Any(c => c.PhoneId == phoneId && c.IsRelaying);
+    }
+
+    /// <summary>A phone or computer connected or left (by id): the PC's tray shows who is on it now.</summary>
+    public event Action<string>? ConnectionsChanged;
+
+    internal void RaiseConnectionsChanged(string phoneId) => ConnectionsChanged?.Invoke(phoneId);
+
     /// <summary>The phones connected now, one entry per connection.</summary>
     public IReadOnlyList<string> ConnectedPhones { get { lock (_lock) return [.. _connections.Select(c => c.PhoneId)]; } }
 
@@ -269,6 +280,7 @@ public sealed class ShellGate
             Log?.Invoke("shell: a phone connected");
             // A computer coming or going changes its granter's computerList (connected).
             if (Computers.IsComputerId(phoneId)) PushComputers();
+            RaiseConnectionsChanged(phoneId);
             await connection.RunAsync().ConfigureAwait(false);
         }
         catch (Exception e) when (e is IOException or ObjectDisposedException or OperationCanceledException or LineTooLongException) { }
@@ -279,6 +291,7 @@ public sealed class ShellGate
             connection?.Close();
             stream.Dispose();
             if (connection is not null && Computers.IsComputerId(connection.PhoneId)) PushComputers();
+            if (connection is not null) RaiseConnectionsChanged(connection.PhoneId);
         }
     }
     private static ShellEnvelope? Decode(byte[] line)

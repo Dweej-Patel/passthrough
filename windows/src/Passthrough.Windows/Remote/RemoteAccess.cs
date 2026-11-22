@@ -240,9 +240,11 @@ public sealed class RemoteAccess : IAccessAdmin, IDisposable
 
     /// <summary>
     /// Turns Remote access on (installs or repairs the service, carrying over stage 3's relay, behind one prompt) or
-    /// off. Returns what the person is told (null when it worked).
+    /// off. With <paramref name="withScreen"/>, the same prompt also sets up the screen (Remote Desktop, kept closed to the
+    /// network); if only that part can't be done here, Remote access is turned on without it and the sentence says why.
+    /// Returns what the person is told (null when it worked).
     /// </summary>
-    public async Task<string?> SetEnabledAsync(bool on)
+    public async Task<string?> SetEnabledAsync(bool on, bool withScreen = false)
     {
         lock (_lock)
         {
@@ -263,7 +265,15 @@ public sealed class RemoteAccess : IAccessAdmin, IDisposable
                     RelayUrl = _settings.Get(RelayUrlSetting) is { Length: > 0 } url ? url : null,
                     RelayToken = _settings.Get(RelayUrlSetting) is { Length: > 0 } ? _secrets.Get(RelayTokenSlot) : null,
                 };
-                result = await ElevatedSetup.RunAsync(exe, [IsInstalled ? "--update" : "--install"], input, _ => { }, _log).ConfigureAwait(false);
+                string[] verbs = withScreen ? [IsInstalled ? "--update" : "--install", "--screen"] : [IsInstalled ? "--update" : "--install"];
+                result = await ElevatedSetup.RunAsync(exe, verbs, input, _ => { }, _log).ConfigureAwait(false);
+                string? screenSaid = null;
+                if (withScreen && result.Result != SetupResult.Ok && result.Result != SetupResult.Declined && result.FailedStep?.StartsWith("rdp", StringComparison.Ordinal) == true)
+                {
+                    // The screen can't be set up here (Windows Home, another firewall…): the shell still can, behind one more prompt.
+                    screenSaid = $"Remote access is on. The screen couldn't be set up: {result.Error}";
+                    result = await ElevatedSetup.RunAsync(exe, [IsInstalled ? "--update" : "--install"], input, _ => { }, _log).ConfigureAwait(false);
+                }
                 if (result.Result == SetupResult.Ok)
                 {
                     // The service has the relay now; this account's copies go.
@@ -273,6 +283,7 @@ public sealed class RemoteAccess : IAccessAdmin, IDisposable
                     await StartIfEnabledAsync().ConfigureAwait(false);
                     // From here the installed copy is this account's Passthrough: this one hands over to it.
                     if (InstalledExe() is { } launcher) HandOffWanted?.Invoke(launcher);
+                    if (screenSaid is not null) return screenSaid;
                 }
             }
             else

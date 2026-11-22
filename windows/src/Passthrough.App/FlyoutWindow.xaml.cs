@@ -18,7 +18,7 @@ namespace Passthrough.App;
 /// </summary>
 public sealed partial class FlyoutWindow : Window
 {
-    private readonly Action _openSettings;
+    private readonly Action<string?> _openSettings;
     private readonly Action _quit;
     private readonly FlyoutToggle _toggle = new(TimeProvider.System);
     private bool _quitting;
@@ -27,7 +27,7 @@ public sealed partial class FlyoutWindow : Window
     /// <summary>The content's height when last measured, so the next opening starts at the right size.</summary>
     private int? _contentHeightDip;
 
-    public FlyoutWindow(SessionViewModel viewModel, Action openSettings, Action quit)
+    public FlyoutWindow(SessionViewModel viewModel, Action<string?> openSettings, Action quit)
     {
         ViewModel = viewModel;
         _openSettings = openSettings;
@@ -51,6 +51,10 @@ public sealed partial class FlyoutWindow : Window
         Scrolled.SizeChanged += (_, _) => FitIfOpen();
         Body.SizeChanged += (_, _) => FitIfOpen();
         HintsBox.SizeChanged += (_, _) => FitIfOpen();
+        ThisPcPanel.SizeChanged += (_, _) => FitIfOpen();
+        RemotePanel.SizeChanged += (_, _) => FitIfOpen();
+        // The last tab chosen, as it was left.
+        Tabs.SelectedItem = ViewModel.SelectedTab == 1 ? RemoteTab : ThisPcTab;
         ViewModel.PropertyChanged += (_, _) => DispatcherQueue.TryEnqueue(FitIfOpen);
         AppWindow.Closing += (_, args) =>
         {
@@ -92,20 +96,8 @@ public sealed partial class FlyoutWindow : Window
     private void OnRemoveComputer(object sender, RoutedEventArgs e)
     {
         if (sender is not FrameworkElement link || link.DataContext is not ComputerRow row) return;
-        var confirm = new Microsoft.UI.Xaml.Controls.Flyout();
-        var remove = new Microsoft.UI.Xaml.Controls.Button { Content = "Remove", Style = (Style)Application.Current.Resources["AccentButtonStyle"] };
-        Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(remove, row.RemoveName);
-        remove.Click += async (_, _) =>
-        {
-            confirm.Hide();
-            try { await ViewModel.RemoveComputerAsync(row); }
-            catch (Exception ex) { Platform.LogFile.Error(ex); }
-        };
-        var panel = new Microsoft.UI.Xaml.Controls.StackPanel { Spacing = 10, MaxWidth = 260 };
-        panel.Children.Add(new Microsoft.UI.Xaml.Controls.TextBlock { Text = row.RemoveQuestion, TextWrapping = TextWrapping.Wrap });
-        panel.Children.Add(remove);
-        confirm.Content = panel;
-        confirm.ShowAt(link);
+        Confirm(link, row.RemoveQuestion, "Remove", () => ViewModel.RemoveComputerAsync(row));
+
     }
 
     private void OnScreen(object sender, RoutedEventArgs e)
@@ -117,7 +109,108 @@ public sealed partial class FlyoutWindow : Window
 
     private async void OnNoticeOk(object sender, RoutedEventArgs e) => await Answer(sender, act: false);
 
-    private async void OnNoticeAction(object sender, RoutedEventArgs e) => await Answer(sender, act: true);
+    /// <summary>Allow screen answers at once; Revoke… asks beside the button first; Open Settings shows Remote access.</summary>
+    private async void OnNoticeAction(object sender, RoutedEventArgs e)
+    {
+        if (sender is not FrameworkElement button || button.DataContext is not NoticeRow row) return;
+        if (row.ActionOpensSettings)
+        {
+            AppWindow.Hide();
+            _openSettings(SettingsWindow.RemotePage);
+            return;
+        }
+        if (!row.ActionAsks)
+        {
+            await Answer(sender, act: true);
+            return;
+        }
+        Confirm(button, "Revoke its access? Its shells and any view of the screen close, and a phone can share it again.", "Revoke", () => Answer(sender, act: true));
+    }
+
+    /// <summary>A question beside <paramref name="anchor"/> with one button; nothing happens unless it is pressed.</summary>
+    private static void Confirm(FrameworkElement anchor, string question, string action, Func<Task> then)
+    {
+        var confirm = new Flyout();
+        var go = new Button { Content = action, Style = (Style)Application.Current.Resources["AccentButtonStyle"] };
+        go.Click += async (_, _) =>
+        {
+            confirm.Hide();
+            try { await then(); }
+            catch (Exception ex) { LogFile.Error(ex); }
+        };
+        var panel = new StackPanel { Spacing = 10, MaxWidth = 260 };
+        panel.Children.Add(new TextBlock { Text = question, TextWrapping = TextWrapping.Wrap });
+        panel.Children.Add(go);
+        confirm.Content = panel;
+        confirm.ShowAt(anchor);
+    }
+
+    private void OnTabChanged(SelectorBar sender, SelectorBarSelectionChangedEventArgs args)
+    {
+        ViewModel.SelectedTab = sender.SelectedItem == RemoteTab ? 1 : 0;
+        DispatcherQueue.TryEnqueue(FitIfOpen);
+    }
+
+    private void OnReachClick(object sender, RoutedEventArgs e)
+    {
+        AppWindow.Hide();
+        _openSettings(SettingsWindow.RemotePage);
+    }
+
+    private async void OnStopClick(object sender, RoutedEventArgs e)
+    {
+        if (((FrameworkElement)sender).DataContext is not OnThisPcRow row) return;
+        try { await ViewModel.StopAsync(row.Id); }
+        catch (Exception ex) { LogFile.Error(ex); }
+    }
+
+    private async void OnStopViewClick(object sender, RoutedEventArgs e)
+    {
+        if (((FrameworkElement)sender).DataContext is not ViewerRow row) return;
+        try { await ViewModel.StopViewAsync(row.Id); }
+        catch (Exception ex) { LogFile.Error(ex); }
+    }
+
+    private async void OnAwakeToggled(object sender, RoutedEventArgs e)
+    {
+        // The binding setting it from the service's answer isn't a change the person asked for.
+        if (AwakeSwitch.IsOn == ViewModel.StayAwake) return;
+        try { await ViewModel.SetStayAwakeAsync(AwakeSwitch.IsOn); }
+        catch (Exception ex) { LogFile.Error(ex); }
+    }
+
+    /// <summary>Esc closes the flyout, as Windows' own tray flyouts do.</summary>
+    private void OnRootKeyDown(object sender, KeyRoutedEventArgs e)
+    {
+        if (e.Key != global::Windows.System.VirtualKey.Escape) return;
+        e.Handled = true;
+        AppWindow.Hide();
+    }
+
+    /// <summary>
+    /// Asks before quitting when that ends phones' shells or leaves Remote access on: Quit, Quit and turn off Remote
+    /// access, or Cancel (the default). The flyout opens to ask, so the question is never asked out of sight.
+    /// </summary>
+    public async Task<QuitChoice> AskQuitAsync(string question, bool remoteOn)
+    {
+        if (!AppWindow.IsVisible) ShowAtTray();
+        var dialog = new ContentDialog
+        {
+            XamlRoot = Content.XamlRoot,
+            Title = "Quit Passthrough?",
+            Content = new TextBlock { Text = question, TextWrapping = TextWrapping.Wrap },
+            PrimaryButtonText = "Quit",
+            SecondaryButtonText = remoteOn ? "Quit and turn off Remote access" : "",
+            CloseButtonText = "Cancel",
+            DefaultButton = ContentDialogButton.Close,
+        };
+        return await dialog.ShowAsync() switch
+        {
+            ContentDialogResult.Primary => QuitChoice.Quit,
+            ContentDialogResult.Secondary => QuitChoice.QuitAndTurnOff,
+            _ => QuitChoice.Cancel,
+        };
+    }
 
     private async Task Answer(object sender, bool act)
     {
@@ -244,8 +337,11 @@ public sealed partial class FlyoutWindow : Window
     private void OnSettingsClick(object sender, RoutedEventArgs e)
     {
         AppWindow.Hide();
-        _openSettings();
+        _openSettings(null);
     }
 
     private void OnQuitClick(object sender, RoutedEventArgs e) => _quit();
 }
+
+/// <summary>What Quit's question was answered with.</summary>
+public enum QuitChoice { Cancel, Quit, QuitAndTurnOff }

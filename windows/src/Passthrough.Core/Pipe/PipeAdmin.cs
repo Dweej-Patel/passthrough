@@ -68,6 +68,8 @@ public sealed record PipeDevice
     public bool Share { get; init; }
     public long GrantedAt { get; init; }
     public int Connections { get; init; }
+    /// <summary>It is viewing the screen now.</summary>
+    public bool Viewing { get; init; }
 }
 
 /// <summary>One computer with access to this PC, as Settings shows it (stage 7 a.7).</summary>
@@ -86,6 +88,8 @@ public sealed record PipeComputer
     public string GrantedBy { get; init; } = "";
     public long GrantedAt { get; init; }
     public int Connections { get; init; }
+    /// <summary>It is viewing the screen now.</summary>
+    public bool Viewing { get; init; }
 }
 
 /// <summary>What a grant carries now (<see cref="GrantContents"/> across the pipe).</summary>
@@ -136,6 +140,9 @@ public sealed class PipeAdminHandler(AccessDirectory directory, Func<GrantConten
     /// <summary>The Screen row for an account; null when this PC has no relay.</summary>
     public Func<string, PipeScreenRow?>? ScreenRow { get; init; }
 
+    /// <summary>Whether a phone or computer is viewing the screen now (the flyout shows it, with Stop).</summary>
+    public Func<string, bool>? Viewing { get; init; }
+
     public PipeAdminReply Handle(string account, PipeAdminRequest request)
     {
         var store = directory.For(account);
@@ -148,14 +155,14 @@ public sealed class PipeAdminHandler(AccessDirectory directory, Func<GrantConten
                     Devices = [.. store.Phones.Select(p => new PipeDevice
                     {
                         Phone = p.PhoneId, Label = p.Label, PairingSlot = p.PairingSlot, Screen = p.ScreenAllowed, Share = p.Share == true,
-                        GrantedAt = p.GrantedAt.ToUnixTimeSeconds(), Connections = connections(p.PhoneId),
+                        GrantedAt = p.GrantedAt.ToUnixTimeSeconds(), Connections = connections(p.PhoneId), Viewing = Viewing?.Invoke(p.PhoneId) == true,
                     })],
                     Computers = [.. directory.ComputersFor(account).All.Select(c => new PipeComputer
                     {
                         Id = c.Id, Name = c.Name, Kind = c.Kind, Shell = c.Shell == true,
                         Screen = c.Screen == true && c.ScreenPending != true, ScreenPending = c.ScreenPending == true,
                         GrantedBy = store.Phones.FirstOrDefault(p => p.PhoneId == c.GrantedBy)?.Label ?? "a phone",
-                        GrantedAt = c.GrantedAt.ToUnixTimeSeconds(), Connections = connections(c.Id),
+                        GrantedAt = c.GrantedAt.ToUnixTimeSeconds(), Connections = connections(c.Id), Viewing = Viewing?.Invoke(c.Id) == true,
                     })],
                 };
             case PipeAdminRequest.GrantInfo:
@@ -198,7 +205,9 @@ public sealed class PipeAdminHandler(AccessDirectory directory, Func<GrantConten
                 store.Relabel(relabeled, ShellAccessStore.CleanLabel(request.Label));
                 return reply;
             case PipeAdminRequest.Disconnect:
-                if (request.Phone is not { } stopped || !store.IsKnown(stopped)) return reply with { Error = PipeAdminReply.Unknown };
+                // A phone of this account, or a computer one of its phones let in (the flyout's Stop works for both).
+                if (request.Phone is not { } stopped || !(store.IsKnown(stopped) || directory.ComputersFor(account).Find(stopped) is not null))
+                    return reply with { Error = PipeAdminReply.Unknown };
                 if (request.What == "screen") EndScreen?.Invoke(stopped, "stopped");
                 else disconnect(stopped);
                 return reply;

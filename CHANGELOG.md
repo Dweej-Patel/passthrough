@@ -120,6 +120,23 @@ these steps as written and check each one before building.
 
 ### Added
 
+* **Windows: the tray and Settings, reorganised around what you use.**
+  - The flyout's header follows Remote access, not the cable: off, reachable, needs a look (and why), or who is on the PC now.
+  - Notices and anyone viewing the screen (with **Stop**) sit above two tabs, which the flyout remembers:
+    - *This PC*: the phones on the cable and Stay awake;
+    - *Remote · N*: who can reach the PC, who is on it now (each with **Stop**) and Your computers.
+  - Settings has four pages: General, Remote access, Your computers and Advanced.
+    - Each phone has one row: Screen, Share, Stop, Revoke… and Forget…. Before, a phone was listed once for its pairing and again for its access.
+    - Computers with access get **Allow screen** and **Revoke…**.
+  - The first Turn on can set up the screen in the same administrator prompt.
+  - Quit asks first when phones have shells open or Remote access is on.
+  - Notices:
+    - a granted phone's notice offers **Not now** in place of **OK**;
+    - Revoke from a notice asks first;
+    - the Remote Desktop notice opens Settings;
+    - Windows notifications say what happened.
+  - Esc closes the flyout, and buttons name their phone or computer for Narrator.
+
 * **A host tells a phone which computers it gave access to there**
   (`listComputers` / `computerList`, protocol/README.md *Computers*), and tells
   it again whenever that changes: what each may do now, what waits for the

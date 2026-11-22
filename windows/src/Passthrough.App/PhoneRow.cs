@@ -89,6 +89,12 @@ public sealed class PhoneRow : ObservableBase
 
     public Visibility CodeProblemVisibility => Show(_codeProblem.Length > 0);
 
+    /// <summary>What Narrator says for each button, naming the phone ("Pair iPhone").</summary>
+    public string PairName => $"Pair {Title}";
+    public string RetryName => $"Try {Title} again";
+    public string UseName => $"Use {Title}";
+    public string CodeName => $"Six-digit code shown on {Title}";
+
     public void Update(PhoneEntry entry)
     {
         _model = PhoneRowModel.From(entry);

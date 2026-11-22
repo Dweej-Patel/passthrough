@@ -17,6 +17,8 @@ public sealed class ComputerRow(ReachableComputer computer)
     /// <summary>Forgets this PC's copy only: the other computer keeps its own settings, and a phone can share it again.</summary>
     public string RemoveQuestion => $"Remove {Title} from this PC? Its shells and screen can't be opened here until a phone shares it again.";
     public string RemoveName => $"Remove {Title}";
+    public string ScreenName => $"Show {Title}'s screen";
+    public string ShellName => $"New shell on {Title}";
 
     /// <summary>A Mac whose screen this PC was given: a PC offers only Remote Desktop, which this viewer doesn't show.</summary>
     public Microsoft.UI.Xaml.Visibility ScreenVisibility =>
