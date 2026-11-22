@@ -458,11 +458,19 @@ private struct PhonesSection: View {
                             .help("Let \(phone.label) turn Keep awake and the VPN on or off, and lock this screen. Turning the VPN off asks for Face ID on the phone and shows a notice here. Battery and heat limits, VPN accounts and the kill switch setting stay on this Mac.")
                     }
                     .padding(.leading, 34)
+                    permission("May share access with other computers", isOn: Binding(get: { phone.shareAllowed },
+                                                                                      set: { shell.setShareAllowed($0, for: phone.phoneID) }))
+                        .help("Let \(phone.label) give another of your computers access to this Mac.")
+                        .padding(.leading, 34)
                 }
                 .padding(.vertical, 1)
             }
         } header: {
             Text("Phones with access")
+        } footer: {
+            if !shell.phones.isEmpty {
+                Text("May share access with other computers lets that phone give another of your computers access to this Mac, from anywhere. Turning it off stops new sharing; computers it already let in stay until you remove them.")
+            }
         }
         .confirmationDialog("Revoke \(revoking?.label ?? "this phone")'s access?",
                             isPresented: Binding(get: { revoking != nil }, set: { if !$0 { revoking = nil } }),

@@ -24,6 +24,8 @@ struct MacHomeView: View {
     @State private var showPhonePairing = false
     /// Letting another Mac see this one's screen.
     @State private var showShareScreen = false
+    /// Letting another computer use this one (`ShareComputerSheet`).
+    @State private var showShareComputer = false
     @ObservedObject private var links = PendingLinks.shared
 
     /// The Mac on screen: the shell's selection, else the first paired Mac.
@@ -82,6 +84,9 @@ struct MacHomeView: View {
         }
         .sheet(isPresented: $showShareScreen) {
             if let mac = shell.selectedMac { ShareScreenSheet(shell: shell, shared: mac) }
+        }
+        .sheet(isPresented: $showShareComputer) {
+            if let mac = shell.selectedMac { ShareComputerSheet(shell: shell, shared: mac) }
         }
         .sheet(isPresented: $showPhonePairing) {
             if let hotspot = model.hotspot { PairWithPhoneSheet(hotspot: hotspot) }
@@ -247,6 +252,10 @@ struct MacHomeView: View {
                         if shell.hostFacts?.lock == true || model.hotspot != nil { Divider().padding(.leading, 58) }
                         screenRow
                     }
+                    if canShareComputer {
+                        Divider().padding(.leading, 58)
+                        shareComputerRow
+                    }
                     if let reason = reachBlock { SwitchNote(problem: reason).padding(.horizontal, 10).padding(.vertical, 10) }
                 } else if paired {
                     if !wide { Divider().padding(.leading, 58) }
@@ -265,6 +274,10 @@ struct MacHomeView: View {
                     if canShareScreen {
                         Divider().padding(.leading, 58)
                         shareScreenRow
+                    }
+                    if canShareComputer {
+                        Divider().padding(.leading, 58)
+                        shareComputerRow
                     }
                     if let reason = reachBlock { SwitchNote(problem: reason).padding(.horizontal, 10).padding(.bottom, 10) }
                 }
@@ -483,6 +496,30 @@ struct MacHomeView: View {
     /// Another of this phone's Macs could be let see this one's screen (Macs only, both sides).
     private var canShareScreen: Bool {
         isMac && shell.selectedMac != nil && shell.macs.filter { shell.kind(of: $0.macID) == .mac }.count >= 2
+    }
+
+    /// The computer on screen said this phone may share it (`host.access.share`), and there is another to share it with.
+    private var canShareComputer: Bool {
+        shell.selectedMac != nil && shell.hostFacts?.access?.share == true && shell.macs.count >= 2
+    }
+
+    private var shareComputerRow: some View {
+        Button { showShareComputer = true } label: {
+            HStack(spacing: 12) {
+                SwitchIcon(symbol: "person.2.badge.key", on: false, warning: false)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Share with another computer").font(.body.weight(.semibold))
+                    Text("Let another of your computers use this one").font(.subheadline).foregroundStyle(.secondary)
+                }
+                Spacer(minLength: 8)
+                Image(systemName: "chevron.right").font(.subheadline.weight(.semibold)).foregroundStyle(.tertiary)
+            }
+            .padding(10)
+            .frame(minHeight: 60)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityHint("Gives another of your computers its own access to this one")
     }
 
     private var shareScreenRow: some View {
