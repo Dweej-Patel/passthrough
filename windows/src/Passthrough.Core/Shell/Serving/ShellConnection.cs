@@ -33,8 +33,10 @@ public sealed class ShellConnection : IShellAttachment
     private Screen.RelayRecord? _view;
     private Screen.RelayRateLimit.Ticket? _ticket;
 
-    /// <summary>This connection carries a view of the screen now (Remote Desktop's bytes, no more lines).</summary>
-    internal bool IsRelaying => _relaying;
+    /// <summary>This connection carries a view of the screen now, or is opening one (Remote Desktop's bytes, no more lines).</summary>
+    internal bool IsRelaying => _relaying || _opening;
+
+    private volatile bool _opening;
     private volatile bool _looking;
     private int _closed;
 
@@ -99,6 +101,8 @@ public sealed class ShellConnection : IShellAttachment
                 EndView(0, 0, "no Network Level Authentication");
             }
         }
+        // Closed between rdpReady and the splice: the view's slot is freed all the same.
+        EndView(0, 0, "Stop");
         Close();
         await writer.ConfigureAwait(false);
     }
@@ -128,6 +132,7 @@ public sealed class ShellConnection : IShellAttachment
             return;
         }
         if (!_gate.Views.TryTake(PhoneId)) { Fail(ShellError.TooManyScreens); return; }
+        _opening = true;
         var released = false;
         void Release()
         {
@@ -173,7 +178,16 @@ public sealed class ShellConnection : IShellAttachment
             }
             // The phone must have waited for the answer: anything it sent since would go to Remote Desktop unasked.
             if (_reader.HasBuffered) { Close(); return; }
-            await SendAndWaitAsync(new ShellEnvelope(ShellEnvelope.RdpReady) { CertSHA256 = pin }).ConfigureAwait(false);
+            // Screen may have been turned off, or the view stopped, while this was dialling: asked again, last thing.
+            if (!_gate.Access.ScreenAllowed(PhoneId)) { Fail(ShellError.ScreenNotAllowed); return; }
+            if (_gate.StoppedFor(PhoneId) is > 0 and var stoppedNow)
+            {
+                Send(new ShellEnvelope(ShellEnvelope.Error) { Reason = ShellError.TryLater.ToWire(), RetryAfter = stoppedNow });
+                return;
+            }
+            var ready = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            Enqueue(new ShellEnvelope(ShellEnvelope.RdpReady) { CertSHA256 = pin }.EncodeLine(), ready, last: true);
+            await ready.Task.ConfigureAwait(false);
             if (IsClosed) return;
             _view = new Screen.RelayRecord(PhoneId, Label, account, "", _gate.Time.GetUtcNow());
             _gate.Hooks.ViewStarted?.Invoke(_view);
@@ -187,6 +201,7 @@ public sealed class ShellConnection : IShellAttachment
         }
         finally
         {
+            _opening = false;
             dial?.Dispose();
             // Refused after the ticket was taken: it reached nothing, so it doesn't count.
             if (_relay is null && _ticket is { } unused) { _gate.RelayRate.Cancel(unused); _ticket = null; }
@@ -497,10 +512,16 @@ public sealed class ShellConnection : IShellAttachment
         return written.Task;
     }
 
-    private void Enqueue(byte[] line, TaskCompletionSource? written)
+    /// <summary>Set as <c>rdpReady</c> is queued: it is the last line, and anything after it would corrupt Remote Desktop's bytes.</summary>
+    private bool _sealed;
+
+    private void Enqueue(byte[] line, TaskCompletionSource? written, bool last = false)
     {
-        // Relaying: the stream is Remote Desktop's; a line now would corrupt it.
-        if (IsClosed || _relaying) { written?.TrySetResult(); return; }
+        lock (_lock)
+        {
+            if (IsClosed || _relaying || _sealed) { written?.TrySetResult(); return; }
+            if (last) _sealed = true;
+        }
         if (Interlocked.Add(ref _backlog, line.Length) > SendBacklogLimit)
         {
             _gate.Log?.Invoke("shell: a phone is not reading its output; disconnected");

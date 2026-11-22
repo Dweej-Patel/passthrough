@@ -269,4 +269,63 @@ public sealed class ComputerAccessTests : IAsyncDisposable
 
     [Fact]
     public void TheDecoyIsARealPoint() => Assert.False(ComputerProof.IsValid(new byte[64], ComputerProof.DecoyKey, "x"u8));
+
+    [Fact]
+    public void TheDecoySignatureIsWellFormedButNeverValid() =>
+        Assert.False(ComputerProof.IsValid(ComputerProof.DecoySignature, ComputerProof.DecoyKey, "x"u8));
+
+    private ShellComputer GrantMac(string viewer = "mac-1")
+    {
+        Assert.True(_access.For(Account).SetShareAllowed("phone-a", true));
+        var (c, error) = _access.GrantComputer("phone-a", "MacBook", viewer, "mac", IdKey(), new HashSet<string> { "shell" }, screenNeedsOwner: false);
+        Assert.Null(error);
+        return c!;
+    }
+
+    [Fact]
+    public void RevokingAPhoneTakesItsComputersWithIt()
+    {
+        var c = GrantMac();
+        var cut = new List<string>();
+        var admin = new Passthrough.Core.Pipe.PipeAdminHandler(_access, () => null, _ => 0, cut.Add);
+        var reply = admin.Handle(Account, new Passthrough.Core.Pipe.PipeAdminRequest { Op = Passthrough.Core.Pipe.PipeAdminRequest.Revoke, Phone = "phone-a" });
+        Assert.Null(reply.Error);
+        Assert.Empty(_access.ComputersFor(Account).All);
+        Assert.Contains("phone-a", cut);
+        Assert.Contains(c.Id, cut);
+    }
+
+    [Fact]
+    public void TheOwnerCanRevokeAComputer()
+    {
+        var c = GrantMac();
+        var cut = new List<string>();
+        var admin = new Passthrough.Core.Pipe.PipeAdminHandler(_access, () => null, _ => 0, cut.Add);
+        Assert.Null(admin.Handle(Account, new Passthrough.Core.Pipe.PipeAdminRequest { Op = Passthrough.Core.Pipe.PipeAdminRequest.RevokeComputer, Phone = c.Id }).Error);
+        Assert.Null(_access.Computer(c.Id));
+        Assert.Equal([c.Id], cut);
+        // Another account can't name it.
+        Assert.Equal(Passthrough.Core.Pipe.PipeAdminReply.Unknown,
+            admin.Handle("S-1-5-21-9", new Passthrough.Core.Pipe.PipeAdminRequest { Op = Passthrough.Core.Pipe.PipeAdminRequest.RevokeComputer, Phone = c.Id }).Error);
+    }
+
+    [Fact]
+    public void ANewGrantForTheSameComputerCutsTheOldOne()
+    {
+        var replaced = new List<string>();
+        _access.Replaced += replaced.Add;
+        var first = GrantMac();
+        var second = GrantMac();
+        Assert.Equal([first.Id], replaced);
+        Assert.Null(_access.Computer(first.Id));
+        Assert.NotNull(_access.Computer(second.Id));
+    }
+
+    [Fact]
+    public void ADisallowedAccountsPhonesReachNothing()
+    {
+        Assert.Equal(Account, _access.Owner("phone-a"));
+        _access.IsAllowed = a => a != Account;
+        Assert.Null(_access.Owner("phone-a"));
+    }
 }

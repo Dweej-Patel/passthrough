@@ -7,7 +7,8 @@ namespace Passthrough.Core.Pipe;
 /// </summary>
 public sealed record PipeNotice
 {
-    public const string Viewed = "viewed", Granted = "granted", ComputerGranted = "computerGranted", Exposed = "exposed";
+    public const string Viewed = "viewed", Granted = "granted", ComputerGranted = "computerGranted", ComputerScreenPending = "computerScreenPending",
+        Exposed = "exposed";
 
     public string Id { get; init; } = "";
     public string Kind { get; init; } = "";

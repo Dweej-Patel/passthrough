@@ -69,6 +69,7 @@ public static class SetupPlans
         }),
         new SetupStep("reset", c =>
         {
+            StoreIsOurs(c);
             c.System.Files.Write(c.Machine.PendingReset, "reset"u8.ToArray());
             return StepState.Done;
         }, c => c.System.Files.DeleteFile(c.Machine.PendingReset)),
@@ -86,6 +87,7 @@ public static class SetupPlans
     private static ISetupStep Relay() => new SetupStep("relay", c =>
     {
         if (c.RelayUrl is null && c.RelayToken is null) return StepState.Skipped;
+        StoreIsOurs(c);
         if (c.RelayUrl is { Length: > 0 } url && !IsRelayUrl(url)) throw new SetupException("A relay is an https:// address with nothing after its path.");
         if (c.RelayUrl is not null) c.State = c.State! with { Relay = new InstallState.RelayState { Url = c.RelayUrl.Length == 0 ? null : c.RelayUrl } };
         var token = c.RelayUrl is { Length: 0 } ? "" : c.RelayToken;
@@ -101,6 +103,16 @@ public static class SetupPlans
         c.System.Files.DeleteFile(c.Machine.PendingRelayToken);
         if (c.Before is { } before) c.System.Files.Write(c.Machine.StateFile, before.Encode());
     });
+
+    /// <summary>
+    /// The service can change what is in its store folder; before an administrator writes there, nothing in it may be a
+    /// link (a compromised service could point one anywhere).
+    /// </summary>
+    internal static void StoreIsOurs(SetupContext c)
+    {
+        if (c.System.Files.Check(c.Machine.StoreFolder) != FolderCheck.Trusted)
+            throw new SetupException("Passthrough's store folder isn't as it should be (it holds a link, or someone else can write it). Turn Remote access off and on again.");
+    }
 
     /// <summary>https, a host, no query, fragment or user info (where a token would end up logged), at most 512 characters.</summary>
     public static bool IsRelayUrl(string text) =>
@@ -197,8 +209,12 @@ public static class SetupPlans
         state.Allowing(c.AskingAccount ?? throw new SetupException("Couldn't tell which account asked.")));
 
     /// <summary><c>--configure disallow &lt;SID&gt;</c>: that account's phones can't reach this PC any more (their records stay).</summary>
-    public static IReadOnlyList<ISetupStep> DisallowAccount(string sid) => ChangeAccounts((state, _) =>
-        state with { AllowedAccounts = [.. state.AllowedAccounts.Where(a => !string.Equals(a, sid, StringComparison.OrdinalIgnoreCase))] });
+    public static IReadOnlyList<ISetupStep> DisallowAccount(string sid) => ChangeAccounts((state, _) => state with
+    {
+        AllowedAccounts = [.. state.AllowedAccounts.Where(a => !string.Equals(a, sid, StringComparison.OrdinalIgnoreCase))],
+        // Its consent to Screen goes with it: allowed again, it consents again.
+        Rdp = state.Rdp is { } rdp ? rdp with { ConsentedBy = [.. rdp.ConsentedBy.Where(a => !string.Equals(a, sid, StringComparison.OrdinalIgnoreCase))] } : null,
+    });
 
     private static IReadOnlyList<ISetupStep> ChangeAccounts(Func<InstallState, SetupContext, InstallState> change) =>
     [
@@ -219,6 +235,8 @@ public static class SetupPlans
             c.System.Service.SetSecurity(c.State!.AllowedAccounts);
             return StepState.Done;
         }, c => c.System.Service.SetSecurity(c.Before!.AllowedAccounts)),
+        // The running service re-reads who is allowed now.
+        Reload(),
     ];
 
     // MARK: Install and update steps

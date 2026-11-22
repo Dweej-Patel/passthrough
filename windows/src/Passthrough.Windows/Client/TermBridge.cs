@@ -30,6 +30,8 @@ public static class TermBridge
                 using var wait = new CancellationTokenSource(TimeSpan.FromSeconds(30));
                 try { await pipe.WaitForConnectionAsync(wait.Token).ConfigureAwait(false); }
                 catch (OperationCanceledException) { log?.Invoke("term: the terminal didn't connect"); return; }
+                // Only the terminal this started may drive the shell, not another program of this account that found the name.
+                if (!IsOurTerminal(PipeNative.ClientProcessId(pipe.SafePipeHandle))) { log?.Invoke("term: something other than passthrough-term connected"); return; }
                 await BridgeAsync(pipe, computer, identity, shell, log).ConfigureAwait(false);
             }
         });
@@ -88,6 +90,16 @@ public static class TermBridge
         });
         var status = await done.Task.ConfigureAwait(false);
         await Write(TermWire.EndedWith(status)).ConfigureAwait(false);
+    }
+
+    private static bool IsOurTerminal(int pid)
+    {
+        try
+        {
+            using var process = Process.GetProcessById(pid);
+            return string.Equals(process.MainModule?.FileName, Path.Combine(AppContext.BaseDirectory, "passthrough-term.exe"), StringComparison.OrdinalIgnoreCase);
+        }
+        catch (Exception e) when (e is ArgumentException or InvalidOperationException or System.ComponentModel.Win32Exception) { return false; }
     }
 
     /// <summary>A new tab in the current Windows Terminal window, or a console window when there is none.</summary>

@@ -11,7 +11,8 @@ public sealed record PipeAdminRequest
 {
     public const string List = "list", GrantInfo = "grantInfo", AddKey = "addKey", SetScreen = "setScreen", Revoke = "revoke",
         RevokeSlot = "revokeSlot", Relabel = "relabel", Disconnect = "disconnect", HandOver = "handOver", SetStayAwake = "setStayAwake", Power = "power", Screen = "screen",
-        SetMayShare = "setMayShare", Notices = "notices", AnswerNotice = "answerNotice";
+        SetMayShare = "setMayShare", Notices = "notices", AnswerNotice = "answerNotice",
+        RevokeComputer = "revokeComputer", AllowComputerScreen = "allowComputerScreen";
 
     public uint Id { get; init; }
     public string Op { get; init; } = "";
@@ -147,7 +148,12 @@ public sealed class PipeAdminHandler(AccessDirectory directory, Func<GrantConten
                 if (!store.IsKnown(screenPhone)) return reply with { Error = PipeAdminReply.Unknown };
                 // Off holds in memory even if it can't be written; its views end at once.
                 var set = store.SetScreenAllowed(screenPhone, on);
-                if (!on) EndScreen?.Invoke(screenPhone, "switched_off");
+                if (!on)
+                {
+                    EndScreen?.Invoke(screenPhone, "switched_off");
+                    // Its computers' screen goes with its own (their scopes follow it): their views end too.
+                    foreach (var c in directory.ComputersFor(account).All.Where(c => c.GrantedBy == screenPhone)) EndScreen?.Invoke(c.Id, "switched_off");
+                }
                 return set ? reply : reply with { Error = PipeAdminReply.StoreFailed };
             case PipeAdminRequest.SetMayShare:
                 if (request.Phone is not { } sharer || request.On is not { } share) return reply with { Error = PipeAdminReply.BadRequest };
@@ -156,10 +162,10 @@ public sealed class PipeAdminHandler(AccessDirectory directory, Func<GrantConten
                 return store.SetShareAllowed(sharer, share) ? reply : reply with { Error = PipeAdminReply.StoreFailed };
             case PipeAdminRequest.Revoke:
                 if (request.Phone is not { } revoked || !store.IsKnown(revoked)) return reply with { Error = PipeAdminReply.Unknown };
-                return Removed(reply, store.Revoke(revoked));
+                return Removed(account, reply, store.Revoke(revoked));
             case PipeAdminRequest.RevokeSlot:
                 if (request.PairingSlot is not { } pairing) return reply with { Error = PipeAdminReply.BadRequest };
-                return Removed(reply, store.RevokeSlot(pairing));
+                return Removed(account, reply, store.RevokeSlot(pairing));
             case PipeAdminRequest.Relabel:
                 if (request.PairingSlot is not { } relabeled) return reply with { Error = PipeAdminReply.BadRequest };
                 store.Relabel(relabeled, ShellAccessStore.CleanLabel(request.Label));
@@ -175,6 +181,16 @@ public sealed class PipeAdminHandler(AccessDirectory directory, Func<GrantConten
                 if (request.On is not { } awake || SetStayAwake is null) return reply with { Error = PipeAdminReply.BadRequest };
                 SetStayAwake(awake);
                 return reply;
+            case PipeAdminRequest.RevokeComputer:
+                if (request.Phone is not { } computerId || !Computers.IsComputerId(computerId)) return reply with { Error = PipeAdminReply.BadRequest };
+                var gone = directory.ComputersFor(account).Remove(c => c.Id == computerId);
+                if (gone.Count == 0) return reply with { Error = PipeAdminReply.Unknown };
+                disconnect(computerId);
+                return reply with { Removed = [computerId] };
+            case PipeAdminRequest.AllowComputerScreen:
+                if (request.Phone is not { } allowed || directory.ComputersFor(account).Find(allowed) is not { ScreenPending: true })
+                    return reply with { Error = PipeAdminReply.Unknown };
+                return directory.ComputersFor(account).SetScreen(allowed, on: true) ? reply : reply with { Error = PipeAdminReply.StoreFailed };
             case PipeAdminRequest.Notices:
                 return reply with { NoticeList = [.. Board?.For(account) ?? []] };
             case PipeAdminRequest.AnswerNotice:
@@ -196,10 +212,18 @@ public sealed class PipeAdminHandler(AccessDirectory directory, Func<GrantConten
         return reply;
     }
 
-    /// <summary>Keys first (a reconnect is already refused), then what is connected and what it opened.</summary>
-    private PipeAdminReply Removed(PipeAdminReply reply, (bool Done, IReadOnlyList<ShellPhone> Removed) result)
+    /// <summary>
+    /// Keys first (a reconnect is already refused), then what is connected and what it opened; and every computer a
+    /// removed phone gave access to goes in the same step (its records, its connections, its sessions), so pairing that
+    /// phone again brings none back.
+    /// </summary>
+    private PipeAdminReply Removed(string account, PipeAdminReply reply, (bool Done, IReadOnlyList<ShellPhone> Removed) result)
     {
-        foreach (var phone in result.Removed) disconnect(phone.PhoneId);
+        foreach (var phone in result.Removed)
+        {
+            disconnect(phone.PhoneId);
+            foreach (var c in directory.ComputersFor(account).Remove(c => c.GrantedBy == phone.PhoneId)) disconnect(c.Id);
+        }
         return result.Done ? reply with { Removed = [.. result.Removed.Select(p => p.PhoneId)] } : reply with { Error = PipeAdminReply.StoreFailed };
     }
 

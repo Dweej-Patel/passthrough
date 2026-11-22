@@ -35,6 +35,9 @@ public static class ComputerProof
     public static readonly byte[] DecoyKey = Convert.FromHexString(
         "046B17D1F2E12C4247F8BCE6E563A440F277037D812DEB33A0F4A13945D898C2964FE342E2FE1A7F9B8EE7EB4A7C0F9E162BCE33576B315ECECBB6406837BF51F5");
 
+    /// <summary>A well-formed signature (r and s nonzero, below the curve order) for the decoy check, so it does the full work.</summary>
+    public static readonly byte[] DecoySignature = [.. Enumerable.Repeat((byte)0x5A, 32), .. Enumerable.Repeat((byte)0x3C, 32)];
+
     public static byte[] Message(ReadOnlySpan<byte> nonce, byte path, ReadOnlySpan<byte> hostBinding, string computerId) =>
         [.. Encoding.UTF8.GetBytes(Label), 0x00, path, .. nonce, .. hostBinding, .. Encoding.UTF8.GetBytes(computerId)];
 
@@ -132,17 +135,22 @@ public sealed class ComputerAccessStore(ISecretStore secrets, Action<string>? lo
         catch (Exception e) when (e is IOException or UnauthorizedAccessException or CryptographicException) { return false; }
     }
 
-    /// <summary>Keeps <paramref name="computer"/>, replacing any earlier one for the same viewer from the same granter.</summary>
-    public bool Add(ShellComputer computer)
+    /// <summary>
+    /// Keeps <paramref name="computer"/>, replacing any earlier one for the same viewer from the same granter; the ids it
+    /// replaced come back so their connections can be cut. Null when it couldn't be stored.
+    /// </summary>
+    public IReadOnlyList<string>? Add(ShellComputer computer)
     {
+        List<string> replaced;
         lock (_lock)
         {
-            var next = All.Where(c => !(c.ViewerOf == computer.ViewerOf && c.GrantedBy == computer.GrantedBy)).Append(computer).ToList();
-            if (!Write(next)) return false;
+            replaced = [.. All.Where(c => c.ViewerOf == computer.ViewerOf && c.GrantedBy == computer.GrantedBy).Select(c => c.Id)];
+            var next = All.Where(c => !replaced.Contains(c.Id)).Append(computer).ToList();
+            if (!Write(next)) return null;
             _cached = next;
         }
         Changed?.Invoke();
-        return true;
+        return replaced;
     }
 
     /// <summary>Removes what matches: from memory first, then the store; the whole slot if it can't be rewritten.</summary>

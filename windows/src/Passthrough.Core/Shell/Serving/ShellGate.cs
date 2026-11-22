@@ -302,7 +302,7 @@ public sealed class ShellGate
             var key = Access.Computer(phoneId)?.IdentityKey;
             var real = key is not null && sig is { Length: 64 } && binding is not null;
             var message = ComputerProof.Message(nonce, binding?.Path ?? 0, binding?.HostBinding ?? new byte[32], phoneId);
-            var valid = ComputerProof.IsValid(real ? sig! : new byte[64], real ? key! : ComputerProof.DecoyKey, message);
+            var valid = ComputerProof.IsValid(real ? sig! : ComputerProof.DecoySignature, real ? key! : ComputerProof.DecoyKey, message);
             computerOk = real && valid;
         }
         byte[] mac;

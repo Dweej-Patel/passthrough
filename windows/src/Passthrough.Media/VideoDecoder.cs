@@ -345,6 +345,7 @@ public sealed class VideoDecoder : IDisposable
             if (length < pitch * _outputHeight * 3 / 2)
             {
                 buffer.Unlock();
+                Marshal.ReleaseComObject(buffer);
                 ArrayPool<byte>.Shared.Return(data);
                 throw new DecodeException("The decoder's picture was shorter than its size.");
             }

@@ -284,7 +284,9 @@ public sealed class ShellClient : IAsyncDisposable
         var challenge = Decode(await reader.ReadLineAsync(cancel).ConfigureAwait(false));
         if (challenge.T == ShellEnvelope.Error) throw new ShellRefusedException(Reason(challenge.Reason));
         if (challenge.T != ShellEnvelope.Challenge || challenge.Nonce is null) throw new IOException("The computer didn't send a challenge.");
-        var nonce = Convert.FromBase64String(challenge.Nonce);
+        byte[] nonce;
+        try { nonce = Convert.FromBase64String(challenge.Nonce); }
+        catch (FormatException) { throw new IOException("The challenge wasn't base64."); }
         if (nonce.Length != RemoteShell.NonceLength) throw new IOException("The challenge was the wrong size.");
         await stream.WriteAsync(new ShellEnvelope(ShellEnvelope.Proof)
         {
@@ -320,6 +322,12 @@ public sealed class ShellClient : IAsyncDisposable
     // MARK: After ready
 
     private void Handle(byte[] line)
+    {
+        try { HandleLine(line); }
+        catch (FormatException) { } // bad base64 in one line: that line is dropped, not the connection
+    }
+
+    private void HandleLine(byte[] line)
     {
         ShellEnvelope m;
         try { m = ShellEnvelope.Decode(line); }

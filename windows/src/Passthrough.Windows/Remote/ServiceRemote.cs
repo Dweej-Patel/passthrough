@@ -49,7 +49,8 @@ public sealed class ServiceRemote : IDisposable
     public string? NetworkProblem { get; private set; }
 
     public ServiceRemote(ISecretStore secrets, string installFolder, ITrayHosts trays, Func<string?> relayUrl, Action<string> log, string? hostName = null, IrohRelay? relayOverride = null,
-        TlsOptions? tls = null, Func<Passthrough.Core.Screen.RemoteDesktopSetup?>? screenSetup = null)
+        TlsOptions? tls = null, Func<Passthrough.Core.Screen.RemoteDesktopSetup?>? screenSetup = null,
+        Func<IReadOnlyCollection<string>>? allowedAccounts = null)
     {
         _secrets = secrets;
         _trays = trays;
@@ -59,6 +60,7 @@ public sealed class ServiceRemote : IDisposable
         _tls = tls;
         _relayOverride = relayOverride;
         Directory = new AccessDirectory(_secrets, log: log);
+        if (allowedAccounts is not null) Directory.IsAllowed = account => allowedAccounts().Contains(account, StringComparer.OrdinalIgnoreCase);
         IrohEndpoint.UseLibraryIn(installFolder);
         // Screen through Remote Desktop, when it is set up (install.json's rdp); a PC without it answers rdp_unavailable.
         RemoteDesktop = screenSetup is null ? null : new Passthrough.Windows.Screen.RemoteDesktopGate(screenSetup, IsWorkAccount, log);
@@ -96,6 +98,7 @@ public sealed class ServiceRemote : IDisposable
             Gate.PushHost(host);
             Gate.PushState();
         };
+        Directory.Replaced += Disconnect;
         Directory.Changed += account => trays.Tell(account, new PipeAdminEvent { What = PipeAdminEvent.Access });
     }
 
@@ -148,7 +151,16 @@ public sealed class ServiceRemote : IDisposable
 
     private int ConnectionsOf(string phoneId) => Gate.ConnectedPhones.Count(p => p == phoneId);
 
-    private void Disconnect(string phoneId) => Gate.Disconnect(phoneId);
+    /// <summary>
+    /// Ends a phone's or computer's connections and the sessions it opened. Its access is already gone by now (taken
+    /// first, so a reconnect is refused), so its owner can't be looked up: its sessions are closed on every account's
+    /// shells (an id belongs to one account; the others have none of its).
+    /// </summary>
+    private void Disconnect(string phoneId)
+    {
+        Gate.Disconnect(phoneId);
+        foreach (var host in _trays.Hosts) host.CloseSessions(phoneId);
+    }
 
     public void Start()
     {
@@ -344,7 +356,7 @@ public sealed class ServiceRemote : IDisposable
         ComputerGranted = (phone, c) =>
         {
             if (Directory.Owner(c.Id) is not { } owner) return;
-            Notices.Add(owner, PipeNotice.ComputerGranted, c.ScreenPending == true
+            Notices.Add(owner, c.ScreenPending == true ? PipeNotice.ComputerScreenPending : PipeNotice.ComputerGranted, c.ScreenPending == true
                 ? $"{phone} gave {c.Name} access to this PC's shell. Let it see the screen too? Windows still asks for your password."
                 : $"{phone} gave {c.Name} access to this PC's {(c.Shell == true ? "shell" : "screen")}.", c.Id);
         },

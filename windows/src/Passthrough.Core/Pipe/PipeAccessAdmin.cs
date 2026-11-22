@@ -111,6 +111,10 @@ public sealed class PipeAccessAdmin : IAccessAdmin
     /// <summary>Fires when the service says the notices changed.</summary>
     public event Action? NoticesChanged;
 
+    public Task<PipeAdminReply> RevokeComputerAsync(string id) => AskAsync(new PipeAdminRequest { Op = PipeAdminRequest.RevokeComputer, Phone = id });
+
+    public Task<PipeAdminReply> AllowComputerScreenAsync(string id) => AskAsync(new PipeAdminRequest { Op = PipeAdminRequest.AllowComputerScreen, Phone = id });
+
     public Task<PipeAdminReply> ScreenAsync() => AskAsync(new PipeAdminRequest { Op = PipeAdminRequest.Screen });
 
     public Task<PipeAdminReply> StopScreenAsync(string phoneId) => AskAsync(new PipeAdminRequest { Op = PipeAdminRequest.Disconnect, Phone = phoneId, What = "screen" });

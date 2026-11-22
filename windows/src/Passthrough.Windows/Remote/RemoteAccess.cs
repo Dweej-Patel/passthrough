@@ -394,11 +394,13 @@ public sealed class RemoteAccess : IAccessAdmin, IDisposable
     private async Task<string?> KeepPassAsync(PipeMessage m)
     {
         if (m.Pass is not { } pass) return ShellError.BadRequest.ToWire();
+        // The service waits 40 s for this answer; past that the phone was told it failed, so nothing is written.
+        using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(35));
         var result = await Reach.SaveAsync(new Passthrough.Core.Trust.ReachableComputer
         {
             Credential = pass, HostKind = m.HostKind, Scopes = m.Scopes ?? [], Pending = m.Pending, From = m.Label, FromPhoneId = m.Phone,
             ReceivedAt = DateTimeOffset.UtcNow,
-        }).ConfigureAwait(false);
+        }, deadline.Token).ConfigureAwait(false);
         switch (result)
         {
             case Passthrough.Core.Trust.ComputerReachStore.SaveResult.Saved:
@@ -437,6 +439,8 @@ public sealed class RemoteAccess : IAccessAdmin, IDisposable
     public async Task RevokeAsync(string phoneId)
     {
         await _admin.RevokeAsync(phoneId).ConfigureAwait(false);
+        if (Reach.Computers is { } kept)
+            foreach (var c in kept.Where(c => c.FromPhoneId == phoneId).ToList()) await Reach.RemoveAsync(c.HostId).ConfigureAwait(false);
         Sessions.CloseSessions(phoneId);
         await RefreshPhonesAsync().ConfigureAwait(false);
     }
@@ -467,7 +471,12 @@ public sealed class RemoteAccess : IAccessAdmin, IDisposable
     /// <summary>Answers a notice: OK, or its action first (Allow screen: the phone may see the screen).</summary>
     public async Task AnswerNoticeAsync(PipeNotice notice, bool act)
     {
-        if (act && notice.Kind == PipeNotice.Granted && notice.Subject is { } phone) await SetScreenAllowedAsync(phone, true).ConfigureAwait(false);
+        if (act && notice.Subject is { } subject)
+        {
+            if (notice.Kind == PipeNotice.Granted) await SetScreenAllowedAsync(subject, true).ConfigureAwait(false);
+            else if (notice.Kind == PipeNotice.ComputerScreenPending) await _admin.AllowComputerScreenAsync(subject).ConfigureAwait(false);
+            else if (notice.Kind == PipeNotice.ComputerGranted) await _admin.RevokeComputerAsync(subject).ConfigureAwait(false);
+        }
         await _admin.AnswerNoticeAsync(notice.Id).ConfigureAwait(false);
         await RefreshNoticesAsync().ConfigureAwait(false);
     }

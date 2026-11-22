@@ -250,9 +250,23 @@ public sealed class ScreenTests
         rdp.Calls.Clear();
         var result = SetupEngine.Run(SetupPlans.RemoveAll(rdp), new SetupContext { System = pc.System(), Source = FakePc.Source }, _ => { }, continuePastFailure: true);
         Assert.Equal(SetupResult.Ok, result.Result);
-        Assert.Equal(["remove-user", "nla", "off"], rdp.Calls);
+        // Off first: NLA goes back only once nothing can reach Remote Desktop without it.
+        Assert.Equal(["remove-user", "off", "nla"], rdp.Calls);
         Assert.True(rdp.State.Denied);
         Assert.Empty(pc.Rules);
+    }
+
+    [Fact]
+    public void RemovingLeavesNlaRequiredWhenRemoteDesktopStaysOn()
+    {
+        var rdp = new FakeRdp(Off);
+        var (pc, _) = SetUp(rdp);
+        // The owner opened Remote Desktop to the network since: it stays on, so it keeps requiring NLA.
+        rdp.State = rdp.State with { AllowRuleForPort = true };
+        rdp.Calls.Clear();
+        SetupEngine.Run(SetupPlans.RemoveAll(rdp), new SetupContext { System = pc.System(), Source = FakePc.Source }, _ => { }, continuePastFailure: true);
+        Assert.DoesNotContain("nla", rdp.Calls);
+        Assert.False(rdp.State.Denied);
     }
 
     [Fact]

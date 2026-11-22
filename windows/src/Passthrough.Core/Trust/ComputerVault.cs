@@ -102,17 +102,26 @@ public sealed class ComputerReachStore(ISecretStore secrets, IHelloSigner hello)
             (_open, _salt, _key) = (list, salt, key);
             return true;
         }
+        catch (AuthenticationTagMismatchException)
+        {
+            // Sealed under a Hello key that no longer exists (reset or re-made): nothing in it can be opened again, so it
+            // is set aside and the store starts empty; the computers in it need handing over again.
+            secrets.Delete(Slot);
+            return false;
+        }
         catch (Exception e) when (e is CryptographicException or JsonException or FormatException) { return false; }
         finally { _gate.Release(); }
     }
 
-    public async Task<SaveResult> SaveAsync(ReachableComputer computer)
+    public async Task<SaveResult> SaveAsync(ReachableComputer computer, CancellationToken deadline = default)
     {
         if (!computer.IsUsable()) return SaveResult.NotUsable;
         if (!await UnlockAsync().ConfigureAwait(false)) return SaveResult.Locked;
         await _gate.WaitAsync().ConfigureAwait(false);
         try
         {
+            // Past the deadline the phone was told it failed: nothing is written.
+            if (deadline.IsCancellationRequested) return SaveResult.Failed;
             var list = _open!.ToList();
             if (list.FirstOrDefault(c => c.HostId == computer.HostId) is { } kept
                 && (kept.Credential.CertSHA256 != computer.Credential.CertSHA256 || kept.Credential.IrohID != computer.Credential.IrohID))

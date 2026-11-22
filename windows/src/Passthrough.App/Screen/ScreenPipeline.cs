@@ -75,6 +75,9 @@ internal sealed class ScreenPipeline : IScreenSink, IDisposable
 
     public void Attach(ScreenVideoClient client) => _client = client;
 
+    private FormatItem? _latestFormat;
+    private bool _formatQueued;
+
     private void Post(Action action) => _ui.TryEnqueue(() => { if (!_closed) action(); });
 
     // MARK: IScreenSink (the read loop)
@@ -82,7 +85,16 @@ internal sealed class ScreenPipeline : IScreenSink, IDisposable
     public void Format(ScreenCodec codec, int width, int height, IReadOnlyList<byte[]> parameterSets)
     {
         var fullRange = codec == ScreenCodec.H264 && H264Sps.TryParse(parameterSets[0])?.FullRange == true;
-        _queue.Writer.TryWrite(new FormatItem(codec, width, height, fullRange));
+        // Format changes waiting to be decoded are merged into the newest: a Mac sending them faster than the decoder
+        // is rebuilt can't queue them, or GPU devices, without end.
+        bool queued;
+        lock (_lock)
+        {
+            _latestFormat = new FormatItem(codec, width, height, fullRange);
+            queued = _formatQueued;
+            _formatQueued = true;
+        }
+        if (!queued) _queue.Writer.TryWrite(_latestFormat);
         Post(() => _view.Sized(width, height));
     }
 
@@ -145,7 +157,13 @@ internal sealed class ScreenPipeline : IScreenSink, IDisposable
                 {
                     switch (item)
                     {
-                        case FormatItem f:
+                        case FormatItem:
+                            FormatItem f;
+                            lock (_lock)
+                            {
+                                f = _latestFormat!;
+                                _formatQueued = false;
+                            }
                             decoder?.Dispose();
                             decoder = null;
                             fullRange = f.FullRange;

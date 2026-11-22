@@ -70,6 +70,7 @@ public sealed class ServiceRemoteTests : IDisposable
         private readonly Dictionary<string, PipeSessionHost> _hosts = [];
         private readonly Dictionary<string, PipeLink> _links = [];
         public Func<string, PipeAdminRequest, PipeAdminReply>? Admin;
+        public IReadOnlyList<PipeSessionHost> Hosts { get { lock (_hosts) return [.. _hosts.Values]; } }
         public event Action<PipeSessionHost>? Changed;
 
         public PipeSessionHost HostFor(string account)

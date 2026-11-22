@@ -46,6 +46,12 @@ public sealed class AccessDirectory : IShellAccess
     private readonly Lock _lock = new();
     private readonly Dictionary<string, ShellAccessStore> _stores = new(StringComparer.OrdinalIgnoreCase);
 
+    /// <summary>
+    /// Whether an account may use the service now (install.json's allowed accounts): a phone of an account an
+    /// administrator disallowed proves nothing and reaches nothing, though its records stay until removal.
+    /// </summary>
+    public Func<string, bool> IsAllowed { get; set; } = _ => true;
+
     public AccessDirectory(ISecretStore secrets, TimeProvider? time = null, Action<string>? log = null)
     {
         _secrets = secrets;
@@ -54,6 +60,9 @@ public sealed class AccessDirectory : IShellAccess
         foreach (var slot in secrets.Slots().Where(s => s.StartsWith(SlotPrefix, StringComparison.Ordinal)))
             For(slot[SlotPrefix.Length..]);
     }
+
+    /// <summary>A computer's access was replaced by a new grant for it: its connections must go.</summary>
+    public event Action<string>? Replaced;
 
     /// <summary>Fires with the account whose phones changed.</summary>
     public event Action<string>? Changed;
@@ -80,6 +89,7 @@ public sealed class AccessDirectory : IShellAccess
         lock (_lock) stores = [.. _stores];
         foreach (var (account, store) in stores)
         {
+            if (!IsAllowed(account)) continue;
             if (Computers.IsComputerId(phoneId) ? ComputersFor(account).Find(phoneId) is not null : store.IsKnown(phoneId)) return account;
         }
         return null;
@@ -172,7 +182,9 @@ public sealed class AccessDirectory : IShellAccess
                 PairingSlot = phones.Phones.First(p => p.PhoneId == granter).PairingSlot,
                 GrantedAt = DateTimeOffset.UtcNow,
             };
-            return ComputersFor(owner).Add(computer) ? (computer, null) : (null, ShellError.BadRequest);
+            if (ComputersFor(owner).Add(computer) is not { } replaced) return (null, ShellError.BadRequest);
+            foreach (var id in replaced) Replaced?.Invoke(id);
+            return (computer, null);
         }
     }
 

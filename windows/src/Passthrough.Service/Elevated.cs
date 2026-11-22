@@ -51,7 +51,10 @@ internal static class Elevated
         }
         if (!WindowsSetup.IsElevatedAdministrator()) return Refuse("This needs an administrator.").ExitCode;
 
-        using var mutex = new Mutex(initiallyOwned: false, @"Global\Passthrough.Setup");
+        Mutex mutex;
+        try { mutex = new Mutex(initiallyOwned: false, @"Global\Passthrough.Setup"); }
+        catch (UnauthorizedAccessException) { return Refuse("Another program is holding Passthrough's setup lock. Restart this PC and try again.").ExitCode; }
+        using var _ = mutex;
         try
         {
             if (!mutex.WaitOne(0)) return Refuse("Passthrough is already being set up. Wait for it to finish.").ExitCode;
@@ -122,6 +125,10 @@ internal static class Elevated
             var logs = WindowsSetup.Machine().LogsFolder;
             if (!Directory.Exists(logs)) return;
             var path = Path.Combine(logs, "setup.log");
+            // The service can change what is in logs\: an administrator writes there only when nothing is a link.
+            if (new DirectoryInfo(logs).Attributes.HasFlag(FileAttributes.ReparsePoint)
+                || (File.Exists(path) && File.GetAttributes(path).HasFlag(FileAttributes.ReparsePoint))
+                || Directory.EnumerateFileSystemEntries(logs).Any(e => File.GetAttributes(e).HasFlag(FileAttributes.ReparsePoint))) return;
             if (new FileInfo(path) is { Exists: true, Length: > 1_000_000 }) File.Move(path, path + ".1", overwrite: true);
             var text = new StringBuilder();
             foreach (var line in lines) text.Append(DateTimeOffset.UtcNow.ToString("u")).Append(' ').Append(verb).Append(' ').AppendLine(LogText.Redact(line));

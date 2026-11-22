@@ -11,6 +11,9 @@ public interface ITrayHosts
 
     void TellAll(PipeAdminEvent e);
 
+    /// <summary>Every account's shells known so far.</summary>
+    IReadOnlyList<PipeSessionHost> Hosts { get; }
+
     /// <summary>Fires when an account's tray app comes or goes, or its sessions or state change.</summary>
     event Action<PipeSessionHost>? Changed;
 }

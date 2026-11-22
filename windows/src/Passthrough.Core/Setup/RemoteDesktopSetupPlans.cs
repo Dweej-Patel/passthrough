@@ -87,11 +87,13 @@ public static class RemoteDesktopSetupPlans
         new SetupStep("rdp-users", c =>
         {
             var sid = c.AskingAccount!;
+            c.AddedUser = false;
             if (rdp.MayUseRemoteDesktop(sid)) return StepState.Skipped;
             rdp.AddToRemoteDesktopUsers(sid);
+            c.AddedUser = true;
             c.State = c.State! with { Rdp = c.State.Rdp! with { AddedToRemoteDesktopUsers = [.. c.State.Rdp.AddedToRemoteDesktopUsers, sid] } };
             return StepState.Done;
-        }, c => rdp.RemoveFromRemoteDesktopUsers(c.AskingAccount!)),
+        }, c => { if (c.AddedUser) rdp.RemoveFromRemoteDesktopUsers(c.AskingAccount!); }),
         new SetupStep("rdp-service", c =>
         {
             if (c.State!.Rdp!.Mode != RemoteDesktopSetup.Closed) return StepState.Skipped;
@@ -130,8 +132,9 @@ public static class RemoteDesktopSetupPlans
         if (state?.Rdp is not { } setup) return RemoveBlockRules(c) ? StepState.Done : StepState.Skipped;
         var facts = rdp.Facts();
         foreach (var sid in setup.AddedToRemoteDesktopUsers) rdp.RemoveFromRemoteDesktopUsers(sid);
-        if (setup.WeSetNla) rdp.SetNla(false, setup.Prior.UserAuthentication);
-        if (setup.WeTurnedOn && facts.AllowRuleForPort != true) rdp.SetAllowed(false); // throws: the block rules stay
+        if (setup.WeTurnedOn && facts.AllowRuleForPort != true) rdp.SetAllowed(false); // throws: NLA and the block rules stay
+        // NLA goes back only when Remote Desktop ends up off: one left on (the owner uses it) keeps requiring it.
+        if (setup.WeSetNla && rdp.Facts().Denied) rdp.SetNla(false, setup.Prior.UserAuthentication);
         if (setup.WeChangedStart) rdp.SetStartType(setup.Prior.TermServiceStart ?? 4);
         RemoveBlockRules(c);
         return StepState.Done;
@@ -169,12 +172,8 @@ public static class RemoteDesktopSetupPlans
             }
             else
             {
+                // Open to the network again, it keeps requiring NLA (removal puts the old value back once it is off).
                 RemoveBlockRules(c);
-                if (c.Before!.Rdp!.WeSetNla)
-                {
-                    rdp.SetNla(false, c.Before.Rdp.Prior.UserAuthentication);
-                    c.State = c.State! with { Rdp = c.State.Rdp! with { WeSetNla = false } };
-                }
             }
             return StepState.Done;
         }),
