@@ -48,6 +48,7 @@ struct PassthroughMacApp: App {
             }
         }
         .defaultSize(width: 1280, height: 820)
+        .commands { PCScreenCommands() }
 
         Window("Welcome to Passthrough", id: WelcomeView.id) {
             WelcomeView()

@@ -23,6 +23,8 @@ struct PCScreenWindow: View {
     @State private var unlocked = false
     @State private var unlocking = false
     @State private var shown = false
+    /// The context that prompt satisfied: it reads and writes the saved Windows login without a second prompt.
+    @State private var context = LAContext()
     /// The picture's area in pixels: the desktop Windows is asked for.
     @State private var viewPixels = CGSize.zero
     @Environment(\.displayScale) private var displayScale
@@ -52,9 +54,25 @@ struct PCScreenWindow: View {
             case .live:
                 EmptyView()
             case let .signIn(error):
-                PCSignInForm(name: model.name, account: model.account, error: error) { login in
-                    model.connect(login, pixels: viewPixels, scale: displayScale)
+                PCSignInForm(name: model.name, account: model.account, error: error) { login, remember in
+                    model.connect(login, remember: remember, pixels: viewPixels, scale: displayScale)
                 }
+            case .inUse:
+                VStack(spacing: 14) {
+                    Image(systemName: "person.fill.questionmark")
+                        .font(.system(size: 40, weight: .light))
+                        .foregroundStyle(.secondary)
+                    Text("Someone is using \(model.name) right now. Connecting locks its screen and they lose their place.")
+                        .multilineTextAlignment(.center)
+                        .foregroundStyle(.secondary)
+                        .frame(maxWidth: 420)
+                    HStack {
+                        Button("Not Now") { model.end("\(model.name) is in use.", canRetry: true) }
+                            .keyboardShortcut(.defaultAction)
+                        Button("Connect Anyway") { model.connectAnyway() }
+                    }
+                }
+                .padding(24)
             case let .failed(message):
                 VStack(spacing: 14) {
                     Image(systemName: "display.trianglebadge.exclamationmark")
@@ -72,7 +90,22 @@ struct PCScreenWindow: View {
                 .padding(24)
             }
         }
+        .overlay(alignment: .top) {
+            // Said once, when the picture first shows: what being here does at the PC.
+            if model.showsLockedNote {
+                Text("\(model.name)'s own screen is locked while you're here, and stays locked when you leave.")
+                    .font(.callout)
+                    .padding(.horizontal, 14).padding(.vertical, 8)
+                    .background(.regularMaterial, in: Capsule())
+                    .padding(.top, 10)
+                    .transition(.opacity)
+                    .allowsHitTesting(false)
+            }
+        }
+        .animation(.easeInOut(duration: 0.25), value: model.showsLockedNote)
         .frame(minWidth: 480, minHeight: 300)
+        .focusedSceneValue(\.pcScreen, model)
+        .onChange(of: viewPixels) { _, pixels in model.viewChanged(pixels: pixels, scale: displayScale) }
         .navigationTitle(model.name)
         .navigationSubtitle(model.subtitle)
         .toolbar {
@@ -99,12 +132,14 @@ struct PCScreenWindow: View {
         }
         .onAppear {
             shown = true
+            PCScreenWindows.opened()
             start()
             NSApp.activate()
         }
         .onDisappear {
             shown = false
-            model.stop()
+            model.close()
+            PCScreenWindows.closed()
         }
         .onChange(of: shell.reachableComputers) { _, computers in
             // The access was taken away while the window was open.
@@ -119,7 +154,14 @@ struct PCScreenWindow: View {
             return
         }
         guard unlocked else { return unlock(computer) }
-        model.begin(computer, identity: shell.identityForReaching)
+        let context = self.context
+        model.begin(computer, identity: shell.identityForReaching,
+                    remembered: { WindowsLoginStore.read(hostID: hostID, context: context) },
+                    remember: { login in
+                        if let login { WindowsLoginStore.save(login, hostID: hostID, context: context) } else { WindowsLoginStore.delete(hostID: hostID) }
+                    })
+        // A login saved for this PC signs in without asking; the picture's area is known by now.
+        model.connectRemembered(pixels: viewPixels, scale: displayScale)
     }
 
     private func unlock(_ computer: ReachableComputer) {
@@ -128,8 +170,10 @@ struct PCScreenWindow: View {
         model.locked(computer.credential.macName)
         Task { @MainActor in
             // Shown as "Passthrough is trying to …".
-            let ok = (try? await LAContext().evaluatePolicy(.deviceOwnerAuthentication,
-                                                           localizedReason: "see and control \(computer.credential.macName)'s screen")) ?? false
+            let fresh = LAContext()
+            let ok = (try? await fresh.evaluatePolicy(.deviceOwnerAuthentication,
+                                                      localizedReason: "see and control \(computer.credential.macName)'s screen")) ?? false
+            if ok { context = fresh }
             unlocking = false
             guard ok, shown else { return }
             unlocked = true
@@ -143,9 +187,10 @@ private struct PCSignInForm: View {
     let name: String
     let account: String?
     let error: String?
-    let onSignIn: (ScreenLogin) -> Void
+    let onSignIn: (ScreenLogin, Bool) -> Void
     @State private var username = ""
     @State private var password = ""
+    @State private var remember = true
     @State private var editsAccount = false
     @FocusState private var focus: Field?
 
@@ -154,7 +199,7 @@ private struct PCSignInForm: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             Text("Sign in to \(name)").font(.title3.weight(.semibold))
-            Text("Windows asks for your account's password, not your PIN. Passthrough passes it to Windows.")
+            Text("Windows asks for your account's password, not your PIN. Passthrough passes it to Windows and keeps it on this Mac behind Touch ID.")
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
             if let error {
@@ -170,6 +215,7 @@ private struct PCSignInForm: View {
                 .textContentType(.password)
                 .focused($focus, equals: .password)
                 .onSubmit(signIn)
+            Toggle("Remember on this Mac", isOn: $remember)
             HStack {
                 if !editsAccount {
                     Button("Use a different account") {
@@ -202,7 +248,7 @@ private struct PCSignInForm: View {
     private func signIn() {
         let name = username.trimmingCharacters(in: .whitespaces)
         guard !name.isEmpty, !password.isEmpty else { return }
-        onSignIn(ScreenLogin(username: name, password: password))
+        onSignIn(ScreenLogin(username: name, password: password), remember)
         password = ""
     }
 }
@@ -214,6 +260,8 @@ final class PCScreenModel: ObservableObject, RemoteScreenSource {
     enum Phase: Equatable {
         /// Waiting for the Windows account's password; `error` says why again.
         case signIn(error: String?)
+        /// Someone is at the PC: connecting would lock its screen under them.
+        case inUse
         case connecting, live
         case failed(String)
     }
@@ -247,8 +295,33 @@ final class PCScreenModel: ObservableObject, RemoteScreenSource {
     private var buttons: RFBClient.Buttons = []
     /// Held only between the form and the helper's start, then let go.
     private var login: ScreenLogin?
+    /// The login this window signed in with, kept while the window is open so a dropped view comes back without asking.
+    private var held: (login: ScreenLogin, remember: Bool)?
+    /// The saved login for this PC, and how to save one (nil: forget it): the window's, with its Touch ID context.
+    private var remembered: (() -> ScreenLogin?)?
+    private var remember: ((ScreenLogin?) -> Void)?
     private var shape = ScreenShape(width: 1920, height: 1200)
     private var visible = true
+    /// The picture's area and this display's scale, as the window is now.
+    private var view = (pixels: CGSize(width: 2560, height: 1600), scale: CGFloat(2))
+    /// What the PC said of itself on this connection: whether someone is at it, and its own monitor's scale.
+    private var host: HostInfo?
+    private var askedAnyway = false
+    private var rdpAsked = false
+    private var hostWait: Task<Void, Never>?
+    /// Reshaping: what Windows was last asked for, and when.
+    private var asked: ScreenShape?
+    private var askedAt: TimeInterval?
+    private var reshapeTask: Task<Void, Never>?
+    /// Reconnecting: how many tries in a row, and since when the picture has been live.
+    private var retries = 0
+    private var liveSince: TimeInterval?
+    private var retryTask: Task<Void, Never>?
+    /// The waits between tries after a view that worked dropped.
+    static let retryWaits: [TimeInterval] = [1, 2, 4, 8, 15]
+    @Published private(set) var showsLockedNote = false
+    private var saidLockedNote = false
+    private var noteTask: Task<Void, Never>?
 
     var isLive: Bool { phase == .live }
     var buttonsHeld: Bool { !buttons.isEmpty }
@@ -258,14 +331,40 @@ final class PCScreenModel: ObservableObject, RemoteScreenSource {
     private var words: HostWords { HostWords(kind: .windows, name: name, device: "Mac") }
 
     /// The window opened (or Try Again): Windows wants a password before anything is dialled.
-    func begin(_ computer: ReachableComputer, identity: (any ComputerIdentitySigning)?) {
+    func begin(_ computer: ReachableComputer, identity: (any ComputerIdentitySigning)?,
+               remembered: @escaping () -> ScreenLogin?, remember: @escaping (ScreenLogin?) -> Void) {
         stop()
         self.computer = computer
         self.identity = identity
+        self.remembered = remembered
+        self.remember = remember
         name = computer.credential.macName
         subtitle = ""
         canRetry = true
+        retries = 0
+        askedAnyway = false
         phase = .signIn(error: nil)
+    }
+
+    /// Signs in with the login this window already used, else the one saved for this PC; without either, the form stays.
+    func connectRemembered(pixels: CGSize, scale: CGFloat) {
+        guard phase == .signIn(error: nil) else { return }
+        if let held { return connect(held.login, remember: held.remember, pixels: pixels, scale: scale) }
+        if let saved = remembered?() { connect(saved, remember: true, pixels: pixels, scale: scale) }
+    }
+
+    /// The window closed: nothing of the login stays in memory.
+    func close() {
+        stop()
+        held = nil
+        remembered = nil
+        remember = nil
+    }
+
+    /// Forgets the login saved for this PC (the window's own stays until it closes).
+    func forgetSavedLogin() {
+        remember?(nil)
+        if let current = held { held = (current.login, false) }
     }
 
     /// Waiting for Touch ID or the password before anything else.
@@ -277,23 +376,26 @@ final class PCScreenModel: ObservableObject, RemoteScreenSource {
         phase = .failed("Confirm it's you to see and control \(name)'s screen.")
     }
 
-    /// Stops for good with `message`: nothing to try again with.
-    func end(_ message: String) {
+    /// Stops with `message`; for good unless `canRetry`.
+    func end(_ message: String, canRetry: Bool = false) {
         stop()
-        canRetry = false
+        self.canRetry = canRetry
         phase = .failed(message)
     }
 
     /// Dials the PC and asks for its Remote Desktop, to sign in as `login` once it answers.
     /// `pixels`: the picture's area, which the desktop takes; `scale`: this display's.
-    func connect(_ login: ScreenLogin, pixels: CGSize, scale: CGFloat) {
+    func connect(_ login: ScreenLogin, remember: Bool, pixels: CGSize, scale: CGFloat) {
         guard let computer else { return }
         stop()
         generation += 1
         let gen = generation
         self.login = login
+        held = (login, remember)
         account = login.username
-        shape = Self.shape(pixels: pixels, scale: scale)
+        if pixels.width > 0, pixels.height > 0 { view = (pixels, scale) }
+        host = nil
+        rdpAsked = false
         phase = .connecting
         guard let identity else {
             return fail("Turn on Remote Shell on this Mac first: it proves to \(name) which Mac this is.")
@@ -320,9 +422,51 @@ final class PCScreenModel: ObservableObject, RemoteScreenSource {
         return ScreenShape(width: width, height: height, desktopScale: hostScale, deviceScale: WindowsDisplay.deviceScale(for: hostScale))
     }
 
+    /// The user chose to connect though someone is at the PC.
+    func connectAnyway() {
+        guard phase == .inUse else { return }
+        askedAnyway = true
+        phase = .connecting
+        askForScreen()
+    }
+
+    /// The picture's area changed (the window was resized, or moved to another display): once it has settled, the
+    /// desktop is asked to follow, as on the phone.
+    func viewChanged(pixels: CGSize, scale: CGFloat) {
+        guard pixels.width > 0, pixels.height > 0 else { return }
+        view = (pixels, scale)
+        guard phase == .live, engine != nil else { return }
+        reshapeTask?.cancel()
+        let wait = WindowsDisplay.wait(now: ProcessInfo.processInfo.systemUptime, lastAsked: askedAt)
+        let gen = generation
+        reshapeTask = Task { [weak self] in
+            try? await Task.sleep(for: .milliseconds(Int(wait * 1000)))
+            guard !Task.isCancelled, let self, gen == self.generation, let engine = self.engine else { return }
+            let next = Self.shape(pixels: self.view.pixels, scale: self.view.scale, hostScale: self.hostScale)
+            guard WindowsDisplay.worthAsking(next, current: self.asked) else { return }
+            self.asked = next
+            self.askedAt = ProcessInfo.processInfo.systemUptime
+            engine.reshape(width: next.width, height: next.height, desktopScale: next.desktopScale, deviceScale: next.deviceScale)
+        }
+    }
+
+    /// The PC's own scale, which the session keeps (100 % until it says).
+    private var hostScale: Int {
+        guard let scale = host?.display?.scale, WindowsDisplay.scales.contains(scale) else { return 100 }
+        return scale
+    }
+
     func stop() {
         generation += 1
         login = nil
+        hostWait?.cancel()
+        reshapeTask?.cancel()
+        retryTask?.cancel()
+        noteTask?.cancel()
+        showsLockedNote = false
+        asked = nil
+        askedAt = nil
+        liveSince = nil
         client?.disconnect()
         client = nil
         engine?.stop()
@@ -356,7 +500,23 @@ final class PCScreenModel: ObservableObject, RemoteScreenSource {
         switch event {
         case let .ready(path):
             self.path = path
-            client?.requestRDP()
+            // What the PC says of itself comes right behind: whether someone is at it decides if the user is asked first.
+            hostWait?.cancel()
+            hostWait = Task { [weak self] in
+                try? await Task.sleep(for: .milliseconds(600))
+                guard !Task.isCancelled, let self, gen == self.generation else { return }
+                self.askForScreen()
+            }
+        case let .host(info):
+            host = info
+            hostWait?.cancel()
+            let inUse = info.console == "active" && (info.idleSeconds ?? .max) < HostInfo.inUseIdleSeconds
+            // Not asked again for a reconnect, or once the user said to go ahead.
+            if inUse, !askedAnyway, retries == 0, !rdpAsked {
+                phase = .inUse
+            } else {
+                askForScreen()
+            }
         case let .rdp(stream, initialBytes, certSHA256):
             client = nil   // it let go of the stream; the dialer stays up for it
             startEngine(stream: stream, initialBytes: initialBytes, certSHA256: certSHA256, generation: gen)
@@ -372,6 +532,12 @@ final class PCScreenModel: ObservableObject, RemoteScreenSource {
         }
     }
 
+    private func askForScreen() {
+        guard !rdpAsked, let client else { return }
+        rdpAsked = true
+        client.requestRDP()
+    }
+
     /// The PC handed the connection over to its Remote Desktop: the bytes go to a helper process through a socket
     /// pair, and the helper signs in. The helper never sees the network, and this app never runs the engine.
     private func startEngine(stream: any ByteStream, initialBytes: Data, certSHA256: String, generation gen: Int) {
@@ -380,6 +546,8 @@ final class PCScreenModel: ObservableObject, RemoteScreenSource {
             return fail("This Mac couldn't start the screen view. Try again.")
         }
         self.login = nil
+        shape = Self.shape(pixels: view.pixels, scale: view.scale, hostScale: hostScale)
+        asked = shape
         let helperEnd = FileHandle(fileDescriptor: pair.1, closeOnDealloc: true)
         splice = StreamSplice(stream, initialBytes: initialBytes, FileDescriptorStream(descriptor: pair.0)) { [weak self] _ in
             DispatchQueue.main.async {
@@ -435,6 +603,20 @@ final class PCScreenModel: ObservableObject, RemoteScreenSource {
         guard gen == generation else { return }
         self.surface = surface
         streamSize = CGSize(width: width, height: height)
+        if liveSince == nil {
+            // Windows took the login: kept or forgotten as the user chose, only now.
+            liveSince = ProcessInfo.processInfo.systemUptime
+            if let held { remember?(held.remember ? held.login : nil) }
+            if !saidLockedNote {
+                saidLockedNote = true
+                showsLockedNote = true
+                noteTask = Task { [weak self] in
+                    try? await Task.sleep(for: .seconds(6))
+                    guard !Task.isCancelled else { return }
+                    self?.showsLockedNote = false
+                }
+            }
+        }
         phase = .live
         subtitle = switch path {
         case .relay?: "Keys go to \(name) · through a relay"
@@ -482,12 +664,35 @@ final class PCScreenModel: ObservableObject, RemoteScreenSource {
 
     fileprivate func ended(_ end: ScreenEnd, generation gen: Int) {
         guard gen == generation else { return }
+        let liveFor = liveSince.map { ProcessInfo.processInfo.systemUptime - $0 }
         stop()
         switch end {
         case .closedHere:
             break
         case .signIn(.wrongPassword), .signIn(.other):
+            // A password Windows refused is forgotten, here and in the Keychain: one attempt, then the form.
+            held = nil
+            remember?(nil)
             phase = .signIn(error: WindowsScreenCopy.signInError(end))
+        case .connectionLost where liveFor != nil && held != nil:
+            // A view that worked and dropped (the network, this Mac's sleep, the helper) comes back by itself, a few
+            // times; one that lasted half a minute starts the count again. Nothing else reconnects on its own.
+            if let liveFor, liveFor > 30 { retries = 0 }
+            guard retries < Self.retryWaits.count, let held else {
+                phase = .failed("The connection to \(name) was lost.")
+                return
+            }
+            let wait = Self.retryWaits[retries]
+            retries += 1
+            phase = .connecting
+            let again = generation
+            retryTask = Task { [weak self] in
+                try? await Task.sleep(for: .milliseconds(Int(wait * 1000)))
+                guard !Task.isCancelled, let self, again == self.generation, self.phase == .connecting else { return }
+                let kept = self.retries
+                self.connect(held.login, remember: held.remember, pixels: self.view.pixels, scale: self.view.scale)
+                self.retries = kept
+            }
         default:
             phase = .failed(WindowsScreenCopy.ending(end, words)?.sentence ?? "The connection to \(name) was lost.")
         }
@@ -570,6 +775,60 @@ final class PCScreenModel: ObservableObject, RemoteScreenSource {
     }
 
     func copyFromPC() { engine?.copySelection() }
+}
+
+/// The model of the PC window in front, for the menu bar's Windows menu.
+struct PCScreenFocusKey: FocusedValueKey {
+    typealias Value = PCScreenModel
+}
+
+extension FocusedValues {
+    var pcScreen: PCScreenModel? {
+        get { self[PCScreenFocusKey.self] }
+        set { self[PCScreenFocusKey.self] = newValue }
+    }
+}
+
+/// The app has no Dock icon or menu bar of its own. While a PC's screen window is open it takes both, so the
+/// Windows menu and the standard window commands are there; when the last one closes it goes back.
+@MainActor
+enum PCScreenWindows {
+    private static var count = 0
+
+    static func opened() {
+        count += 1
+        if count == 1 { NSApp.setActivationPolicy(.regular) }
+    }
+
+    static func closed() {
+        count = max(0, count - 1)
+        if count == 0 { NSApp.setActivationPolicy(.accessory) }
+    }
+}
+
+/// The menu bar's Windows menu: the same keys as the toolbar's, for the PC window in front.
+struct PCScreenCommands: Commands {
+    @FocusedValue(\.pcScreen) private var model
+
+    var body: some Commands {
+        CommandMenu("Windows") {
+            Group {
+                Button("Send Ctrl+Alt+Del") { model?.windows(.ctrlAltDel) }
+                Button("Start") { model?.windows(.start) }
+                Button("Task View") { model?.windows(.taskView) }
+                Button("Switch Apps (Alt+Tab)") { model?.windows(.altTab) }
+                Button("Show Desktop") { model?.windows(.showDesktop) }
+                Button("Close Window (Alt+F4)") { model?.windows(.closeWindow) }
+                Divider()
+                Button("Send Clipboard") { model?.sendClipboard() }
+                Button("Copy from PC") { model?.copyFromPC() }
+            }
+            .disabled(model?.phase != .live)
+            Divider()
+            Button("Forget Saved Sign-In") { model?.forgetSavedLogin() }
+                .disabled(model == nil)
+        }
+    }
 }
 
 /// What the helper sends, on the connection's queue: every value is checked here before the model sees it. The helper
