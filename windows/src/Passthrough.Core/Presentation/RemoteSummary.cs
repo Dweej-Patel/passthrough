@@ -60,8 +60,9 @@ public static class RemoteSummary
             case RemoteMode.Unavailable: return new("Remote access needs a look", problem ?? "Open Settings ▸ Remote access to see why", RemoteTone.Attention);
         }
         var viewers = here.Where(d => d.Viewing).ToList();
-        if (viewers.Count == 1) return new($"{viewers[0].Name} is viewing this screen", "This PC's own screen is locked while it does", RemoteTone.On);
-        if (viewers.Count > 1) return new($"{viewers.Count} devices are viewing this screen", "This PC's own screen is locked while they do", RemoteTone.On);
+        // Who is viewing is the row under the notices (with Stop); the header says what that means here.
+        if (viewers.Count > 0)
+            return new("This PC's screen is in use", viewers.Count == 1 ? "Its own screen stays locked while it is" : $"By {viewers.Count} devices; its own screen stays locked", RemoteTone.On);
         var shells = here.Where(d => d.Shells > 0).ToList();
         if (shells.Count == 1)
             return new($"{shells[0].Name} has {Shells(shells[0].Shells)} open", "Stop ends them from the Remote tab", RemoteTone.On);
@@ -76,6 +77,17 @@ public static class RemoteSummary
             var n => $"{n} phones can reach it",
         }, RemoteTone.On);
     }
+
+    /// <summary>The header's one button, when there is something to do in Settings ▸ Remote access: turn it on, or fix it.</summary>
+    public static string? HeaderAction(RemoteMode mode) => mode switch
+    {
+        RemoteMode.Off => "Turn on…",
+        RemoteMode.Unavailable => "Fix…",
+        _ => null,
+    };
+
+    /// <summary>The This PC tab's title: marked while a phone on the cable waits for its code or a retry.</summary>
+    public static string ThisPcTabTitle(bool phoneWaits) => phoneWaits ? "This PC · Pair" : "This PC";
 
     /// <summary>The Remote tab's title: "Remote · 2" while two devices are on this PC.</summary>
     public static string TabTitle(IReadOnlyList<OnThisPc> here) => here.Count > 0 ? $"Remote · {here.Count}" : "Remote";

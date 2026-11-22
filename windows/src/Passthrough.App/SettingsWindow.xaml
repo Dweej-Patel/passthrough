@@ -6,7 +6,7 @@
     Title="Passthrough settings">
 
     <!-- No background of its own: the window's Mica shows through. Four pages along the top (General, Remote access,
-         Your computers, Advanced), one card per setting, as in Windows Settings. -->
+         Computers with access, Advanced), one card per setting, as in Windows Settings. -->
     <Grid>
         <Grid.RowDefinitions>
             <RowDefinition Height="32" />
@@ -22,7 +22,7 @@
         <NavigationView.MenuItems>
             <NavigationViewItem Content="General" Tag="general" />
             <NavigationViewItem Content="Remote access" Tag="remote" />
-            <NavigationViewItem Content="Your computers" Tag="computers" />
+            <NavigationViewItem Content="Computers with access" Tag="computers" />
             <NavigationViewItem Content="Advanced" Tag="advanced" />
         </NavigationView.MenuItems>
     <ScrollViewer>
@@ -30,7 +30,10 @@
             <!-- A failed action's sentence, at the top of whichever page is showing -->
             <Border x:Name="ErrorBox" Visibility="Collapsed" Background="{StaticResource PtAttentionFillBrush}"
                     CornerRadius="6" Padding="12,10">
-                <TextBlock x:Name="ErrorText" TextWrapping="Wrap" AutomationProperties.LiveSetting="Assertive" />
+                <StackPanel Spacing="4">
+                    <TextBlock x:Name="ErrorText" TextWrapping="Wrap" AutomationProperties.LiveSetting="Assertive" />
+                    <HyperlinkButton Content="Open the log folder" Padding="0" Click="OnOpenLogClick" />
+                </StackPanel>
             </Border>
 
             <!-- General -->
@@ -116,18 +119,18 @@
                             <ColumnDefinition Width="Auto" />
                         </Grid.ColumnDefinitions>
                         <StackPanel VerticalAlignment="Center">
-                            <TextBlock Text="Stay awake while plugged in" />
+                            <TextBlock Text="Stay awake on mains power" />
                             <TextBlock x:Name="AwakeText" Style="{StaticResource CaptionTextBlockStyle}" TextWrapping="Wrap"
                                        Foreground="{ThemeResource TextFillColorSecondaryBrush}"
                                        AutomationProperties.LiveSetting="Polite" />
                         </StackPanel>
                         <ToggleSwitch x:Name="AwakeSwitch" Grid.Column="1" MinWidth="0" OnContent="" OffContent=""
-                                      AutomationProperties.Name="Stay awake while plugged in" Toggled="OnAwakeToggled" />
+                                      AutomationProperties.Name="Stay awake on mains power" Toggled="OnAwakeToggled" />
                     </Grid>
                 </Border>
 
-                <TextBlock Text="Phones" Style="{StaticResource BodyStrongTextBlockStyle}" Margin="0,16,0,0" />
-                <TextBlock Text="Every phone paired with this PC. Plug a paired phone in once with Remote access on to give it the shell; tick Screen to let it see the screen too."
+                <TextBlock Text="Phones" Style="{StaticResource BodyStrongTextBlockStyle}" Margin="0,16,0,0" AutomationProperties.HeadingLevel="Level1" />
+                <TextBlock Text="Every phone paired with this PC. Plug a paired phone in once with Remote access on to give it the shell. Screen lets it see this PC's screen too, and the screen of any computer it shares this PC with. A Mac shows a PC's screen; the iPhone and iPad apps do only with their developer setting on, for now."
                            Style="{StaticResource CaptionTextBlockStyle}" TextWrapping="Wrap"
                            Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
                 <Border x:Name="NoPhonesText" Style="{StaticResource PtCardStyle}" Padding="16,14" Visibility="Collapsed">
@@ -168,7 +171,7 @@
                                                   ToolTipService.ToolTip="Let it give your other computers access to this PC, from Share with another computer on the phone. A computer's screen still waits for you to allow it here." />
                                         <Button Content="Stop" Click="OnStopClick" IsEnabled="{x:Bind CanStop}" Visibility="{x:Bind AccessVisibility}"
                                                 AutomationProperties.Name="{x:Bind StopName}"
-                                                ToolTipService.ToolTip="Ends its shells and any view of the screen now. It keeps its access." />
+                                                ToolTipService.ToolTip="Ends its shells and any view of the screen now. It keeps its access and can connect again." />
                                         <Button Content="Revoke…" Click="OnRevokeClick" Visibility="{x:Bind AccessVisibility}"
                                                 AutomationProperties.Name="{x:Bind RevokeName}" />
                                         <Button Content="Forget…" Click="OnForgetClick" Visibility="{x:Bind ForgetVisibility}"
@@ -181,9 +184,9 @@
                 </ItemsControl>
             </StackPanel>
 
-            <!-- Your computers: the ones a phone let in here -->
+            <!-- Computers with access: the ones a phone let in here (the ones this PC reaches are the tray's Your computers) -->
             <StackPanel x:Name="ComputersPanel" Spacing="8" Visibility="Collapsed">
-                <TextBlock Text="Computers with access" Style="{StaticResource BodyStrongTextBlockStyle}" />
+                <TextBlock Text="Computers with access" Style="{StaticResource BodyStrongTextBlockStyle}" AutomationProperties.HeadingLevel="Level1" />
                 <TextBlock Text="Your other computers a phone gave access to this PC. A computer's screen waits for you to allow it here."
                            Style="{StaticResource CaptionTextBlockStyle}" TextWrapping="Wrap"
                            Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
@@ -233,6 +236,21 @@
 
             <!-- Advanced: history, the relay, this PC's identity -->
             <StackPanel x:Name="AdvancedPanel" Spacing="8" Visibility="Collapsed">
+                <Border Style="{StaticResource PtCardStyle}" Padding="16,12">
+                    <Grid ColumnSpacing="12">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="Auto" />
+                        </Grid.ColumnDefinitions>
+                        <StackPanel VerticalAlignment="Center">
+                            <TextBlock Text="Logs" />
+                            <TextBlock Text="What Passthrough did on this PC, for when something didn't work. They hold no keys, tokens or passwords."
+                                       Style="{StaticResource CaptionTextBlockStyle}" TextWrapping="Wrap"
+                                       Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                        </StackPanel>
+                        <Button Grid.Column="1" Content="Open the log folder" VerticalAlignment="Center" Click="OnOpenLogClick" />
+                    </Grid>
+                </Border>
                 <Border Style="{StaticResource PtCardStyle}" Padding="16,12">
                     <Grid ColumnSpacing="12" RowSpacing="8">
                         <Grid.ColumnDefinitions>

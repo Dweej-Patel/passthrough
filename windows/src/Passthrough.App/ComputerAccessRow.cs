@@ -15,22 +15,26 @@ public sealed class ComputerAccessRow(PipeComputer computer)
         $"from {computer.GrantedBy}",
         computer.Connections > 0 ? "Connected" : null,
         computer.ScreenPending ? "Screen waits for you" : null,
+        computer.ScreenHeld ? $"No screen while {computer.GrantedBy} has Screen off here" : null,
     }.Where(part => part is not null));
 
     /// <summary>It may see the screen now.</summary>
     public bool Screen { get; } = computer.Screen;
 
-    /// <summary>The screen was handed to it: the box can be ticked (and unticked). Without it, only the phone can give it.</summary>
-    public bool ScreenSwitchEnabled { get; } = computer.Screen || computer.ScreenPending;
+    /// <summary>The owner allowed it the screen here (it may be held back by its phone's Screen switch).</summary>
+    public bool AllowedHere { get; } = computer.Screen || computer.ScreenHeld;
 
-    public string ScreenTip { get; } = computer.Screen || computer.ScreenPending
+    /// <summary>The screen was handed to it: the box can be ticked (and unticked). Without it, only the phone can give it.</summary>
+    public bool ScreenSwitchEnabled { get; } = computer.Screen || computer.ScreenHeld || computer.ScreenPending;
+
+    public string ScreenTip { get; } = computer.Screen || computer.ScreenHeld || computer.ScreenPending
         ? "Let it see and control this PC's screen. Windows still asks for your password."
         : "The phone gave it the shell only. To give it the screen too, share again from the phone.";
 
     public string Glyph => computer.Kind == "mac" ? Glyphs.Laptop : Glyphs.Desktop;
 
     /// <summary>Allow screen while it waits for you; Turn off screen once it may see it; nothing when it was given the shell only.</summary>
-    public string ScreenAction { get; } = computer.Screen ? "Turn off screen" : computer.ScreenPending ? "Allow screen" : "";
+    public string ScreenAction { get; } = computer.Screen || computer.ScreenHeld ? "Turn off screen" : computer.ScreenPending ? "Allow screen" : "";
     public Microsoft.UI.Xaml.Visibility ScreenActionVisibility => ScreenAction.Length > 0 ? Microsoft.UI.Xaml.Visibility.Visible : Microsoft.UI.Xaml.Visibility.Collapsed;
     public string ScreenActionName => $"{ScreenAction} for {computer.Name}";
     public string RevokeName => $"Revoke {computer.Name}";

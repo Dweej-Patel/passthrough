@@ -343,7 +343,7 @@ public sealed partial class SettingsWindow : Window
         if (_remote is null) return;
         var computer = (ComputerAccessRow)((FrameworkElement)sender).DataContext;
         // Allow screen while it waits; Turn off screen once it may see it.
-        try { await _remote.SetComputerScreenAsync(computer.Id, !computer.Screen); }
+        try { await _remote.SetComputerScreenAsync(computer.Id, !computer.AllowedHere); }
         catch (Exception ex)
         {
             LogFile.Error(ex);
@@ -400,7 +400,7 @@ public sealed partial class SettingsWindow : Window
         AwakeCard.Visibility = Visibility.Visible;
         var minutes = (power.SleepAfter ?? 0) / 60;
         AwakeText.Text = power.StayAwake == true
-            ? power.OnMains == true ? "Stays awake while plugged in." : $"On battery this PC sleeps after {minutes} minutes."
+            ? power.OnMains == true ? "Stays awake on mains power." : $"On battery this PC sleeps after {minutes} minutes."
             : minutes > 0 ? $"This PC sleeps after {minutes} minutes. A sleeping PC can't answer." : "This PC doesn't sleep by itself.";
         _settingAwake = true;
         AwakeSwitch.IsOn = power.StayAwake == true;
@@ -584,6 +584,17 @@ public sealed partial class SettingsWindow : Window
     {
         Activate();
         _ = NativeMethods.BringToFront(Win32Interop.GetWindowFromWindowId(AppWindow.Id));
+    }
+
+    /// <summary>The folder with passthrough.log, in Explorer (the service's own log is under ProgramData, for administrators).</summary>
+    private void OnOpenLogClick(object sender, RoutedEventArgs e)
+    {
+        try
+        {
+            if (System.IO.Path.GetDirectoryName(LogFile.Path) is { } folder)
+                System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo("explorer.exe") { ArgumentList = { folder }, UseShellExecute = false });
+        }
+        catch (Exception ex) { LogFile.Error(ex); }
     }
 
     private void ShowError(string message)

@@ -90,6 +90,8 @@ public sealed record PipeComputer
     public int Connections { get; init; }
     /// <summary>It is viewing the screen now.</summary>
     public bool Viewing { get; init; }
+    /// <summary>It was allowed the screen here, but the phone that gave it access has Screen off, so it can't see it now.</summary>
+    public bool ScreenHeld { get; init; }
 }
 
 /// <summary>What a grant carries now (<see cref="GrantContents"/> across the pipe).</summary>
@@ -160,7 +162,9 @@ public sealed class PipeAdminHandler(AccessDirectory directory, Func<GrantConten
                     Computers = [.. directory.ComputersFor(account).All.Select(c => new PipeComputer
                     {
                         Id = c.Id, Name = c.Name, Kind = c.Kind, Shell = c.Shell == true,
-                        Screen = c.Screen == true && c.ScreenPending != true, ScreenPending = c.ScreenPending == true,
+                        // What it may do now: its granter's Screen switch counts too.
+                        Screen = directory.Computer(c.Id)?.Screen == true, ScreenPending = c.ScreenPending == true,
+                        ScreenHeld = c.Screen == true && c.ScreenPending != true && directory.Computer(c.Id)?.Screen != true,
                         GrantedBy = store.Phones.FirstOrDefault(p => p.PhoneId == c.GrantedBy)?.Label ?? "a phone",
                         GrantedAt = c.GrantedAt.ToUnixTimeSeconds(), Connections = connections(c.Id), Viewing = Viewing?.Invoke(c.Id) == true,
                     })],

@@ -59,7 +59,8 @@ public sealed class PhoneRow : ObservableBase
     public Visibility MessageVisibility => Show(_model.ShowMessage);
     public Visibility PairVisibility => Show(_model.ShowPair);
     public Visibility RetryVisibility => Show(_model.ShowRetry);
-    public Visibility UseVisibility => Show(_model.ShowUse);
+    // Hidden until the PC goes online through a phone: choosing one does nothing else yet (GUIDE.md: "Not yet").
+    public Visibility UseVisibility => Visibility.Collapsed;
     public Visibility ForgetVisibility => Show(_model.ShowForget);
 
     public string Code

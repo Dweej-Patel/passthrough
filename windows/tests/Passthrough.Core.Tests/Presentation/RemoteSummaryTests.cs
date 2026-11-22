@@ -34,7 +34,11 @@ public sealed class RemoteSummaryTests
     public void AViewerComesFirstThenShells()
     {
         var both = RemoteSummary.Here([D("iPhone", connections: 2, shells: 2), D("MacBook", connections: 1, viewing: true)]);
-        Assert.Equal("MacBook is viewing this screen", RemoteSummary.Header(RemoteMode.On, null, 1, both)!.Title);
+        Assert.Equal("This PC's screen is in use", RemoteSummary.Header(RemoteMode.On, null, 1, both)!.Title);
+        Assert.Equal("Turn on…", RemoteSummary.HeaderAction(RemoteMode.Off));
+        Assert.Equal("Fix…", RemoteSummary.HeaderAction(RemoteMode.Unavailable));
+        Assert.Null(RemoteSummary.HeaderAction(RemoteMode.On));
+        Assert.Equal("This PC · Pair", RemoteSummary.ThisPcTabTitle(true));
         var shells = RemoteSummary.Here([D("iPhone", connections: 1, shells: 2)]);
         Assert.Equal("iPhone has 2 shells open", RemoteSummary.Header(RemoteMode.On, null, 1, shells)!.Title);
         var two = RemoteSummary.Here([D("iPhone", shells: 1), D("Pixel", shells: 2)]);

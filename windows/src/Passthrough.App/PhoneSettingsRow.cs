@@ -26,6 +26,7 @@ public sealed class PhoneSettingsRow
             paired is null ? "Not paired over the cable" : paired.Detail,
             access is null ? "No access yet: plug it in with Remote access on" : null,
             access is not null && access.Viewing ? "Viewing the screen" : null,
+            access is not null && !screenAvailable && access.Screen != true ? "Screen: set up the screen above first" : null,
             access is not null && connected ? "Connected" : null,
             sessions switch { 0 => null, 1 => "1 shell open", var n => $"{n} shells open" },
         }.Where(part => !string.IsNullOrEmpty(part)));
