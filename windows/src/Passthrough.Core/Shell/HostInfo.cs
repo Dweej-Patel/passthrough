@@ -42,6 +42,8 @@ public sealed record HostInfo
     [JsonPropertyName("user")] public string? User { get; init; }
     /// <summary>Seconds on mains until the host sleeps; 0 for never.</summary>
     [JsonPropertyName("sleepAfter")] public int? SleepAfter { get; init; }
+    /// <summary>The host's own monitor, so a viewer can leave its size and scale as they are.</summary>
+    [JsonPropertyName("display")] public HostDisplay? Display { get; init; }
 
     /// <summary>
     /// What a client may rely on: null without a <c>kind</c>; malformed fields dropped, shells checked,
@@ -75,6 +77,7 @@ public sealed record HostInfo
             Console = Console is not null && ConsoleStates.Contains(Console) ? Console : null,
             IdleSeconds = IdleSeconds is >= 0 ? IdleSeconds : null,
             SleepAfter = SleepAfter is >= 0 ? SleepAfter : null,
+            Display = Display is { Width: >= 1 and <= 16384, Height: >= 1 and <= 16384, Scale: >= 100 and <= 500 } ? Display : null,
             Rdp = IsLine(Rdp, 32) ? Rdp : null,
             User = IsLine(User, 256) ? User : null,
             IdKey = IdKey is { Length: <= 512 } && IdKey.All(c => c is >= '0' and <= '9' or >= 'a' and <= 'f') ? IdKey : null,
@@ -91,4 +94,15 @@ public sealed record HostInfo
         text is { Length: > 0 } && text.Length <= max && !text.Any(c => char.GetUnicodeCategory(c) is
             System.Globalization.UnicodeCategory.Control or System.Globalization.UnicodeCategory.Format
             or System.Globalization.UnicodeCategory.LineSeparator or System.Globalization.UnicodeCategory.ParagraphSeparator);
+}
+
+/// <summary>
+/// The host's own monitor (<see cref="HostInfo.Display"/>): pixels, and the scale in percent. A viewer that keeps a
+/// Remote Desktop session at this scale changes no DPI when the person goes back to the PC.
+/// </summary>
+public sealed record HostDisplay
+{
+    [JsonPropertyName("width")] public int Width { get; init; }
+    [JsonPropertyName("height")] public int Height { get; init; }
+    [JsonPropertyName("scale")] public int Scale { get; init; }
 }

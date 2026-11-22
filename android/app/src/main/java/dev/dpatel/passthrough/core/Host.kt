@@ -33,6 +33,8 @@ data class HostInfo(
     val user: String? = null,
     /** Seconds on mains until the host sleeps; 0 for never. */
     val sleepAfter: Int? = null,
+    /** The host's own monitor, so a viewer can leave its size and scale as they are. */
+    val display: HostDisplay? = null,
 ) {
     /**
      * What the app may rely on: null without a [kind]; malformed fields dropped,
@@ -56,6 +58,7 @@ data class HostInfo(
             console = console.takeIf { it in CONSOLE_STATES },
             idleSeconds = idleSeconds?.takeIf { it >= 0 },
             sleepAfter = sleepAfter?.takeIf { it >= 0 },
+            display = display?.takeIf { it.width in 1..16_384 && it.height in 1..16_384 && it.scale in 100..500 },
             rdp = rdp.takeIf { isLine(it, 32) },
             user = user.takeIf { isLine(it, 256) },
             idKey = idKey?.takeIf { k -> k.length <= 512 && k.all { it in '0'..'9' || it in 'a'..'f' } },
@@ -104,6 +107,10 @@ data class HostShell(
         private fun alnum(c: Char) = c in '0'..'9' || c in 'A'..'Z' || c in 'a'..'z'
     }
 }
+
+/** The host's own monitor ([HostInfo.display]): pixels, and its scale in percent. */
+@Serializable
+data class HostDisplay(val width: Int, val height: Int, val scale: Int)
 
 /** What the device on this connection may do on the host ([HostInfo.access]). */
 @Serializable

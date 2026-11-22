@@ -570,6 +570,7 @@ so a phone offers neither until it has heard one.
 | `idKey` | The host's identity public key for computers (*Computers*), lowercase hex. |
 | `user` | The name its Windows sign-in takes; sent only to a device whose `access.screen` is true. |
 | `sleepAfter` | Seconds on mains until the host sleeps; 0 for never. |
+| `display` | The host's own monitor, so a viewer can leave it as it is: `width` and `height` in pixels (1 to 16384), `scale` in percent (100 to 500). A PC reads it while the account's session is on the PC's own screen. A viewer that keeps the session at this scale changes no DPI when the person goes back to the PC. |
 
 A host sends a `host` line of at most 16384 bytes. Clients drop the parts that
 are out of range rather than the whole message: an over-long `os`, an unknown

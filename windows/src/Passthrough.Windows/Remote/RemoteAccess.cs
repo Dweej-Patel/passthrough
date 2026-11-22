@@ -82,6 +82,20 @@ public sealed class RemoteAccess : IAccessAdmin, IDisposable
         };
         // Old sessions go as the owner chose, now and every hour (also while Remote access is off).
         _pruner = new Timer(_ => PruneHistory(), null, TimeSpan.FromSeconds(30), TimeSpan.FromHours(1));
+        // The PC's own monitor, for host.display: phones are told again when it changes.
+        _displayCheck = new Timer(_ => CheckDisplay(), null, TimeSpan.FromSeconds(5), TimeSpan.FromSeconds(30));
+    }
+
+    private readonly ConsoleDisplay _display = ConsoleDisplay.ForThisAccount();
+    private readonly Timer _displayCheck;
+    private Passthrough.Core.Shell.HostDisplay? _sentDisplay;
+
+    private void CheckDisplay()
+    {
+        var now = _display.Current();
+        if (now == _sentDisplay) return;
+        _sentDisplay = now;
+        _server.PushState();
     }
 
     public ShellCatalog Catalog { get; }
@@ -361,6 +375,7 @@ public sealed class RemoteAccess : IAccessAdmin, IDisposable
         Shells = [.. Catalog.Shells],
         User = Environment.UserName,
         IdKey = _canKeep && Identity() is { } identity ? Convert.ToHexStringLower(identity.PublicKey) : null, // lowercase hex, as host.idKey is on the wire
+        Display = _display.Current(),
     };
 
     private volatile bool _canKeep;
@@ -519,6 +534,7 @@ public sealed class RemoteAccess : IAccessAdmin, IDisposable
     public void Dispose()
     {
         _pruner.Dispose();
+        _displayCheck.Dispose();
         _link?.Dispose();
         Sessions.CloseAll();
     }
