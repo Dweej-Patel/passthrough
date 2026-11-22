@@ -1087,7 +1087,7 @@ final class RemoteShellController: ObservableObject {
                     self.refreshPhones()
                     // Stays until dismissed: whoever is at this Mac learns another computer can now get in.
                     let id = granted.id
-                    let remove = "Remove it in Passthrough's settings ▸ Remote Shell ▸ Computers with access."
+                    let remove = "Revoke it in Passthrough's settings ▸ Remote Shell ▸ Computers with access."
                     self.passNotice.show(.lowered(
                         title: shell ? "\(label) gave \(request.name) access to this Mac" : "\(label) gave \(request.name) access to this Mac's screen",
                         detail: shell ? "It can open shells as you\(granted.scopes.contains(Computers.scopeScreen) ? " and see the screen" : ""). \(remove)"

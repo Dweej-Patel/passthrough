@@ -113,10 +113,10 @@ final class ComputerShareModel: ObservableObject {
                     self.failed(self.granted == nil ? "Couldn't ask \(viewerHost.macName). Try again." : tooOld)
                 case .failed(.passConflict, _):
                     let v = viewerHost.macName, h = sharedHost.macName
-                    // Where the viewer forgets its older copy: a PC lists it under Your computers; a Mac has no list yet.
+                    // Where the viewer forgets its older copy of the host: the PC's Your computers, the Mac's reach list.
                     self.failed(shell.kind(of: viewerHost.macID) == .windows
-                        ? "\(v) already has different access to \(h). On \(v), remove \(h) under Your computers in Passthrough's tray icon, then share again."
-                        : "\(v) already has different access to \(h), and a Mac can't remove it on its own yet. On \(v), revoke this \(ThisDevice.name) in Settings ▸ Remote Shell, plug it in again, then share again.")
+                        ? "\(v) already has different access to \(h). On \(v), click Passthrough's tray icon ▸ Remote ▸ Show your computers, remove \(h), then share again."
+                        : "\(v) already has different access to \(h). On \(v), remove \(h) in Settings ▸ Remote Shell ▸ Computers this Mac can reach, then share again.")
                 case let .failed(error, _):
                     self.failed(error.message ?? "\(viewerHost.macName) refused the access.")
                 case .disconnected:
@@ -165,7 +165,8 @@ final class ComputerShareModel: ObservableObject {
                     self.viewer?.client.giveComputerPass(pass, scopes: grantedScopes, pending: pending)
                 case let .failed(error, _):
                     guard self.granted == nil else { return }   // the hand-over's outcome decides
-                    self.failed(Self.grantMessage(error, shared: sharedHost.macName))
+                    self.failed(Self.grantMessage(error, words: HostWords(kind: shell.kind(of: sharedHost.macID), name: sharedHost.macName,
+                                                                          device: ThisDevice.name)))
                 case .disconnected:
                     guard self.granted == nil else { return }
                     self.failed("Couldn't reach \(sharedHost.macName). Check that it's awake and Passthrough is on.")
@@ -203,10 +204,11 @@ final class ComputerShareModel: ObservableObject {
         }
     }
 
-    private static func grantMessage(_ error: ShellError, shared: String) -> String {
-        switch error {
+    private static func grantMessage(_ error: ShellError, words: HostWords) -> String {
+        let shared = words.name
+        return switch error {
         case .notAllowed:
-            "\(shared) doesn't let this \(ThisDevice.name) share access. Turn on May share access with other computers for it in Passthrough's settings on \(shared)."
+            "\(shared) doesn't let this \(ThisDevice.name) share access. " + HostCopy.shareOff(words)
         case .tooManyComputers:
             "\(shared) already lets as many computers in as it allows. Remove one in its settings first."
         case .screenNotAllowed:

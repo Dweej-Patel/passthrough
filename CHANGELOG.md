@@ -136,6 +136,23 @@ these steps as written and check each one before building.
 
 ### Added
 
+* **The Mac's menu-bar panel, in two tabs.**
+  - Above the tabs, always: the header, shells waiting on a question, and anyone viewing this Mac's screen (with **Stop**).
+  - *This Mac*: pairing, the three switches and Details (the flow map, speeds, top apps), as before.
+  - *Remote · N*:
+    - *Who can reach this Mac*, one row that opens Settings ▸ Remote Shell;
+    - *On this Mac now*, which was *From your phone*: each session says who opened it (*From \<phone or computer\>*), with **Open here** or **Stop**;
+    - *Your computers*: other Macs' screen passes and PCs in one list, each with its state.
+  - The panel remembers the last tab. A phone waiting for its pairing code brings *This Mac* forward.
+* **The Mac lists the computers it let in, and the ones it can reach.** Settings ▸ Remote Shell:
+  - *Computers with access* (new): each computer a phone gave access to this Mac, which phone shared it and when, and what it may do and has open. **Stop** ends what it has open now; **Revoke…** takes its access away, whichever phone shared it. The notice for a new computer points here.
+  - *Computers this Mac can reach* replaces *Other Macs' screens*. It lists PCs and other Macs' screen passes, with **View**, **Forget Saved Sign-In** and **Remove…**. **Remove…** also clears an older copy of a computer that blocks sharing it again.
+* **iPhone and iPad: one Share row, and a computer switcher on Shells and Activity.**
+  - **Share with another computer…** replaces *Share screen with a Mac* and *Share with another computer*. Where the host doesn't let this phone share, the row stays, greyed out, with the switch to turn on. A Mac with sharing off still offers its screen to your other Macs, as the screen pass did before.
+  - The sheet offers each computer only what it can open: a PC the shell, and the screen only from a Mac; a Mac another Mac's screen as a screen pass, or a PC's screen. A Mac isn't offered shells.
+  - With two or more computers, the *Shells* and *Activity* titles are a computer switcher.
+  - A PC is called a PC everywhere, and its Activity tab says it doesn't record activity yet.
+
 * **Windows: the tray and Settings, reorganised around what you use.**
   - The flyout's header follows Remote access, not the cable: off, reachable, needs a look (and why), or who is on the PC now.
   - Notices and anyone viewing the screen (with **Stop**) sit above two tabs, which the flyout remembers:
@@ -162,17 +179,17 @@ these steps as written and check each one before building.
   **Remove**. An older host doesn't answer, and the sheet goes by what the
   phone remembers sharing.
 * **Share with another computer** (iPhone and iPad). Open a computer, tap
-  *Share with another computer*, pick *Screen only* or *Shell and screen*,
+  *Share with another computer…*, pick *Screen only* or *Shell and screen*,
   pick the computer that should use it and confirm with Face ID. That computer
   then uses it from anywhere, without the phone. Shown only where the host
   allows this phone to share: on a Mac, *Settings › Remote Shell › Phones with
   access › May share access with other computers* (new, off at first); on a
   PC, its *Share* tick. A Mac grants at once and leaves a notice with
   *Revoke*. A PC gives the shell at once and holds the screen until its owner
-  clicks *Allow screen* on the PC's notice or ticks *Screen* in *Computers with
-  access*. The access lasts while the sharing phone keeps its own. The Mac has
-  no settings list of the computers it let in yet: remove one from the phone's
-  Share sheet, or revoke the phone that shared it. Not on Android.
+  clicks *Allow screen* on the PC's notice or in *Computers with access*. The
+  access lasts while the sharing phone keeps its own. Take it back from the
+  phone's Share sheet, or on the host in *Computers with access*. Not on
+  Android.
 * **A PC's screen on the Mac.** A Mac given a PC's screen lists it under
   *Your computers* in the menu-bar panel; *View …'s screen* opens a *PC
   Screen* window after Touch ID, then asks for the Windows account's password
@@ -190,8 +207,8 @@ these steps as written and check each one before building.
   behind Face ID if you choose), with a Windows menu, the Windows key and
   Windows' three-finger swipes, and the desktop takes the device's shape.
 * **The iPhone and iPad app knows a PC from a Mac.** A paired PC shows as a
-  PC: its own words, only the rows a PC has (no Internet, Keep awake, VPN or
-  Share screen), its Lock when it allows it, its own setup steps, why its
+  PC: its own words, only the rows a PC has (no Internet, Keep awake or VPN),
+  its Lock when it allows it, its own setup steps, why its
   shell can't start (nobody signed in, someone else signed in, Passthrough
   not open there, Shell off for this phone), and why it can't be reached
   when it said so (asleep, Remote access turned off, shut down). New shell
@@ -227,9 +244,9 @@ these steps as written and check each one before building.
   [windows/README.md](windows/README.md).
 
 * **One Mac can see and control another's screen.** On the iPhone, open a
-  Mac and tap *Share screen with a Mac*, pick your other Mac and confirm with
-  Face ID. That Mac gets a screen-only pass and opens the screen from
-  Passthrough's menu (*Other Macs*), on the local network or from anywhere
+  Mac and tap *Share with another computer…*, pick your other Mac and confirm
+  with Face ID. That Mac gets a screen-only pass and opens the screen from
+  Passthrough's menu (*Remote* ▸ *Your computers*), on the local network or from anywhere
   over iroh, without the phone, after Touch ID or the password on that Mac.
   Controlling the screen means typing into any app on it, Terminal included,
   but the pass can't open Passthrough's shells, hide the shared Mac's
