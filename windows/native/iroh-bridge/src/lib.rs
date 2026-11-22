@@ -764,6 +764,31 @@ pub unsafe extern "C" fn pt_iroh_stream_path(handle: u64, path: *mut i32, buffer
     })
 }
 
+/// The selected path's round trip in milliseconds and whether it is a relay (`*relayed` 1 or 0); `*rtt_ms` is
+/// `u32::MAX` when no path is selected yet.
+///
+/// # Safety
+/// `rtt_ms` and `relayed` are each valid for one value.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn pt_iroh_stream_rtt(handle: u64, rtt_ms: *mut u32, relayed: *mut i32) -> i32 {
+    guard(|| {
+        if rtt_ms.is_null() || relayed.is_null() {
+            return Err(Failure::new(PT_ERR_ARGUMENT, "null out pointer"));
+        }
+        let object = stream(handle)?;
+        let paths = object.connection.paths();
+        let (rtt, relay) = match paths.iter().find(|p| p.is_selected()) {
+            Some(p) => (p.rtt().as_millis().min(u32::MAX as u128 - 1) as u32, p.is_relay() as i32),
+            None => (u32::MAX, 0),
+        };
+        unsafe {
+            *rtt_ms = rtt;
+            *relayed = relay;
+        }
+        Ok(0)
+    })
+}
+
 /// The selected path's QUIC numbers, as text for a log line: round trip, congestion window, the controller's
 /// bandwidth estimate, packets sent and lost, congestion events, MTU. No addresses.
 ///

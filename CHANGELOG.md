@@ -337,6 +337,16 @@ these steps as written and check each one before building.
   `doctor` says when the tray app runs as administrator; the app logs why it
   doesn't link to the service then.
 
+### Fixed (Windows: a PC's screen through a relay)
+
+* A PC's screen seen through a relay could fall many seconds behind (23 s
+  measured) after a drag or a scroll: a relay queues what it can't deliver
+  instead of dropping it, so nothing told the PC to slow down. The service now
+  holds back what it sends to the viewer while the relay's round trip is above
+  0.6 s (never more than 1.5 s at a time, and never the viewer's input). Each
+  view's log lines say its path, and every 5 s the round trip, loss, how long
+  writes waited and how long they were held back.
+
 ### Changed (Windows, from the second review)
 
 * The flyout's header has **Turn on…** or **Fix…** when Remote access needs it,

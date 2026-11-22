@@ -27,7 +27,7 @@ public sealed class ShellConnection : IShellAttachment
         string link;
         try { link = _stream is IStreamPath s ? s.DescribeLink() : ""; }
         catch (Exception e) when (e is IOException or ObjectDisposedException or InvalidOperationException) { link = ""; }
-        _gate.Log?.Invoke($"screen: {Label}'s view, last 5 s: {p.ToA} bytes out, {p.FromA} in; writes to it waited {p.BlockedToA.TotalMilliseconds:0} ms (longest {p.LongestWriteToA.TotalMilliseconds:0} ms); longest silence from it {p.LongestQuietFromA.TotalMilliseconds:0} ms; {PathNow()}{(link.Length > 0 ? "; " + link : "")}");
+        _gate.Log?.Invoke($"screen: {Label}'s view, last 5 s: {p.ToA} bytes out, {p.FromA} in; writes to it waited {p.BlockedToA.TotalMilliseconds:0} ms (longest {p.LongestWriteToA.TotalMilliseconds:0} ms); longest silence from it {p.LongestQuietFromA.TotalMilliseconds:0} ms; {(p.Held > TimeSpan.Zero ? $"held back {p.Held.TotalMilliseconds:0} ms for the relay's queue; " : "")}{PathNow()}{(link.Length > 0 ? "; " + link : "")}");
     }
 
     /// <summary>How this connection reaches the peer now: iroh's path, or the TLS listener on this network.</summary>
@@ -110,7 +110,8 @@ public sealed class ShellConnection : IShellAttachment
             catch (Exception e) when (e is IOException or ObjectDisposedException or OperationCanceledException) { nla = false; }
             if (nla)
             {
-                var (fromPhone, toPhone) = await Screen.Splice.RunAsync(_stream, relay, report: LogProgress).ConfigureAwait(false);
+                var (fromPhone, toPhone) = await Screen.Splice.RunAsync(_stream, relay, report: LogProgress,
+                    roundTripToA: _stream is IStreamPath paced ? () => paced.RelayRoundTrip : null).ConfigureAwait(false);
                 EndView(fromPhone, toPhone, IsClosed ? "Stop" : "the phone or Remote Desktop");
             }
             else
