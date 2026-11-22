@@ -1,6 +1,5 @@
 import CoreGraphics
 import Foundation
-import ScreenClient
 
 /// The shape a PC's desktop is asked for, and how large Windows draws on it.
 /// Pure: the view's pixels, the kind of device and the user's two choices in,
@@ -22,7 +21,7 @@ public enum WindowsDisplay {
     public static let spaces = [80, 100, 125]
 
     /// Windows' scale steps.
-    static let scales = [100, 125, 150, 175, 200, 225, 250, 300, 350, 400, 450, 500]
+    public static let scales = [100, 125, 150, 175, 200, 225, 250, 300, 350, 400, 450, 500]
     /// Display control's limits for a side, and this app's for the whole desktop (three copies of it are held).
     static let sideRange = 200...8192
     static let longestSide: CGFloat = 4096
@@ -66,7 +65,7 @@ public enum WindowsDisplay {
     }
 
     /// The device scale factor Windows pairs with a desktop scale.
-    static func deviceScale(for desktopScale: Int) -> Int {
+    public static func deviceScale(for desktopScale: Int) -> Int {
         desktopScale < 150 ? 100 : desktopScale <= 225 ? 140 : 180
     }
 

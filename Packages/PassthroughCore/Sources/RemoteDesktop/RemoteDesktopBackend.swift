@@ -16,6 +16,15 @@ import ScreenClient
 /// Threads: one engine thread per session makes every FreeRDP call; `io`
 /// owns the stream's reads and writes; input comes from main and events go
 /// to the queue given to `init` (main).
+/// Takes a PC's pixels straight from the engine, in place of the backend's own pictures (`.image`): a surface
+/// shared with another process, on a Mac. Called on the engine's threads, one call at a time.
+public protocol RemoteDesktopPainter: AnyObject, Sendable {
+    /// The desktop is now this size (first, and after every resize); `.size` follows.
+    func desktop(width: Int, height: Int)
+    /// `dirty` changed in the desktop's BGRA pixels (`stride` bytes a row); valid only during the call.
+    func painted(_ bgra: UnsafePointer<UInt8>, stride: Int, width: Int, height: Int, dirty: CGRect)
+}
+
 public final class RemoteDesktopBackend: ScreenBackend, @unchecked Sendable {
     public let capabilities: ScreenCapabilities = [.smoothScroll, .unicodeText, .resize, .drawsOwnPointer, .signIn, .windowsKeys]
     public var macStream: (any MacStreamControls)? { nil }
@@ -44,6 +53,7 @@ public final class RemoteDesktopBackend: ScreenBackend, @unchecked Sendable {
     private let clientName: String
     private let callbackQueue: DispatchQueue
     private let onEvent: (ScreenBackendEvent) -> Void
+    private let painter: (any RemoteDesktopPainter)?
     private let io = DispatchQueue(label: "\(PassthroughProtocol.identifier).rdp-io")
 
     /// Guards `rdp`, `started`, `closing`, `ended`.
@@ -73,7 +83,8 @@ public final class RemoteDesktopBackend: ScreenBackend, @unchecked Sendable {
 
     /// `certSHA256`: `rdpReady`'s, 64 lowercase hex. `clientName`: the device's kind ("iPhone"), never its own name.
     public init(stream: any ByteStream, initialBytes: Data = Data(), certSHA256: String, login: ScreenLogin, layout: Layout,
-                clientName: String, queue: DispatchQueue = .main, onEvent: @escaping (ScreenBackendEvent) -> Void) {
+                clientName: String, queue: DispatchQueue = .main, painter: (any RemoteDesktopPainter)? = nil,
+                onEvent: @escaping (ScreenBackendEvent) -> Void) {
         self.stream = stream
         self.initialBytes = initialBytes
         self.certSHA256 = certSHA256
@@ -82,6 +93,7 @@ public final class RemoteDesktopBackend: ScreenBackend, @unchecked Sendable {
         self.clientName = clientName
         self.callbackQueue = queue
         self.onEvent = onEvent
+        self.painter = painter
     }
 
     deinit {
@@ -351,6 +363,13 @@ public final class RemoteDesktopBackend: ScreenBackend, @unchecked Sendable {
     // MARK: Pictures (engine thread, then the callback queue)
 
     private func desktopChanged(_ width: Int, _ height: Int) {
+        if let painter {
+            painter.desktop(width: width, height: height)
+            pixelsLock.lock()
+            desktop = (width, height)
+            pixelsLock.unlock()
+            return emit(.size(width: width, height: height))
+        }
         pixelsLock.lock()
         desktop = (width, height)
         pixels = [UInt8](repeating: 0, count: width * height * 4)
@@ -359,6 +378,10 @@ public final class RemoteDesktopBackend: ScreenBackend, @unchecked Sendable {
     }
 
     private func painted(_ bgra: UnsafePointer<UInt8>, stride: Int, width: Int, height: Int, dirty: pt_rect) {
+        if let painter {
+            return painter.painted(bgra, stride: stride, width: width, height: height,
+                                   dirty: CGRect(x: Int(dirty.x), y: Int(dirty.y), width: Int(dirty.w), height: Int(dirty.h)))
+        }
         pixelsLock.lock()
         guard desktop.width == width, desktop.height == height, pixels.count == width * height * 4 else {
             pixelsLock.unlock()

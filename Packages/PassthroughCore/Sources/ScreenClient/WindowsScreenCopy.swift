@@ -1,6 +1,5 @@
 import Foundation
 import PassthroughCore
-import ScreenClient
 
 /// The sentence for each way a PC's screen can be refused or end
 /// (docs/plans/windows-remote/stage-6-ios-rdp.md, section 7), and whether

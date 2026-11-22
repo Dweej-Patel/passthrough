@@ -2,7 +2,9 @@ import Foundation
 import PassthroughCore
 
 /// What the Windows menu, the three-finger swipes and Copy and Paste send a PC:
-/// one key with modifiers held around it, always as scan codes (`WindowsKeymap`).
+/// one key with modifiers held around it, always as scan codes (the Remote
+/// Desktop backend's `WindowsKeymap`). Here, not with the engine, so a Mac's
+/// window can name them without linking it.
 public enum WindowsShortcut: Equatable, Sendable {
     case ctrlAltDel
     /// The Windows key alone.
@@ -37,11 +39,6 @@ public enum WindowsShortcut: Equatable, Sendable {
         case .copy: (RFBKeys.insert, .control)
         case .paste: (RFBKeys.insert, .shift)
         }
-    }
-
-    /// The exact key events, in order.
-    public var strokes: [WindowsKeymap.Stroke] {
-        WindowsKeymap.strokes(for: chord.key, modifiers: chord.modifiers)
     }
 
     /// A hardware keyboard's ⌘ on a PC: Control (the default, so ⌘C copies), or the Windows key when the user chose that.

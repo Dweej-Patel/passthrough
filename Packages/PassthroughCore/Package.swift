@@ -25,6 +25,8 @@ let package = Package(
         .library(name: "ScreenHost", targets: ["ScreenHost"]),
         // Remote Desktop to a PC. App only: never link it into an extension.
         .library(name: "RemoteDesktop", targets: ["RemoteDesktop"]),
+        // Between the Mac app and its sandboxed engine helper: the XPC interface, the byte splice, the limits.
+        .library(name: "ScreenEngine", targets: ["ScreenEngine"]),
         .executable(name: "passthrough-devserver", targets: ["passthrough-devserver"]),
         .executable(name: "passthrough-term", targets: ["passthrough-term"]),
     ],
@@ -65,6 +67,7 @@ let package = Package(
         .target(name: "ScreenClient", dependencies: ["PassthroughCore", "CZlib"],
                 swiftSettings: [.unsafeFlags(["-O"], .when(configuration: .debug))]),
         // Mac-only: CoreGraphics' private virtual displays (a display shaped like the phone).
+        .target(name: "ScreenEngine", dependencies: ["PassthroughCore", "ScreenClient"]),
         .target(name: "CVirtualDisplay", linkerSettings: [.linkedFramework("CoreGraphics")]),
         // Mac-only: streams the Mac's screen to a phone as H.264 and posts its input.
         .target(name: "ScreenHost", dependencies: ["PassthroughCore", "ShellHost", "CVirtualDisplay"]),
@@ -85,6 +88,7 @@ let package = Package(
             .product(name: "IrohLib", package: "iroh-ffi"),
         ]),
         .testTarget(name: "RemoteDesktopTests", dependencies: ["RemoteDesktop", "ScreenClient", "PassthroughCore"]),
+        .testTarget(name: "ScreenEngineTests", dependencies: ["ScreenEngine", "ScreenClient", "PassthroughCore"]),
     ]
 )
 
