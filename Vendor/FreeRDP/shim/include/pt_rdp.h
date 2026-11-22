@@ -109,7 +109,25 @@ typedef struct {
     void (*outbox_ready)(void *user);
     /** The inbox has room again after it was full: feed more. */
     void (*inbox_space)(void *user);
+    /** The PC's clipboard changed; `has_text`: it holds Unicode text. Nothing is fetched until asked. May be NULL. */
+    void (*clipboard_offered)(void *user, int has_text);
+    /** The PC took (1) or refused (0) what pt_rdp_clipboard_offer announced. May be NULL. */
+    void (*clipboard_announced)(void *user, int accepted);
+    /** The answer to pt_rdp_clipboard_fetch: `units` UTF-16 units (valid only during the call) when `result` is PT_CLIPBOARD_TEXT. May be NULL. */
+    void (*clipboard_text)(void *user, const uint16_t *utf16, size_t units, int result);
 } pt_rdp_callbacks;
+
+/** `clipboard_text`'s result. */
+enum {
+    PT_CLIPBOARD_TEXT = 0,
+    /** The PC had no text after all, or the clipboard channel isn't open. */
+    PT_CLIPBOARD_FAILED = 1,
+    /** More than PT_RDP_CLIPBOARD_BYTES. */
+    PT_CLIPBOARD_TOO_LONG = 2,
+};
+
+/** The most text taken from, or offered to, the PC's clipboard: 1 MiB of UTF-16. */
+#define PT_RDP_CLIPBOARD_BYTES (1u << 20)
 
 /** The inbox's size: never more than this is held from the network. */
 #define PT_RDP_INBOX_BYTES (4u << 20)
@@ -146,6 +164,14 @@ void pt_rdp_pointer(pt_rdp *rdp, uint16_t x, uint16_t y, uint8_t buttons);
 void pt_rdp_wheel(pt_rdp *rdp, uint16_t x, uint16_t y, int16_t rotation, int horizontal);
 /** Stops (1) or restarts (0) the pictures, as when the app is in the background. */
 void pt_rdp_suppress_output(pt_rdp *rdp, int suppress);
+
+/* The clipboard, any thread: Unicode text only. */
+
+/** Offers `units` UTF-16 units to the PC's clipboard (copied; `clipboard_announced` follows), replacing any earlier
+    offer. NULL or 0 units withdraws it: the PC is told this side has nothing, and later requests are refused. */
+void pt_rdp_clipboard_offer(pt_rdp *rdp, const uint16_t *utf16, size_t units);
+/** Asks the PC for its clipboard's text; `clipboard_text` answers. */
+void pt_rdp_clipboard_fetch(pt_rdp *rdp);
 
 /** Asks Windows for a desktop of this shape (a `desktop` callback follows if it agrees). The newest request
     replaces one not yet sent; before display control has opened it waits, and goes if it opens. */

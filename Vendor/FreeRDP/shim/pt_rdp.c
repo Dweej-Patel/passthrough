@@ -18,6 +18,9 @@
  *    only thread that calls FreeRDP. Pure pointer moves in a row are coalesced.
  *  - The desktop's shape: one monitor through display control, the newest
  *    request only, sent once Windows has said the channel's limits.
+ *  - The clipboard: Unicode text only, no files. The PC's is fetched only when
+ *    the app asks (pt_rdp_clipboard_fetch); ours is whatever the app offered
+ *    (pt_rdp_clipboard_offer), held here until it is replaced or withdrawn.
  */
 #include "pt_rdp.h"
 #include "pt_bridge.h"
@@ -37,6 +40,7 @@
 #include <freerdp/channels/channels.h>
 #include <freerdp/channels/rdpgfx.h>
 #include <freerdp/client/channels.h>
+#include <freerdp/client/cliprdr.h>
 #include <freerdp/client/disp.h>
 #include <freerdp/codec/color.h>
 #include <freerdp/error.h>
@@ -75,10 +79,22 @@ struct pt_rdp {
     size_t count;
     /* The newest shape asked for and not yet sent (width 0: none). */
     pt_rdp_layout_request wanted;
+    /* The clipboard, asked for from any thread: text to offer the PC (NULL with offer_changed: withdraw it), and a fetch. */
+    uint16_t *offer_next;
+    size_t offer_next_units;
+    int offer_changed;
+    int fetch_wanted;
 
     /* Engine thread only. */
     uint8_t buttons;
     int signed_in;
+    /* The clipboard channel (static: its callbacks run on the engine thread), once the PC said it is ready;
+       the text on offer; and whether a fetch is waiting for its answer. */
+    CliprdrClientContext *cliprdr;
+    int cliprdr_ready;
+    uint16_t *offer;
+    size_t offer_units;
+    int fetching;
 
     /* Display control, once its channel is open, and whether Windows has sent its limits (nothing may be sent
        before). Dynamic channels have a thread of their own (drdynvc's): it sets and clears these, the engine
@@ -276,6 +292,189 @@ static BOOL pointer_set_position(rdpContext *context, UINT32 x, UINT32 y) {
 
 /* MARK: Channels */
 
+/* MARK: Clipboard (engine thread) */
+
+static void wipe_units(uint16_t *units, size_t count) {
+    if (units) memset(units, 0, count * sizeof(uint16_t));
+    free(units);
+}
+
+/* What this side has: Unicode text when something is on offer, else nothing. */
+static UINT clipboard_announce(pt_rdp *rdp) {
+    CliprdrClientContext *cliprdr = rdp->cliprdr;
+    if (!cliprdr || !rdp->cliprdr_ready || !cliprdr->ClientFormatList) return CHANNEL_RC_OK;
+    CLIPRDR_FORMAT format = { CF_UNICODETEXT, NULL };
+    CLIPRDR_FORMAT_LIST list;
+    memset(&list, 0, sizeof(list));
+    list.common.msgType = CB_FORMAT_LIST;
+    list.numFormats = rdp->offer ? 1 : 0;
+    list.formats = rdp->offer ? &format : NULL;
+    return cliprdr->ClientFormatList(cliprdr, &list);
+}
+
+static UINT clipboard_monitor_ready(CliprdrClientContext *cliprdr, const CLIPRDR_MONITOR_READY *ready) {
+    (void)ready;
+    pt_rdp *rdp = cliprdr ? cliprdr->custom : NULL;
+    if (!rdp || !cliprdr->ClientCapabilities) return ERROR_INVALID_PARAMETER;
+    /* Long format names and nothing else: no file copy, no locking. */
+    CLIPRDR_GENERAL_CAPABILITY_SET general;
+    memset(&general, 0, sizeof(general));
+    general.capabilitySetType = CB_CAPSTYPE_GENERAL;
+    general.capabilitySetLength = CB_CAPSTYPE_GENERAL_LEN;
+    general.version = CB_CAPS_VERSION_2;
+    general.generalFlags = CB_USE_LONG_FORMAT_NAMES;
+    CLIPRDR_CAPABILITIES capabilities;
+    memset(&capabilities, 0, sizeof(capabilities));
+    capabilities.cCapabilitiesSets = 1;
+    capabilities.capabilitySets = (CLIPRDR_CAPABILITY_SET *)&general;
+    UINT status = cliprdr->ClientCapabilities(cliprdr, &capabilities);
+    if (status != CHANNEL_RC_OK) return status;
+    rdp->cliprdr_ready = 1;
+    return clipboard_announce(rdp);
+}
+
+static UINT clipboard_server_capabilities(CliprdrClientContext *cliprdr, const CLIPRDR_CAPABILITIES *capabilities) {
+    (void)cliprdr;
+    (void)capabilities;
+    return CHANNEL_RC_OK;
+}
+
+/* The PC's clipboard changed: acknowledged, and the app is told whether it holds text. Nothing is fetched here. */
+static UINT clipboard_server_format_list(CliprdrClientContext *cliprdr, const CLIPRDR_FORMAT_LIST *list) {
+    pt_rdp *rdp = cliprdr ? cliprdr->custom : NULL;
+    if (!rdp || !list) return ERROR_INVALID_PARAMETER;
+    int has_text = 0;
+    for (UINT32 i = 0; i < list->numFormats; i++) {
+        if (list->formats[i].formatId == CF_UNICODETEXT) has_text = 1;
+    }
+    CLIPRDR_FORMAT_LIST_RESPONSE response;
+    memset(&response, 0, sizeof(response));
+    response.common.msgType = CB_FORMAT_LIST_RESPONSE;
+    response.common.msgFlags = CB_RESPONSE_OK;
+    UINT status = cliprdr->ClientFormatListResponse ? cliprdr->ClientFormatListResponse(cliprdr, &response) : CHANNEL_RC_OK;
+    if (rdp->callbacks.clipboard_offered) rdp->callbacks.clipboard_offered(rdp->callbacks.user, has_text);
+    return status;
+}
+
+/* The PC took (or refused) what this side announced. */
+static UINT clipboard_server_format_list_response(CliprdrClientContext *cliprdr, const CLIPRDR_FORMAT_LIST_RESPONSE *response) {
+    pt_rdp *rdp = cliprdr ? cliprdr->custom : NULL;
+    if (!rdp || !response) return ERROR_INVALID_PARAMETER;
+    if (rdp->callbacks.clipboard_announced) {
+        rdp->callbacks.clipboard_announced(rdp->callbacks.user, (response->common.msgFlags & CB_RESPONSE_OK) ? 1 : 0);
+    }
+    return CHANNEL_RC_OK;
+}
+
+/* The PC pastes: the text on offer, with its terminator; anything else is refused. */
+static UINT clipboard_server_data_request(CliprdrClientContext *cliprdr, const CLIPRDR_FORMAT_DATA_REQUEST *request) {
+    pt_rdp *rdp = cliprdr ? cliprdr->custom : NULL;
+    if (!rdp || !request || !cliprdr->ClientFormatDataResponse) return ERROR_INVALID_PARAMETER;
+    CLIPRDR_FORMAT_DATA_RESPONSE response;
+    memset(&response, 0, sizeof(response));
+    response.common.msgType = CB_FORMAT_DATA_RESPONSE;
+    uint16_t *copy = NULL;
+    size_t bytes = 0;
+    if (rdp->offer && request->requestedFormatId == CF_UNICODETEXT) {
+        bytes = (rdp->offer_units + 1) * sizeof(uint16_t);
+        copy = calloc(1, bytes);
+        if (copy) memcpy(copy, rdp->offer, rdp->offer_units * sizeof(uint16_t));
+    }
+    if (copy) {
+        response.common.msgFlags = CB_RESPONSE_OK;
+        response.common.dataLen = (UINT32)bytes;
+        response.requestedFormatData = (const BYTE *)copy;
+    } else {
+        response.common.msgFlags = CB_RESPONSE_FAIL;
+    }
+    UINT status = cliprdr->ClientFormatDataResponse(cliprdr, &response);
+    if (copy) memset(copy, 0, bytes);
+    free(copy);
+    return status;
+}
+
+/* The answer to a fetch: UTF-16 up to its terminator. One that wasn't asked for is dropped. */
+static UINT clipboard_server_data_response(CliprdrClientContext *cliprdr, const CLIPRDR_FORMAT_DATA_RESPONSE *response) {
+    pt_rdp *rdp = cliprdr ? cliprdr->custom : NULL;
+    if (!rdp || !response) return ERROR_INVALID_PARAMETER;
+    if (!rdp->fetching) return CHANNEL_RC_OK;
+    rdp->fetching = 0;
+    if (!rdp->callbacks.clipboard_text) return CHANNEL_RC_OK;
+    if ((response->common.msgFlags & CB_RESPONSE_FAIL) || !response->requestedFormatData) {
+        rdp->callbacks.clipboard_text(rdp->callbacks.user, NULL, 0, PT_CLIPBOARD_FAILED);
+        return CHANNEL_RC_OK;
+    }
+    if (response->common.dataLen > PT_RDP_CLIPBOARD_BYTES) {
+        rdp->callbacks.clipboard_text(rdp->callbacks.user, NULL, 0, PT_CLIPBOARD_TOO_LONG);
+        return CHANNEL_RC_OK;
+    }
+    /* The bytes may not be aligned for uint16_t: copied out first. */
+    size_t units = response->common.dataLen / sizeof(uint16_t);
+    uint16_t *text = calloc(units + 1, sizeof(uint16_t));
+    if (!text) return CHANNEL_RC_NO_MEMORY;
+    memcpy(text, response->requestedFormatData, units * sizeof(uint16_t));
+    size_t length = 0;
+    while (length < units && text[length] != 0) length++;
+    rdp->callbacks.clipboard_text(rdp->callbacks.user, text, length, PT_CLIPBOARD_TEXT);
+    wipe_units(text, units + 1);
+    return CHANNEL_RC_OK;
+}
+
+/* No file copy and no locking were offered: asked anyway, they are acknowledged or refused. */
+static UINT clipboard_server_lock(CliprdrClientContext *cliprdr, const CLIPRDR_LOCK_CLIPBOARD_DATA *lock) {
+    (void)cliprdr;
+    (void)lock;
+    return CHANNEL_RC_OK;
+}
+
+static UINT clipboard_server_unlock(CliprdrClientContext *cliprdr, const CLIPRDR_UNLOCK_CLIPBOARD_DATA *unlock) {
+    (void)cliprdr;
+    (void)unlock;
+    return CHANNEL_RC_OK;
+}
+
+static UINT clipboard_server_file_request(CliprdrClientContext *cliprdr, const CLIPRDR_FILE_CONTENTS_REQUEST *request) {
+    if (!cliprdr || !request || !cliprdr->ClientFileContentsResponse) return CHANNEL_RC_OK;
+    CLIPRDR_FILE_CONTENTS_RESPONSE response;
+    memset(&response, 0, sizeof(response));
+    response.common.msgType = CB_FILECONTENTS_RESPONSE;
+    response.common.msgFlags = CB_RESPONSE_FAIL;
+    response.streamId = request->streamId;
+    return cliprdr->ClientFileContentsResponse(cliprdr, &response);
+}
+
+/* What the app asked of the clipboard since the last turn of the loop. */
+static void clipboard_drain(pt_rdp *rdp) {
+    pthread_mutex_lock(&rdp->lock);
+    int changed = rdp->offer_changed, fetch = rdp->fetch_wanted;
+    uint16_t *next = rdp->offer_next;
+    size_t next_units = rdp->offer_next_units;
+    rdp->offer_changed = 0;
+    rdp->fetch_wanted = 0;
+    rdp->offer_next = NULL;
+    rdp->offer_next_units = 0;
+    pthread_mutex_unlock(&rdp->lock);
+    if (changed) {
+        wipe_units(rdp->offer, rdp->offer_units);
+        rdp->offer = next;
+        rdp->offer_units = next_units;
+        (void)clipboard_announce(rdp);
+    }
+    if (fetch) {
+        CliprdrClientContext *cliprdr = rdp->cliprdr;
+        if (cliprdr && rdp->cliprdr_ready && cliprdr->ClientFormatDataRequest) {
+            CLIPRDR_FORMAT_DATA_REQUEST request;
+            memset(&request, 0, sizeof(request));
+            request.common.msgType = CB_FORMAT_DATA_REQUEST;
+            request.requestedFormatId = CF_UNICODETEXT;
+            rdp->fetching = 1;
+            if (cliprdr->ClientFormatDataRequest(cliprdr, &request) == CHANNEL_RC_OK) return;
+            rdp->fetching = 0;
+        }
+        if (rdp->callbacks.clipboard_text) rdp->callbacks.clipboard_text(rdp->callbacks.user, NULL, 0, PT_CLIPBOARD_FAILED);
+    }
+}
+
 /* Windows said display control's limits: layouts may be sent from here on. */
 static UINT disp_caps(DispClientContext *disp, UINT32 max_monitors, UINT32 area_a, UINT32 area_b) {
     (void)max_monitors;
@@ -296,6 +495,22 @@ static void channel_connected(void *context, const ChannelConnectedEventArgs *e)
     if (!ctx || !e || !e->name) return;
     if (strcmp(e->name, RDPGFX_DVC_CHANNEL_NAME) == 0 && ctx->gdi) {
         (void)gdi_graphics_pipeline_init(ctx->gdi, (RdpgfxClientContext *)e->pInterface);
+    } else if (strcmp(e->name, CLIPRDR_SVC_CHANNEL_NAME) == 0) {
+        pt_rdp *rdp = rdp_of(ctx);
+        CliprdrClientContext *cliprdr = (CliprdrClientContext *)e->pInterface;
+        if (!rdp || !cliprdr) return;
+        cliprdr->custom = rdp;
+        cliprdr->MonitorReady = clipboard_monitor_ready;
+        cliprdr->ServerCapabilities = clipboard_server_capabilities;
+        cliprdr->ServerFormatList = clipboard_server_format_list;
+        cliprdr->ServerFormatListResponse = clipboard_server_format_list_response;
+        cliprdr->ServerFormatDataRequest = clipboard_server_data_request;
+        cliprdr->ServerFormatDataResponse = clipboard_server_data_response;
+        cliprdr->ServerLockClipboardData = clipboard_server_lock;
+        cliprdr->ServerUnlockClipboardData = clipboard_server_unlock;
+        cliprdr->ServerFileContentsRequest = clipboard_server_file_request;
+        rdp->cliprdr = cliprdr;
+        rdp->cliprdr_ready = 0;
     } else if (strcmp(e->name, DISP_DVC_CHANNEL_NAME) == 0) {
         pt_rdp *rdp = rdp_of(ctx);
         DispClientContext *disp = (DispClientContext *)e->pInterface;
@@ -314,6 +529,12 @@ static void channel_disconnected(void *context, const ChannelDisconnectedEventAr
     if (!ctx || !e || !e->name) return;
     if (strcmp(e->name, RDPGFX_DVC_CHANNEL_NAME) == 0 && ctx->gdi) {
         gdi_graphics_pipeline_uninit(ctx->gdi, (RdpgfxClientContext *)e->pInterface);
+    } else if (strcmp(e->name, CLIPRDR_SVC_CHANNEL_NAME) == 0) {
+        pt_rdp *rdp = rdp_of(ctx);
+        if (!rdp) return;
+        rdp->cliprdr = NULL;
+        rdp->cliprdr_ready = 0;
+        rdp->fetching = 0;
     } else if (strcmp(e->name, DISP_DVC_CHANNEL_NAME) == 0) {
         pt_rdp *rdp = rdp_of(ctx);
         if (!rdp) return;
@@ -468,8 +689,9 @@ static BOOL configure(rdpSettings *settings, const pt_rdp_config *config) {
     SET_BOOL(AudioCapture, 0);
     SET_BOOL(RemoteApplicationMode, 0);
     SET_BOOL(SupportVideoOptimized, 0);
-    /* The clipboard (text only) comes with copy and paste; off until then. */
-    SET_BOOL(RedirectClipboard, 0);
+    /* The clipboard, text only, both ways; no files either way. */
+    SET_BOOL(RedirectClipboard, 1);
+    SET_UINT32(ClipboardFeatureMask, CLIPRDR_FLAG_LOCAL_TO_REMOTE | CLIPRDR_FLAG_REMOTE_TO_LOCAL);
     /* The desktop follows this device's shape through display control (disp over drdynvc, both compiled in):
        one monitor, never several. */
     SET_BOOL(SupportDisplayControl, 1);
@@ -546,6 +768,8 @@ void pt_rdp_free(pt_rdp *rdp) {
     }
     if (rdp->bridge) pt_bridge_free(rdp->bridge);
     if (rdp->wake) CloseHandle(rdp->wake);
+    wipe_units(rdp->offer, rdp->offer_units);
+    wipe_units(rdp->offer_next, rdp->offer_next_units);
     free(rdp->commands);
     pthread_mutex_destroy(&rdp->disp_lock);
     pthread_mutex_destroy(&rdp->lock);
@@ -675,6 +899,7 @@ static void drain(pt_rdp *rdp) {
     rdpContext *context = rdp->context;
     rdpInput *input = context->input;
     send_layout(rdp);
+    clipboard_drain(rdp);
     for (;;) {
         pthread_mutex_lock(&rdp->lock);
         size_t n = rdp->count < 256 ? rdp->count : 256;
@@ -736,6 +961,30 @@ void pt_rdp_wheel(pt_rdp *rdp, uint16_t x, uint16_t y, int16_t rotation, int hor
 
 void pt_rdp_suppress_output(pt_rdp *rdp, int suppress) {
     enqueue(rdp, (pt_cmd){ .kind = PT_CMD_SUPPRESS, .value = suppress ? 1 : 0 });
+}
+
+void pt_rdp_clipboard_offer(pt_rdp *rdp, const uint16_t *utf16, size_t units) {
+    if (!rdp || atomic_load(&rdp->aborted)) return;
+    uint16_t *copy = NULL;
+    if (utf16 && units > 0 && units * sizeof(uint16_t) < PT_RDP_CLIPBOARD_BYTES) {
+        copy = calloc(units, sizeof(uint16_t));
+        if (copy) memcpy(copy, utf16, units * sizeof(uint16_t));
+    }
+    pthread_mutex_lock(&rdp->lock);
+    wipe_units(rdp->offer_next, rdp->offer_next_units);
+    rdp->offer_next = copy;
+    rdp->offer_next_units = copy ? units : 0;
+    rdp->offer_changed = 1;
+    pthread_mutex_unlock(&rdp->lock);
+    SetEvent(rdp->wake);
+}
+
+void pt_rdp_clipboard_fetch(pt_rdp *rdp) {
+    if (!rdp || atomic_load(&rdp->aborted)) return;
+    pthread_mutex_lock(&rdp->lock);
+    rdp->fetch_wanted = 1;
+    pthread_mutex_unlock(&rdp->lock);
+    SetEvent(rdp->wake);
 }
 
 void pt_rdp_layout(pt_rdp *rdp, const pt_rdp_layout_request *request) {

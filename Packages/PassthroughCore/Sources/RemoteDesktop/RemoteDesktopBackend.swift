@@ -68,6 +68,9 @@ public final class RemoteDesktopBackend: ScreenBackend, @unchecked Sendable {
     private var scrollRemainder = CGPoint.zero
     private var buttons: ScreenButtons = []
 
+    /// The clipboard's rules; on the callback queue only (copy, paste and the engine's clipboard callbacks all arrive there).
+    private var clipboard = RDPClipboard()
+
     /// `certSHA256`: `rdpReady`'s, 64 lowercase hex. `clientName`: the device's kind ("iPhone"), never its own name.
     public init(stream: any ByteStream, initialBytes: Data = Data(), certSHA256: String, login: ScreenLogin, layout: Layout,
                 clientName: String, queue: DispatchQueue = .main, onEvent: @escaping (ScreenBackendEvent) -> Void) {
@@ -170,6 +173,29 @@ public final class RemoteDesktopBackend: ScreenBackend, @unchecked Sendable {
             guard let user else { return }
             Unmanaged<RemoteDesktopBackend>.fromOpaque(user).takeUnretainedValue()
                 .emit(.pointerPosition(CGPoint(x: Int(x), y: Int(y)), visible: true))
+        }
+        callbacks.clipboard_offered = { user, hasText in
+            guard let user else { return }
+            let backend = Unmanaged<RemoteDesktopBackend>.fromOpaque(user).takeUnretainedValue()
+            backend.callbackQueue.async { backend.clipboardChanged(hasText: hasText != 0) }
+        }
+        callbacks.clipboard_announced = { user, _ in
+            guard let user else { return }
+            let backend = Unmanaged<RemoteDesktopBackend>.fromOpaque(user).takeUnretainedValue()
+            backend.callbackQueue.async { backend.apply(backend.clipboard.pasteReady()) }
+        }
+        callbacks.clipboard_text = { user, utf16, units, result in
+            guard let user else { return }
+            let backend = Unmanaged<RemoteDesktopBackend>.fromOpaque(user).takeUnretainedValue()
+            let answer: ScreenCopyResult
+            switch result {
+            case Int32(PT_CLIPBOARD_TEXT):
+                let text = utf16.map { RDPClipboard.deviceText(Array(UnsafeBufferPointer(start: $0, count: units))) } ?? ""
+                answer = text.isEmpty ? .nothing : .text(text)
+            case Int32(PT_CLIPBOARD_TOO_LONG): answer = .tooLong
+            default: answer = .nothing
+            }
+            backend.callbackQueue.async { backend.apply(backend.clipboard.fetched(answer)) }
         }
         callbacks.outbox_ready = { user in
             guard let user else { return }
@@ -438,15 +464,47 @@ public final class RemoteDesktopBackend: ScreenBackend, @unchecked Sendable {
 
     public func text(_ text: String) { send(WindowsKeymap.strokes(forText: text)) }
 
-    /// No clipboard channel yet: the text is typed instead.
+    /// Offers `text` to the PC's clipboard and presses Shift + Insert once the PC has taken the offer (or after a
+    /// moment). The offer is withdrawn ten seconds later. False: too long, nothing is offered.
     public func paste(_ text: String) -> Bool {
-        guard text.utf16.count <= 4096 else { return false }
-        send(WindowsKeymap.strokes(forText: text))
+        let units = RDPClipboard.windowsText(text)
+        guard let offer = clipboard.pasteAsked(units: units.count) else { return false }
+        withSession { rdp in units.withUnsafeBufferPointer { pt_rdp_clipboard_offer(rdp, $0.baseAddress, $0.count) } }
+        callbackQueue.asyncAfter(deadline: .now() + RDPClipboard.pasteWait) { [weak self] in
+            guard let self else { return }
+            self.apply(self.clipboard.pasteReady())
+        }
+        callbackQueue.asyncAfter(deadline: .now() + RDPClipboard.offerLifetime) { [weak self] in
+            guard let self else { return }
+            self.apply(self.clipboard.offerExpired(offer))
+        }
         return true
     }
 
-    /// No clipboard channel yet: nothing answers (the view's copy times out).
-    public func copySelection() {}
+    /// Presses Control + Insert, and takes the PC's clipboard if it changes to text within two seconds: `.copied` answers.
+    public func copySelection() {
+        clipboard.copyAsked(now: ProcessInfo.processInfo.systemUptime)
+        send(WindowsShortcut.copy.strokes)
+        callbackQueue.asyncAfter(deadline: .now() + RDPClipboard.copyWindow + 0.05) { [weak self] in
+            guard let self else { return }
+            self.apply(self.clipboard.copyDeadline(now: ProcessInfo.processInfo.systemUptime))
+        }
+    }
+
+    private func clipboardChanged(hasText: Bool) {
+        apply(clipboard.changed(hasText: hasText, now: ProcessInfo.processInfo.systemUptime))
+    }
+
+    /// Does what the clipboard's rules decided (callback queue).
+    private func apply(_ effect: RDPClipboard.Effect?) {
+        switch effect {
+        case .fetch: withSession { pt_rdp_clipboard_fetch($0) }
+        case let .copied(result): emit(.copied(result))
+        case .paste: send(WindowsShortcut.paste.strokes)
+        case .withdraw: withSession { pt_rdp_clipboard_offer($0, nil, 0) }
+        case nil: break
+        }
+    }
 
     public func presented(_ number: UInt32) {}
     public func needsKeyframe() {}

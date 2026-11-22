@@ -132,6 +132,9 @@ final class ScreenModel: ObservableObject {
     private var windowsResizeWatch: Task<Void, Never>?
     /// "…kept its screen as it was" is said once a view.
     private var saidKeptShape = false
+    /// A hardware keyboard's ⌘ on a PC: Control (the default), or the Windows key. Kept for every PC.
+    @Published private(set) var commandIsWindows = UserDefaults.standard.bool(forKey: ScreenModel.commandIsWindowsKey)
+    private static let commandIsWindowsKey = "screenCommandIsWindows"
     /// How the sign-in sheet asks: a Mac's account, or a PC's Windows account (the last used here, else the one the PC named).
     var loginStyle: ScreenLoginForm.Style {
         guard windowsView else { return .mac }
@@ -1029,15 +1032,21 @@ final class ScreenModel: ObservableObject {
 
     func scrollEnded() { backend?.scrollEnded() }
 
+    /// The modifiers as the far computer takes them: a PC gets ⌘ as Control, or as the Windows key if the user chose that.
+    private func farModifiers(_ modifiers: [UInt32]) -> ScreenModifiers {
+        let held = ScreenModifiers(keysyms: modifiers)
+        return windowsView ? WindowsShortcut.modifiers(held, commandIsWindows: commandIsWindows) : held
+    }
+
     /// A key with modifiers held around it.
     func key(_ keysym: UInt32, modifiers: [UInt32] = []) {
-        backend?.key(keysym, modifiers: ScreenModifiers(keysyms: modifiers))
+        backend?.key(keysym, modifiers: farModifiers(modifiers))
     }
 
     func type(_ text: String, modifiers: [UInt32] = []) {
         guard let backend else { return }
         if modifiers.isEmpty { return backend.text(text) }
-        let held = ScreenModifiers(keysyms: modifiers)
+        let held = farModifiers(modifiers)
         for character in text {
             if let keysym = RFBKeys.keysym(for: character) { backend.key(keysym, modifiers: held) }
         }
@@ -1057,6 +1066,15 @@ final class ScreenModel: ObservableObject {
     var onCaretMayMove: (() -> Void)?
 
     func perform(_ action: SpaceAction) {
+        // A PC: the same swipes and menu rows mean Windows' own (virtual desktops, Task View, Show desktop).
+        if windowsView {
+            switch action {
+            case .previousDesktop: return windows(.previousDesktop)
+            case .nextDesktop: return windows(.nextDesktop)
+            case .missionControl: return windows(.taskView)
+            case .appWindows, .showDesktop: return windows(.showDesktop)
+            }
+        }
         onCaretMayMove?()
         switch action {
         case .previousDesktop: key(RFBKeys.left, modifiers: [RFBKeys.control])
@@ -1066,6 +1084,21 @@ final class ScreenModel: ObservableObject {
         case .showDesktop: key(RFBKeys.function(11))
         }
         UIImpactFeedbackGenerator(style: .light).impactOccurred()
+    }
+
+    /// A Windows shortcut (the Windows menu, a three-finger swipe), as scan codes.
+    func windows(_ shortcut: WindowsShortcut) {
+        guard windowsView, let backend else { return }
+        onCaretMayMove?()
+        let chord = shortcut.chord
+        backend.key(chord.key, modifiers: chord.modifiers)
+        UIImpactFeedbackGenerator(style: .light).impactOccurred()
+    }
+
+    /// What a hardware keyboard's ⌘ is on a PC; kept for every PC.
+    func setCommandIsWindows(_ on: Bool) {
+        commandIsWindows = on
+        UserDefaults.standard.set(on, forKey: Self.commandIsWindowsKey)
     }
 
     /// Puts the phone's clipboard on the Mac's and pastes it there.
@@ -1091,7 +1124,8 @@ final class ScreenModel: ObservableObject {
         copyTimeout?.cancel()
         // The stream's ⌘C may wait for typing to finish on the Mac.
         let answers = backend.macStream != nil
-        let wait: Duration = answers ? .seconds(5) : .seconds(2)
+        // A PC answers within its own two-second window, then the text has to come over.
+        let wait: Duration = answers ? .seconds(5) : windowsView ? .seconds(6) : .seconds(2)
         copyTimeout = Task { [weak self] in
             try? await Task.sleep(for: wait)
             guard !Task.isCancelled, let self, self.copying else { return }
