@@ -4,6 +4,14 @@
 # and never "${empty[@]}" under set -u.
 
 PT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+
+# Never as root: `open` from a root shell would start the Mac app as root (it then can't reach its own
+# helper, Keychain or login items), and files it builds would be root's. The scripts ask for sudo
+# themselves for the few steps that need it (removing the helper and the driver).
+if [ "$(id -u)" = 0 ] && [ "${PT_ALLOW_ROOT:-0}" != 1 ]; then
+  printf 'passthrough: run this as yourself, not with sudo or as root; it asks for your password where it needs it.\n' >&2
+  exit 1
+fi
 cd "$PT_ROOT"
 
 DRY_RUN=0
