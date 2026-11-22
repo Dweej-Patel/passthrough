@@ -1,9 +1,15 @@
 import CoreGraphics
 import Foundation
+import PassthroughCore
 
-/// The shape a PC's desktop is asked for, and how large Windows draws on it.
-/// Pure: the view's pixels, the kind of device and the user's two choices in,
-/// one `ScreenShape` out.
+/// The shape a PC's desktop is asked for, and how large things are on it.
+/// Pure: the view's pixels, the kind of device, the PC's own display and the
+/// user's two choices in, one `ScreenShape` out.
+///
+/// Windows' scale factor is never changed: a session at another scale than the
+/// PC's own monitor leaves the taskbar unlaid and older apps stretched, there
+/// and back at the PC. The session keeps the PC's scale, and text size is how
+/// many pixels are asked for: fewer, shown larger here.
 public enum WindowsDisplay {
     /// The Display menu's choice, remembered per computer.
     public enum Shape: String, Sendable, CaseIterable {
@@ -11,7 +17,12 @@ public enum WindowsDisplay {
         case fit
         /// 16:10, landscape however the device is held; shown fitted, with pinch to zoom.
         case standard
+        /// The PC's own monitor as it is: nothing on its desktop moves, here or back at the PC. Pan and zoom.
+        /// Without the PC's display (`HostDisplay`), the standard shape.
+        case own
     }
+
+
 
     public enum Device: Sendable {
         case phone, pad
@@ -27,28 +38,38 @@ public enum WindowsDisplay {
     static let longestSide: CGFloat = 4096
     static let mostPixels: CGFloat = 8_300_000
 
-    /// `viewPixels`: the screen view's area in device pixels, as the device is held. `space`: 80 (larger text), 100 or 125 (more space).
-    public static func shape(_ shape: Shape, device: Device, viewPixels: CGSize, space: Int) -> ScreenShape {
+    /// `viewPixels`: the screen view's area in device pixels, as the device is held. `space`: 80 (larger text), 100
+    /// or 125 (more space). `host`: the PC's own monitor, when it said; its scale is the session's (100 % without it).
+    public static func shape(_ shape: Shape, device: Device, viewPixels: CGSize, space: Int, host: HostDisplay? = nil) -> ScreenShape {
+        let hostScale = host.map { scales.contains($0.scale) ? $0.scale : 100 } ?? 100
+        func made(_ width: Int, _ height: Int) -> ScreenShape {
+            ScreenShape(width: even(width), height: even(height), desktopScale: hostScale, deviceScale: deviceScale(for: hostScale))
+        }
         switch shape {
+        case .own:
+            guard let host, sideRange.contains(host.width), sideRange.contains(host.height) else {
+                return Self.shape(.standard, device: device, viewPixels: viewPixels, space: space, host: host)
+            }
+            return made(host.width, host.height)
         case .standard:
-            let scale: Int
+            // How large things would be drawn at the full size; the desktop is that much smaller instead.
+            let zoom: Int
             switch (device, space) {
-            case (.phone, 80): scale = 175
-            case (.phone, 125): scale = 125
-            case (.phone, _): scale = 150
-            case (.pad, 80): scale = 250
-            case (.pad, 125): scale = 150
-            case (.pad, _): scale = 200
+            case (.phone, 80): zoom = 175
+            case (.phone, 125): zoom = 125
+            case (.phone, _): zoom = 150
+            case (.pad, 80): zoom = 250
+            case (.pad, 125): zoom = 150
+            case (.pad, _): zoom = 200
             }
             let size = device == .pad ? (2560, 1600) : (1920, 1200)
-            return ScreenShape(width: size.0, height: size.1, desktopScale: scale, deviceScale: deviceScale(for: scale))
+            return made(size.0 * hostScale / zoom, size.1 * hostScale / zoom)
         case .fit:
             var pixels = CGSize(width: max(viewPixels.width, 1), height: max(viewPixels.height, 1))
             // A view larger than the caps is asked for proportionally smaller.
             let cap = min(1, longestSide / max(pixels.width, pixels.height), (mostPixels / (pixels.width * pixels.height)).squareRoot())
             pixels = CGSize(width: pixels.width * cap, height: pixels.height * cap)
-            let width = even(Int(pixels.width)), height = even(Int(pixels.height))
-            // How many Windows points the short side should have; the scale is the largest step that still gives them.
+            // How many points the short side should have; the zoom is the largest step that still gives them.
             let target: Int
             switch (device, space) {
             case (.phone, 80): target = 480
@@ -58,9 +79,10 @@ public enum WindowsDisplay {
             case (.pad, 125): target = 1280
             case (.pad, _): target = 1000
             }
-            let short = min(width, height)
-            let scale = scales.last { $0 * target <= short * 100 } ?? 100
-            return ScreenShape(width: width, height: height, desktopScale: scale, deviceScale: deviceScale(for: scale))
+            let short = Int(min(pixels.width, pixels.height))
+            let zoom = scales.last { $0 * target <= short * 100 } ?? 100
+            // The view's shape, with as many pixels as the PC draws those points in at its own scale.
+            return made(Int(pixels.width) * hostScale / zoom, Int(pixels.height) * hostScale / zoom)
         }
     }
 
@@ -73,9 +95,19 @@ public enum WindowsDisplay {
         min(max(side, sideRange.lowerBound), sideRange.upperBound) & ~1
     }
 
-    /// A change of shape waits for the turn to settle, and Windows is asked at most once a second.
-    public static let settle: TimeInterval = 0.4
-    public static let apart: TimeInterval = 1
+    /// A change of shape waits a second after the last change (a turn of the device passes through several
+    /// sizes), and Windows is asked at most once every two seconds: each ask rearranges the PC's desktop.
+    public static let settle: TimeInterval = 1
+    public static let apart: TimeInterval = 2
+
+    /// Whether `next` differs enough from `current` to ask Windows for it: a few percent either way isn't worth
+    /// rearranging the PC's desktop for.
+    public static func worthAsking(_ next: ScreenShape, current: ScreenShape?) -> Bool {
+        guard let current else { return true }
+        if next.desktopScale != current.desktopScale { return true }
+        func near(_ a: Int, _ b: Int) -> Bool { abs(a - b) * 100 <= max(a, b) * 3 }
+        return !(near(next.width, current.width) && near(next.height, current.height))
+    }
 
     /// How long to wait before asking, `now` and `lastAsked` on the same clock (nil: never asked).
     /// A newer change replaces one that is waiting, and waits again.

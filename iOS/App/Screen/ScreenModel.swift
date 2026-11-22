@@ -835,10 +835,13 @@ final class ScreenModel: ObservableObject {
         let screen = UIScreen.main
         let pixels = viewPixels ?? CGSize(width: screen.bounds.width * screen.scale, height: screen.bounds.height * screen.scale)
         return WindowsDisplay.shape(windowsShapeChoice, device: UIDevice.current.userInterfaceIdiom == .pad ? .pad : .phone,
-                                    viewPixels: pixels, space: windowsSpace)
+                                    viewPixels: pixels, space: windowsSpace, host: windowsHostDisplay)
     }
 
-    /// Fit to this device, or the standard 16:10; kept for this PC.
+    /// The PC's own monitor, when it said: the session keeps its scale, and "the PC's own size" is its pixels.
+    var windowsHostDisplay: HostDisplay? { macID.flatMap { shell?.factsByMac[$0]?.display } }
+
+    /// Fit to this device, the standard 16:10, or the PC's own size; kept for this PC.
     func setWindowsShape(_ shape: WindowsDisplay.Shape) {
         guard shape != windowsShapeChoice else { return }
         windowsShapeChoice = shape
@@ -846,7 +849,8 @@ final class ScreenModel: ObservableObject {
         windowsShapeChanged()
     }
 
-    /// Windows' text size (80 larger text, 100, 125 more space); kept for this PC.
+    /// How large things are on the PC's desktop here (80 larger text, 100, 125 more space): fewer or more pixels asked
+    /// for, never another Windows scale. Kept for this PC.
     func setWindowsSpace(_ space: Int) {
         guard space != windowsSpace, WindowsDisplay.spaces.contains(space) else { return }
         windowsSpace = space
@@ -854,7 +858,7 @@ final class ScreenModel: ObservableObject {
         windowsShapeChanged()
     }
 
-    /// The view turned, or a choice changed: once it has settled, and at most once a second,
+    /// The view turned, or a choice changed: a second after the last change, and at most once every two,
     /// Windows is asked for the new shape. A newer change replaces one that is waiting.
     private func windowsShapeChanged() {
         guard windowsView, backend != nil else { return }
@@ -865,12 +869,12 @@ final class ScreenModel: ObservableObject {
             try? await Task.sleep(for: .milliseconds(Int(wait * 1000)))
             guard !Task.isCancelled, let self, gen == self.generation, let backend = self.backend else { return }
             let shape = self.windowsShape()
-            guard shape != self.windowsAsked else { return }
+            // A few percent either way isn't worth rearranging the PC's desktop for.
+            guard WindowsDisplay.worthAsking(shape, current: self.windowsAsked) else { return }
             let resizes = shape.width != Int(self.screenSize.width) || shape.height != Int(self.screenSize.height)
             self.windowsAsked = shape
             self.windowsAskedAt = ProcessInfo.processInfo.systemUptime
             backend.reshape(shape)
-            // A text size alone changes no pixels: there is no answer to wait for.
             self.windowsResizeWatch?.cancel()
             guard resizes else { return }
             self.windowsResizeWatch = Task { [weak self] in

@@ -308,15 +308,16 @@ final class PCScreenModel: ObservableObject, RemoteScreenSource {
         client.connect(discovered: nil)
     }
 
-    /// The desktop to ask for: the picture's own pixels (even, within Remote Desktop's limits and 4096 a side),
-    /// with Windows' text at this display's scale.
-    static func shape(pixels: CGSize, scale: CGFloat) -> ScreenShape {
-        let fit = min(1, 4096 / max(pixels.width, pixels.height, 1))
-        let width = min(max(Int(pixels.width * fit), 800), 8192) & ~1
-        let height = min(max(Int(pixels.height * fit), 600), 8192) & ~1
-        let wanted = Int((scale * fit * 100).rounded())
-        let desktopScale = WindowsDisplay.scales.last { $0 <= max(wanted, 100) } ?? 100
-        return ScreenShape(width: width, height: height, desktopScale: desktopScale, deviceScale: WindowsDisplay.deviceScale(for: desktopScale))
+    /// The desktop to ask for: the picture's area in this Mac's points, drawn at the PC's own scale (100 % until it
+    /// says otherwise), so things are about the size they are on this Mac and Windows' scale never changes. Even
+    /// sides, at least 800 x 600, at most 4096.
+    static func shape(pixels: CGSize, scale: CGFloat, hostScale: Int = 100) -> ScreenShape {
+        let points = CGSize(width: pixels.width / max(scale, 1), height: pixels.height / max(scale, 1))
+        let wide = points.width * CGFloat(hostScale) / 100, high = points.height * CGFloat(hostScale) / 100
+        let fit = min(1, 4096 / max(wide, high, 1))
+        let width = min(max(Int(wide * fit), 800), 4096) & ~1
+        let height = min(max(Int(high * fit), 600), 4096) & ~1
+        return ScreenShape(width: width, height: height, desktopScale: hostScale, deviceScale: WindowsDisplay.deviceScale(for: hostScale))
     }
 
     func stop() {

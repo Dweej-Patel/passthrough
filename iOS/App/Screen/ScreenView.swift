@@ -325,6 +325,7 @@ struct ScreenView: View, Equatable {
                           fitsDevice: model.fitsDevice, space: model.space, quality: model.quality,
                           pinchesMac: model.pinchesMacOnItsDisplay, playsSound: model.playsSound, macHidden: model.macHidden,
                           windows: model.windowsView, windowsShape: model.windowsShapeChoice, windowsSpace: model.windowsSpace,
+                          windowsHasDisplay: model.windowsHostDisplay != nil,
                           pad: pad, landscape: landscape).equatable()
     }
 
@@ -575,12 +576,15 @@ struct ScreenDisplayMenu: View, Equatable {
     var windows = false
     var windowsShape = WindowsDisplay.Shape.fit
     var windowsSpace = 100
+    /// The PC said what its own monitor is: its own size can be kept.
+    var windowsHasDisplay = false
     let pad: Bool
     let landscape: Bool
     nonisolated static func == (a: Self, b: Self) -> Bool {
         a.macName == b.macName && a.canHideMac == b.canHideMac && a.path == b.path && a.fitsDevice == b.fitsDevice && a.space == b.space
             && a.quality == b.quality && a.pinchesMac == b.pinchesMac && a.playsSound == b.playsSound && a.macHidden == b.macHidden && a.pad == b.pad
             && a.landscape == b.landscape && a.windows == b.windows && a.windowsShape == b.windowsShape && a.windowsSpace == b.windowsSpace
+            && a.windowsHasDisplay == b.windowsHasDisplay
     }
 
     @ViewBuilder var body: some View {
@@ -595,18 +599,25 @@ struct ScreenDisplayMenu: View, Equatable {
                     Picker(selection: Binding(get: { windowsShape }, set: { model.setWindowsShape($0) })) {
                         Label("Fit to this \(ThisDevice.name)", systemImage: pad ? "ipad" : "iphone").tag(WindowsDisplay.Shape.fit)
                         Label("Standard (16:10)", systemImage: "display").tag(WindowsDisplay.Shape.standard)
+                        // Nothing on the PC's desktop moves, here or back at the PC; pan and pinch to zoom.
+                        if windowsHasDisplay {
+                            Label("\(macName)'s own size", systemImage: "pc").tag(WindowsDisplay.Shape.own)
+                        }
                     } label: {
                         Label("Screen shape", systemImage: "rectangle.portrait.on.rectangle.portrait")
                     }
                     .pickerStyle(.menu)
-                    Picker(selection: Binding(get: { windowsSpace }, set: { model.setWindowsSpace($0) })) {
-                        Label("Larger text", systemImage: "textformat.size.larger").tag(80)
-                        Label("Default", systemImage: "textformat.size").tag(100)
-                        Label("More space", systemImage: "textformat.size.smaller").tag(125)
-                    } label: {
-                        Label("Text size", systemImage: "textformat.size")
+                    // The PC's own size is what it is: pinch to zoom instead.
+                    if windowsShape != .own || !windowsHasDisplay {
+                        Picker(selection: Binding(get: { windowsSpace }, set: { model.setWindowsSpace($0) })) {
+                            Label("Larger text", systemImage: "textformat.size.larger").tag(80)
+                            Label("Default", systemImage: "textformat.size").tag(100)
+                            Label("More space", systemImage: "textformat.size.smaller").tag(125)
+                        } label: {
+                            Label("Text size", systemImage: "textformat.size")
+                        }
+                        .pickerStyle(.menu)
                     }
-                    .pickerStyle(.menu)
                 }
                 // Only the Mac's own stream has these; Screen Sharing shows the screen as it is.
                 if canHideMac {
