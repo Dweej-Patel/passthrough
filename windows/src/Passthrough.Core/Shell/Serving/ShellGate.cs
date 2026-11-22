@@ -335,6 +335,7 @@ public sealed class ShellGate
         if (matched is not { } index || !computerOk) return null;
         if (index == 0 && keys.Count > 1 && keys[0] is { } proven)
             ThreadPool.QueueUserWorkItem(_ => Access.ConfirmCurrentKey(phoneId, proven));
+        if (Computers.IsComputerId(phoneId)) ThreadPool.QueueUserWorkItem(_ => Access.ComputerUsed(phoneId));
         return phoneId;
     }
 

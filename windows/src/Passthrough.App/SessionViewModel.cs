@@ -168,6 +168,7 @@ public sealed partial class SessionViewModel : ObservableBase
         RowList.Reconcile(Rows, state.Phones, r => r.Id, e => new PhoneRow(e), (r, e) => r.Update(e));
         Raise(nameof(RowsVisibility));
         Raise(nameof(NoRowsVisibility));
+        ShowWaitingPhone();
         var header = FlyoutHeader.For(state);
         if (header != _header)
         {

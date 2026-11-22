@@ -182,8 +182,13 @@ public sealed class ServiceRemote : IDisposable
     /// <summary>The account that granted <paramref name="phoneId"/> hears that its phones' state changed.</summary>
     private void TellOwner(string phoneId)
     {
-        if (Directory.Owner(phoneId) is { } owner) _trays.Tell(owner, new PipeAdminEvent { What = PipeAdminEvent.Access });
+        if (Directory.Owner(phoneId) is not { } owner) return;
+        _lastOwner[phoneId] = owner;
+        _trays.Tell(owner, new PipeAdminEvent { What = PipeAdminEvent.Access });
     }
+
+    /// <summary>The account each id that connected belonged to then: its sessions are closed there after its access is gone.</summary>
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<string, string> _lastOwner = new();
 
     private int ConnectionsOf(string phoneId) => Gate.ConnectedPhones.Count(p => p == phoneId);
 
@@ -195,7 +200,12 @@ public sealed class ServiceRemote : IDisposable
     private void Disconnect(string phoneId)
     {
         Gate.Disconnect(phoneId);
-        foreach (var host in _trays.Hosts) host.CloseSessions(phoneId);
+        // Only the account that held it hears its id (another account's tray has none of its sessions). An id whose
+        // account isn't known (it hasn't connected since the service started) is still sent to every tray: closing its
+        // shells matters more than not naming it.
+        var owner = Directory.AnyOwner(phoneId) ?? (_lastOwner.TryRemove(phoneId, out var was) ? was : null);
+        if (owner is not null) _trays.HostFor(owner)?.CloseSessions(phoneId);
+        else foreach (var host in _trays.Hosts) host.CloseSessions(phoneId);
     }
 
     public void Start()

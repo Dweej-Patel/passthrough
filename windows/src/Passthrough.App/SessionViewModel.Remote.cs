@@ -14,7 +14,7 @@ public sealed class OnThisPcRow(OnThisPc here)
     public string Detail { get; } = here.Detail;
     public string Glyph { get; } = here.IsComputer ? Glyphs.Laptop : Glyphs.Phone;
     public string StopName { get; } = $"Stop {here.Name}";
-    public string StopTip { get; } = "Ends its shells and any view of the screen now. It keeps its access.";
+    public string StopTip { get; } = "Ends its shells and any view of the screen now. It keeps its access and can connect again.";
 }
 
 /// <summary>Someone viewing this PC's screen, above the tabs: never hidden behind one.</summary>
@@ -75,6 +75,28 @@ public sealed partial class SessionViewModel
     public Visibility RemoteVisibility => SelectedTab == 1 ? Visibility.Visible : Visibility.Collapsed;
 
     public string RemoteTabTitle => _remoteTab;
+
+    private bool _phoneWaits;
+
+    /// <summary>"This PC · Pair" while a phone on the cable waits for its code or a retry.</summary>
+    public string ThisPcTabTitle => RemoteSummary.ThisPcTabTitle(_phoneWaits);
+
+    /// <summary>
+    /// A phone that starts waiting for its code (or a retry) brings the This PC tab forward, once: the code box is there,
+    /// and the header above is Remote access's, so on the Remote tab nothing would say a phone is waiting.
+    /// </summary>
+    private void ShowWaitingPhone()
+    {
+        var waits = Rows.Any(r => r.PairVisibility == Visibility.Visible || r.RetryVisibility == Visibility.Visible);
+        if (waits == _phoneWaits) return;
+        _phoneWaits = waits;
+        Raise(nameof(ThisPcTabTitle));
+        if (waits && SelectedTab != 0) SelectedTab = 0;
+    }
+
+    /// <summary>The header's button (Turn on…, Fix…), which opens Settings ▸ Remote access.</summary>
+    public string HeaderActionText => _remoteHeader is null ? "" : RemoteSummary.HeaderAction(Mode) ?? "";
+    public Visibility HeaderActionVisibility => HeaderActionText.Length > 0 ? Visibility.Visible : Visibility.Collapsed;
     public string ReachLine => _reachLine;
     public Visibility OnThisPcVisibility => OnThisPc.Count > 0 ? Visibility.Visible : Visibility.Collapsed;
     public Visibility NobodyHereVisibility => OnThisPc.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
@@ -180,5 +202,7 @@ public sealed partial class SessionViewModel
         Raise(nameof(HeaderOnVisibility));
         Raise(nameof(HeaderAttentionVisibility));
         Raise(nameof(HeaderIdleVisibility));
+        Raise(nameof(HeaderActionText));
+        Raise(nameof(HeaderActionVisibility));
     }
 }

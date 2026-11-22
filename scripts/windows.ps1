@@ -27,6 +27,7 @@
 
   Exits 0 when it worked; otherwise prints one sentence saying what failed and exits 1.
 #>
+#Requires -Version 7.2
 [CmdletBinding()]
 param(
     [Parameter(Position = 0)]
@@ -170,13 +171,16 @@ function Assert-OnlyYouCanWrite([string]$what, [string]$path) {
 
 function Invoke-Elevated([string]$exe, [string[]]$arguments, [string]$what) {
     if ($WhatIf) { Say "   would run, as administrator: `"$exe`" $($arguments -join ' ')"; return }
+    if (-not (Test-Path -LiteralPath $exe)) { Fail "$exe is missing, so nothing was changed." }
     Step "$what (Windows asks for an administrator)"
     try {
         $process = Start-Process -FilePath $exe -ArgumentList $arguments -Verb RunAs -Wait -PassThru
     }
     catch {
-        if (-not (Test-Path -LiteralPath $exe)) { Fail "$exe is missing, so nothing was changed." }
-        Fail "The administrator prompt was declined, so nothing was changed."
+        # ERROR_CANCELLED (1223) is the prompt declined; anything else is said as it is.
+        $native = $_.Exception.InnerException ?? $_.Exception
+        if ($native -is [System.ComponentModel.Win32Exception] -and $native.NativeErrorCode -eq 1223) { Fail "The administrator prompt was declined, so nothing was changed." }
+        Fail "Windows couldn't start $exe as administrator: $($_.Exception.Message)"
     }
     $result = Get-Content $SetupLog -Tail 50 -ErrorAction SilentlyContinue | Where-Object { $_ -match '"result"' } | Select-Object -Last 1
     if ($process.ExitCode -ne 0) {
@@ -321,9 +325,32 @@ function Invoke-Deps {
     Say 'Open a new terminal if a command above was just installed, so PATH has it.'
 }
 
+<#
+  The elevated setup allows the account that is asking. Run from here it can only tell who approved the prompt, so a
+  standard account approving with an administrator's password would set it up for the administrator instead: that
+  account turns Remote access on in the tray app (Settings ▸ Remote access), which tells setup who asked.
+#>
+function Assert-AdministratorAccount {
+    $claims = [System.Security.Principal.WindowsIdentity]::GetCurrent().Claims
+    if ($claims | Where-Object { $_.Value -eq 'S-1-5-32-544' }) { return }
+    Fail ('Your Windows account isn''t an administrator, so setup run from here would be set up for whoever approves the prompt. ' +
+        'Build with: scripts/windows.ps1 build, then open the built Passthrough.exe and choose Settings ▸ Remote access ▸ Turn on.')
+}
+
+<#
+  The build replaces its folder, which then takes its permissions from the folder above it: checked again just before
+  setup runs the exe from it as administrator.
+#>
+function Assert-BuildStillYours {
+    if ($WhatIf) { return }
+    Assert-OnlyYouCanWrite 'The build' $Output
+}
+
 function Invoke-Install([bool]$built = $false) {
+    Assert-AdministratorAccount
     if (Get-Installed) { Say 'Remote access is already set up here; installing again repairs it and keeps the phones'' access.' }
     if (-not $built) { Invoke-Build }
+    Assert-BuildStillYours
     $arguments = @('--install')
     if ($Screen) { $arguments += '--screen' }
     Invoke-Elevated (Join-Path $Output 'Passthrough.Service.exe') $arguments $(if ($Screen) { 'Setting up Remote access and the screen' } else { 'Setting up Remote access' })
@@ -337,6 +364,7 @@ function Invoke-Install([bool]$built = $false) {
 
 function Invoke-Update {
     if (-not (Get-Installed)) { Fail 'There''s nothing to update: Remote access isn''t set up here. Run: scripts/windows.ps1 install' }
+    Assert-AdministratorAccount
     if ($Pull) {
         if ($WhatIf) { Say "   would run git pull --ff-only in $Root" }
         else {
@@ -346,6 +374,7 @@ function Invoke-Update {
         }
     }
     Invoke-Build
+    Assert-BuildStillYours
     Invoke-Elevated (Join-Path $Output 'Passthrough.Service.exe') @('--update') 'Updating the background service'
     Stop-Tray
     Start-Tray

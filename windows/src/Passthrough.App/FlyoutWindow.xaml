@@ -19,7 +19,11 @@
             <Grid.ColumnDefinitions>
                 <ColumnDefinition Width="Auto" />
                 <ColumnDefinition Width="*" />
+                <ColumnDefinition Width="Auto" />
             </Grid.ColumnDefinitions>
+            <Button Grid.Column="2" Content="{x:Bind ViewModel.HeaderActionText, Mode=OneWay}" VerticalAlignment="Center"
+                    Visibility="{x:Bind ViewModel.HeaderActionVisibility, Mode=OneWay}" Click="OnReachClick"
+                    ToolTipService.ToolTip="Opens Settings ▸ Remote access" />
             <Grid Width="38" Height="38" Visibility="{x:Bind ViewModel.HeaderIdleVisibility, Mode=OneWay}">
                 <Ellipse Fill="{ThemeResource ControlFillColorSecondaryBrush}" />
                 <FontIcon Glyph="{x:Bind ViewModel.HeaderGlyph, Mode=OneWay}" FontSize="18"
@@ -95,7 +99,7 @@
             </ItemsControl>
 
             <SelectorBar x:Name="Tabs" Visibility="{x:Bind ViewModel.TabsVisibility, Mode=OneWay}" SelectionChanged="OnTabChanged">
-                <SelectorBarItem x:Name="ThisPcTab" Text="This PC" />
+                <SelectorBarItem x:Name="ThisPcTab" Text="{x:Bind ViewModel.ThisPcTabTitle, Mode=OneWay}" />
                 <SelectorBarItem x:Name="RemoteTab" Text="{x:Bind ViewModel.RemoteTabTitle, Mode=OneWay}" />
             </SelectorBar>
 
@@ -182,7 +186,6 @@
                                             AutomationProperties.Name="{x:Bind RetryName, Mode=OneWay}"
                                             Visibility="{x:Bind RetryVisibility, Mode=OneWay}" Click="OnRetryClick" />
                                     <Button Content="Use this phone" HorizontalAlignment="Stretch" AutomationProperties.Name="{x:Bind UseName, Mode=OneWay}"
-                                            ToolTipService.ToolTip="This PC goes online through this phone, once it can."
                                             Visibility="{x:Bind UseVisibility, Mode=OneWay}" Click="OnUseClick" />
                                 </StackPanel>
                             </Border>
@@ -211,13 +214,13 @@
                             <ColumnDefinition Width="Auto" />
                         </Grid.ColumnDefinitions>
                         <StackPanel VerticalAlignment="Center">
-                            <TextBlock Text="Stay awake while plugged in" />
+                            <TextBlock Text="Stay awake on mains power" />
                             <TextBlock Text="A sleeping PC can't answer your phones." Style="{StaticResource CaptionTextBlockStyle}"
                                        Foreground="{ThemeResource TextFillColorSecondaryBrush}" TextWrapping="Wrap" />
                         </StackPanel>
                         <ToggleSwitch x:Name="AwakeSwitch" Grid.Column="1" MinWidth="0" OnContent="" OffContent=""
                                       IsOn="{x:Bind ViewModel.StayAwake, Mode=OneWay}" Toggled="OnAwakeToggled"
-                                      AutomationProperties.Name="Stay awake while plugged in" />
+                                      AutomationProperties.Name="Stay awake on mains power" />
                     </Grid>
                 </Border>
             </StackPanel>
@@ -237,7 +240,7 @@
                     </Grid>
                 </Button>
 
-                <TextBlock Text="On this PC now" Style="{StaticResource BodyStrongTextBlockStyle}" Margin="2,6,0,0" />
+                <TextBlock Text="On this PC now" Style="{StaticResource BodyStrongTextBlockStyle}" Margin="2,6,0,0" AutomationProperties.HeadingLevel="Level1" />
                 <TextBlock Text="Nobody is on this PC now." Style="{StaticResource CaptionTextBlockStyle}" Margin="2,0,0,0"
                            Foreground="{ThemeResource TextFillColorSecondaryBrush}" Visibility="{x:Bind ViewModel.NobodyHereVisibility, Mode=OneWay}" />
                 <ItemsControl ItemsSource="{x:Bind ViewModel.OnThisPc}" Visibility="{x:Bind ViewModel.OnThisPcVisibility, Mode=OneWay}">
@@ -272,7 +275,7 @@
                     </ItemsControl.ItemTemplate>
                 </ItemsControl>
 
-                <TextBlock Text="Your computers" Style="{StaticResource BodyStrongTextBlockStyle}" Margin="2,6,0,0" />
+                <TextBlock Text="Your computers" Style="{StaticResource BodyStrongTextBlockStyle}" Margin="2,6,0,0" AutomationProperties.HeadingLevel="Level1" />
                 <Button Content="Show your computers" HorizontalAlignment="Stretch" Click="OnShowComputers"
                         Visibility="{x:Bind ViewModel.ShowComputersVisibility, Mode=OneWay}"
                         ToolTipService.ToolTip="Other computers this PC can reach. Windows asks for your PIN or fingerprint." />
