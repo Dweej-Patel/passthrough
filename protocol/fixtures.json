@@ -461,6 +461,30 @@
       },
       {
         "line": "{\"t\":\"error\",\"reason\":\"too_many_screens\"}"
+      },
+      {
+        "line": "{\"t\":\"computerGrant\",\"name\":\"MacBook\",\"viewer\":\"5d1e0c2a-7b3f-4e8a-9c61-2f0b8d4a7e13\",\"scopes\":[\"shell\",\"screen\"],\"idKey\":\"BGsX0fLhLEJH+Lzm5WOkQPJ3A32BLeszoPShOUXYmMKWT+NC4v4af5uO5+tKfA+eFivOM1drMV7Oy7ZAaDe/UfU=\",\"kind\":\"mac\"}"
+      },
+      {
+        "line": "{\"t\":\"computerGranted\",\"phoneID\":\"computer.9b2f6c1e-4d7a-4f0b-8e35-6a1c2d9e7f40\",\"key\":\"AQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyA=\",\"scopes\":[\"shell\",\"screen\"],\"pending\":[\"screen\"]}"
+      },
+      {
+        "line": "{\"t\":\"computerPassSaved\"}"
+      },
+      {
+        "line": "{\"t\":\"computerRevoke\",\"phoneID\":\"computer.9b2f6c1e-4d7a-4f0b-8e35-6a1c2d9e7f40\"}"
+      },
+      {
+        "line": "{\"t\":\"computerRevoked\"}"
+      },
+      {
+        "line": "{\"t\":\"listComputers\"}"
+      },
+      {
+        "line": "{\"t\":\"computerList\",\"computers\":[{\"phoneID\":\"computer.9b2f6c1e-4d7a-4f0b-8e35-6a1c2d9e7f40\",\"viewer\":\"5d1e0c2a-7b3f-4e8a-9c61-2f0b8d4a7e13\",\"name\":\"MacBook\",\"kind\":\"mac\",\"scopes\":[\"shell\"],\"pending\":[\"screen\"],\"connected\":true,\"grantedAt\":1763790000},{\"phoneID\":\"computer.0c4e8a2b-1f3d-4b6a-9e7c-5d2f1a8b3c60\",\"name\":\"Studio\",\"scopes\":[],\"connected\":false,\"grantedAt\":1763793600}]}"
+      },
+      {
+        "line": "{\"t\":\"computerList\",\"computers\":[]}"
       }
     ],
     "errors": ["not_authorized", "too_many_sessions", "no_such_session", "bad_request", "screen_not_allowed", "screen_unavailable", "screen_video_unavailable", "too_many_screens", "not_allowed", "vpn_not_set_up", "screen_only", "pass_not_saved", "signed_out", "rdp_unavailable", "try_later", "too_many_computers", "pass_conflict"],

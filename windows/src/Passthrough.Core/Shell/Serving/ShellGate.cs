@@ -267,6 +267,8 @@ public sealed class ShellGate
                 _connections.Add(connection);
             }
             Log?.Invoke("shell: a phone connected");
+            // A computer coming or going changes its granter's computerList (connected).
+            if (Computers.IsComputerId(phoneId)) PushComputers();
             await connection.RunAsync().ConfigureAwait(false);
         }
         catch (Exception e) when (e is IOException or ObjectDisposedException or OperationCanceledException or LineTooLongException) { }
@@ -276,6 +278,7 @@ public sealed class ShellGate
             if (connection is not null) lock (_lock) _connections.Remove(connection);
             connection?.Close();
             stream.Dispose();
+            if (connection is not null && Computers.IsComputerId(connection.PhoneId)) PushComputers();
         }
     }
     private static ShellEnvelope? Decode(byte[] line)
@@ -363,6 +366,12 @@ public sealed class ShellGate
     public void PushHost(ISessionHost host)
     {
         foreach (var connection in Connections().Where(c => c.Host == host)) connection.SendHost();
+    }
+
+    /// <summary>Sends <c>computerList</c> again to every phone that asked for it (a grant, a revoke, a computer came or went).</summary>
+    public void PushComputers()
+    {
+        foreach (var connection in Connections()) connection.SendComputers();
     }
 
     /// <summary>Sends every phone the host's state again.</summary>
