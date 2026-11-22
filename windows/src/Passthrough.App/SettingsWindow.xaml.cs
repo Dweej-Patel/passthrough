@@ -60,6 +60,8 @@ public sealed partial class SettingsWindow : Window
             };
         }
         ShowRemote();
+        // The history choice and the relay's sentence too: they were filled only after a change, so they opened blank.
+        ShowHistoryAndRelay();
 
         // The setting and the pairings can change while the window is open; follow them until it closes.
         viewModel.PropertyChanged += OnViewModelChanged;
