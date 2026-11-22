@@ -385,6 +385,9 @@ static BOOL configure(rdpSettings *settings, const pt_rdp_config *config) {
     SET_UINT32(ProxyType, PROXY_TYPE_NONE);
     SET_BOOL(SupportMultitransport, 0);
     SET_BOOL(NetworkAutoDetect, 0);
+    /* With any of auto-detect, the heartbeat or multitransport on, freerdp_client_load_addins turns device
+       redirection on and asks for rdpdr, which is not compiled in: PreConnect would fail before a byte is sent. */
+    SET_BOOL(SupportHeartbeatPdu, 0);
     SET_BOOL(AutoReconnectionEnabled, 0);
 
     /* Graphics: the GFX pipeline; no RemoteFX, NSCodec or JPEG. */
@@ -412,6 +415,7 @@ static BOOL configure(rdpSettings *settings, const pt_rdp_config *config) {
     /* Nothing of this device is redirected. */
     SET_BOOL(DeviceRedirection, 0);
     SET_BOOL(RedirectDrives, 0);
+    SET_BOOL(RedirectHomeDrive, 0);
     SET_BOOL(RedirectPrinters, 0);
     SET_BOOL(RedirectSmartCards, 0);
     SET_BOOL(RedirectSerialPorts, 0);
