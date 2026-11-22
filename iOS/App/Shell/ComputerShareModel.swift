@@ -33,6 +33,8 @@ final class ComputerShareModel: ObservableObject {
     private var shared: (client: ShellClient, dialer: IrohShellDialer?)?
     /// What H granted, until V kept it.
     private var granted: String?
+    /// The pass went to V: from here V may have kept it, so only V's own refusal takes the access back.
+    private var passSent = false
     private var generation = 0
 
     var isWorking: Bool { if case .working = phase { true } else { false } }
@@ -59,17 +61,23 @@ final class ComputerShareModel: ObservableObject {
                 return cancelled(gen)
             }
             guard gen == generation else { return }
+            passSent = false
             ask(viewerHost, about: sharedHost, name: name, scopes: scopes, shell: shell, generation: gen)
             DispatchQueue.main.asyncAfter(deadline: .now() + Self.timeout) { [weak self] in
                 guard let self, gen == self.generation, self.isWorking else { return }
-                self.failed("That took too long. Check that both computers are awake with Passthrough on, then try again.")
+                if self.passSent {
+                    // V may have kept it: taking it back now would leave V with access that no longer works.
+                    self.failed("\(viewerHost.macName) didn't answer in time. If \(sharedHost.macName) isn't under Your computers there, share again.", keepGrant: true)
+                } else {
+                    self.failed("That took too long. Check that both computers are awake with Passthrough on, then try again.")
+                }
             }
         }
     }
 
     /// The sheet went away: anything still under way stops (access not handed over is taken back).
     func reset() {
-        if isWorking { failed(nil) } else { closeAll() }
+        if isWorking { failed(nil, keepGrant: passSent) } else { closeAll() }
         phase = .idle
     }
 
@@ -149,6 +157,7 @@ final class ComputerShareModel: ObservableObject {
                         return self.failed("This \(ThisDevice.name)'s details for \(sharedHost.macName) can't be handed over. Open \(sharedHost.macName) on this \(ThisDevice.name) so they refresh, then try again.")
                     }
                     self.phase = .working("Handing it to \(viewerHost.macName)…")
+                    self.passSent = true
                     self.viewer?.client.giveComputerPass(pass, scopes: grantedScopes, pending: pending)
                 case let .failed(error, _):
                     guard self.granted == nil else { return }   // the hand-over's outcome decides
@@ -174,7 +183,9 @@ final class ComputerShareModel: ObservableObject {
         let v = viewerHost.macName, h = sharedHost.macName
         let shell = grantedScopes.scopes.contains(Computers.scopeShell)
         let screen = grantedScopes.scopes.contains(Computers.scopeScreen)
-        if grantedScopes.pending.contains(Computers.scopeScreen) {
+        if grantedScopes.pending.contains(Computers.scopeScreen) && !shell {
+            phase = .done("\(v) can see \(h)'s screen once you allow it in Passthrough on \(h). Until then it can't use \(h).")
+        } else if grantedScopes.pending.contains(Computers.scopeScreen) {
             phase = .done("\(v) can now open shells on \(h). To let it see the screen too, allow it in Passthrough on \(h).")
         } else if shell && screen {
             phase = .done("\(v) can now open shells on \(h) and see its screen. Find it under Your computers on \(v).")
@@ -209,13 +220,14 @@ final class ComputerShareModel: ObservableObject {
 
     /// Stops with `message` (nil: quietly). Access granted but not handed over
     /// is taken back on H's still-open connection, then everything closes.
-    private func failed(_ message: String?) {
+    private func failed(_ message: String?, keepGrant: Bool = false) {
         generation += 1
+        passSent = false
         closeViewer()
         if let message { phase = .failed(message) }
         guard let connection = shared else { return closeAll() }
         shared = nil
-        if let id = granted { connection.client.revokeComputer(id) }
+        if let id = granted, !keepGrant { connection.client.revokeComputer(id) }
         granted = nil
         // As `ScreenShareModel`: give the request time to reach H, then close. The closure keeps the
         // connection alive even if the sheet (and this model) has gone.
