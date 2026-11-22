@@ -16,6 +16,8 @@
  *    RemoteApp or legacy codecs and caches.
  *  - Input is queued from any thread and sent from the engine thread, the
  *    only thread that calls FreeRDP. Pure pointer moves in a row are coalesced.
+ *  - The desktop's shape: one monitor through display control, the newest
+ *    request only, sent once Windows has said the channel's limits.
  */
 #include "pt_rdp.h"
 #include "pt_bridge.h"
@@ -35,6 +37,7 @@
 #include <freerdp/channels/channels.h>
 #include <freerdp/channels/rdpgfx.h>
 #include <freerdp/client/channels.h>
+#include <freerdp/client/disp.h>
 #include <freerdp/codec/color.h>
 #include <freerdp/error.h>
 #include <freerdp/event.h>
@@ -67,13 +70,22 @@ struct pt_rdp {
     pt_bridge *bridge;
     HANDLE wake;
 
-    pthread_mutex_t lock; /* the command queue */
+    pthread_mutex_t lock; /* the command queue and the wanted layout */
     pt_cmd *commands;
     size_t count;
+    /* The newest shape asked for and not yet sent (width 0: none). */
+    pt_rdp_layout_request wanted;
 
     /* Engine thread only. */
     uint8_t buttons;
     int signed_in;
+
+    /* Display control, once its channel is open, and whether Windows has sent its limits (nothing may be sent
+       before). Dynamic channels have a thread of their own (drdynvc's): it sets and clears these, the engine
+       thread sends through them, both under disp_lock. */
+    pthread_mutex_t disp_lock;
+    DispClientContext *disp;
+    int disp_ready;
 
     atomic_int aborted;
     atomic_int certificate_refused;
@@ -264,11 +276,36 @@ static BOOL pointer_set_position(rdpContext *context, UINT32 x, UINT32 y) {
 
 /* MARK: Channels */
 
+/* Windows said display control's limits: layouts may be sent from here on. */
+static UINT disp_caps(DispClientContext *disp, UINT32 max_monitors, UINT32 area_a, UINT32 area_b) {
+    (void)max_monitors;
+    (void)area_a;
+    (void)area_b;
+    pt_rdp *rdp = disp ? disp->custom : NULL;
+    if (!rdp) return CHANNEL_RC_OK;
+    pthread_mutex_lock(&rdp->disp_lock);
+    rdp->disp_ready = 1;
+    pthread_mutex_unlock(&rdp->disp_lock);
+    /* A shape asked for meanwhile goes with the next drain (the loop's next turn). */
+    SetEvent(rdp->wake);
+    return CHANNEL_RC_OK;
+}
+
 static void channel_connected(void *context, const ChannelConnectedEventArgs *e) {
     rdpContext *ctx = context;
     if (!ctx || !e || !e->name) return;
     if (strcmp(e->name, RDPGFX_DVC_CHANNEL_NAME) == 0 && ctx->gdi) {
         (void)gdi_graphics_pipeline_init(ctx->gdi, (RdpgfxClientContext *)e->pInterface);
+    } else if (strcmp(e->name, DISP_DVC_CHANNEL_NAME) == 0) {
+        pt_rdp *rdp = rdp_of(ctx);
+        DispClientContext *disp = (DispClientContext *)e->pInterface;
+        if (!rdp || !disp) return;
+        disp->custom = rdp;
+        disp->DisplayControlCaps = disp_caps;
+        pthread_mutex_lock(&rdp->disp_lock);
+        rdp->disp = disp;
+        rdp->disp_ready = 0;
+        pthread_mutex_unlock(&rdp->disp_lock);
     }
 }
 
@@ -277,6 +314,13 @@ static void channel_disconnected(void *context, const ChannelDisconnectedEventAr
     if (!ctx || !e || !e->name) return;
     if (strcmp(e->name, RDPGFX_DVC_CHANNEL_NAME) == 0 && ctx->gdi) {
         gdi_graphics_pipeline_uninit(ctx->gdi, (RdpgfxClientContext *)e->pInterface);
+    } else if (strcmp(e->name, DISP_DVC_CHANNEL_NAME) == 0) {
+        pt_rdp *rdp = rdp_of(ctx);
+        if (!rdp) return;
+        pthread_mutex_lock(&rdp->disp_lock);
+        rdp->disp = NULL;
+        rdp->disp_ready = 0;
+        pthread_mutex_unlock(&rdp->disp_lock);
     }
 }
 
@@ -424,10 +468,12 @@ static BOOL configure(rdpSettings *settings, const pt_rdp_config *config) {
     SET_BOOL(AudioCapture, 0);
     SET_BOOL(RemoteApplicationMode, 0);
     SET_BOOL(SupportVideoOptimized, 0);
-    /* The clipboard (text only) and display control come with copy and paste and resizing; off until then. */
+    /* The clipboard (text only) comes with copy and paste; off until then. */
     SET_BOOL(RedirectClipboard, 0);
-    SET_BOOL(SupportDisplayControl, 0);
-    SET_BOOL(DynamicResolutionUpdate, 0);
+    /* The desktop follows this device's shape through display control (disp over drdynvc, both compiled in):
+       one monitor, never several. */
+    SET_BOOL(SupportDisplayControl, 1);
+    SET_BOOL(DynamicResolutionUpdate, 1);
     SET_BOOL(UseMultimon, 0);
 
     /* Shape. */
@@ -463,6 +509,7 @@ pt_rdp *pt_rdp_new(const pt_rdp_config *config, const pt_rdp_callbacks *callback
     if (!rdp) return NULL;
     rdp->callbacks = *callbacks;
     pthread_mutex_init(&rdp->lock, NULL);
+    pthread_mutex_init(&rdp->disp_lock, NULL);
     rdp->commands = calloc(PT_MAX_COMMANDS, sizeof(pt_cmd));
     rdp->wake = CreateEventA(NULL, TRUE, FALSE, NULL);
     pt_bridge_callbacks bridge_callbacks = { .user = rdp, .outbox_ready = bridge_outbox_ready, .inbox_space = bridge_inbox_space };
@@ -500,6 +547,7 @@ void pt_rdp_free(pt_rdp *rdp) {
     if (rdp->bridge) pt_bridge_free(rdp->bridge);
     if (rdp->wake) CloseHandle(rdp->wake);
     free(rdp->commands);
+    pthread_mutex_destroy(&rdp->disp_lock);
     pthread_mutex_destroy(&rdp->lock);
     free(rdp);
 }
@@ -595,10 +643,38 @@ static void send_pointer(pt_rdp *rdp, rdpInput *input, uint16_t x, uint16_t y, u
     rdp->buttons = buttons;
 }
 
+/* The newest shape asked for, once display control is ready: one monitor, primary, at the origin. */
+static void send_layout(pt_rdp *rdp) {
+    if (!rdp->signed_in) return;
+    pthread_mutex_lock(&rdp->disp_lock);
+    if (!rdp->disp || !rdp->disp_ready) {
+        pthread_mutex_unlock(&rdp->disp_lock);
+        return;
+    }
+    pthread_mutex_lock(&rdp->lock);
+    pt_rdp_layout_request wanted = rdp->wanted;
+    rdp->wanted.width = 0;
+    pthread_mutex_unlock(&rdp->lock);
+    if (wanted.width == 0 || wanted.height == 0) {
+        pthread_mutex_unlock(&rdp->disp_lock);
+        return;
+    }
+    DISPLAY_CONTROL_MONITOR_LAYOUT monitor;
+    memset(&monitor, 0, sizeof(monitor));
+    monitor.Flags = DISPLAY_CONTROL_MONITOR_PRIMARY;
+    monitor.Width = wanted.width;
+    monitor.Height = wanted.height;
+    monitor.DesktopScaleFactor = wanted.desktop_scale ? wanted.desktop_scale : 100;
+    monitor.DeviceScaleFactor = wanted.device_scale ? wanted.device_scale : 100;
+    if (rdp->disp->SendMonitorLayout) (void)rdp->disp->SendMonitorLayout(rdp->disp, 1, &monitor);
+    pthread_mutex_unlock(&rdp->disp_lock);
+}
+
 static void drain(pt_rdp *rdp) {
     pt_cmd batch[256];
     rdpContext *context = rdp->context;
     rdpInput *input = context->input;
+    send_layout(rdp);
     for (;;) {
         pthread_mutex_lock(&rdp->lock);
         size_t n = rdp->count < 256 ? rdp->count : 256;
@@ -660,6 +736,14 @@ void pt_rdp_wheel(pt_rdp *rdp, uint16_t x, uint16_t y, int16_t rotation, int hor
 
 void pt_rdp_suppress_output(pt_rdp *rdp, int suppress) {
     enqueue(rdp, (pt_cmd){ .kind = PT_CMD_SUPPRESS, .value = suppress ? 1 : 0 });
+}
+
+void pt_rdp_layout(pt_rdp *rdp, const pt_rdp_layout_request *request) {
+    if (!rdp || !request || atomic_load(&rdp->aborted)) return;
+    pthread_mutex_lock(&rdp->lock);
+    rdp->wanted = *request;
+    pthread_mutex_unlock(&rdp->lock);
+    SetEvent(rdp->wake);
 }
 
 /* MARK: Running */

@@ -121,7 +121,17 @@ final class ScreenModel: ObservableObject {
     /// Screen Sharing shows the screen (the stream is tried again meanwhile).
     private var onScreenSharing: Bool { backend is ScreenSharingBackend }
     /// This view shows a PC (through its Remote Desktop), not a Mac.
-    private var windowsView = false
+    @Published private(set) var windowsView = false
+    /// The user's choices for this PC, remembered per computer: the desktop's shape, and Windows' text size on it.
+    @Published private(set) var windowsShapeChoice = WindowsDisplay.Shape.fit
+    @Published private(set) var windowsSpace = 100
+    /// The shape Windows was last asked for (the first desktop, then every change), and when (uptime).
+    private var windowsAsked: ScreenShape?
+    private var windowsAskedAt: TimeInterval?
+    private var windowsLayoutTask: Task<Void, Never>?
+    private var windowsResizeWatch: Task<Void, Never>?
+    /// "…kept its screen as it was" is said once a view.
+    private var saidKeptShape = false
     /// How the sign-in sheet asks: a Mac's account, or a PC's Windows account (the last used here, else the one the PC named).
     var loginStyle: ScreenLoginForm.Style {
         guard windowsView else { return .mac }
@@ -393,6 +403,10 @@ final class ScreenModel: ObservableObject {
         connectionPath = nil
         upgradeStream = nil
         relayoutTask?.cancel()
+        windowsLayoutTask?.cancel()
+        windowsResizeWatch?.cancel()
+        windowsAsked = nil
+        windowsAskedAt = nil
         stopMicrophone()
         stopSound()
         backend?.close()
@@ -475,6 +489,8 @@ final class ScreenModel: ObservableObject {
             screenSize = CGSize(width: width, height: height)
             phase = .live
             if windowsView {
+                // The answer to a change of shape (or the first desktop): nothing is waited for now.
+                windowsResizeWatch?.cancel()
                 if liveSince == nil {
                     liveSince = ProcessInfo.processInfo.systemUptime
                     windowsSignedIn()
@@ -643,6 +659,10 @@ final class ScreenModel: ObservableObject {
         windowsView = true
         macID = pc.macID
         macName = pc.macName
+        windowsShapeChoice = UserDefaults.standard.string(forKey: Self.windowsShapeKey(pc.macID)).flatMap(WindowsDisplay.Shape.init) ?? .fit
+        let space = UserDefaults.standard.integer(forKey: Self.windowsSpaceKey(pc.macID))
+        windowsSpace = WindowsDisplay.spaces.contains(space) ? space : 100
+        saidKeptShape = false
         slowReason = nil
         saidRelay = false
         observeApp()
@@ -709,6 +729,7 @@ final class ScreenModel: ObservableObject {
             backendToken += 1
             let token = backendToken
             let shape = windowsShape()
+            windowsAsked = shape
             let made = RemoteDesktop.backend(stream: stream, initialBytes: initialBytes, certSHA256: certSHA256, login: login,
                                              width: shape.width, height: shape.height, desktopScale: shape.desktopScale,
                                              deviceScale: shape.deviceScale, clientName: ThisDevice.name) { [weak self] event in
@@ -800,20 +821,62 @@ final class ScreenModel: ObservableObject {
         phase = .failed(WindowsScreenCopy.ending(end, words)?.sentence ?? "The connection to \(macName) was lost.")
     }
 
-    /// The first desktop: the view's own pixels (even, at most 4096 on the longer side and
-    /// 8.3 million in all), with Windows' text at the default size for this device.
-    private func windowsShape() -> (width: Int, height: Int, desktopScale: Int, deviceScale: Int) {
+    // MARK: A PC's shape
+
+    private static func windowsShapeKey(_ hostID: String) -> String { "screenShape.\(hostID)" }
+    private static func windowsSpaceKey(_ hostID: String) -> String { "screenSpace.\(hostID)" }
+
+    /// The desktop to ask Windows for: the view's own pixels as the device is held (the whole
+    /// screen until it's laid out) or the standard 16:10, with Windows' text at the chosen size.
+    private func windowsShape() -> ScreenShape {
         let screen = UIScreen.main
-        var pixels = viewPixels ?? CGSize(width: screen.bounds.width * screen.scale, height: screen.bounds.height * screen.scale)
-        let cap = min(1, 4096 / max(pixels.width, pixels.height), (8_300_000 / max(pixels.width * pixels.height, 1)).squareRoot())
-        pixels = CGSize(width: pixels.width * cap, height: pixels.height * cap)
-        let short = min(pixels.width, pixels.height)
-        // Windows points on the short side: 600 on a phone, 1000 on an iPad.
-        let target: CGFloat = UIDevice.current.userInterfaceIdiom == .pad ? 1000 : 600
-        let steps = [100, 125, 150, 175, 200, 225, 250, 300, 350, 400, 450, 500]
-        let scale = steps.last { CGFloat($0) <= short / target * 100 } ?? 100
-        let device = scale < 150 ? 100 : scale <= 225 ? 140 : 180
-        return (Int(pixels.width) & ~1, Int(pixels.height) & ~1, scale, device)
+        let pixels = viewPixels ?? CGSize(width: screen.bounds.width * screen.scale, height: screen.bounds.height * screen.scale)
+        return WindowsDisplay.shape(windowsShapeChoice, device: UIDevice.current.userInterfaceIdiom == .pad ? .pad : .phone,
+                                    viewPixels: pixels, space: windowsSpace)
+    }
+
+    /// Fit to this device, or the standard 16:10; kept for this PC.
+    func setWindowsShape(_ shape: WindowsDisplay.Shape) {
+        guard shape != windowsShapeChoice else { return }
+        windowsShapeChoice = shape
+        if let macID { UserDefaults.standard.set(shape.rawValue, forKey: Self.windowsShapeKey(macID)) }
+        windowsShapeChanged()
+    }
+
+    /// Windows' text size (80 larger text, 100, 125 more space); kept for this PC.
+    func setWindowsSpace(_ space: Int) {
+        guard space != windowsSpace, WindowsDisplay.spaces.contains(space) else { return }
+        windowsSpace = space
+        if let macID { UserDefaults.standard.set(space, forKey: Self.windowsSpaceKey(macID)) }
+        windowsShapeChanged()
+    }
+
+    /// The view turned, or a choice changed: once it has settled, and at most once a second,
+    /// Windows is asked for the new shape. A newer change replaces one that is waiting.
+    private func windowsShapeChanged() {
+        guard windowsView, backend != nil else { return }
+        windowsLayoutTask?.cancel()
+        let wait = WindowsDisplay.wait(now: ProcessInfo.processInfo.systemUptime, lastAsked: windowsAskedAt)
+        let gen = generation
+        windowsLayoutTask = Task { [weak self] in
+            try? await Task.sleep(for: .milliseconds(Int(wait * 1000)))
+            guard !Task.isCancelled, let self, gen == self.generation, let backend = self.backend else { return }
+            let shape = self.windowsShape()
+            guard shape != self.windowsAsked else { return }
+            let resizes = shape.width != Int(self.screenSize.width) || shape.height != Int(self.screenSize.height)
+            self.windowsAsked = shape
+            self.windowsAskedAt = ProcessInfo.processInfo.systemUptime
+            backend.reshape(shape)
+            // A text size alone changes no pixels: there is no answer to wait for.
+            self.windowsResizeWatch?.cancel()
+            guard resizes else { return }
+            self.windowsResizeWatch = Task { [weak self] in
+                try? await Task.sleep(for: .seconds(3))
+                guard !Task.isCancelled, let self, gen == self.generation, self.phase == .live, !self.saidKeptShape else { return }
+                self.saidKeptShape = true
+                self.show("\(self.macName) kept its screen as it was.")
+            }
+        }
     }
 
     // MARK: Back to the stream
@@ -1344,6 +1407,8 @@ final class ScreenModel: ObservableObject {
         } else {
             viewPixels = size
         }
+        // A PC's desktop follows the view when it fits this device (the standard shape stays as it is).
+        if windowsView { return windowsShapeChanged() }
         guard fitsDevice else { return }
         // Once the turn has settled: each change remakes the Mac's display.
         relayoutTask?.cancel()

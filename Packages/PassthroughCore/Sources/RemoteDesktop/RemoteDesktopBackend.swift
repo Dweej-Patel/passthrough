@@ -17,7 +17,7 @@ import ScreenClient
 /// owns the stream's reads and writes; input comes from main and events go
 /// to the queue given to `init` (main).
 public final class RemoteDesktopBackend: ScreenBackend, @unchecked Sendable {
-    public let capabilities: ScreenCapabilities = [.smoothScroll, .unicodeText, .drawsOwnPointer, .signIn, .windowsKeys]
+    public let capabilities: ScreenCapabilities = [.smoothScroll, .unicodeText, .resize, .drawsOwnPointer, .signIn, .windowsKeys]
     public var macStream: (any MacStreamControls)? { nil }
 
     /// The first shape asked of Windows.
@@ -450,6 +450,17 @@ public final class RemoteDesktopBackend: ScreenBackend, @unchecked Sendable {
 
     public func presented(_ number: UInt32) {}
     public func needsKeyframe() {}
+
+    /// Asks Windows for a desktop of this shape through display control. The size is clamped as the first one is.
+    public func reshape(_ shape: ScreenShape) {
+        let layout = Layout(width: shape.width, height: shape.height, desktopScale: shape.desktopScale, deviceScale: shape.deviceScale)
+        var request = pt_rdp_layout_request()
+        request.width = UInt32(layout.width)
+        request.height = UInt32(layout.height)
+        request.desktop_scale = UInt32(layout.desktopScale)
+        request.device_scale = UInt32(layout.deviceScale)
+        withSession { pt_rdp_layout($0, &request) }
+    }
 
     /// Stops the PC's pictures while the app is away, and restarts them.
     public func setActive(_ active: Bool) {

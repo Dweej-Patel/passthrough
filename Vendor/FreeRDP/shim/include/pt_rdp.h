@@ -9,8 +9,10 @@
  * and drained by the app from the stream its own connection handed over
  * after `rdpReady`.
  *
- * Threads: pt_rdp_run makes every FreeRDP call, on the thread that calls it
- * (the engine thread); every callback below runs there. Functions marked
+ * Threads: pt_rdp_run runs the session on the thread that calls it (the
+ * engine thread). Callbacks come from it, or from the thread FreeRDP keeps
+ * for dynamic channels (the graphics pipeline paints there): one at a time
+ * for any one callback, never after pt_rdp_run returned. Functions marked
  * "any thread" may be called from anywhere, at any time before pt_rdp_free.
  */
 #ifndef PT_RDP_H
@@ -81,6 +83,14 @@ typedef struct {
     int allow_h264;
 } pt_rdp_config;
 
+/** The desktop's shape, as display control takes it. */
+typedef struct {
+    /** Pixels: even, 200 to 8192. */
+    uint32_t width, height;
+    /** Windows' scale factors: desktop 100 to 500, device 100, 140 or 180. */
+    uint32_t desktop_scale, device_scale;
+} pt_rdp_layout_request;
+
 typedef struct {
     void *user;
     /** The server's certificate chain, PEM, leaf first. Return 1 to accept, 0 to refuse (the session ends; nothing of the login has been sent). */
@@ -136,6 +146,10 @@ void pt_rdp_pointer(pt_rdp *rdp, uint16_t x, uint16_t y, uint8_t buttons);
 void pt_rdp_wheel(pt_rdp *rdp, uint16_t x, uint16_t y, int16_t rotation, int horizontal);
 /** Stops (1) or restarts (0) the pictures, as when the app is in the background. */
 void pt_rdp_suppress_output(pt_rdp *rdp, int suppress);
+
+/** Asks Windows for a desktop of this shape (a `desktop` callback follows if it agrees). The newest request
+    replaces one not yet sent; before display control has opened it waits, and goes if it opens. */
+void pt_rdp_layout(pt_rdp *rdp, const pt_rdp_layout_request *request);
 
 /** FreeRDP's and OpenSSL's versions, and whether VideoToolbox H.264 is compiled in. */
 const char *pt_rdp_freerdp_version(void);

@@ -2,6 +2,7 @@ import GameController
 import SwiftUI
 import PassthroughCore
 import PassthroughUI
+import RemoteDesktop
 import ScreenClient
 
 /// The full-screen view of the selected Mac's screen: the Mac's login when
@@ -312,6 +313,7 @@ struct ScreenView: View, Equatable {
         ScreenDisplayMenu(model: model, macName: model.macName, canHideMac: model.canHideMac, path: model.connectionPath,
                           fitsDevice: model.fitsDevice, space: model.space, quality: model.quality,
                           pinchesMac: model.pinchesMacOnItsDisplay, playsSound: model.playsSound, macHidden: model.macHidden,
+                          windows: model.windowsView, windowsShape: model.windowsShapeChoice, windowsSpace: model.windowsSpace,
                           pad: pad, landscape: landscape).equatable()
     }
 
@@ -498,20 +500,42 @@ struct ScreenDisplayMenu: View, Equatable {
     let pinchesMac: Bool
     let playsSound: Bool
     let macHidden: Bool
+    /// A PC: its desktop's shape and Windows' text size, in place of the Mac's rows.
+    var windows = false
+    var windowsShape = WindowsDisplay.Shape.fit
+    var windowsSpace = 100
     let pad: Bool
     let landscape: Bool
     nonisolated static func == (a: Self, b: Self) -> Bool {
         a.macName == b.macName && a.canHideMac == b.canHideMac && a.path == b.path && a.fitsDevice == b.fitsDevice && a.space == b.space
             && a.quality == b.quality && a.pinchesMac == b.pinchesMac && a.playsSound == b.playsSound && a.macHidden == b.macHidden && a.pad == b.pad
-            && a.landscape == b.landscape
+            && a.landscape == b.landscape && a.windows == b.windows && a.windowsShape == b.windowsShape && a.windowsSpace == b.windowsSpace
     }
 
     @ViewBuilder var body: some View {
-        if canHideMac || path.flatMap(ScreenView.describe) != nil {
+        if canHideMac || windows || path.flatMap(ScreenView.describe) != nil {
             Menu {
                 // How far the picture travels: a relay is the likeliest reason it lags.
                 if let path = path, let reach = ScreenView.describe(path) {
                     Section { Label(reach.text, systemImage: reach.symbol) }
+                }
+                // A PC makes its desktop the shape it is asked for: this device's, or a standard one to pan and zoom.
+                if windows {
+                    Picker(selection: Binding(get: { windowsShape }, set: { model.setWindowsShape($0) })) {
+                        Label("Fit to this \(ThisDevice.name)", systemImage: pad ? "ipad" : "iphone").tag(WindowsDisplay.Shape.fit)
+                        Label("Standard (16:10)", systemImage: "display").tag(WindowsDisplay.Shape.standard)
+                    } label: {
+                        Label("Screen shape", systemImage: "rectangle.portrait.on.rectangle.portrait")
+                    }
+                    .pickerStyle(.menu)
+                    Picker(selection: Binding(get: { windowsSpace }, set: { model.setWindowsSpace($0) })) {
+                        Label("Larger text", systemImage: "textformat.size.larger").tag(80)
+                        Label("Default", systemImage: "textformat.size").tag(100)
+                        Label("More space", systemImage: "textformat.size.smaller").tag(125)
+                    } label: {
+                        Label("Text size", systemImage: "textformat.size")
+                    }
+                    .pickerStyle(.menu)
                 }
                 // Only the Mac's own stream has these; Screen Sharing shows the screen as it is.
                 if canHideMac {

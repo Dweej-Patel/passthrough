@@ -27,6 +27,18 @@ public struct ScreenCapabilities: OptionSet, Sendable {
     public static let frameAcks = ScreenCapabilities(rawValue: 1 << 7)
 }
 
+/// A shape to ask the far screen for (`.resize`): its pixels, and how large the far
+/// system draws on them (a PC's scale factors, in percent).
+public struct ScreenShape: Equatable, Sendable {
+    public var width: Int
+    public var height: Int
+    public var desktopScale: Int
+    public var deviceScale: Int
+    public init(width: Int, height: Int, desktopScale: Int = 100, deviceScale: Int = 100) {
+        self.width = width; self.height = height; self.desktopScale = desktopScale; self.deviceScale = deviceScale
+    }
+}
+
 /// The answer to `copySelection()`.
 public enum ScreenCopyResult: Sendable, Equatable {
     case text(String)
@@ -137,6 +149,10 @@ public protocol ScreenBackend: AnyObject, Sendable {
     /// Copies the far selection; `.copied` or `.clipboardChanged` answers.
     func copySelection()
 
+    /// Asks the far screen to take `shape` (`.resize`); a `.size` follows if it does.
+    /// Before the far end can resize, the newest ask waits.
+    func reshape(_ shape: ScreenShape)
+
     /// Sample `number` is on screen (`.frameAcks`).
     func presented(_ number: UInt32)
     /// The display lost its place: start again from a whole picture.
@@ -148,6 +164,8 @@ public protocol ScreenBackend: AnyObject, Sendable {
 extension ScreenBackend {
     /// The Mac's backends do nothing on their own when the app goes away (the model handles their sound and curtain).
     public func setActive(_ active: Bool) {}
+    /// Only a backend with `.resize` changes shape.
+    public func reshape(_ shape: ScreenShape) {}
 }
 
 /// The Mac's own stream's extra controls.
