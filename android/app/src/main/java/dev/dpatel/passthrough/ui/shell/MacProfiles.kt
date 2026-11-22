@@ -1,6 +1,9 @@
 package dev.dpatel.passthrough.ui.shell
 
 import android.text.format.DateUtils
+import dev.dpatel.passthrough.core.HostInfo
+import dev.dpatel.passthrough.core.HostKind
+import dev.dpatel.passthrough.core.HostWords
 import dev.dpatel.passthrough.core.ShellCredential
 import dev.dpatel.passthrough.core.ShellSessionInfo
 import dev.dpatel.passthrough.core.isAsking
@@ -87,14 +90,18 @@ sealed interface MacStatus {
     /** Paired for internet only. */
     object NoShell : MacStatus
     object Connecting : MacStatus
+    /** Reachable, but no shell can start: nobody (or not the account that granted it) is signed in. */
+    object SignInNeeded : MacStatus
 }
 
 object MacProfiles {
-    fun status(sessions: List<ShellSessionInfo>?, reachable: Boolean, lastHeardMillis: Long?, hasShell: Boolean): MacStatus {
+    /** [host]: what the computer last said about itself, if anything. */
+    fun status(sessions: List<ShellSessionInfo>?, reachable: Boolean, lastHeardMillis: Long?, hasShell: Boolean, host: HostInfo? = null): MacStatus {
         if (!hasShell) return MacStatus.NoShell
         val asking = sessions?.firstOrNull { it.isAsking }
         val question = asking?.waiting
         if (asking != null && question != null) return MacStatus.Asking(asking.title, question)
+        if (reachable && host?.signedIn == false) return MacStatus.SignInNeeded
         if (reachable) return MacStatus.Connected(sessions?.count { it.running } ?: 0)
         if (lastHeardMillis != null) return MacStatus.LastHeard(lastHeardMillis)
         return MacStatus.Connecting
@@ -103,23 +110,33 @@ object MacProfiles {
     /**
      * [relative] renders a past time against now; production uses Android's
      * DateUtils (localized, like Swift's RelativeDateTimeFormatter). Injected so
-     * this stays testable on the JVM, where DateUtils returns null.
+     * this stays testable on the JVM, where DateUtils returns null. [kind] picks the words;
+     * with [showKind] (some paired computer isn't a Mac) the row starts with it: "PC · Connected".
      */
     fun statusText(
         status: MacStatus,
         nowMillis: Long,
+        kind: HostKind? = HostKind.MAC,
+        showKind: Boolean = false,
         relative: (thenMillis: Long, nowMillis: Long) -> String = ::androidRelative,
-    ): String = when (status) {
-        is MacStatus.Connected -> when (status.shells) {
-            0 -> "Connected"
-            1 -> "Connected · 1 shell open"
-            else -> "Connected · ${status.shells} shells open"
+    ): String {
+        val text = when (status) {
+            is MacStatus.Connected -> when (status.shells) {
+                0 -> "Connected"
+                1 -> "Connected · 1 shell open"
+                else -> "Connected · ${status.shells} shells open"
+            }
+            is MacStatus.Asking -> "${status.title} is asking a question"
+            is MacStatus.LastHeard -> "Last heard " + relative(status.millis, nowMillis)
+            MacStatus.NoShell -> if (kind == HostKind.MAC) "Paired, no Remote shell" else "Paired, no access yet"
+            MacStatus.Connecting -> "Connecting…"
+            MacStatus.SignInNeeded -> "Sign in needed"
         }
-        is MacStatus.Asking -> "${status.title} is asking a question"
-        is MacStatus.LastHeard -> "Last heard " + relative(status.millis, nowMillis)
-        MacStatus.NoShell -> "Paired, no Remote shell"
-        MacStatus.Connecting -> "Connecting…"
+        return if (showKind) "${HostWords(kind, null).noun.replaceFirstChar { it.uppercase() }} · $text" else text
     }
+
+    /** Whether switcher rows name each computer's kind: only once some paired computer isn't a Mac. */
+    fun showsKind(kinds: List<HostKind?>): Boolean = kinds.any { it != HostKind.MAC }
 
     /** The avatar letter: the name's first grapheme cluster, uppercased; "?" without one. */
     fun initial(macName: String): String {

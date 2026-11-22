@@ -5,11 +5,14 @@ import android.content.SharedPreferences
 import android.os.Build
 import android.provider.Settings
 import androidx.core.content.edit
+import dev.dpatel.passthrough.core.HostFarewell
+import dev.dpatel.passthrough.core.HostInfo
 import dev.dpatel.passthrough.core.KeyValueStore
 import dev.dpatel.passthrough.core.PassthroughProtocol
 import dev.dpatel.passthrough.core.ShellConnectMode
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.serialization.KSerializer
 import kotlinx.serialization.builtins.MapSerializer
 import kotlinx.serialization.builtins.serializer
 import kotlinx.serialization.json.Json
@@ -88,6 +91,25 @@ class AppSettings(context: Context) {
     fun shellLastSelectedAt(): Map<String, Long> = times(SHELL_LAST_SELECTED_AT)
     fun setShellLastSelectedAt(times: Map<String, Long>) = setTimes(SHELL_LAST_SELECTED_AT, times)
 
+    /** The last `host` each computer sent (cleaned), by its ID; same key and shape as the iOS app. */
+    fun shellHostFacts(): Map<String, HostInfo> = decoded(SHELL_HOST_FACTS, hostFactsSerializer)
+    fun setShellHostFacts(facts: Map<String, HostInfo>) = encoded(SHELL_HOST_FACTS, hostFactsSerializer, facts)
+
+    /** Why each computer last said it was leaving, until it answers again. */
+    fun shellFarewells(): Map<String, HostFarewell> = decoded(SHELL_FAREWELLS, farewellsSerializer)
+    fun setShellFarewells(farewells: Map<String, HostFarewell>) = encoded(SHELL_FAREWELLS, farewellsSerializer, farewells)
+
+    /** The shell last opened on each computer ([dev.dpatel.passthrough.core.HostShell.id]), for New shell. */
+    fun shellLastShell(): Map<String, String> = decoded(SHELL_LAST_SHELL, lastShellSerializer)
+    fun setShellLastShell(shells: Map<String, String>) = encoded(SHELL_LAST_SHELL, lastShellSerializer, shells)
+
+    private fun <T> decoded(key: String, serializer: KSerializer<Map<String, T>>): Map<String, T> =
+        prefs.getString(key, null)?.let { runCatching { lenient.decodeFromString(serializer, it) }.getOrNull() } ?: emptyMap()
+
+    private fun <T> encoded(key: String, serializer: KSerializer<Map<String, T>>, value: Map<String, T>) {
+        prefs.edit { if (value.isEmpty()) remove(key) else putString(key, lenient.encodeToString(serializer, value)) }
+    }
+
     private fun times(key: String): Map<String, Long> =
         prefs.getString(key, null)?.let { runCatching { Json.decodeFromString(timesSerializer, it) }.getOrNull() } ?: emptyMap()
 
@@ -97,6 +119,14 @@ class AppSettings(context: Context) {
 
     companion object {
         private val timesSerializer = MapSerializer(String.serializer(), Long.serializer())
+        private val hostFactsSerializer = MapSerializer(String.serializer(), HostInfo.serializer())
+        private val farewellsSerializer = MapSerializer(String.serializer(), HostFarewell.serializer())
+        private val lastShellSerializer = MapSerializer(String.serializer(), String.serializer())
+        /** Stored facts may come from a later build: unknown keys are skipped, and nulls aren't written. */
+        private val lenient = Json { ignoreUnknownKeys = true; explicitNulls = false }
+        const val SHELL_HOST_FACTS = "shell.hostFacts"
+        const val SHELL_FAREWELLS = "shell.farewells"
+        const val SHELL_LAST_SHELL = "shell.lastShell"
         const val DEVICE_NAME = "device.name"
         const val CELLULAR_ONLY = "settings.cellularOnly"
         const val ALLOW_UDP = "settings.allowUDP"

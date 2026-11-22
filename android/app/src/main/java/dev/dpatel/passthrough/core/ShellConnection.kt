@@ -270,10 +270,14 @@ class ShellConnection(
 
     fun list() = enqueue(ShellEnvelope(ShellEnvelope.LIST))
 
-    fun open(cols: Int, rows: Int): Unit = synchronized(lock) {
+    /**
+     * Opens a session. [shell]: which of the host's shells ([HostShell.id], from its `host` list);
+     * null leaves it out of the line (the host's default), so the line is as before shells had ids.
+     */
+    fun open(cols: Int, rows: Int, shell: String? = null): Unit = synchronized(lock) {
         if (!active) return
         val ref = ++lastOpenRef
-        enqueue(ShellEnvelope(ShellEnvelope.OPEN, cols = cols, rows = rows, ref = ref))
+        enqueue(ShellEnvelope(ShellEnvelope.OPEN, cols = cols, rows = rows, ref = ref, shell = shell))
     }
 
     fun attach(session: String, cols: Int, rows: Int): Unit = synchronized(lock) {

@@ -105,7 +105,7 @@ class PassthroughService : Service() {
         lastUsage = null
         Runtime.updateStats { engine.stats() }
         Runtime.setState(ServiceState.Running)
-        ptLog(PtLog.Level.INFO, "Serving in the background. Plug in your Mac and connect from its menu bar.")
+        ptLog(PtLog.Level.INFO, "Serving in the background. Plug in your Mac or PC.")
         handler.removeCallbacks(ticker)
         handler.post(ticker)
     }

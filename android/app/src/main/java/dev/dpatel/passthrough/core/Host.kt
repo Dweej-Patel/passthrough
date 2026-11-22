@@ -113,3 +113,53 @@ data class HostAccess(
     /** May hand access to this host on to another computer. */
     val share: Boolean? = null,
 )
+
+/** What kind of computer a host is. [wire] is the protocol's word. Mirrors HostKind in Host.swift. */
+enum class HostKind(val wire: String) {
+    MAC(HostInfo.KIND_MAC),
+    WINDOWS(HostInfo.KIND_WINDOWS);
+
+    companion object {
+        /** Null for anything this build doesn't know (and for none). */
+        fun fromWire(wire: String?): HostKind? = entries.firstOrNull { it.wire == wire }
+    }
+}
+
+/** Mirrors Hosts in Host.swift. */
+object Hosts {
+    /**
+     * The kind words and rows are chosen by: what the live (or last stored) `host` says, then
+     * what the pairing or grant recorded ([PairedClient.hostKind]), then a Mac, since a computer
+     * that never said is one from before Windows hosts. Null only when a `host` named a kind this
+     * build doesn't know: neutral words, and only shells.
+     */
+    fun kind(live: HostInfo?, stored: String?): HostKind? {
+        live?.kind?.let { return HostKind.fromWire(it) }
+        return HostKind.fromWire(stored) ?: HostKind.MAC
+    }
+
+    /**
+     * The shell a plain New shell opens: the one [lastChosen] names if [host] still lists it,
+     * else the host's default, else its first. Null when the host lists none.
+     */
+    fun preferredShell(host: HostInfo?, lastChosen: String?): HostShell? {
+        val shells = host?.shells.orEmpty()
+        return shells.firstOrNull { it.id == lastChosen } ?: shells.firstOrNull { it.default == true } ?: shells.firstOrNull()
+    }
+
+    /** Whether New shell offers a choice (and `open` names a shell): the host lists more than one. */
+    fun offersChoice(host: HostInfo?): Boolean = (host?.shells?.size ?: 0) > 1
+}
+
+/**
+ * Why a host said it was leaving (one of [HostInfo.GOING_AWAY_REASONS], or one this build
+ * doesn't know, shown as "can't reach"), and when this phone heard it (Unix millis).
+ */
+@Serializable
+data class HostFarewell(val reason: String, val atMillis: Long) {
+    companion object {
+        const val SLEEPING = "sleeping"
+        const val TURNED_OFF = "turned_off"
+        const val SHUTTING_DOWN = "shutting_down"
+    }
+}

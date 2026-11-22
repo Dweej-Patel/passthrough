@@ -290,7 +290,7 @@ class ShellKeyVault(context: Context) {
      */
     private fun discarded(registry: PairingRegistry, macID: String, stored: ByteArray) {
         if (registry.sealedPendingShellKey(macID)?.contentEquals(stored) == true) registry.clearPendingShellKey(macID)
-        ptLog(PtLog.Level.INFO, "shell: discarded a pending key this version can't open; the Mac grants again over the cable")
+        ptLog(PtLog.Level.INFO, "shell: discarded a pending key this version can't open; the computer grants again over the cable")
     }
 
     /** Whether [macID]'s key was lost when the vault's key was invalidated (until that Mac grants again). */
