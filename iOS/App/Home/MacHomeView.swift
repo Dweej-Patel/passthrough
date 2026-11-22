@@ -611,6 +611,7 @@ struct MacHomeView: View {
                     .buttonStyle(.bordered)
                     .buttonBorderShape(.capsule)
                     .tint(PTColor.tint)
+                    .frame(minHeight: 44)
                     .disabled(sharedBlock || pending)
                     .accessibilityLabel("Lock \(macName)'s screen")
                     .accessibilityHint(isMac ? "The Mac stays awake and its shells keep running" : "Its shells keep running")
@@ -649,7 +650,8 @@ struct MacHomeView: View {
         case .ready: return nil
         case .connecting: return .init("Connecting to \(macName)\u{2026} These switches work once it's reachable.")
         case .unreachable:
-            return .init("Can't reach \(macName) right now, so these can't change. They show how it was when it was last heard from.", warning: true)
+            // The hero above already says it can't be reached, and when it was last heard.
+            return .init("These can't change until \(macName) is reachable again; they show its last known state.", warning: true)
         case .noAccess:
             // Revoked: the hero says so, and there are no steps below.
             if shell.accessRefused, !isMac { return nil }

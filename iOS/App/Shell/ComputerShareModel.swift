@@ -120,7 +120,13 @@ final class ComputerShareModel: ObservableObject {
                 case let .failed(error, _):
                     self.failed(error.message ?? "\(viewerHost.macName) refused the access.")
                 case .disconnected:
-                    self.failed("Couldn't reach \(viewerHost.macName). Check that it's awake and Passthrough is on.")
+                    if self.passSent {
+                        // As the timeout: V may have kept the pass before it went, so the access stays on H.
+                        self.failed("Lost \(viewerHost.macName) while handing it over. If \(sharedHost.macName) isn't under Your computers there, share again.",
+                                    keepGrant: true)
+                    } else {
+                        self.failed("Couldn't reach \(viewerHost.macName). Check that it's awake and Passthrough is on.")
+                    }
                 case let .screen(stream, _):
                     stream.cancel()
                 default:

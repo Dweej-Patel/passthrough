@@ -34,16 +34,23 @@ public enum HostCopy {
 
     /// Can't be reached, cause unknown. `lastHeard`: when it last answered, formatted.
     public static func unreachable(_ w: HostWords, fromAnywhere: Bool, lastHeard: String? = nil) -> String {
+        let advice = unreachableAdvice(w, fromAnywhere: fromAnywhere) ?? mayBeAsleep + "."
         switch w.kind {
         case .mac:
-            fromAnywhere
-                ? "Can't reach your Mac. Check that Remote shell is on and the Mac is awake."
-                : "Can't reach your Mac. Use the same Wi-Fi, or turn on Tailscale on both devices."
+            return "Can't reach your Mac. " + advice
         case .windows, .other, nil:
-            fromAnywhere
-                ? "Can't reach \(w.name). It may be asleep, off, or offline." + (lastHeard.map { " Last heard \($0)." } ?? "")
-                : "Can't reach \(w.name). Use the same Wi-Fi, or turn on Tailscale on both devices."
+            return "Can't reach \(w.name). " + advice + (fromAnywhere ? lastHeard.map { " Last heard \($0)." } ?? "" : "")
         }
+    }
+
+    /// The hero's line while it can't be reached, cause unknown.
+    public static let mayBeAsleep = "It may be asleep, off, or offline"
+
+    /// What `unreachable` advises, without its "Can't reach…" or "Last heard", for a page whose title and
+    /// caption already say those; nil when `mayBeAsleep` is all there is to say.
+    public static func unreachableAdvice(_ w: HostWords, fromAnywhere: Bool) -> String? {
+        guard fromAnywhere else { return "Use the same Wi-Fi, or turn on Tailscale on both devices." }
+        return w.kind == .mac ? "Check that Remote shell is on and the Mac is awake." : nil
     }
 
     /// `sleepsAfter`: how long it waits before sleeping, formatted ("30 minutes"); nil when not known or never.
@@ -119,7 +126,10 @@ public enum HostCopy {
         case .nobodySignedIn: "Sign in to \(w.name) to use its shell."
         case .someoneElseSignedIn: "Someone else is signed in to \(w.name). Its shell starts when you sign in."
         case .appNotOpen: "Passthrough isn't open on \(w.name). Open it there."
-        case .switchedOff: "\(w.name) doesn't let this \(w.device) open shells. Turn on Shell for it in \(w.settingsPlace)."
+        // Neither a Mac nor a PC has a per-phone Shell switch: a phone's shell comes with its access, which it gets
+        // by being plugged in while the computer lets phones in.
+        case .switchedOff:
+            "\(w.name) doesn't let this \(w.device) open shells. Plug this \(w.device) into \(w.the) with \(w.feature) on to get access again."
         }
     }
 
@@ -128,8 +138,8 @@ public enum HostCopy {
         switch state {
         case .available: "See and control \(w.the)'s screen"
         case .notInThisVersion: "\(w.name)'s screen isn't in this version of Passthrough yet. Its shell works."
-        case .switchedOff: "Screen is off for this \(w.device). On \(w.name), open Passthrough's settings and turn on Screen for it."
-        case .remoteDesktopOff: "Remote Desktop is off on \(w.name). Turn it on in Passthrough's settings there."
+        case .switchedOff: "Screen is off for this \(w.device). On \(w.name), open \(w.settingsPage) and turn on Screen for it."
+        case .remoteDesktopOff: "Remote Desktop is off on \(w.name). Turn it on in \(w.settingsPage) there."
         case .windowsHome: "\(w.name) runs Windows Home, which has no Remote Desktop. The shell works."
         case .noPassword: "Your account on \(w.name) has no password Remote Desktop can use. Add one on \(w.the)."
         case .remoteDesktopProblem: "Remote Desktop on \(w.name) needs a look. Open Passthrough's settings on \(w.the)."
@@ -156,7 +166,7 @@ public enum HostCopy {
     public static func shareOff(_ w: HostWords) -> String {
         switch w.kind {
         case .mac: "Turn on May share access with other computers for this \(w.device) in Passthrough's settings on \(w.name)."
-        case .windows, .other, nil: "Turn on Share for this \(w.device) in Passthrough's settings on \(w.name)."
+        case .windows, .other, nil: "Turn on Share for this \(w.device) in \(w.settingsPage) on \(w.name)."
         }
     }
 
@@ -220,6 +230,11 @@ public enum HostCopy {
 
     public enum SetupAction: Equatable, Sendable { case turnOnCableLink }
 
+    // Each says what the user sees there: the Mac's switch has no label of its own (only the page's
+    // title beside it), and the PC's sits beside its sentence.
+    private static let macTurnOn = "open Passthrough and turn on the switch at the top of Settings \u{25B8} Remote Shell"
+    private static let pcTurnOn = "open Passthrough and turn on Use this PC's shell from your phones in Settings \u{25B8} Remote access"
+
     /// How to give this device the shell. `w.kind` nil: nothing paired yet, both kinds' steps in one.
     /// `isPad`: an iPad serves the cable from the app, so there is nothing to turn on.
     /// `cableLinkOn`: the phone's service is running; `needsVPNPrompt`: iOS will ask to add a VPN configuration.
@@ -231,7 +246,7 @@ public enum HostCopy {
             return [
                 pair,
                 SetupStep(title: "Turn on Remote shell on your Mac",
-                          detail: "On the Mac, open Passthrough's Settings, go to Remote Shell and turn on \u{201C}Allow remote shell from paired phones\u{201D}."),
+                          detail: "On the Mac, " + macTurnOn + "."),
                 SetupStep(title: "Connect over USB once",
                           detail: isPad ? "With Passthrough open, plug this iPad into the Mac. Its shells then show up on the Mac and Shells tabs by themselves."
                                         : "With sharing on, plug this \(w.device) into the Mac. Its shells then show up on the Mac and Shells tabs by themselves."),
@@ -250,14 +265,14 @@ public enum HostCopy {
             return [
                 pair,
                 SetupStep(title: "Turn on Remote access on your PC",
-                          detail: "On the PC, open Passthrough's Settings, go to Remote access and choose Turn on. Windows asks for an administrator once."),
+                          detail: "On the PC, " + pcTurnOn + ". Windows asks for an administrator once."),
                 plug,
             ]
         case .other, nil:
             return [
                 pair,
                 SetupStep(title: "Turn on Remote shell (Mac) or Remote access (PC) there",
-                          detail: "On a Mac, open Passthrough's Settings, go to Remote Shell and turn on \u{201C}Allow remote shell from paired phones\u{201D}. On a PC, open Passthrough's Settings, go to Remote access and choose Turn on."),
+                          detail: "On a Mac, " + macTurnOn + ". On a PC, " + pcTurnOn + "."),
                 SetupStep(title: "Plug in once",
                           detail: isPad ? "With Passthrough open, plug this iPad into the computer. Its shells then show up by themselves."
                                         : "With the cable link on, plug this \(w.device) into the computer. Its shells then show up by themselves."),

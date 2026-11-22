@@ -47,6 +47,8 @@ struct ShareComputerSheet: View {
     /// Access the user asked to take back: confirmed first.
     @State private var removal: ComputerAccess?
     @State private var withShell = false
+    /// `withShell` was set to suit the computers on offer (once, as the sheet opens).
+    @State private var choseDefault = false
     /// A computer that already has access was tapped: asked before it is shared again.
     @State private var again: ShellCredential?
     /// The last hand-over was a screen pass: its outcome is the one shown.
@@ -59,6 +61,13 @@ struct ShareComputerSheet: View {
 
     private func offer(for viewer: ShellCredential) -> ShareOffer {
         ShareOffer.make(host: hostKind, viewer: shell.kind(of: viewer.macID), withShell: withShell)
+    }
+
+    /// Screen only, the lesser access, unless it leaves every computer on offer with nothing to get (a PC
+    /// shared with other PCs, which can't show its screen): then Shell and screen, so the rows can be used.
+    static func startsWithShell(host: HostKind, viewers: [HostKind]) -> Bool {
+        let usable = { (withShell: Bool) in viewers.filter { !ShareOffer.make(host: host, viewer: $0, withShell: withShell).isEmpty }.count }
+        return usable(false) == 0 && usable(true) > 0
     }
 
     /// Shell is worth choosing only when one of the others can open shells.
@@ -114,7 +123,13 @@ struct ShareComputerSheet: View {
         }
         .sensoryFeedback(.success, trigger: phase) { _, new in if case .done = new { true } else { false } }
         .sensoryFeedback(.error, trigger: phase) { _, new in if case .failed = new { true } else { false } }
-        .onAppear { hosted.watch(shared, shell: shell) }
+        .onAppear {
+            if !choseDefault {
+                choseDefault = true
+                withShell = Self.startsWithShell(host: hostKind, viewers: others.map { shell.kind(of: $0.macID) })
+            }
+            hosted.watch(shared, shell: shell)
+        }
         .onDisappear {
             model.reset()
             passes.reset()
@@ -211,7 +226,8 @@ struct ShareComputerSheet: View {
                     if hosted.removing == computer.phoneID {
                         ProgressView()
                     } else {
-                        Button("Remove", role: .destructive) { removal = computer }
+                        // "Remove Access", as its confirmation says: on the computers, "Remove…" only forgets one there.
+                        Button("Remove Access", role: .destructive) { removal = computer }
                             .buttonStyle(.borderless)
                             .disabled(hosted.removing != nil || isWorking)
                             .accessibilityLabel("Remove \(computer.name)'s access")

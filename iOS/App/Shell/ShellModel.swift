@@ -351,6 +351,9 @@ final class ShellModel: ObservableObject {
         }
     }
 
+    /// What to check while it can't be reached, for a page that already says so and when it was last heard.
+    var unreachableAdvice: String? { HostCopy.unreachableAdvice(words, fromAnywhere: clientTriesIroh) }
+
     /// "30 minutes" for a `sleepAfter` in seconds; nil for never.
     private static func sleepsAfter(_ seconds: Int) -> String? {
         guard seconds > 0 else { return nil }
