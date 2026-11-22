@@ -283,6 +283,9 @@ enum SharedComputers {
     /// What `viewer` was given on `shared`, if this phone shared it.
     static func entry(shared: String, viewer: String) -> Entry? { all[shared]?[viewer] }
 
+    /// Everything `shared` was shared with, by viewer: the Share row's caption, without a connection.
+    static func entries(shared: String) -> [String: Entry] { all[shared] ?? [:] }
+
     static func record(shared: String, viewer: String, shell: Bool) {
         var stored = all
         stored[shared, default: [:]][viewer] = Entry(shell: shell, at: Date())

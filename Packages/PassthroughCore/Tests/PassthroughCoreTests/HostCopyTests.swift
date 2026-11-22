@@ -90,6 +90,16 @@ final class HostCopyTests: XCTestCase {
         XCTAssertFalse(none[0].done)
     }
 
+    /// The Share row names the switch as each computer's settings call it.
+    func testShareSentences() {
+        XCTAssertEqual(HostCopy.shareOff(mac),
+                       "Turn on May share access with other computers for this iPhone in Passthrough's settings on MacBook Pro.")
+        XCTAssertEqual(HostCopy.shareOff(pc), "Turn on Share for this iPhone in Passthrough's settings on Office-PC.")
+        XCTAssertEqual(HostCopy.shareScreenOnly(mac),
+                       "Its screen, with another of your Macs. To share its shell or share with a PC, turn on May share access with other computers for this iPhone in Passthrough's settings on MacBook Pro.")
+        XCTAssertEqual(HostCopy.noActivity(pc), "Office-PC doesn't record activity yet.")
+    }
+
     func testSwitcherKindPrefix() {
         let now = Date()
         XCTAssertEqual(MacProfiles.statusText(.connected(shells: 0), now: now, kind: .windows, showKind: true), "PC · Connected")

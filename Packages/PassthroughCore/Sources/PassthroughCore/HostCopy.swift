@@ -150,6 +150,26 @@ public enum HostCopy {
         kind == .mac ? "Paired, no Remote shell" : "Paired, no access yet"
     }
 
+    // MARK: Sharing it with another computer
+
+    /// Under the Share row when the computer doesn't let this device share it: the switch, by the name it has there.
+    public static func shareOff(_ w: HostWords) -> String {
+        switch w.kind {
+        case .mac: "Turn on May share access with other computers for this \(w.device) in Passthrough's settings on \(w.name)."
+        case .windows, .other, nil: "Turn on Share for this \(w.device) in Passthrough's settings on \(w.name)."
+        }
+    }
+
+    /// Under the Share row when a Mac lets this device pass on only its screen, to another Mac (a screen pass).
+    public static func shareScreenOnly(_ w: HostWords) -> String {
+        "Its screen, with another of your Macs. To share its shell or share with a PC, " + lowercasedFirst(shareOff(w))
+    }
+
+    /// The Activity tab for a computer whose Passthrough keeps no timeline (a PC answers with none).
+    public static func noActivity(_ w: HostWords) -> String { "\(w.name) doesn't record activity yet." }
+
+    private static func lowercasedFirst(_ s: String) -> String { s.prefix(1).lowercased() + s.dropFirst() }
+
     /// What a refusal says (nil for one shown another way: a refused key is `noAccess`).
     public static func error(_ error: ShellError, _ w: HostWords) -> String? {
         switch error {

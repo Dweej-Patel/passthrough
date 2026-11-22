@@ -7,9 +7,12 @@ import PassthroughUI
 /// battery meanwhile, then each event.
 struct ActivityTab: View {
     @ObservedObject var shell: ShellModel
+    @EnvironmentObject private var model: AppModel
     @EnvironmentObject private var router: ShellRouter
 
     private var since: Date { .now - 86_400 }
+    /// The selected computer's nouns: a Mac's sentences read as they always have.
+    private var words: HostWords { shell.words }
 
     var body: some View {
         NavigationStack {
@@ -22,6 +25,7 @@ struct ActivityTab: View {
             }
             .background(PTColor.background)
             .navigationTitle("Activity")
+            .computerTitleMenu(shell)
             .refreshable { load() }
         }
         .onAppear(perform: load)
@@ -30,14 +34,22 @@ struct ActivityTab: View {
 
     private func load() { shell.loadTimeline(since: since) }
 
+    /// A PC answers `events` with none: it keeps no timeline yet, so "0 events" would say nothing happened.
+    /// Should one start keeping one, its events show as a Mac's do.
+    private var recordsNothing: Bool {
+        shell.selectedKind == .windows && (shell.timeline?.events.isEmpty ?? true)
+    }
+
     @ViewBuilder private var content: some View {
-        if shell.timelineUnsupported {
-            notice("Update Passthrough on your Mac to see what happened on it.", symbol: "arrow.down.circle")
+        if recordsNothing {
+            notice(HostCopy.noActivity(words), symbol: "clock")
+        } else if shell.timelineUnsupported {
+            notice("Update Passthrough on \(words.your) to see what happened on it.", symbol: "arrow.down.circle")
         } else if let timeline = shell.timeline {
             summary(timeline)
             if timeline.battery.count > 1 { BatteryChart(samples: timeline.battery, floor: shell.macState?.batteryFloor) }
             if shell.reach != .ready {
-                Label("As of \(timeline.loadedAt.formatted(date: .omitted, time: .shortened)). Your Mac can't be reached right now.",
+                Label("As of \(timeline.loadedAt.formatted(date: .omitted, time: .shortened)). \(words.Your) can't be reached right now.",
                       systemImage: "clock")
                     .font(.footnote).foregroundStyle(.secondary)
             }
@@ -45,7 +57,7 @@ struct ActivityTab: View {
         } else if shell.reach == .ready || shell.timelineLoading {
             ProgressView().frame(maxWidth: .infinity, minHeight: 120)
         } else {
-            notice("Your Mac's timeline shows up here once this \(ThisDevice.name) can reach it.", symbol: "clock")
+            notice("\(words.Your)'s timeline shows up here once this \(ThisDevice.name) can reach it.", symbol: "clock")
         }
     }
 
@@ -67,7 +79,8 @@ struct ActivityTab: View {
         return PTSurface {
             VStack(alignment: .leading, spacing: 12) {
                 VStack(alignment: .leading, spacing: 2) {
-                    Text("Last 24 hours").font(.headline)
+                    // With a switcher in the title, which computer this is.
+                    Text(model.pairedClients.count >= 2 ? "Last 24 hours on \(shell.selectedMacName)" : "Last 24 hours").font(.headline)
                     Text(timeline.events.count == 1 ? "1 event" : "\(timeline.events.count) events")
                         .font(.subheadline).foregroundStyle(.secondary)
                 }
@@ -95,7 +108,7 @@ struct ActivityTab: View {
 
     @ViewBuilder private func events(_ timeline: MacTimeline) -> some View {
         if timeline.events.isEmpty {
-            notice("Nothing happened on your Mac in this time.", symbol: "checkmark.circle")
+            notice("Nothing happened on \(words.your) in this time.", symbol: "checkmark.circle")
         } else {
             PTSurface(padding: 6) {
                 VStack(spacing: 0) {
