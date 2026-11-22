@@ -189,6 +189,39 @@ final class ShellClientIrohTests: XCTestCase {
     }
 
     /// A Mac that sends `macInfo` after `ready` has it surfaced before the session list.
+    /// The Mac moved to another public relay while the phone was away (it
+    /// went online another way): the relay it last named has nothing, the
+    /// other regions are tried beside it, and the phone still gets in.
+    func testFindsAMacThatMovedToAnotherPublicRelay() async throws {
+        startIrohListener()
+        let named = "https://use1-1.relay.n0.iroh.link./"
+        let iroh = MovedRelayIroh(LoopbackIroh(host), nowOn: "https://usw1-1.relay.n0.iroh.link./")
+        let probe = Probe()
+        var moved = credential(addresses: [], irohID: host.endpointID, port: 1)
+        moved.irohRelay = named
+        let client = ShellClient(credential: moved, queue: DispatchQueue(label: "probe"), iroh: iroh) { probe.record($0) }
+        addTeardownBlock { client.disconnect() }
+        client.connect()
+        await probe.wait("ready over iroh", timeout: 8) { probe.readyPath != nil }
+        XCTAssertEqual(iroh.tried.first, named, "the relay it named is tried first")
+        XCTAssertTrue(iroh.tried.contains("https://usw1-1.relay.n0.iroh.link./"))
+        client.list()
+        await probe.wait("served") { probe.sessionLists >= 2 }
+        XCTAssertFalse(probe.disconnected)
+    }
+
+    func testRelayCandidates() {
+        XCTAssertEqual(IrohInfo.relayCandidates("https://use1-1.relay.n0.iroh.link./", custom: false),
+                       ["https://use1-1.relay.n0.iroh.link./", "https://usw1-1.relay.n0.iroh.link./",
+                        "https://euc1-1.relay.n0.iroh.link./", "https://aps1-1.relay.n0.iroh.link./"])
+        XCTAssertEqual(IrohInfo.relayCandidates("https://euc1-1.relay.n0.iroh.link", custom: false).count, 4)
+        // A relay of the user's own, or one with a token, is the only place its Mac can be.
+        XCTAssertEqual(IrohInfo.relayCandidates("https://relay.example.com/", custom: false), ["https://relay.example.com/"])
+        XCTAssertEqual(IrohInfo.relayCandidates("https://use1-1.relay.n0.iroh.link./", custom: true), ["https://use1-1.relay.n0.iroh.link./"])
+        XCTAssertEqual(IrohInfo.relayCandidates("https://use1-1.relay.n0.iroh.link.evil.example/", custom: false).count, 1)
+        XCTAssertEqual(IrohInfo.relayCandidates(nil, custom: false), [nil])
+    }
+
     func testMacInfoEvent() async throws {
         let identity = try (try? makeTestIdentity()) ?? makeTestIdentity()
         var info = ShellEnvelope(t: ShellEnvelope.macInfo)
@@ -280,6 +313,28 @@ private final class LoopbackIroh: ShellIrohDialing, @unchecked Sendable {
         shutdowns.set(shutdowns.get() + 1)
         inner.shutdown()
     }
+}
+
+/// A Mac found only on the relay `nowOn`: dials through any other fail.
+private final class MovedRelayIroh: ShellIrohDialing, @unchecked Sendable {
+    struct NotHere: Error {}
+    private let inner: LoopbackIroh
+    private let nowOn: String
+    private let lock = NSLock()
+    private var _tried: [String?] = []
+    /// The relays dialed so far, in order (several are dialed at once).
+    var tried: [String?] { lock.withLock { _tried } }
+
+    init(_ inner: LoopbackIroh, nowOn: String) { self.inner = inner; self.nowOn = nowOn }
+
+    func connect(irohID: String, relayURL: String?, relayToken: String?, addresses: [String]) async throws -> any ByteStream {
+        lock.withLock { _tried.append(relayURL) }
+        guard relayURL == nowOn else { throw NotHere() }
+        return try await inner.connect(irohID: irohID, relayURL: relayURL, relayToken: relayToken, addresses: addresses)
+    }
+
+    func path(of stream: any ByteStream) -> ShellPath { inner.path(of: stream) }
+    func shutdown() { inner.shutdown() }
 }
 
 /// A dialer whose every connect fails.

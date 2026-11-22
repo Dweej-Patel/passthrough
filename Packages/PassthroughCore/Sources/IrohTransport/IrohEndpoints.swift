@@ -52,6 +52,7 @@ public final class IrohEndpointHost: @unchecked Sendable {
     let endpoint: Endpoint
     private let lock = NSLock()
     private var alpns: [Data]
+    private var watches: [WatchHandle] = []
 
     /// A fresh 32-byte endpoint secret key, for the Mac to store.
     public static func newSecretKey() -> Data {
@@ -100,9 +101,33 @@ public final class IrohEndpointHost: @unchecked Sendable {
         return IrohIncoming(incoming: incoming, alpn: wanted)
     }
 
+    /// Calls `onHomeRelay` whenever the relay this endpoint is reachable
+    /// through changes (nil: none right now), and `onNetworkChange` when the
+    /// machine's network does. Phones dial the relay they were last told, so
+    /// a move has to reach them. Watched until `shutdown`.
+    public func watch(onHomeRelay: @escaping @Sendable (String?) -> Void, onNetworkChange: @escaping @Sendable () -> Void) {
+        let handles = [endpoint.watchHomeRelay(callback: HomeRelayWatcher(onHomeRelay)),
+                       endpoint.watchNetworkChange(callback: NetworkChangeWatcher(onNetworkChange))]
+        lock.withLock { watches += handles }
+    }
+
     public func shutdown() async {
+        let handles = lock.withLock { defer { watches = [] }; return watches }
+        for handle in handles { await handle.stop() }
         try? await endpoint.close()
     }
+}
+
+private final class HomeRelayWatcher: HomeRelayCallback, @unchecked Sendable {
+    private let handler: @Sendable (String?) -> Void
+    init(_ handler: @escaping @Sendable (String?) -> Void) { self.handler = handler }
+    func onChange(relayUrls: [String]) async throws { handler(relayUrls.first) }
+}
+
+private final class NetworkChangeWatcher: NetworkChangeCallback, @unchecked Sendable {
+    private let handler: @Sendable () -> Void
+    init(_ handler: @escaping @Sendable () -> Void) { self.handler = handler }
+    func onChange() async throws { handler() }
 }
 
 /// An incoming connection attempt, not yet handshaken.
@@ -218,6 +243,32 @@ public final class IrohDialer: @unchecked Sendable {
             try? connection.close(errorCode: 0, reason: Data())
             throw error
         }
+    }
+
+    /// Whether endpoint `id` answers through `relayURL` within `timeout`: a
+    /// QUIC handshake and nothing more. The Mac asks this of its own
+    /// endpoint, as a phone away from it would; an endpoint can go deaf to
+    /// its relay while still naming it as its home.
+    public static func answers(id: String, relayURL: String, token: String? = nil, timeout: TimeInterval = 10) async -> Bool {
+        guard let dialer = try? await IrohDialer(relay: IrohRelayConfig(url: relayURL, token: token)) else { return false }
+        let answered = await withTaskGroup(of: Bool.self) { group -> Bool in
+            group.addTask {
+                guard let peer = try? EndpointId.fromString(s: id),
+                      let connection = try? await dialer.endpoint.connect(
+                        addr: EndpointAddr(id: peer, relayUrl: relayURL, addresses: []), alpn: Data(IrohShell.alpn.utf8)) else { return false }
+                try? connection.close(errorCode: 0, reason: Data())
+                return true
+            }
+            group.addTask {
+                try? await Task.sleep(nanoseconds: UInt64(timeout * 1e9))
+                return false
+            }
+            let first = await group.next() ?? false
+            group.cancelAll()
+            return first
+        }
+        Task { await dialer.shutdown() }
+        return answered
     }
 
     public func shutdown() async {

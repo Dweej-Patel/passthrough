@@ -177,6 +177,9 @@ public final class ShellClient: @unchecked Sendable {
     static let attemptTimeout: TimeInterval = 4
     /// The same for iroh, which may first have to reach a relay and punch a hole.
     static let irohAttemptTimeout: TimeInterval = 10
+    /// How long the relay the Mac last named has to itself before the other
+    /// public relays are tried too (`IrohInfo.relayCandidates`).
+    static let irohOtherRelaysDelay: TimeInterval = 1.5
     /// Each further address is dialled this long after the previous one (or
     /// at once if that one failed), so an address that never answers does
     /// not hold up one that does: the first to authorize wins.
@@ -525,15 +528,42 @@ public final class ShellClient: @unchecked Sendable {
         let attempt = Attempt(isIroh: true, stream: nil)
         attempts[id] = attempt
         startTimeout(id, Self.irohAttemptTimeout)
-        let relayURL = credential.irohRelay, relayToken = credential.relayToken
+        let relayToken = credential.relayToken, mac = credential.macName
+        let relays = IrohInfo.relayCandidates(credential.irohRelay, custom: relayToken != nil)
         // The granted addresses are the TLS listener's hosts, without iroh's
         // port: iroh finds direct paths through the relay instead.
         attempt.dial = Task { [weak self] in
-            do {
-                let stream = try await iroh.connect(irohID: irohID, relayURL: relayURL, relayToken: relayToken, addresses: [])
+            // The relay the Mac last named gets a head start; the others are
+            // tried beside it, and the first to open a stream carries on.
+            let found = await withTaskGroup(of: (String?, Result<any ByteStream, Error>).self) { group -> (String?, Result<any ByteStream, Error>) in
+                for (index, relay) in relays.enumerated() {
+                    group.addTask {
+                        do {
+                            if index > 0 { try await Task.sleep(nanoseconds: UInt64(Self.irohOtherRelaysDelay * 1e9)) }
+                            return (relay, .success(try await iroh.connect(irohID: irohID, relayURL: relay, relayToken: relayToken, addresses: [])))
+                        } catch {
+                            return (relay, .failure(error))
+                        }
+                    }
+                }
+                var first: (String?, Result<any ByteStream, Error>)?
+                for await result in group {
+                    if case .success = result.1 { group.cancelAll(); return result }
+                    if first == nil || result.0 == relays.first { first = result }   // the named relay's error says most
+                }
+                return first ?? (nil, .failure(ConnectError.timedOut))
+            }
+            switch found.1 {
+            case .success(let stream):
+                if found.0 != relays.first {
+                    ptLog(.info, "shell: found \(ptPrivate(mac)) on another relay than it last named (\(found.0 ?? "none"), not \(relays.first.flatMap { $0 } ?? "none"))")
+                }
                 guard let self else { return stream.cancel() }
                 self.work.async { self.irohOpened(id, stream) }
-            } catch {
+            case .failure(let error):
+                if !Task.isCancelled {
+                    ptLog(.info, "shell: \(ptPrivate(mac)) not reached from anywhere, tried \(relays.count) relay(s) from \(relays.first.flatMap { $0 } ?? "none"): \(error.localizedDescription)")
+                }
                 self?.work.async { self?.attemptEnded(id, error) }
             }
         }

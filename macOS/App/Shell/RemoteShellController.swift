@@ -434,7 +434,24 @@ final class RemoteShellController: ObservableObject {
             }
             listener.start()
             let id = host.endpointID, home = host.homeRelay
-            ptLog(.info, "iroh: endpoint \(id.prefix(10)) started")
+            ptLog(.info, "iroh: endpoint \(id.prefix(10)) started, home relay \(home ?? "none yet")")
+            // The home relay moves when the Mac goes online another way (the
+            // tunnel through a phone coming up or going down): phones dial
+            // the one they were last told, so keep that current.
+            let lastRelay = Locked(home)
+            host.watch(onHomeRelay: { [weak self] relay in
+                let before = lastRelay.exchange(relay)
+                guard relay != before else { return }
+                ptLog(relay == nil ? .warning : .info, "iroh: home relay is now \(relay ?? "none: not reachable from anywhere") (was \(before ?? "none"))")
+                Task { @MainActor [weak self] in
+                    guard let self, self.iroh === run else { return }
+                    // Without one, phones keep the last: it is where the Mac most likely returns.
+                    if let relay { self.updateReach { $0.homeRelay = relay } }
+                    self.irohStatus.homeRelay = relay
+                }
+            }, onNetworkChange: {
+                ptLog(.debug, "iroh: the network changed; home relay \(lastRelay.get() ?? "none")")
+            })
             Task { @MainActor [weak self] in
                 guard let self, self.iroh === run else { return }
                 self.updateReach { $0.endpointID = id; $0.homeRelay = home }
@@ -541,6 +558,41 @@ final class RemoteShellController: ObservableObject {
         if let home { status.homeRelay = home }
         status.paths = paths
         if status != irohStatus { irohStatus = status }
+        await checkReach(run, home: home, phonesConnected: !paths.isEmpty)
+    }
+
+    // An endpoint can go deaf to its relay (after the Mac's way online
+    // changed under it, say when the tunnel through a phone went away) and
+    // still name that relay as its home: phones away from the Mac then can't
+    // reach it, and nothing here shows it. So once a minute the Mac asks its
+    // own endpoint through the relay, as a phone would, and starts a new one
+    // when it doesn't answer twice running. Not while a phone is connected
+    // over it (it works), and at most every five minutes (the Mac may simply
+    // be offline).
+    private var reachTicks = 0
+    private var reachFailures = 0
+    private var lastReachRestart = Date.distantPast
+    private static let reachCheckEvery = 12   // status refreshes: one minute
+
+    private func checkReach(_ run: IrohRun, home: String?, phonesConnected: Bool) async {
+        reachTicks += 1
+        guard reachTicks >= Self.reachCheckEvery else { return }
+        reachTicks = 0
+        guard !phonesConnected, let home, let id = run.host?.endpointID else { reachFailures = 0; return }
+        let token = relay.url == nil ? nil : relay.token
+        if await IrohDialer.answers(id: id, relayURL: home, token: token) {
+            if reachFailures > 0 { ptLog(.info, "iroh: reachable through \(home) again") }
+            reachFailures = 0
+            return
+        }
+        guard iroh === run else { return }
+        reachFailures += 1
+        ptLog(.warning, "iroh: this Mac does not answer through its relay \(home) (\(reachFailures) in a row)")
+        guard reachFailures >= 2, Date().timeIntervalSince(lastReachRestart) > 300 else { return }
+        reachFailures = 0
+        lastReachRestart = Date()
+        ptLog(.warning, "iroh: starting a new endpoint: the old one stopped answering through its relay")
+        restartIroh()
     }
 
     // MARK: Sessions
