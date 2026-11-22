@@ -126,7 +126,8 @@ shell_sessions() {
   done
 }
 
-default_iface() { route -n get default 2>/dev/null | awk '/interface:/ {print $2}'; }
+# By its full path (/sbin may not be on PATH), and never failing the script: no route is "offline".
+default_iface() { { /sbin/route -n get default 2>/dev/null || true; } | awk '/interface:/ {print $2}'; }
 
 helper_registered() { launchctl print "system/$HELPER_LABEL" >/dev/null 2>&1; }
 
@@ -151,8 +152,11 @@ check_push() {  # <new app>
 
 check_writable() {
   local foreign
-  [ -d "$APP_DEST" ] || { [ -w /Applications ] && ok "/Applications is writable." && return; bad "You can't write to /Applications." "Use an administrator account."; return; }
-  foreign="$(find "$APP_DEST" ! -user "$(id -u)" -print 2>/dev/null | head -1)"
+  # Replacing the app removes and recreates /Applications/Passthrough.app, so /Applications itself must be writable too.
+  [ -w /Applications ] || { bad "You can't write to /Applications." "Use an administrator account."; return; }
+  [ -d "$APP_DEST" ] || { ok "/Applications is writable."; return; }
+  # -quit, not | head: head closing the pipe early would kill find (SIGPIPE) under pipefail.
+  foreign="$(find "$APP_DEST" ! -user "$(id -u)" -print -quit 2>/dev/null || true)"
   if [ -z "$foreign" ]; then ok "$APP_DEST is yours to replace."
   else bad "$APP_DEST has files you don't own ($foreign), so replacing it would stop halfway." "sudo chown -R \"$(id -un)\" $APP_DEST"; fi
 }
@@ -305,7 +309,7 @@ do_doctor() {
   step "Installed app"
   if [ -d "$APP_DEST" ]; then
     local plist="$APP_DEST/Contents/Info.plist" kind pk signed
-    signed="$(codesign -dvv "$APP_DEST" 2>&1 | sed -n 's/^Signed Time=//p')"
+    signed="$( { codesign -dvv "$APP_DEST" 2>&1 || true; } | sed -n 's/^Signed Time=//p')"
     ok "$APP_DEST: version $(plist_get "$plist" CFBundleShortVersionString) ($(plist_get "$plist" CFBundleVersion)), $(plist_get "$plist" CFBundleIdentifier)${signed:+, signed $signed}"
     kind="$(app_kind "$APP_DEST")"
     if [ "$kind" = release ]; then ok "Release build (no get-task-allow in the app or its helper)."
@@ -467,7 +471,11 @@ do_update() {
   if [ "$NO_ENGINE" = 0 ]; then
     case "$(engine_state)" in
       stale) step "The Remote Desktop engine's sources changed"; build_engine ;;
-      missing) info "No Remote Desktop engine built; leaving it out (./passthrough mac deps builds it)." ;;
+      missing)
+        # It was built here before (its SOURCES.lock is left) and is gone, e.g. a rebuild that failed halfway:
+        # build it again rather than install an app without a PC's screen.
+        if [ -f "$PT_ROOT/Vendor/FreeRDP/SOURCES.lock" ]; then step "The Remote Desktop engine is missing"; build_engine
+        else info "No Remote Desktop engine built; leaving it out (./passthrough mac deps builds it)."; fi ;;
     esac
   fi
   do_install

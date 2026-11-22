@@ -74,7 +74,8 @@ have() { command -v "$1" >/dev/null 2>&1; }
 # (KEY[sdk=…] variants don't match), without a trailing // comment.
 xc_value() {
   [ -f "$1" ] || return 0
-  grep -E "^[[:space:]]*$2[[:space:]]*=" "$1" | tail -1 \
+  # grep finds nothing when the key isn't set: that's an empty value, not a failure (pipefail).
+  { grep -E "^[[:space:]]*$2[[:space:]]*=" "$1" || true; } | tail -1 \
     | sed -e 's#[[:space:]]//.*##' -e 's/^[^=]*=//' -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//'
 }
 
@@ -85,7 +86,11 @@ pt_identifier() {
   local id
   id="$(xc_value "$SIGNING" PASSTHROUGH_ID)"
   [ -n "$id" ] || id="$(xc_value "$PT_ROOT/Config/Identity.xcconfig" PASSTHROUGH_ID)"
-  printf '%s' "${id:-dev.dpatel.passthrough}"
+  id="${id:-dev.dpatel.passthrough}"
+  # It names folders --purge deletes: a reverse-DNS id only, never "..", a slash or a space.
+  printf '%s' "$id" | grep -Eq '^[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)+$' \
+    || { printf 'passthrough: PASSTHROUGH_ID "%s" in Config/*.xcconfig isn'"'"'t a bundle id like com.example.passthrough.\n' "$id" >&2; exit 1; }
+  printf '%s' "$id"
 }
 
 team_id() { xc_value "$SIGNING" DEVELOPMENT_TEAM; }
@@ -209,7 +214,7 @@ xcode_build() {
 # Mac (the iPhone's tunnel extension, Android's foreground service), which cuts
 # this Mac's internet when it's online through that phone. Uses FORCE.
 check_phone_route() {
-  local iface; iface="$(route -n get default 2>/dev/null | awk '/interface:/ {print $2}')"
+  local iface; iface="$( { /sbin/route -n get default 2>/dev/null || true; } | awk '/interface:/ {print $2}')"
   case "$iface" in
     utun*)
       if [ "$FORCE" = 1 ]; then warn "This Mac is online through a tunnel ($iface); going ahead (--force)."

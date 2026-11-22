@@ -158,7 +158,7 @@ do_doctor() {
 
   step "Phones"
   local list
-  list="$(phones)"
+  list="$(phones || true)"
   if [ -z "$list" ]; then bad "No Android phone connected." "Turn on USB debugging (Settings ▸ About phone ▸ tap Build number seven times, then Developer options), and plug it in."
   else
     printf '%s\n' "$list" | while IFS="$(printf '\t')" read -r serial state model; do
@@ -225,15 +225,15 @@ do_install() {
   step "Phone"
   serial="$(pick_phone)"
   ok "$serial"
-  check_phone_route
   adb="$(find_adb)"; [ -n "$adb" ] || adb=adb
+  export ANDROID_SERIAL="$serial"
+  # Build first, then check the route (the build takes minutes), then install: replacing the app stops what
+  # serves the Mac.
+  if [ "$NO_BUILD" = 0 ]; then gradle assembleDebug; fi
+  [ "$DRY_RUN" = 1 ] || [ -f "$APK" ] || die "No build at ${APK#"$PT_ROOT"/}; run without --no-build."
+  check_phone_route
   step "Installing"
-  export ANDROID_SERIAL="$serial"   # installDebug installs on every phone otherwise
-  if [ "$NO_BUILD" = 0 ]; then gradle installDebug
-  else
-    [ "$DRY_RUN" = 1 ] || [ -f "$APK" ] || die "No build at ${APK#"$PT_ROOT"/}; run without --no-build."
-    run "$adb" -s "$serial" install -r "$APK"
-  fi
+  run "$adb" -s "$serial" install -r "$APK"
   run "$adb" -s "$serial" shell monkey -p "$APP_ID" -c android.intent.category.LAUNCHER 1
   if [ "$DRY_RUN" = 1 ]; then done_ok "Dry run finished; nothing was changed."; return; fi
   done_ok "Installed on $serial. Tap the power button, then flip the switch in the Mac's menu bar and type the code from Pair your Mac."

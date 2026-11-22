@@ -208,9 +208,10 @@ do_install() {
   udid="$(printf '%s' "$dev" | cut -f1)"; name="$(printf '%s' "$dev" | cut -f2)"
   ok "$name  $udid"
   if [ "$(device_locked "$udid")" = true ]; then warn "$name is locked: unlock it, or opening the app at the end fails."; fi
-  check_phone_route
   if [ "$NO_BUILD" = 0 ]; then do_build; else info "Not building (--no-build)."; fi
   [ "$DRY_RUN" = 1 ] || [ -d "$BUILT_APP" ] || die "No build at ${BUILT_APP#"$PT_ROOT"/}; run without --no-build."
+  # After the build (minutes): whether the Mac is online through this phone is what's true now.
+  check_phone_route
   step "Installing on $name"
   run xcrun devicectl device install app --device "$udid" "$BUILT_APP"
   if [ "$PC_SCREEN" = 1 ]; then
