@@ -8,6 +8,13 @@ name: Remote Desktop engine
 
 on:
   workflow_dispatch:
+  # Also on a PR that changes the engine, its script, its shim or this workflow, so a change is built before it merges.
+  pull_request:
+    branches: [main, dev]
+    paths:
+      - scripts/build-freerdp.sh
+      - Vendor/FreeRDP/**
+      - .github/workflows/freerdp.yml
 
 permissions:
   contents: read
