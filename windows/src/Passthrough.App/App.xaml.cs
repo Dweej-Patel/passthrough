@@ -131,6 +131,7 @@ public partial class App : Application
             viewModel.AnswerNotice = remote.AnswerNoticeAsync;
             viewModel.OpenComputers = async () => await remote.Reach.UnlockAsync() ? remote.Reach.Computers : null;
             viewModel.NewShell = remote.OpenShellAsync;
+            viewModel.OpenScreen = ShowScreen;
             remote.HandOffWanted += launcher => DispatcherQueue.GetForCurrentThread()?.TryEnqueue(() => HandOff(launcher));
             _ui = DispatcherQueue.GetForCurrentThread();
 
@@ -187,6 +188,28 @@ public partial class App : Application
 
     private Microsoft.UI.Dispatching.DispatcherQueue? _ui;
 
+    /// <summary>One screen window per computer; a second Screen click brings it forward.</summary>
+    private readonly Dictionary<string, Screen.ScreenWindow> _screens = [];
+
+    private async void ShowScreen(Passthrough.Core.Trust.ReachableComputer computer)
+    {
+        if (_remote is null || _shuttingDown) return;
+        try
+        {
+            if (_screens.TryGetValue(computer.HostId, out var open))
+            {
+                open.BringToFront();
+                return;
+            }
+            if (_remote.Identity() is not { } identity) return;
+            var window = new Screen.ScreenWindow(computer, identity, _remote.ConfirmPresenceAsync);
+            _screens[computer.HostId] = window;
+            window.Closed += (_, _) => _screens.Remove(computer.HostId);
+            await window.StartAsync();
+        }
+        catch (Exception e) { LogFile.Error(e); }
+    }
+
     /// <summary>
     /// After Turn on: Start at login follows the installed copy, the installed copy starts (it waits for this one to
     /// go), and this one quits. A copy that already is the installed one stays.
@@ -242,6 +265,7 @@ public partial class App : Application
             LogFile.Error(e);
         }
         Try(() => _settings?.Close());
+        foreach (var screen in _screens.Values.ToList()) Try(screen.Close);
         Try(() =>
         {
             _flyout?.AllowClose();

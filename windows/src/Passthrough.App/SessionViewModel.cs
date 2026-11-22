@@ -63,6 +63,9 @@ public sealed class SessionViewModel : ObservableBase
     /// <summary>A new shell on a computer, in a terminal.</summary>
     public Func<Passthrough.Core.Trust.ReachableComputer, Task>? NewShell { get; set; }
 
+    /// <summary>A Mac's screen in a window of its own (Windows Hello again for it).</summary>
+    public Action<Passthrough.Core.Trust.ReachableComputer>? OpenScreen { get; set; }
+
     public async Task ShowComputersAsync()
     {
         if (OpenComputers is not { } open || await open() is not { } list) return;

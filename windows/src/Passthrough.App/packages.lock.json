@@ -173,6 +173,12 @@
       "passthrough.core": {
         "type": "Project"
       },
+      "passthrough.media": {
+        "type": "Project",
+        "dependencies": {
+          "Passthrough.Core": "[1.0.0, )"
+        }
+      },
       "passthrough.windows": {
         "type": "Project",
         "dependencies": {

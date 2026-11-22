@@ -29,6 +29,7 @@
   <ItemGroup>
     <ProjectReference Include="..\Passthrough.Core\Passthrough.Core.csproj" />
     <ProjectReference Include="..\Passthrough.Windows\Passthrough.Windows.csproj" />
+    <ProjectReference Include="..\Passthrough.Media\Passthrough.Media.csproj" />
   </ItemGroup>
 
   <ItemGroup>

@@ -86,8 +86,13 @@
                                     <TextBlock Text="{x:Bind Detail}" Style="{StaticResource CaptionTextBlockStyle}"
                                                Foreground="{ThemeResource TextFillColorSecondaryBrush}" TextTrimming="CharacterEllipsis" />
                                 </StackPanel>
-                                <Button Grid.Column="1" Content="New shell" IsEnabled="{x:Bind CanOpenShell}" Click="OnNewShell"
-                                        AutomationProperties.Name="New shell on this computer" />
+                                <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="6">
+                                    <Button Content="Screen" Visibility="{x:Bind ScreenVisibility}" Click="OnScreen"
+                                            AutomationProperties.Name="Show this computer's screen"
+                                            ToolTipService.ToolTip="Shows its screen in a window. Windows asks for your PIN or fingerprint." />
+                                    <Button Content="New shell" IsEnabled="{x:Bind CanOpenShell}" Click="OnNewShell"
+                                            AutomationProperties.Name="New shell on this computer" />
+                                </StackPanel>
                             </Grid>
                         </Border>
                     </DataTemplate>

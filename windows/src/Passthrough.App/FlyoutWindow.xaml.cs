@@ -87,6 +87,13 @@ public sealed partial class FlyoutWindow : Window
         catch (Exception ex) { Platform.LogFile.Error(ex); }
     }
 
+    private void OnScreen(object sender, RoutedEventArgs e)
+    {
+        if (((FrameworkElement)sender).DataContext is not ComputerRow row || ViewModel.OpenScreen is not { } open) return;
+        try { open(row.Computer); }
+        catch (Exception ex) { Platform.LogFile.Error(ex); }
+    }
+
     private async void OnNoticeOk(object sender, RoutedEventArgs e) => await Answer(sender, act: false);
 
     private async void OnNoticeAction(object sender, RoutedEventArgs e) => await Answer(sender, act: true);

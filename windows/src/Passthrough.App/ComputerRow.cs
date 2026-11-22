@@ -13,4 +13,8 @@ public sealed class ComputerRow(ReachableComputer computer)
         + (Computer.Scopes.Contains("shell") ? "" : " · screen only");
 
     public bool CanOpenShell => Computer.Scopes.Contains("shell");
+
+    /// <summary>A Mac whose screen this PC was given: a PC offers only Remote Desktop, which this viewer doesn't show.</summary>
+    public Microsoft.UI.Xaml.Visibility ScreenVisibility =>
+        Computer.Scopes.Contains("screen") && Computer.HostKind != "windows" ? Microsoft.UI.Xaml.Visibility.Visible : Microsoft.UI.Xaml.Visibility.Collapsed;
 }

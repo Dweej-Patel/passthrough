@@ -380,6 +380,13 @@ public sealed class RemoteAccess : IAccessAdmin, IDisposable
     public Task OpenShellAsync(Passthrough.Core.Trust.ReachableComputer computer) =>
         Identity() is { } identity ? Passthrough.Windows.Client.TermBridge.OpenAsync(computer, identity, null, _log) : Task.CompletedTask;
 
+    /// <summary>
+    /// Windows Hello for one screen window (stage 8: every window asks, so someone at an unlocked PC can't take over the
+    /// Mac with a click): a signature over a fresh challenge with this account's Hello key. False when not confirmed.
+    /// </summary>
+    public async Task<bool> ConfirmPresenceAsync() =>
+        await new Passthrough.Windows.Trust.HelloSigner().SignAsync(System.Security.Cryptography.RandomNumberGenerator.GetBytes(32)) is not null;
+
     /// <summary>Fires when this PC was handed access to another computer.</summary>
     public event Action<string>? ComputerReceived;
 
