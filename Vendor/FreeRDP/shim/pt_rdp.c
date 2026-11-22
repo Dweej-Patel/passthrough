@@ -649,9 +649,12 @@ static BOOL configure(rdpSettings *settings, const pt_rdp_config *config) {
     SET_BOOL(GatewayEnabled, 0);
     SET_UINT32(ProxyType, PROXY_TYPE_NONE);
     SET_BOOL(SupportMultitransport, 0);
-    SET_BOOL(NetworkAutoDetect, 0);
-    /* With any of auto-detect, the heartbeat or multitransport on, freerdp_client_load_addins turns device
-       redirection on and asks for rdpdr, which is not compiled in: PreConnect would fail before a byte is sent. */
+    /* Auto-detect: Windows measures the link and fits its video to it. Patch 0002 stops it asking for rdpdr.
+       With the heartbeat or multitransport on, freerdp_client_load_addins still turns device redirection on and
+       asks for rdpdr, which is not compiled in: PreConnect would fail before a byte is sent. */
+    SET_BOOL(NetworkAutoDetect, config->detect_network);
+    /* FreeRDP's default connection type is already "auto-detect"; it's restated only where it is used. */
+    if (config->detect_network) SET_UINT32(ConnectionType, CONNECTION_TYPE_AUTODETECT);
     SET_BOOL(SupportHeartbeatPdu, 0);
     SET_BOOL(AutoReconnectionEnabled, 0);
 

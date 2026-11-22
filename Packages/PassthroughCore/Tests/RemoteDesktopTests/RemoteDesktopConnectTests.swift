@@ -45,6 +45,16 @@ final class RemoteDesktopConnectTests: XCTestCase {
     /// The first bytes out are one X.224 connection request offering CredSSP: what a PC checks before it lets the
     /// phone through to Remote Desktop (windows/src/Passthrough.Core/Screen/RdpNegotiation.cs, `OffersNla`).
     func testTheFirstBytesAreAConnectionRequestOfferingNLA() {
+        firstBytesOfferNLA(slowLink: false)
+    }
+
+    /// The same over a relay, where network auto-detect is on (patch 0002): it must not make the engine ask for a
+    /// channel it leaves out, which stopped the connection before a byte went (edd933b).
+    func testOverARelayTheConnectionStartsTheSame() {
+        firstBytesOfferNLA(slowLink: true)
+    }
+
+    private func firstBytesOfferNLA(slowLink: Bool) {
         let stream = RecordingStream()
         let request = expectation(description: "a first PDU, or the end")
         request.assertForOverFulfill = false
@@ -53,7 +63,7 @@ final class RemoteDesktopConnectTests: XCTestCase {
         let backend = RemoteDesktopBackend(
             stream: stream, certSHA256: String(repeating: "0", count: 64),
             login: ScreenLogin(username: "someone", password: "not a real password"),
-            layout: .init(width: 1180, height: 820), clientName: "iPhone", queue: .main
+            layout: .init(width: 1180, height: 820), clientName: "iPhone", slowLink: slowLink, queue: .main
         ) { event in
             guard case .ended = event else { return }
             request.fulfill()

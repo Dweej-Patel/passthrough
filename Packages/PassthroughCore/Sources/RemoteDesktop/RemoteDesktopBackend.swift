@@ -238,6 +238,7 @@ public final class RemoteDesktopBackend: ScreenBackend, @unchecked Sendable {
                         config.device_scale = UInt32(layout.deviceScale)
                         config.allow_h264 = 1
                         config.suspend_frame_acks = slowLink ? 1 : 0
+                        config.detect_network = slowLink ? 1 : 0
                         return pt_rdp_new(&config, &callbacks)
                     }
                 }

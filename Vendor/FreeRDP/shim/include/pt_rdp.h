@@ -84,6 +84,9 @@ typedef struct {
     /** 1: tell Windows not to wait for each frame's acknowledgement (GFX queueDepth = SUSPEND). Over a relay
         every acknowledgement is a full round trip, and Windows idles waiting for them ("skipped for client"). */
     int suspend_frame_acks;
+    /** 1: network auto-detect on (patch 0002), so Windows measures the link's bandwidth and round trip and fits its
+        H.264 to it, as Microsoft's own clients let it. For a relay, where a drag's frames otherwise pile up. */
+    int detect_network;
 } pt_rdp_config;
 
 /** The desktop's shape, as display control takes it. */
