@@ -521,6 +521,9 @@ final class PCScreenModel: ObservableObject, RemoteScreenSource {
         case let .rdp(stream, initialBytes, certSHA256):
             client = nil   // it let go of the stream; the dialer stays up for it
             startEngine(stream: stream, initialBytes: initialBytes, certSHA256: certSHA256, generation: gen)
+        case .rdpRefused(.screenNotAllowed, _, _):
+            // A computer's screen waits for the PC's owner, who allows it on the notice the hand-over left there.
+            fail("Screen is off for this Mac. On \(name), click Passthrough's icon and choose Allow screen on the notice about this Mac.")
         case let .rdpRefused(error, detail, retryAfter):
             let refusal = WindowsScreenCopy.refusal(error, detail: detail, retryAfter: retryAfter, words)
             fail(refusal?.sentence ?? HostCopy.error(error, words) ?? "\(name) refused the connection.")
