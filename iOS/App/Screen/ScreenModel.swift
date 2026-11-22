@@ -144,7 +144,8 @@ final class ScreenModel: ObservableObject {
     }
     /// The login this PC view signed in with, kept while the view is open so a dropped
     /// view (or one back from the background) reconnects without asking again.
-    private var windowsLogin: (login: ScreenLogin, remember: Bool)?
+    /// The login this view signed in with, and the PC it is for (its id and keys): reused only for that PC.
+    private var windowsLogin: (login: ScreenLogin, remember: Bool, host: String, pin: String)?
     /// The connection is asking for the Mac's own stream (not Screen Sharing).
     private var wantsVideo = false
     /// Where the Mac last heard the pointer was, in screen pixels.
@@ -673,7 +674,11 @@ final class ScreenModel: ObservableObject {
         saidRelay = false
         observeApp()
         reconnects = 0
-        if let held = windowsLogin { return connectWindows(held.login, remember: held.remember) }
+        // Held for this PC and these keys only: another computer (or this id with other keys) never gets it.
+        if let held = windowsLogin, held.host == pc.macID, held.pin == pc.loginPin {
+            return connectWindows(held.login, remember: held.remember)
+        }
+        windowsLogin = nil
         // The account last used here, else the one the PC says Remote Desktop takes; its saved
         // login is read with the app lock's context, so it never prompts.
         let account = ScreenLoginStore.lastAccount(hostID: pc.macID) ?? shell?.factsByMac[pc.macID]?.user
@@ -688,7 +693,7 @@ final class ScreenModel: ObservableObject {
     private func connectWindows(_ login: ScreenLogin, remember: Bool) {
         stop()
         // Kept for as long as the view is open, so a dropped view reconnects with it.
-        windowsLogin = (login, remember)
+        windowsLogin = (login, remember, macID ?? "", windowsPin ?? "")
         guard let shell else { return }
         generation += 1
         let gen = generation
