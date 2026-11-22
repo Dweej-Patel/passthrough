@@ -104,6 +104,8 @@ internal sealed class TrayLinks(Func<IReadOnlyCollection<string>> allowedAccount
             var account = peer.Account;
             await link.RunAsync(frame =>
             {
+                // An account taken off the allowed list since it linked is dropped at its next frame, whatever it is.
+                if (!IsAllowed(account)) { link.Close(); return ValueTask.CompletedTask; }
                 if (frame.Kind != PipeKind.Admin) return host.OnFrameAsync(frame);
                 // Off the pipe's reader: a store write must not hold up output. The account is the token's, never the frame's.
                 if (frame.Read<PipeAdminRequest>() is { } request && Admin is { } admin)
@@ -118,6 +120,20 @@ internal sealed class TrayLinks(Func<IReadOnlyCollection<string>> allowedAccount
         {
             Interlocked.Decrement(ref _alive);
             await pipe.DisposeAsync().ConfigureAwait(false);
+        }
+    }
+
+    private bool IsAllowed(string account) => allowedAccounts().Contains(account, StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>After a reload: the links of accounts no longer allowed close now (the next connect is refused).</summary>
+    public void DropDisallowed()
+    {
+        List<(string Account, PipeLink Link)> links;
+        lock (_lock) links = [.. _links.Select(l => (l.Key, l.Value))];
+        foreach (var (account, link) in links.Where(l => !IsAllowed(l.Account)))
+        {
+            log($"pipe: account …{Tail(account)} is no longer allowed; its link closed");
+            link.Close();
         }
     }
 
