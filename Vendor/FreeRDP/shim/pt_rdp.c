@@ -661,8 +661,8 @@ static BOOL configure(rdpSettings *settings, const pt_rdp_config *config) {
     /* Graphics: the GFX pipeline; no RemoteFX, NSCodec or JPEG. */
     SET_BOOL(SupportGraphicsPipeline, 1);
     SET_BOOL(GfxH264, config->allow_h264);
-    SET_BOOL(GfxAVC444, config->allow_h264);
-    SET_BOOL(GfxAVC444v2, config->allow_h264);
+    SET_BOOL(GfxAVC444, config->allow_h264 && !config->avc420_only);
+    SET_BOOL(GfxAVC444v2, config->allow_h264 && !config->avc420_only);
     SET_BOOL(GfxProgressive, 1);
     SET_BOOL(GfxProgressiveV2, 1);
     SET_BOOL(GfxPlanar, 1);

@@ -241,6 +241,9 @@ public final class RemoteDesktopBackend: ScreenBackend, @unchecked Sendable {
                         // suspended (60db5fc), the relay queued a drag's frames until its round trip reached 23 s.
                         config.suspend_frame_acks = 0
                         config.detect_network = slowLink ? 1 : 0
+                        // Measured over the cellular relay: Windows held a drag to ~4 fps at 30–40 KB/s. 4:2:0 frames
+                        // cost about half of 4:4:4's, so more of them fit.
+                        config.avc420_only = slowLink ? 1 : 0
                         return pt_rdp_new(&config, &callbacks)
                     }
                 }

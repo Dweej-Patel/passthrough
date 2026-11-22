@@ -87,6 +87,8 @@ typedef struct {
     /** 1: network auto-detect on (patch 0002), so Windows measures the link's bandwidth and round trip and fits its
         H.264 to it, as Microsoft's own clients let it. For a relay, where a drag's frames otherwise pile up. */
     int detect_network;
+    /** 1: H.264 in its 4:2:0 form only (no AVC444): about half the data a frame, for a slow link (a relay). */
+    int avc420_only;
 } pt_rdp_config;
 
 /** The desktop's shape, as display control takes it. */
