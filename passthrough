@@ -1,0 +1,30 @@
+#!/bin/bash
+# One command per platform: ./passthrough <mac|iphone|android|windows> <verb> [flags]
+# e.g. ./passthrough mac update --pull, ./passthrough iphone install, ./passthrough android doctor
+set -euo pipefail
+here="$(cd "$(dirname "$0")" && pwd)"
+platform="${1:-}"
+[ $# -gt 0 ] && shift
+case "$platform" in
+  mac) exec /bin/bash "$here/scripts/mac.sh" "$@" ;;
+  iphone|ipad|ios) exec /bin/bash "$here/scripts/iphone.sh" "$@" ;;
+  android) exec /bin/bash "$here/scripts/android.sh" "$@" ;;
+  windows|pc)
+    echo "The Windows host builds and installs on the PC itself. In PowerShell, in the repository:"
+    echo "  powershell -ExecutionPolicy Bypass -File scripts\\windows.ps1 ${*:-help}"
+    echo "See windows/README.md."
+    ;;
+  *)
+    cat <<'EOF'
+Usage: ./passthrough <platform> <verb> [flags]
+
+  ./passthrough mac      doctor | deps | build | install | update | rollback | remove
+  ./passthrough iphone   devices | doctor | build | install | update | remove      (iPad too)
+  ./passthrough android  doctor | deps | build | install | update | remove
+  ./passthrough windows  …     runs on the PC: scripts\windows.ps1
+
+Every verb takes --dry-run and --help. Start with: ./passthrough mac doctor
+EOF
+    [ -z "$platform" ] || [ "$platform" = help ] || [ "$platform" = -h ] || [ "$platform" = --help ] || exit 1
+    ;;
+esac

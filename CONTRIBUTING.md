@@ -20,6 +20,23 @@ You need Xcode 15+, [XcodeGen](https://github.com/yonaskolb/XcodeGen) and an
 Apple Developer account (the Network Extension and keychain entitlements need
 a real Team ID).
 
+The quickest way is the scripts, from the repository's folder:
+
+```
+./passthrough mac doctor     # what's missing, with the fix for each
+./passthrough mac deps       # xcodegen, cmake, ninja, the Metal toolchain, Signing.xcconfig, the engine
+./passthrough mac build      # or: ./passthrough iphone build, ./passthrough android build
+```
+
+`./passthrough mac install`, `./passthrough iphone install` and
+`./passthrough android install` put your build on the Mac and the phones; every
+verb takes `--dry-run` and `--help`. The scripts are `scripts/mac.sh`,
+`scripts/iphone.sh` and `scripts/android.sh` (Bash 3.2, as macOS ships it,
+sharing `scripts/lib/common.sh`). If you change how the apps are built or
+installed, change them too.
+
+By hand:
+
 ```
 brew install xcodegen
 cp Config/Signing.xcconfig.example Config/Signing.xcconfig   # then set DEVELOPMENT_TEAM
@@ -136,8 +153,8 @@ or the pairing rules, update the fixtures first, then make all three pass.
 * [ ] `./gradlew testDebugUnitTest lintDebug` passes in `android/` (if you touched it)
 * [ ] `dotnet test windows/tests/Passthrough.Core.Tests` passes (if you touched `windows/` or `protocol/`),
       and any package change comes with its updated `packages.lock.json`
-* [ ] Both apps build (`xcodegen generate`, then build the `Passthrough` and
-      `PassthroughMac` schemes)
+* [ ] Both apps build (`./passthrough mac build` and `./passthrough iphone build`,
+      or `xcodegen generate`, then build the `Passthrough` and `PassthroughMac` schemes)
 * [ ] README and docs/GUIDE.md updated if behaviour or setup changed
 * [ ] No personal identifiers or credentials in the diff
 

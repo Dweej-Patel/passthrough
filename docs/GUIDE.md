@@ -423,6 +423,8 @@ On the Mac, `SessionCoordinator` runs the passthrough link and owns two independ
 
 ## Setup
 
+`./passthrough` does all of this from the repository's folder: `./passthrough mac deps` once, then `./passthrough mac install`, `./passthrough iphone install` and `./passthrough android install`. `./passthrough <platform> doctor` says what's missing and how to fix it, and `--dry-run` shows each step without doing it. The steps below are what the scripts do.
+
 ### Mac (needed for either phone)
 
 1. `brew install xcodegen`, then `xcodegen generate`. The `.xcodeproj` is generated and gitignored, so run this after cloning.
@@ -432,8 +434,8 @@ On the Mac, `SessionCoordinator` runs the passthrough link and owns two independ
 5. For everyday use, build Release and install it in `/Applications`:
    ```sh
    xcodebuild -project Passthrough.xcodeproj -scheme PassthroughMac -configuration Release \
-     -derivedDataPath build -allowProvisioningUpdates build
-   ditto build/Build/Products/Release/Passthrough.app /Applications/Passthrough.app
+     -derivedDataPath build/dd-rel -allowProvisioningUpdates build
+   ditto build/dd-rel/Build/Products/Release/Passthrough.app /Applications/Passthrough.app
    ```
    then open `/Applications/Passthrough.app`. On first connect macOS asks you to allow the helper under *System Settings ▸ General ▸ Login Items & Extensions ▸ Allow in the Background*. Release builds carry no `get-task-allow` entitlement, and a Release helper refuses any app that does. Running `PassthroughMac` from Xcode (Debug) is for development: a Debug app works only with a Debug helper, so don't run it while the Release app's helper is registered (moving the registration between them drops the tunnel).
 
@@ -480,6 +482,18 @@ Showing a PC's screen (on the iPhone and iPad behind the developer switch, and i
 Without it, the iPhone's Screen row for a PC says its screen isn't in this version, and the Mac's PC Screen window says the PC's screen isn't in this build. CI's *Remote Desktop engine* workflow (`.github/workflows/freerdp.yml`) runs the script on a clean Mac, by hand or on a pull request that changes the engine, its script or the workflow, uploads the result and builds the iPhone app with it; the main CI builds without it. What goes into the engine, and why, is at the top of the script; the licences are in `Vendor/FreeRDP/LICENSES.md`.
 
 ### Updating
+
+```sh
+./passthrough mac update --pull   # pull, rebuild the engine if its sources changed, reinstall the Mac app
+./passthrough iphone update       # the iPhone or iPad on the cable (--device <name> with several)
+./passthrough android update
+```
+
+`mac update` stops before quitting the app if the new build is Debug, if it would drop the push key, if the Mac is online through the phone (quitting would cut it), or while a phone's shell runs on the Mac; fix that, or pass `--force`. The app you had is kept as `build/Passthrough.app.previous`, and `./passthrough mac rollback` puts it back. A Release build ignores `--diagnostics` and `PASSTHROUGH_NO_AUTOCONNECT`, so when it opens it connects through a phone that's plugged in.
+
+To uninstall, `./passthrough mac remove` quits the app, stops its helper, deletes the app, the microphone driver and its login item, and asks for your password once first. `--purge` also deletes its settings, shell history and activity. Keychain items (pairings, Remote shell's keys, saved Windows sign-ins) stay, because only the app can delete them: use *Forget Pairing* and *Reset Identity* in its Settings first if you want them gone. `./passthrough iphone remove --device <name>` and `./passthrough android remove` delete the phone's app with its keys and pairings.
+
+By hand:
 
 * **Rebuild the Mac and the phones from the same commit**, and install both. For now there is no compatibility with older builds on the other side.
 * **Install a Release build of the Mac app** (Mac step 5). The Release helper refuses a Debug app, which carries `get-task-allow`. To check a build, `codesign -d --entitlements - /Applications/Passthrough.app` must not list `com.apple.security.get-task-allow`.

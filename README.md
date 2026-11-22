@@ -98,7 +98,32 @@ The Mac and the phones update together: rebuild both from the same commit. There
 
 ## Install
 
-You build it yourself (there are no signed releases yet).
+You build it yourself (there are no signed releases yet). One command per platform does it, from the repository's folder:
+
+```sh
+./passthrough mac doctor            # what's there, what's missing, and the fix for each
+./passthrough mac deps              # once: xcodegen, the Metal toolchain, Config/Signing.xcconfig, the PC-screen engine
+./passthrough mac install           # build Release, check, swap into /Applications, open
+./passthrough iphone install        # build and install on the plugged-in iPhone or iPad
+./passthrough android install       # build and install on the plugged-in Android phone
+```
+
+`deps` copies `Config/Signing.xcconfig` and stops if it can't tell your Team ID; it lists the teams it finds, and `./passthrough mac deps --team <ID>` sets one. Then pair (step 4 below).
+
+To update, rebuild the Mac and the phones from the same commit:
+
+```sh
+./passthrough mac update --pull     # git pull --ff-only, rebuild the engine if its sources changed, reinstall
+./passthrough iphone update         # and/or: ./passthrough android update
+```
+
+To uninstall: `./passthrough mac remove` (add `--purge` to delete its settings and data too), `./passthrough iphone remove --device <name>`, `./passthrough android remove`. Each verb takes `--help` and `--dry-run`, which prints every step without doing it. `./passthrough mac rollback` puts the previous Mac app back.
+
+Before it quits or replaces the Mac app, `install` refuses (unless `--force`) when the new build isn't Release, when it would drop the push key, when the Mac is online through the phone, or while a phone's shell is running on the Mac. `remove` asks for your password once, for the helper and the microphone driver. On a Windows PC, run `scripts\windows.ps1` there ([windows/README.md](windows/README.md)).
+
+### What the scripts do
+
+These are the same steps by hand.
 
 **1. Set up the project (once, on the Mac).**
 
@@ -110,21 +135,21 @@ xcodegen generate && open Passthrough.xcodeproj
 
 `Config/Signing.xcconfig` holds your Team ID and stays out of git. If your Mac's team is a free one, sign the iPhone app with a paid team there; see [Setup](docs/GUIDE.md#setup).
 
-**2. iPhone (and iPad).** In Xcode, run the `Passthrough` scheme on the phone and tap the power button. iOS asks once to add the VPN configuration.
+**2. iPhone (and iPad).** In Xcode, run the `Passthrough` scheme on the phone (or `xcrun devicectl device install app` a Debug build) and tap the power button. iOS asks once to add the VPN configuration.
 
 **3. Mac.** Build Release and put it in `/Applications`:
 
 ```sh
 xcodebuild -project Passthrough.xcodeproj -scheme PassthroughMac -configuration Release \
-  -derivedDataPath build -allowProvisioningUpdates build
-ditto build/Build/Products/Release/Passthrough.app /Applications/Passthrough.app
+  -derivedDataPath build/dd-rel -allowProvisioningUpdates build
+ditto build/dd-rel/Build/Products/Release/Passthrough.app /Applications/Passthrough.app
 ```
 
-Quit Passthrough first if it's running (menu bar ▸ power button), then copy it in and open `/Applications/Passthrough.app`. On first connect macOS asks you to allow its helper under *System Settings ▸ General ▸ Login Items & Extensions*. Use a Release build: the Release helper refuses a Debug app, so running `PassthroughMac` from Xcode is for development only.
+Quit Passthrough first if it's running (menu bar ▸ power button), then copy it in and open `/Applications/Passthrough.app`. (The script keeps the old one as `build/Passthrough.app.previous`.) On first connect macOS asks you to allow its helper under *System Settings ▸ General ▸ Login Items & Extensions*. Use a Release build: the Release helper refuses a Debug app, so running `PassthroughMac` from Xcode is for development only.
 
 **4. Pair.** Plug the phone in, flip the switch in the menu bar, and type the code the phone shows. For the shell and the screen, turn on Remote shell in the Mac's *Settings ▸ Remote Shell* and plug the phone in once more.
 
-**Android.** Run `./gradlew installDebug` in `android/`, turn on USB debugging on the phone, and pair the same way.
+**Android.** Run `./gradlew installDebug` in `android/` (with JDK 25 as `JAVA_HOME`), turn on USB debugging on the phone, and pair the same way.
 
 **Windows PC.** On the PC, build with `scripts/build-windows.ps1` and run `Passthrough.exe` from `windows\artifacts\Passthrough`. Click its tray icon, plug the phone in, and type the code the phone shows into the flyout. Then turn on Remote access in its *Settings ▸ Remote access* (Windows asks for an administrator once) and plug each phone in once more. Build details and what to install first: [windows/README.md](windows/README.md).
 
