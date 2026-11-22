@@ -183,6 +183,9 @@ final class ComputerShareModel: ObservableObject {
         let v = viewerHost.macName, h = sharedHost.macName
         let shell = grantedScopes.scopes.contains(Computers.scopeShell)
         let screen = grantedScopes.scopes.contains(Computers.scopeScreen)
+        // Remembered here, so the sheet says this computer already has access the next time it opens.
+        SharedComputers.record(shared: sharedHost.macID, viewer: viewerHost.macID,
+                               shell: shell || grantedScopes.pending.contains(Computers.scopeShell))
         if grantedScopes.pending.contains(Computers.scopeScreen) && !shell {
             phase = .done("\(v) can see \(h)'s screen once you allow it in Passthrough on \(h). Until then it can't use \(h).")
         } else if grantedScopes.pending.contains(Computers.scopeScreen) {
@@ -249,5 +252,42 @@ final class ComputerShareModel: ObservableObject {
         shared?.dialer?.shutdown()
         shared = nil
         granted = nil
+    }
+}
+
+/// What this phone has shared: which of its computers it gave access to which other, and when. Only this phone's
+/// memory of what it did, so the Share sheet can say "already has access" and ask before doing it again. The
+/// computer that was shared is the one that decides: access removed there stays listed here until shared again or
+/// forgotten here.
+enum SharedComputers {
+    struct Entry: Codable, Equatable {
+        /// Shell and screen (true), or screen only.
+        var shell: Bool
+        var at: Date
+    }
+
+    private static let key = "sharedComputers"
+
+    private static var all: [String: [String: Entry]] {
+        get {
+            guard let data = UserDefaults.standard.data(forKey: key) else { return [:] }
+            return (try? JSONDecoder().decode([String: [String: Entry]].self, from: data)) ?? [:]
+        }
+        set { UserDefaults.standard.set(try? JSONEncoder().encode(newValue), forKey: key) }
+    }
+
+    /// What `viewer` was given on `shared`, if this phone shared it.
+    static func entry(shared: String, viewer: String) -> Entry? { all[shared]?[viewer] }
+
+    static func record(shared: String, viewer: String, shell: Bool) {
+        var stored = all
+        stored[shared, default: [:]][viewer] = Entry(shell: shell, at: Date())
+        all = stored
+    }
+
+    static func forget(shared: String, viewer: String) {
+        var stored = all
+        stored[shared]?[viewer] = nil
+        all = stored
     }
 }

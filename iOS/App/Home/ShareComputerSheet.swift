@@ -12,6 +12,8 @@ struct ShareComputerSheet: View {
     let shared: ShellCredential
     @StateObject private var model = ComputerShareModel()
     @State private var withShell = false
+    /// A computer that already has access was tapped: asked before it is shared again.
+    @State private var again: ShellCredential?
     @Environment(\.dismiss) private var dismiss
 
     private var others: [ShellCredential] { shell.macs.filter { $0.macID != shared.macID } }
@@ -34,8 +36,10 @@ struct ShareComputerSheet: View {
 
                 Section {
                     ForEach(others, id: \.macID) { viewer in
+                        let had = SharedComputers.entry(shared: shared.macID, viewer: viewer.macID)
                         Button {
-                            model.share(shared, with: viewer, scopes: scopes, shell: shell)
+                            // One that already has access isn't given it again by a stray tap.
+                            if had != nil { again = viewer } else { model.share(shared, with: viewer, scopes: scopes, shell: shell) }
                         } label: {
                             HStack(spacing: 12) {
                                 Image(systemName: shell.kind(of: viewer.macID) == .windows ? "pc" : "desktopcomputer")
@@ -44,10 +48,17 @@ struct ShareComputerSheet: View {
                                     .frame(width: 30)
                                 VStack(alignment: .leading, spacing: 2) {
                                     Text(viewer.macName).foregroundStyle(.primary)
-                                    Text(shell.kind(of: viewer.macID) == .windows ? "PC" : "Mac").font(.caption).foregroundStyle(.secondary)
+                                    if let had {
+                                        Text("Has access (\(had.shell ? "shell and screen" : "screen only")), shared \(had.at.formatted(.relative(presentation: .named)))")
+                                            .font(.caption).foregroundStyle(.secondary)
+                                    } else {
+                                        Text(shell.kind(of: viewer.macID) == .windows ? "PC" : "Mac").font(.caption).foregroundStyle(.secondary)
+                                    }
                                 }
                                 Spacer()
-                                Image(systemName: "chevron.right").font(.footnote.weight(.semibold)).foregroundStyle(.tertiary)
+                                Image(systemName: had != nil ? "checkmark.circle.fill" : "chevron.right")
+                                    .font(.footnote.weight(.semibold))
+                                    .foregroundStyle(had != nil ? AnyShapeStyle(PTColor.tintText) : AnyShapeStyle(.tertiary))
                             }
                         }
                         .disabled(model.isWorking)
@@ -87,6 +98,16 @@ struct ShareComputerSheet: View {
                     Button("Done") { dismiss() }
                 }
             }
+        }
+        .confirmationDialog(again.map { "\($0.macName) already has access to \(shared.macName)" } ?? "",
+                            isPresented: Binding(get: { again != nil }, set: { if !$0 { again = nil } }), titleVisibility: .visible) {
+            Button("Share Again") {
+                if let viewer = again { model.share(shared, with: viewer, scopes: scopes, shell: shell) }
+                again = nil
+            }
+            Button("Cancel", role: .cancel) { again = nil }
+        } message: {
+            Text("Sharing again replaces what it has with \(withShell ? "shell and screen" : "screen only"). If you removed its access on \(shared.macName), this gives it back.")
         }
         .sensoryFeedback(.success, trigger: model.phase) { _, new in if case .done = new { true } else { false } }
         .sensoryFeedback(.error, trigger: model.phase) { _, new in if case .failed = new { true } else { false } }
