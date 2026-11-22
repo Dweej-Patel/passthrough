@@ -354,6 +354,7 @@ public sealed class ServiceRemote : IDisposable
                 // This account can keep access to other computers (stage 7): phones may hand it some.
                 IdKey = state?.IdKey,
                 SleepAfter = SleepAfter(),
+                Display = state?.Display,
             }.Cleaned();
         },
         State = phone => OwnerHost(phone)?.State is { } state

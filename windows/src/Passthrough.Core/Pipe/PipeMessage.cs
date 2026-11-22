@@ -51,4 +51,6 @@ public sealed record PipeHostState
     public bool? Charging { get; init; }
     /// <summary>This account's identity public key (lowercase hex, as host.idKey), when it can keep access to other computers (Windows Hello is set up).</summary>
     public string? IdKey { get; init; }
+    /// <summary>The PC's own monitor, read while this account's session was on it (not Remote Desktop's display).</summary>
+    public HostDisplay? Display { get; init; }
 }

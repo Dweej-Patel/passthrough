@@ -427,7 +427,7 @@
         "line": "{\"t\":\"host\",\"host\":{\"kind\":\"mac\",\"os\":\"macOS 15.4\",\"shells\":[{\"id\":\"login\",\"name\":\"zsh\",\"default\":true}],\"screens\":[\"video\",\"rfb\"],\"access\":{\"shell\":true,\"screen\":true}}}"
       },
       {
-        "line": "{\"t\":\"host\",\"host\":{\"kind\":\"windows\",\"os\":\"Windows 11 Pro 24H2\",\"signedIn\":true,\"app\":true,\"console\":\"active\",\"idleSeconds\":40,\"shells\":[{\"id\":\"pwsh\",\"name\":\"PowerShell\",\"default\":true},{\"id\":\"powershell\",\"name\":\"Windows PowerShell\"},{\"id\":\"cmd\",\"name\":\"Command Prompt\"},{\"id\":\"wsl:Ubuntu\",\"name\":\"Ubuntu\"},{\"id\":\"gitbash\",\"name\":\"Git Bash\"}],\"screens\":[\"rdp\"],\"rdp\":\"ready\",\"access\":{\"shell\":true,\"screen\":true,\"share\":false},\"lock\":true,\"user\":\"name@outlook.com\",\"sleepAfter\":0}}"
+        "line": "{\"t\":\"host\",\"host\":{\"kind\":\"windows\",\"os\":\"Windows 11 Pro 24H2\",\"signedIn\":true,\"app\":true,\"console\":\"active\",\"idleSeconds\":40,\"shells\":[{\"id\":\"pwsh\",\"name\":\"PowerShell\",\"default\":true},{\"id\":\"powershell\",\"name\":\"Windows PowerShell\"},{\"id\":\"cmd\",\"name\":\"Command Prompt\"},{\"id\":\"wsl:Ubuntu\",\"name\":\"Ubuntu\"},{\"id\":\"gitbash\",\"name\":\"Git Bash\"}],\"screens\":[\"rdp\"],\"rdp\":\"ready\",\"access\":{\"shell\":true,\"screen\":true,\"share\":false},\"lock\":true,\"user\":\"name@outlook.com\",\"sleepAfter\":0,\"display\":{\"width\":5120,\"height\":1440,\"scale\":100}}}"
       },
       {
         "line": "{\"t\":\"host\",\"host\":{\"kind\":\"windows\",\"os\":\"Windows 11 Pro 24H2\",\"signedIn\":false,\"app\":false,\"console\":\"signedOut\",\"screens\":[\"rdp\"],\"rdp\":\"ready\",\"access\":{\"shell\":true,\"screen\":false},\"lock\":false}}"
@@ -544,13 +544,18 @@
           "valid": false
         }
       ],
-      "_comment": "A host sends `host` after `ready` and `macInfo`. cleaned(): nil without kind; os over 64 characters, an unknown console, a negative idleSeconds or sleepAfter are dropped; shells with an invalid id or name, or a repeated id, are dropped, at most 32, only the first default kept.",
+      "_comment": "A host sends `host` after `ready` and `macInfo`. cleaned(): nil without kind; os over 64 characters, an unknown console, a negative idleSeconds or sleepAfter, and a display whose width or height is outside 1 to 16384 or whose scale is outside 100 to 500, are dropped; shells with an invalid id or name, or a repeated id, are dropped, at most 32, only the first default kept.",
       "cleaning": {
         "in": {
           "kind": "windows",
           "os": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
           "console": "dancing",
           "idleSeconds": -1,
+          "display": {
+            "width": 0,
+            "height": 1440,
+            "scale": 100
+          },
           "shells": [
             {
               "id": "pwsh",
