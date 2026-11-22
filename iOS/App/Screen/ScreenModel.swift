@@ -6,6 +6,7 @@ import IrohTransport
 import LocalAuthentication
 import UIKit
 import PassthroughCore
+import RemoteDesktop
 import ScreenClient
 
 /// One view of the selected Mac's screen: its own shell connection, which asks
@@ -119,6 +120,11 @@ final class ScreenModel: ObservableObject {
     private var macStream: (any MacStreamControls)? { backend?.macStream }
     /// Screen Sharing shows the screen (the stream is tried again meanwhile).
     private var onScreenSharing: Bool { backend is ScreenSharingBackend }
+    /// This view shows a PC (through its Remote Desktop), not a Mac.
+    private var windowsView = false
+    /// The login this PC view signed in with, kept while the view is open so a dropped
+    /// view (or one back from the background) reconnects without asking again.
+    private var windowsLogin: (login: ScreenLogin, remember: Bool)?
     /// The connection is asking for the Mac's own stream (not Screen Sharing).
     private var wantsVideo = false
     /// Where the Mac last heard the pointer was, in screen pixels.
@@ -205,6 +211,10 @@ final class ScreenModel: ObservableObject {
             phase = .failed("Choose a computer first.")
             return
         }
+        // A PC's screen is its Remote Desktop, behind the developer switch: never the Mac's paths.
+        if shell.kind(of: mac.macID) == .windows, PCScreen.isOn { return beginWindows(mac) }
+        windowsView = false
+        windowsLogin = nil
         // Before anything is dialled: a PC is never asked for the Mac's screen.
         if refusesNonMac(mac.macID, name: mac.macName) { return }
         macID = mac.macID
@@ -238,6 +248,8 @@ final class ScreenModel: ObservableObject {
 
     /// The view outlives a short trip away, but no one is watching the Mac meanwhile.
     private func appWentAway() {
+        // A PC stops sending pictures while no one looks.
+        backend?.setActive(false)
         // Not listening while no one is looking at the Mac, nor playing its sound.
         stopMicrophone()
         if soundLive {
@@ -257,6 +269,7 @@ final class ScreenModel: ObservableObject {
     }
 
     private func appCameBack() {
+        backend?.setActive(true)
         if playsSound, phase == .live { macStream?.sound(true) }
         guard hiddenBeforeAway else { return }
         hiddenBeforeAway = false
@@ -268,6 +281,7 @@ final class ScreenModel: ObservableObject {
         #if DEBUG
         if Self.demoState != nil { return applyDemo("live") }
         #endif
+        if windowsView { return connectWindows(login, remember: remember) }
         // A Mac login is never sent to anything but a Mac.
         if let macID, refusesNonMac(macID, name: macName) { return }
         pendingLogin = (login, remember)
@@ -455,7 +469,9 @@ final class ScreenModel: ObservableObject {
         case let .size(width, height):
             screenSize = CGSize(width: width, height: height)
             phase = .live
-            if isStream {
+            if windowsView {
+                if liveSince == nil { liveSince = ProcessInfo.processInfo.systemUptime }
+            } else if isStream {
                 let first = !videoStarted
                 videoStarted = true
                 if first { liveSince = ProcessInfo.processInfo.systemUptime }
@@ -509,7 +525,13 @@ final class ScreenModel: ObservableObject {
         case let .macStream(event):
             handle(event)
         case let .ended(end):
-            if isStream { streamEnded() } else { screenSharingEnded(end) }
+            if windowsView {
+                windowsEnded(end)
+            } else if isStream {
+                streamEnded()
+            } else {
+                screenSharingEnded(end)
+            }
         }
     }
 
@@ -603,6 +625,150 @@ final class ScreenModel: ObservableObject {
         case .connectionLost, .takenOver, .signedOut, .hostEnded:
             phase = .failed("The connection to \(macName) was lost.")
         }
+    }
+
+    // MARK: A PC (behind the developer switch, `PCScreen`)
+
+    /// A PC's screen through its Remote Desktop: the sign-in first (the connection
+    /// opens only with a login in hand), then `rdp` on a connection of its own.
+    private func beginWindows(_ pc: ShellCredential) {
+        windowsView = true
+        macID = pc.macID
+        macName = pc.macName
+        slowReason = nil
+        saidRelay = false
+        observeApp()
+        reconnects = 0
+        if let held = windowsLogin { return connectWindows(held.login, remember: held.remember) }
+        stop()
+        phase = .login(error: nil)
+    }
+
+    private func connectWindows(_ login: ScreenLogin, remember: Bool) {
+        stop()
+        // Kept for as long as the view is open, so a dropped view reconnects with it.
+        windowsLogin = (login, remember)
+        guard let shell else { return }
+        generation += 1
+        let gen = generation
+        lastPointer = nil
+        phase = .connecting
+        guard let connection = shell.screenConnection(onEvent: { [weak self] event in
+            MainActor.assumeIsolated { self?.handleWindows(event, generation: gen) }
+        }) else {
+            phase = .failed("Choose a computer first.")
+            return
+        }
+        client = connection.client
+        dialer = connection.dialer
+    }
+
+    private var windowsWords: HostWords { HostWords(kind: .windows, name: macName, device: ThisDevice.name) }
+
+    private func handleWindows(_ event: ShellClient.Event, generation gen: Int) {
+        guard gen == generation else {
+            if case let .rdp(stream, _, _) = event { stream.cancel() }
+            return
+        }
+        switch event {
+        case let .ready(path):
+            readyPath = path
+            client?.requestRDP()
+        case let .rdp(stream, initialBytes, certSHA256):
+            client = nil   // it let go of the stream; the dialer stays up for it
+            guard let login = windowsLogin?.login else { return stream.cancel() }
+            watchPath(of: stream, dialer: dialer, startingAt: readyPath)
+            backendToken += 1
+            let token = backendToken
+            let shape = windowsShape()
+            let made = RemoteDesktop.backend(stream: stream, initialBytes: initialBytes, certSHA256: certSHA256, login: login,
+                                             width: shape.width, height: shape.height, desktopScale: shape.desktopScale,
+                                             deviceScale: shape.deviceScale, clientName: ThisDevice.name) { [weak self] event in
+                MainActor.assumeIsolated { self?.handle(event, generation: gen, token: token) }
+            }
+            guard let made else {
+                stream.cancel()
+                stop()
+                phase = .failed("\(macName)'s screen isn't in this build of Passthrough.")
+                return
+            }
+            backend = made
+            made.start()
+        case let .rdpRefused(error, detail, retryAfter):
+            stop()
+            let words = windowsWords
+            phase = .failed(WindowsScreenCopy.refusal(error, detail: detail, retryAfter: retryAfter, words)?.sentence
+                            ?? error.message(for: words) ?? "\(macName) refused the connection.")
+        case let .failed(error, _):
+            stop()
+            phase = .failed(error.message(for: windowsWords) ?? "\(macName) refused the connection.")
+        case .disconnected:
+            stop()
+            phase = .failed("Can't reach \(macName). It may be asleep, off, or offline.")
+        default:
+            break
+        }
+    }
+
+    /// The PC's session ended.
+    private func windowsEnded(_ end: ScreenEnd) {
+        let now = ProcessInfo.processInfo.systemUptime
+        let liveFor = liveSince.map { now - $0 }
+        // A reason the PC gave on the app's other connection just now: the relay itself carries only Remote Desktop's bytes.
+        let told = shell?.screenEnded.flatMap { $0.macID == macID && Date().timeIntervalSince($0.at) < 5 ? $0.reason : nil }
+        stop()
+        let words = windowsWords
+        switch end {
+        case .closedHere:
+            return
+        case .signIn(.wrongPassword):
+            windowsLogin = nil
+            phase = .login(error: WindowsScreenCopy.signInError(end))
+            return
+        case .signIn(.other):
+            windowsLogin = nil
+            phase = .login(error: nil)
+            return
+        default:
+            break
+        }
+        if let told, let ending = WindowsScreenCopy.screenEnded(told, words) {
+            phase = .failed(ending.sentence)
+            return
+        }
+        // A view that worked and dropped comes back by itself, twice in a row at most (the PC
+        // allows four opens in ten minutes); one live for 30 seconds starts the count again.
+        if end == .connectionLost, let liveFor, let held = windowsLogin {
+            if liveFor > 30 { reconnects = 0 }
+            if reconnects < 2 {
+                reconnects += 1
+                phase = .connecting
+                let attempt = reconnects, gen = generation
+                Task { [weak self] in
+                    try? await Task.sleep(for: .milliseconds(500 * attempt))
+                    guard let self, gen == self.generation, self.phase == .connecting else { return }
+                    self.connectWindows(held.login, remember: held.remember)
+                }
+                return
+            }
+        }
+        phase = .failed(WindowsScreenCopy.ending(end, words)?.sentence ?? "The connection to \(macName) was lost.")
+    }
+
+    /// The first desktop: the view's own pixels (even, at most 4096 on the longer side and
+    /// 8.3 million in all), with Windows' text at the default size for this device.
+    private func windowsShape() -> (width: Int, height: Int, desktopScale: Int, deviceScale: Int) {
+        let screen = UIScreen.main
+        var pixels = viewPixels ?? CGSize(width: screen.bounds.width * screen.scale, height: screen.bounds.height * screen.scale)
+        let cap = min(1, 4096 / max(pixels.width, pixels.height), (8_300_000 / max(pixels.width * pixels.height, 1)).squareRoot())
+        pixels = CGSize(width: pixels.width * cap, height: pixels.height * cap)
+        let short = min(pixels.width, pixels.height)
+        // Windows points on the short side: 600 on a phone, 1000 on an iPad.
+        let target: CGFloat = UIDevice.current.userInterfaceIdiom == .pad ? 1000 : 600
+        let steps = [100, 125, 150, 175, 200, 225, 250, 300, 350, 400, 450, 500]
+        let scale = steps.last { CGFloat($0) <= short / target * 100 } ?? 100
+        let device = scale < 150 ? 100 : scale <= 225 ? 140 : 180
+        return (Int(pixels.width) & ~1, Int(pixels.height) & ~1, scale, device)
     }
 
     // MARK: Back to the stream

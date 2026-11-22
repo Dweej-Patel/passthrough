@@ -402,12 +402,19 @@ final class ShellModel: ObservableObject {
         }
         return HostPage.make(HostPageInput(kind: selectedKind, reach: hostReach, accessRefused: accessRefused, host: hostFacts,
                                            farewell: farewell, connectingSince: connectingSince, triedFromAnywhere: clientTriesIroh,
-                                           shellRefusal: shellRefusal))
+                                           shellRefusal: shellRefusal, viewerScreens: viewerScreens))
+    }
+
+    /// The screens this app shows for the selected computer: a PC's Remote Desktop only behind the developer switch.
+    private var viewerScreens: Set<String> {
+        selectedKind == .windows && PCScreen.isOn ? [HostInfo.screenRDP] : ScreenBackends.supported(for: selectedKind)
     }
 
     /// The one way into the screen: the selected computer is reachable and this app can show its screen.
-    /// Never true for a PC in this version, so nothing reaches the Mac's Screen Sharing login for one.
-    var canOpenScreen: Bool { reach == .ready && selectedKind == .mac && page.screen == .available }
+    /// For a PC only behind the developer switch (`PCScreen`), and then never by the Mac's Screen Sharing path.
+    var canOpenScreen: Bool {
+        reach == .ready && (selectedKind == .mac || (selectedKind == .windows && PCScreen.isOn)) && page.screen == .available
+    }
 
     private func saveHostFacts() {
         UserDefaults.standard.set(try? JSONEncoder().encode(factsByMac), forKey: Self.hostFactsKey)
