@@ -81,8 +81,8 @@ public final class RemoteDesktopBackend: ScreenBackend, @unchecked Sendable {
     private var clipboard = RDPClipboard()
 
     /// `certSHA256`: `rdpReady`'s, 64 lowercase hex. `clientName`: the device's kind ("iPhone"), never its own name.
-    /// `slowLink`: the stream goes through a relay, where Windows waiting on each frame's acknowledgement stalls the
-    /// picture; it's told not to.
+    /// `slowLink`: the stream goes through a relay: a drag's moves are coalesced and Windows measures the link
+    /// (network auto-detect) to fit its video to it.
     public init(stream: any ByteStream, initialBytes: Data = Data(), certSHA256: String, login: ScreenLogin, layout: Layout,
                 clientName: String, slowLink: Bool = false, queue: DispatchQueue = .main, painter: (any RemoteDesktopPainter)? = nil,
                 onEvent: @escaping (ScreenBackendEvent) -> Void) {
@@ -237,7 +237,9 @@ public final class RemoteDesktopBackend: ScreenBackend, @unchecked Sendable {
                         config.desktop_scale = UInt32(layout.desktopScale)
                         config.device_scale = UInt32(layout.deviceScale)
                         config.allow_h264 = 1
-                        config.suspend_frame_acks = slowLink ? 1 : 0
+                        // Acknowledgements stay on, even over a relay: they're Windows' only brake. Measured with them
+                        // suspended (60db5fc), the relay queued a drag's frames until its round trip reached 23 s.
+                        config.suspend_frame_acks = 0
                         config.detect_network = slowLink ? 1 : 0
                         return pt_rdp_new(&config, &callbacks)
                     }
