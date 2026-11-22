@@ -68,6 +68,12 @@ public final class RemoteDesktopBackend: ScreenBackend, @unchecked Sendable {
     // Main only: input state.
     private var scrollRemainder = CGPoint.zero
     private var buttons: ScreenButtons = []
+    /// Over a relay, a drag's moves (the buttons unchanged) go at most this often, the newest position winning: each
+    /// move makes Windows draw and send a frame, and through a relay those frames queue behind each other.
+    static let relayMoveInterval: TimeInterval = 1.0 / 30
+    private var heldMove: (x: UInt16, y: UInt16)?
+    private var lastMoveSent: TimeInterval = 0
+    private var moveFlushScheduled = false
 
     private let slowLink: Bool
 
@@ -453,9 +459,29 @@ public final class RemoteDesktopBackend: ScreenBackend, @unchecked Sendable {
     }
 
     public func pointer(at point: CGPoint, buttons: ScreenButtons) {
+        let pressOrRelease = buttons != self.buttons
         self.buttons = buttons
         let (x, y) = clamp(point)
-        withSession { pt_rdp_pointer($0, x, y, buttons.rawValue) }
+        let now = ProcessInfo.processInfo.systemUptime
+        // A press or release always goes at once (with its position); so does every move off a relay.
+        guard slowLink, !pressOrRelease, now - lastMoveSent < Self.relayMoveInterval else {
+            heldMove = nil
+            lastMoveSent = now
+            withSession { pt_rdp_pointer($0, x, y, buttons.rawValue) }
+            return
+        }
+        heldMove = (x, y)
+        guard !moveFlushScheduled else { return }
+        moveFlushScheduled = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + (lastMoveSent + Self.relayMoveInterval - now)) { [weak self] in
+            guard let self else { return }
+            self.moveFlushScheduled = false
+            guard let move = self.heldMove else { return }
+            self.heldMove = nil
+            self.lastMoveSent = ProcessInfo.processInfo.systemUptime
+            let held = self.buttons
+            self.withSession { pt_rdp_pointer($0, move.x, move.y, held.rawValue) }
+        }
     }
 
     /// 120 wheel units a notch, the remainder kept; vertical and horizontal apart, each at most ±255 an event.
