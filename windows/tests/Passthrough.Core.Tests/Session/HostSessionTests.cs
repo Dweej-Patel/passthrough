@@ -700,7 +700,8 @@ public class HostSessionTests
         await h.Session.ForgetAsync(android.Id);
 
         Assert.Null(h.Secrets.Get(AndroidSlot));
-        Assert.True(h.Client(0).Client.Events.Completion.IsCompleted);
+        // The channel closes as the access is taken away, which is asynchronous: wait for it rather than race it.
+        await h.Client(0).Client.Events.Completion.WaitAsync(TimeSpan.FromSeconds(10));
         // A fresh channel, with no token: the phone counts as unpaired and may pair again.
         var s = await h.WaitState(s => Entry(s, android) is { State: PhoneState.NotPaired } && h.Clients.Count == 2);
         Assert.Null(h.Client(1).Identity.Token);
