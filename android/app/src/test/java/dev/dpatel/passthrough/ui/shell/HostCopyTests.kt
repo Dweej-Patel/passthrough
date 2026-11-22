@@ -67,7 +67,7 @@ class HostCopyTests {
         assertEquals("Sign in to Office-PC to use its shell.", HostCopy.shell(HostShellState.NOBODY_SIGNED_IN, pc))
         assertEquals("Someone else is signed in to Office-PC. Its shell starts when you sign in.", HostCopy.shell(HostShellState.SOMEONE_ELSE_SIGNED_IN, pc))
         assertEquals("Passthrough isn't open on Office-PC. Open it there.", HostCopy.shell(HostShellState.APP_NOT_OPEN, pc))
-        assertEquals("Office-PC doesn't let this phone open shells. Turn on Shell for it in Passthrough's settings on the PC.",
+        assertEquals("Office-PC doesn't let this phone open shells. Plug this phone into the PC with Remote access on to get access again.",
             HostCopy.shell(HostShellState.SWITCHED_OFF, pc))
         assertEquals("Office-PC's screen isn't in this version of Passthrough yet. Its shell works.", HostCopy.screen(HostScreenState.NOT_IN_THIS_VERSION, pc))
         assertEquals("Screen is off for this phone. On Office-PC, open Passthrough's settings and turn on Screen for it.", HostCopy.screen(HostScreenState.SWITCHED_OFF, pc))

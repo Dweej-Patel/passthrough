@@ -107,7 +107,8 @@ object HostCopy {
         HostShellState.NOBODY_SIGNED_IN -> "Sign in to ${w.name} to use its shell."
         HostShellState.SOMEONE_ELSE_SIGNED_IN -> "Someone else is signed in to ${w.name}. Its shell starts when you sign in."
         HostShellState.APP_NOT_OPEN -> "Passthrough isn't open on ${w.name}. Open it there."
-        HostShellState.SWITCHED_OFF -> "${w.name} doesn't let ${device(w)} open shells. Turn on Shell for it in ${w.settingsPlace}."
+        // Neither host has a per-phone Shell switch: plugging in with access on is what gives a phone the shell.
+        HostShellState.SWITCHED_OFF -> "${w.name} doesn't let ${device(w)} open shells. Plug ${device(w)} into ${w.the} with ${w.feature} on to get access again."
     }
 
     fun tooManySessions(w: HostWords): String = "${w.Your} already has ${RemoteShell.MAX_SESSIONS} sessions open. End one to start another."
