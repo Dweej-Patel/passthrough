@@ -360,7 +360,7 @@ public sealed class RemoteAccess : IAccessAdmin, IDisposable
     {
         Shells = [.. Catalog.Shells],
         User = Environment.UserName,
-        IdKey = _canKeep && Identity() is { } identity ? Convert.ToBase64String(identity.PublicKey) : null,
+        IdKey = _canKeep && Identity() is { } identity ? Convert.ToHexStringLower(identity.PublicKey) : null, // lowercase hex, as host.idKey is on the wire
     };
 
     private volatile bool _canKeep;

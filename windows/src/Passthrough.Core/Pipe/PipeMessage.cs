@@ -49,6 +49,6 @@ public sealed record PipeHostState
     public int? IdleSeconds { get; init; }
     public double? Battery { get; init; }
     public bool? Charging { get; init; }
-    /// <summary>This account's identity public key (base64), when it can keep access to other computers (Windows Hello is set up).</summary>
+    /// <summary>This account's identity public key (lowercase hex, as host.idKey), when it can keep access to other computers (Windows Hello is set up).</summary>
     public string? IdKey { get; init; }
 }
