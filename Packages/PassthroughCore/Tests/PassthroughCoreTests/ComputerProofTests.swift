@@ -42,6 +42,12 @@ final class ComputerProofTests: XCTestCase {
         XCTAssertEqual(ComputerProof.binding(hex: String(repeating: "aB", count: 32)), Data(repeating: 0xAB, count: 32))
         XCTAssertNil(ComputerProof.binding(hex: String(repeating: "a", count: 62)))
         XCTAssertNil(ComputerProof.binding(hex: String(repeating: "g", count: 64)))
+        let point = P256.Signing.PrivateKey().publicKey.x963Representation
+        let hex = point.map { String(format: "%02x", $0) }.joined()
+        XCTAssertEqual(ComputerProof.publicKey(hex: hex), point)
+        // What `host.idKey` keeps after `cleaned()` is what a phone reads back.
+        XCTAssertEqual(HostInfo(kind: HostInfo.kindMac, idKey: hex).cleaned()?.idKey, hex)
+        XCTAssertNil(ComputerProof.publicKey(hex: String(hex.dropLast(2))))
     }
 
     func testIDsAndScopes() {

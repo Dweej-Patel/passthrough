@@ -497,6 +497,12 @@ public enum ComputerProof {
         return bytes(hex: hex)
     }
 
+    /// An identity public key as `host.idKey` carries it (lowercase hex of the 65-byte point); nil for anything else.
+    public static func publicKey(hex: String) -> Data? {
+        guard hex.utf8.count == 130, let key = bytes(hex: hex), isPoint(key) else { return nil }
+        return key
+    }
+
     /// Hex (either case) as bytes; nil for an odd length or a non-hex character.
     static func bytes(hex: String) -> Data? {
         let digits = Array(hex.utf8)
