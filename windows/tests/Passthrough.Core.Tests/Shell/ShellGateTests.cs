@@ -172,13 +172,30 @@ public class ShellGateTests : IAsyncDisposable
         public NetworkStream Raw => _stream;
         public Task Send(ShellEnvelope e) => _stream.WriteAsync(e.EncodeLine()).AsTask();
 
-        public async Task<ShellEnvelope?> Next()
+        private string? _lastSessions;
+
+        public Task<ShellEnvelope?> Next() => Next(skipRepeats: true);
+
+        private async Task<ShellEnvelope?> Next(bool skipRepeats)
         {
-            byte[]? line;
-            // A host that hangs up with lines unread resets the connection: that is it ending too.
-            try { line = await _reader.ReadLineAsync().WaitAsync(Patience); }
-            catch (IOException) { return null; }
-            return line is null ? null : ShellEnvelope.Decode(line);
+            while (true)
+            {
+                byte[]? line;
+                // A host that hangs up with lines unread resets the connection: that is it ending too.
+                try { line = await _reader.ReadLineAsync().WaitAsync(Patience); }
+                catch (IOException) { return null; }
+                if (line is null) return null;
+                var e = ShellEnvelope.Decode(line);
+                // Over the pipe the same session list can be pushed again as the service's snapshot arrives; a
+                // repeat of unchanged state is skipped, a changed list is not.
+                if (e.T == ShellEnvelope.Sessions)
+                {
+                    var text = System.Text.Encoding.UTF8.GetString(line);
+                    if (skipRepeats && text == _lastSessions) continue;
+                    _lastSessions = text;
+                }
+                return e;
+            }
         }
 
         public async Task<string?> NextRaw()
@@ -192,7 +209,8 @@ public class ShellGateTests : IAsyncDisposable
         {
             while (true)
             {
-                var message = await Next() ?? throw new IOException($"closed before {type}");
+                // Asked for by name, a repeated session list counts: the test is waiting for that push.
+                var message = await Next(skipRepeats: type != ShellEnvelope.Sessions) ?? throw new IOException($"closed before {type}");
                 if (message.T == type) return message;
             }
         }
@@ -241,10 +259,7 @@ public class ShellGateTests : IAsyncDisposable
         Assert.Equal(ShellEnvelope.MacState, (await phone.Next())?.T);
         Assert.Empty((await phone.Next())!.SessionList!);
         await phone.Send("{\"t\":\"ping\"}");
-        // Over the pipe the session list can be pushed again as the service's snapshot arrives: that is allowed.
-        var next = await phone.Next();
-        while (next?.T == ShellEnvelope.Sessions) next = await phone.Next();
-        Assert.Equal(ShellEnvelope.Pong, next?.T);
+        Assert.Equal(ShellEnvelope.Pong, (await phone.Next())?.T);
         Assert.Equal(["phone-a"], _gate.ConnectedPhones);
     }
 
