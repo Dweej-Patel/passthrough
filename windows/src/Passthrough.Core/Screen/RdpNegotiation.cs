@@ -40,7 +40,16 @@ public static class RdpNegotiation
 
     private static string Describe(byte[]? pdu) => pdu is null
         ? "wasn't a TPKT PDU of 11 to 1024 bytes, or the stream ended"
-        : $"was {pdu.Length} bytes, X.224 code 0x{pdu[5]:x2}, length indicator {pdu[4]}, ending {Convert.ToHexStringLower(pdu.AsSpan(Math.Max(0, pdu.Length - 8)))}";
+        : $"was {pdu.Length} bytes, X.224 code 0x{pdu[5]:x2}, length indicator {pdu[4]}, {Tail(pdu)}";
+
+    /// <summary>The negotiation structure's bytes, only when the last 8 bytes are one: otherwise they are the cookie's end, which names the account.</summary>
+    private static string Tail(byte[] pdu)
+    {
+        var tail = pdu.AsSpan(pdu.Length - 8);
+        return tail[0] is >= 1 and <= 3 && BinaryPrimitives.ReadUInt16LittleEndian(tail[2..]) == 8
+            ? $"negotiation {Convert.ToHexStringLower(tail)}"
+            : "no negotiation structure";
+    }
 
     /// <summary>One TPKT PDU (version 3, its length in bytes 2–3); null when it isn't one or is too long for a first PDU.</summary>
     internal static async Task<byte[]?> ReadPduAsync(Stream stream, CancellationToken cancel)

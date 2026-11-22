@@ -36,6 +36,20 @@ public sealed class ScreenTests
     }
 
     [Fact]
+    public async Task ARefusedRequestsCookieNeverReachesTheLog()
+    {
+        // Standard RDP security: no negotiation structure, so the request ends with the cookie naming the account.
+        var cookie = "Cookie: mstshash=dpatel\r\n"u8.ToArray();
+        var pdu = new byte[11 + cookie.Length];
+        pdu[0] = 0x03; pdu[3] = (byte)pdu.Length; pdu[4] = (byte)(pdu.Length - 5); pdu[5] = 0xE0;
+        cookie.CopyTo(pdu, 11);
+        string? why = null;
+        Assert.False(await RdpNegotiation.EnforceAsync(new Duplex(pdu), new Duplex([]), CancellationToken.None, w => why = w));
+        Assert.Contains("no negotiation structure", why);
+        Assert.DoesNotContain(Convert.ToHexStringLower("tel\r\n"u8), why!);
+    }
+
+    [Fact]
     public async Task TheFirstPdusAreCheckedBothWays()
     {
         var phone = new MemoryStream(Request(0x0B));
@@ -288,5 +302,18 @@ public sealed class ScreenTests
         rdp.State = rdp.State with { AllowRuleForPort = true }; // the owner turned Windows' rules on since
         SetupEngine.Run(SetupPlans.RemoveAll(rdp), new SetupContext { System = pc.System(), Source = FakePc.Source }, _ => { }, continuePastFailure: true);
         Assert.False(rdp.State.Denied);
+    }
+
+    [Fact]
+    public void AnAllowRuleThatWasOnBeforeSetupDoesntKeepRemoteDesktopOnAfterRemoval()
+    {
+        // Off, with Windows' own allow rule already on: Passthrough turned it on behind its block rules.
+        var rdp = new FakeRdp(Off with { AllowRuleForPort = true });
+        var (pc, result) = SetUp(rdp);
+        Assert.Equal(SetupResult.Ok, result.Result);
+        Assert.Equal(RemoteDesktopSetup.Closed, InstallState.Decode(pc.FileBytes[pc.System().Machine.StateFile])!.Rdp!.Mode);
+        Assert.False(rdp.State.Denied);
+        SetupEngine.Run(SetupPlans.RemoveAll(rdp), new SetupContext { System = pc.System(), Source = FakePc.Source }, _ => { }, continuePastFailure: true);
+        Assert.True(rdp.State.Denied); // off again before the block rules went
     }
 }

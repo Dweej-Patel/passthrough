@@ -60,4 +60,6 @@ public sealed record RemoteDesktopPrior
     public int? FDenyTSConnections { get; init; }
     public int? UserAuthentication { get; init; }
     public int? TermServiceStart { get; init; }
+    /// <summary>A rule letting the network in to Remote Desktop's port was already on (Windows' own, often): its being on at removal isn't the owner's new choice. Null: set up before this was recorded.</summary>
+    public bool? AllowRuleBefore { get; init; }
 }
