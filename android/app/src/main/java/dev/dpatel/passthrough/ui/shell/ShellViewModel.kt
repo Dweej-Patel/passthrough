@@ -259,7 +259,8 @@ class ShellViewModel(app: Application) : AndroidViewModel(app) {
         .stateIn(viewModelScope, SharingStarted.Eagerly, null)
     /** What kind of computer the selected one is (null: a kind this build doesn't know). See [Hosts.kind]. */
     val selectedKind: StateFlow<HostKind?> = combine(_hostFacts, _selectedMacID, Runtime.pairedClients, _demoPaired) { facts, id, paired, demo ->
-        id?.let { Hosts.kind(facts[it], storedKind(it, paired + demo)) } ?: HostKind.MAC
+        // No selection: a Mac (today's default). A kind this build doesn't know stays null: neutral words, only shells.
+        if (id == null) HostKind.MAC else Hosts.kind(facts[id], storedKind(id, paired + demo))
     }.stateIn(viewModelScope, SharingStarted.Eagerly, HostKind.MAC)
     /** The shell the selected computer's New shell opens, when it offers a choice; null otherwise. */
     val preferredShell: StateFlow<HostShell?> = combine(hostFacts, _lastShell, _selectedMacID) { host, last, id ->
