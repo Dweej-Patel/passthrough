@@ -188,8 +188,20 @@ public enum IrohClose { Clean, Application, Lost }
 /// Reads come off a thread of its own into a pipe, so <see cref="ReadAsync(Memory{byte}, CancellationToken)"/> never
 /// holds a pool thread; writes are serialized in the order issued.
 /// </summary>
-public sealed class IrohStream : Stream
+public sealed class IrohStream : Stream, Passthrough.Core.Shell.Serving.IStreamPath
 {
+    /// <summary>This end's home relay, for <see cref="DescribePath"/> (set by the listener that accepted it).</summary>
+    public Func<string?>? HomeRelay { get; set; }
+
+    /// <summary>"iroh, direct" or "iroh, through relay use1-1.relay.n0.iroh.link" (no addresses).</summary>
+    public string DescribePath() => CurrentPath.Path switch
+    {
+        IrohPath.Direct => "iroh, direct",
+        IrohPath.Relay => HomeRelay?.Invoke() is { } relay && Uri.TryCreate(relay, UriKind.Absolute, out var uri)
+            ? $"iroh, through relay {uri.Host.TrimEnd('.')}" : "iroh, through a relay",
+        _ => "iroh, path not settled",
+    };
+
     private const int ReadChunk = 65536;
     private readonly ulong _handle;
     private readonly Pipe _incoming = new(new PipeOptions(pauseWriterThreshold: 1 << 20, resumeWriterThreshold: 1 << 19, useSynchronizationContext: false));

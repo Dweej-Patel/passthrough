@@ -19,6 +19,13 @@ public sealed class ShellConnection : IShellAttachment
     private readonly ShellGate _gate;
     private readonly ISessionHost _host;
     private readonly Stream _stream;
+
+    /// <summary>How this connection reaches the peer now: iroh's path, or the TLS listener on this network.</summary>
+    private string PathNow()
+    {
+        try { return _stream is IStreamPath p ? p.DescribePath() : "this network (TLS)"; }
+        catch (Exception e) when (e is IOException or ObjectDisposedException or InvalidOperationException) { return "path unknown"; }
+    }
     private readonly ShellLineReader _reader;
     private readonly Channel<(byte[] Line, TaskCompletionSource? Written)> _outgoing =
         Channel.CreateUnbounded<(byte[], TaskCompletionSource?)>(new UnboundedChannelOptions { SingleReader = true });
@@ -114,7 +121,7 @@ public sealed class ShellConnection : IShellAttachment
         _view = null;
         _gate.Views.Release(PhoneId);
         if (_ticket is { } ticket) _gate.RelayRate.Closed(ticket);
-        _gate.Log?.Invoke($"screen: {Label}'s view ended ({endedBy}; {fromPhone} bytes in, {toPhone} out)");
+        _gate.Log?.Invoke($"screen: {Label}'s view ended ({endedBy}; {fromPhone} bytes in, {toPhone} out; {PathNow()} at the end)");
         _gate.Hooks.ViewEnded?.Invoke(view with { End = _gate.Time.GetUtcNow(), BytesIn = fromPhone, BytesOut = toPhone, EndedBy = endedBy });
     }
 
@@ -199,7 +206,7 @@ public sealed class ShellConnection : IShellAttachment
             await ready.Task.ConfigureAwait(false);
             if (IsClosed) return;
             _view = new Screen.RelayRecord(PhoneId, Label, account, "", _gate.Time.GetUtcNow());
-            _gate.Log?.Invoke($"screen: {Label}'s view started");
+            _gate.Log?.Invoke($"screen: {Label}'s view started ({PathNow()})");
             _gate.Hooks.ViewStarted?.Invoke(_view);
             released = true; // the view is the relay's now; it is freed when the splice ends
             // Relaying from here, before _opening clears: Screen turned off or Stop in between closes this connection.
