@@ -18,12 +18,14 @@ public struct ShellCredential: Codable, Equatable, Sendable {
     public var irohRelay: String?
     /// The relay's token, when the Mac's relay needs one. Never logged.
     public var relayToken: String?
+    /// What kind of computer granted it (`HostInfo.kindMac`, `kindWindows`); nil: a Mac that never said.
+    public var hostKind: String?
 
     public init(macID: String, macName: String, certSHA256: String, shellKey: Data, phoneID: String, port: UInt16, addresses: [String],
-                irohID: String? = nil, irohRelay: String? = nil, relayToken: String? = nil) {
+                irohID: String? = nil, irohRelay: String? = nil, relayToken: String? = nil, hostKind: String? = nil) {
         self.macID = macID; self.macName = macName; self.certSHA256 = certSHA256; self.shellKey = shellKey
         self.phoneID = phoneID; self.port = port; self.addresses = addresses
-        self.irohID = irohID; self.irohRelay = irohRelay; self.relayToken = relayToken
+        self.irohID = irohID; self.irohRelay = irohRelay; self.relayToken = relayToken; self.hostKind = hostKind
     }
 }
 
@@ -32,7 +34,8 @@ public struct ShellCredential: Codable, Equatable, Sendable {
 extension ShellCredential: CustomStringConvertible, CustomDebugStringConvertible {
     public var description: String {
         "ShellCredential(macID: \(macID), macName: \(macName), phoneID: \(phoneID), port: \(port), addresses: \(addresses), "
-            + "irohID: \(irohID ?? "none"), irohRelay: \(irohRelay ?? "none"), relayToken: \(relayToken == nil ? "none" : "<redacted>"))"
+            + "irohID: \(irohID ?? "none"), irohRelay: \(irohRelay ?? "none"), relayToken: \(relayToken == nil ? "none" : "<redacted>"), "
+            + "hostKind: \(hostKind ?? "none"))"
     }
 
     public var debugDescription: String { description }
@@ -43,7 +46,7 @@ extension ShellCredential: CustomReflectable {
     public var customMirror: Mirror {
         Mirror(self, children: ["macID": macID, "macName": macName, "phoneID": phoneID, "port": port, "addresses": addresses,
                                 "irohID": irohID as Any, "irohRelay": irohRelay as Any,
-                                "relayToken": relayToken == nil ? "none" : "<redacted>"], displayStyle: .struct)
+                                "relayToken": relayToken == nil ? "none" : "<redacted>", "hostKind": hostKind as Any], displayStyle: .struct)
     }
 }
 
@@ -150,6 +153,16 @@ public final class ShellClient: @unchecked Sendable {
         case screenPassSaved
         /// The answer to `revokeScreen`: the pass is gone.
         case screenRevoked
+        /// The host answered `requestRDP` with `rdpReady`: the stream now carries Remote
+        /// Desktop's bytes, starting with `initialBytes`, from a server whose leaf certificate
+        /// must hash to `certSHA256` (64 lowercase hex). Handed over as `.screen` is.
+        case rdp(any ByteStream, initialBytes: Data, certSHA256: String)
+        /// The host refused `requestRDP`: `detail` says why for `rdpUnavailable`, `retryAfter`
+        /// (seconds) when to try again for `tryLater`. The connection stays a shell connection.
+        case rdpRefused(ShellError, detail: String?, retryAfter: Int?)
+        /// A view of this host's screen on another of this device's connections ended on
+        /// purpose (`ShellEnvelope.screenEnded`'s `reason`: `switched_off`, `stopped`, `taken`).
+        case screenEnded(reason: String)
     }
 
     public enum ConnectError: Error, Sendable {
@@ -245,6 +258,8 @@ public final class ShellClient: @unchecked Sendable {
     private var answeredThrough = 0
     /// `requestScreen` was called: lines are read only up to `screenReady`.
     private var screenRequested = false
+    /// `requestRDP` was called and not yet answered: an `error` now is its refusal.
+    private var rdpRequested = false
     /// When the winner last delivered anything.
     private var lastHeard = DispatchTime.now()
     /// A ping is out because the winner's path failed; cleared by anything heard.
@@ -311,9 +326,12 @@ public final class ShellClient: @unchecked Sendable {
 
     public func list() { command(ShellEnvelope(t: ShellEnvelope.list)) }
 
-    public func open(cols: Int, rows: Int) {
+    /// Opens a session. `shell`: one of the host's `HostInfo.shells` ids, as listed on this
+    /// connection; nil lets the host choose (the line then has no `shell`, as before hosts named shells).
+    public func open(cols: Int, rows: Int, shell: String? = nil) {
         var m = ShellEnvelope(t: ShellEnvelope.open)
         m.cols = cols; m.rows = rows
+        m.shell = shell.flatMap { HostShell.isValidID($0) ? $0 : nil }
         opensLock.lock()
         lastOpenRef += 1
         let ref = lastOpenRef
@@ -437,6 +455,18 @@ public final class ShellClient: @unchecked Sendable {
             guard active else { return }
             screenRequested = true
             enqueue(ShellEnvelope(t: video ? ShellEnvelope.screenVideo : ShellEnvelope.screen))
+        }
+    }
+
+    /// Asks a PC for its screen through its Remote Desktop (protocol/README.md, "rdp"):
+    /// `.rdp` when it hands the connection over, or `.rdpRefused` with why it won't.
+    /// Use a client of its own for the screen, never one with a session.
+    public func requestRDP() {
+        work.async { [self] in
+            guard active else { return }
+            screenRequested = true
+            rdpRequested = true
+            enqueue(ShellEnvelope(t: ShellEnvelope.rdp))
         }
     }
 
@@ -763,6 +793,12 @@ public final class ShellClient: @unchecked Sendable {
                 emit(.transcriptResize(session: id, cols: cols, rows: rows))
             }
             emit(.transcript(session: id, data, done: message.done ?? false))
+        case ShellEnvelope.error where rdpRequested && message.ref == nil && message.session == nil:
+            // The answer to `rdp`: nothing was handed over, and lines are lines again.
+            rdpRequested = false
+            screenRequested = false
+            let reason = ShellError(rawValue: message.reason ?? "") ?? .badRequest
+            emit(.rdpRefused(reason, detail: message.detail, retryAfter: message.retryAfter))
         case ShellEnvelope.error:
             let reason = ShellError(rawValue: message.reason ?? "") ?? .badRequest
             // The Mac did not attach the session `attach` named: stop sending it input it would refuse.
@@ -792,6 +828,15 @@ public final class ShellClient: @unchecked Sendable {
             send(ShellEnvelope(t: ShellEnvelope.pong))
         case ShellEnvelope.screenReady where screenRequested, ShellEnvelope.screenVideoReady where screenRequested:
             handOver(id)
+        case ShellEnvelope.rdpReady where rdpRequested:
+            // The pin is what makes the bytes that follow safe to sign in to: without a valid one, nothing is handed over.
+            guard let pin = message.certSHA256, Self.isCertificateHash(pin) else {
+                return attemptEnded(id, ConnectError.protocolViolation)
+            }
+            rdpRequested = false
+            handOver(id, certSHA256: pin)
+        case ShellEnvelope.screenEnded:
+            emit(.screenEnded(reason: message.reason ?? ""))
         default:
             break
         }
@@ -799,12 +844,17 @@ public final class ShellClient: @unchecked Sendable {
 
     private static func isScreenReady(_ line: Data) -> Bool {
         let type = (try? ShellEnvelope.decode(line))?.t
-        return type == ShellEnvelope.screenReady || type == ShellEnvelope.screenVideoReady
+        return type == ShellEnvelope.screenReady || type == ShellEnvelope.screenVideoReady || type == ShellEnvelope.rdpReady
+    }
+
+    /// `rdpReady.certSHA256`: 64 lowercase hex digits.
+    static func isCertificateHash(_ value: String) -> Bool {
+        value.utf8.count == 64 && value.utf8.allSatisfy { (0x30...0x39).contains($0) || (0x61...0x66).contains($0) }
     }
 
     /// Gives the winning stream to the screen viewer and steps aside: no
     /// more reads, sends or events, and no `disconnected`.
-    private func handOver(_ id: Int) {
+    private func handOver(_ id: Int, certSHA256: String? = nil) {
         guard let attempt = attempts.removeValue(forKey: id), let stream = attempt.stream else { return }
         stream.onTerminated = nil
         let rest = attempt.lines.takePending()
@@ -813,7 +863,11 @@ public final class ShellClient: @unchecked Sendable {
         winner = nil
         ready = false
         queued = []
-        emit(.screen(stream, initialBytes: rest))
+        if let certSHA256 {
+            emit(.rdp(stream, initialBytes: rest, certSHA256: certSHA256))
+        } else {
+            emit(.screen(stream, initialBytes: rest))
+        }
     }
 
     private func send(_ message: ShellEnvelope) {

@@ -173,8 +173,13 @@ public struct ProviderStats: Codable, Sendable, Equatable {
         mac.wireless ?? wirelessMacTags?.contains(WirelessLink.macTag(clientID: mac.id)) ?? false
     }
 
-    /// The Macs among the connected clients (`macs` also lists iPads).
-    public var connectedMacs: [ConnectedMac] { macs.filter { $0.kind != .ipad } }
+    /// The Macs among the connected clients (`macs` also lists iPads and PCs):
+    /// the ones online through this phone.
+    public var connectedMacs: [ConnectedMac] { macs.filter { $0.kind != .ipad && $0.hostKind != HostInfo.kindWindows } }
+    /// The PCs on the cable: paired, but they don't use this phone's internet.
+    public var connectedPCs: [ConnectedMac] { macs.filter { $0.kind != .ipad && $0.hostKind == HostInfo.kindWindows } }
+    /// Every computer connected, Mac or PC.
+    public var connectedComputers: [ConnectedMac] { macs.filter { $0.kind != .ipad } }
     /// The iPads using this phone's internet over its hotspot.
     public var connectedIPads: [ConnectedMac] { macs.filter { $0.kind == .ipad } }
 }

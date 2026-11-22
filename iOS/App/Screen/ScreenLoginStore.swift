@@ -5,25 +5,27 @@ import Security
 import PassthroughCore
 import ScreenClient
 
-/// The Mac account name and password Screen Sharing asks for, remembered per
-/// Mac when the user chooses to: kept like the shell keys
-/// (`ShellKeyVault`), a data-protection Keychain item only on this device,
-/// only while a passcode is set, only after user presence, and read with the
-/// app lock's context so it never prompts a second time.
+/// The logins a screen view signs in with, remembered when the user chooses
+/// to: a Mac's account for Screen Sharing (one per Mac), and a PC's Windows
+/// accounts for Remote Desktop (one per PC and account). Kept like the shell
+/// keys (`ShellKeyVault`): a data-protection Keychain item only on this
+/// device, only while a passcode is set, only after user presence, and read
+/// with the app lock's context so it never prompts a second time.
 enum ScreenLoginStore {
     private static let service = "\(PassthroughProtocol.identifier).screen-login"
+    /// A PC's Windows accounts: account attribute `<host id>` U+001F `<account, trimmed and lowercased>`.
+    private static let windowsService = "\(PassthroughProtocol.identifier).screen-login.windows"
     private static let log = Logger(subsystem: "app.passthrough", category: "ScreenLoginStore")
 
     private struct Stored: Codable { var username: String; var password: String }
 
-    private static func query(_ macID: String) -> [CFString: Any] {
-        [kSecClass: kSecClassGenericPassword, kSecAttrService: service, kSecAttrAccount: macID, kSecUseDataProtectionKeychain: true]
+    private static func query(service: String, account: String) -> [CFString: Any] {
+        [kSecClass: kSecClassGenericPassword, kSecAttrService: service, kSecAttrAccount: account, kSecUseDataProtectionKeychain: true]
     }
 
-    /// Nil when none is saved or the context can't vouch for the user (no prompt is shown).
-    static func read(macID: String, context: LAContext) -> RFBClient.Login? {
+    private static func read(service: String, account: String, context: LAContext) -> ScreenLogin? {
         context.interactionNotAllowed = true
-        var q = query(macID)
+        var q = query(service: service, account: account)
         q[kSecReturnData] = true
         q[kSecMatchLimit] = kSecMatchLimitOne
         q[kSecUseAuthenticationContext] = context
@@ -34,18 +36,16 @@ enum ScreenLoginStore {
             if status != errSecItemNotFound && status != errSecSuccess { log.info("Screen login not read (\(status, privacy: .public))") }
             return nil
         }
-        return RFBClient.Login(username: stored.username, password: stored.password)
+        return ScreenLogin(username: stored.username, password: stored.password)
     }
 
-    /// Replaces any saved login for `macID`.
-    @discardableResult
-    static func save(_ login: RFBClient.Login, macID: String, context: LAContext) -> Bool {
+    private static func save(_ login: ScreenLogin, service: String, account: String, context: LAContext) -> Bool {
         var error: Unmanaged<CFError>?
         guard let access = SecAccessControlCreateWithFlags(nil, kSecAttrAccessibleWhenPasscodeSetThisDeviceOnly, .userPresence, &error),
               let data = try? JSONEncoder().encode(Stored(username: login.username, password: login.password)) else { return false }
-        delete(macID: macID)
+        SecItemDelete(query(service: service, account: account) as CFDictionary)
         context.interactionNotAllowed = true
-        var add = query(macID)
+        var add = query(service: service, account: account)
         add[kSecAttrAccessControl] = access
         add[kSecValueData] = data
         add[kSecUseAuthenticationContext] = context
@@ -54,7 +54,81 @@ enum ScreenLoginStore {
         return status == errSecSuccess
     }
 
+    // MARK: A Mac's Screen Sharing
+
+    /// Nil when none is saved or the context can't vouch for the user (no prompt is shown).
+    static func read(macID: String, context: LAContext) -> ScreenLogin? {
+        read(service: service, account: macID, context: context)
+    }
+
+    /// Replaces any saved login for `macID`.
+    @discardableResult
+    static func save(_ login: ScreenLogin, macID: String, context: LAContext) -> Bool {
+        save(login, service: service, account: macID, context: context)
+    }
+
     static func delete(macID: String) {
-        SecItemDelete(query(macID) as CFDictionary)
+        SecItemDelete(query(service: service, account: macID) as CFDictionary)
+    }
+
+    // MARK: A PC's Windows accounts
+
+    /// An account as the store keys it: trimmed, lowercased.
+    static func accountKey(_ account: String) -> String { account.trimmingCharacters(in: .whitespaces).lowercased() }
+
+    private static func windowsAccount(hostID: String, account: String) -> String { hostID + "\u{1F}" + accountKey(account) }
+    /// Names only (not secret): which accounts have a login saved, and the last one used. A protected
+    /// item can't be listed without a prompt, so this index says what is there.
+    private static func accountsKey(_ hostID: String) -> String { "screenLoginAccounts.\(hostID)" }
+    private static func lastKey(_ hostID: String) -> String { "screenLoginLast.\(hostID)" }
+
+    /// The accounts with a login saved for this PC (as the store keys them).
+    static func savedAccounts(hostID: String) -> [String] {
+        UserDefaults.standard.stringArray(forKey: accountsKey(hostID)) ?? []
+    }
+
+    /// The account last signed in with on this PC, as typed.
+    static func lastAccount(hostID: String) -> String? {
+        UserDefaults.standard.string(forKey: lastKey(hostID))
+    }
+
+    static func setLastAccount(_ account: String, hostID: String) {
+        UserDefaults.standard.set(account.trimmingCharacters(in: .whitespaces), forKey: lastKey(hostID))
+    }
+
+    /// Nil when none is saved for that account or the context can't vouch for the user (no prompt is shown).
+    static func readWindows(hostID: String, account: String, context: LAContext) -> ScreenLogin? {
+        guard savedAccounts(hostID: hostID).contains(accountKey(account)) else { return nil }
+        return read(service: windowsService, account: windowsAccount(hostID: hostID, account: account), context: context)
+    }
+
+    /// Replaces any saved login for this PC and the login's account.
+    @discardableResult
+    static func saveWindows(_ login: ScreenLogin, hostID: String, context: LAContext) -> Bool {
+        guard save(login, service: windowsService, account: windowsAccount(hostID: hostID, account: login.username), context: context) else {
+            return false
+        }
+        var accounts = savedAccounts(hostID: hostID)
+        let key = accountKey(login.username)
+        if !accounts.contains(key) { accounts.append(key) }
+        UserDefaults.standard.set(accounts, forKey: accountsKey(hostID))
+        return true
+    }
+
+    static func deleteWindows(hostID: String, account: String) {
+        SecItemDelete(query(service: windowsService, account: windowsAccount(hostID: hostID, account: account)) as CFDictionary)
+        let key = accountKey(account)
+        let accounts = savedAccounts(hostID: hostID).filter { $0 != key }
+        UserDefaults.standard.set(accounts, forKey: accountsKey(hostID))
+    }
+
+    /// Every login saved for this computer: it was forgotten, or its access was revoked.
+    static func deleteAll(hostID: String) {
+        delete(macID: hostID)
+        for account in savedAccounts(hostID: hostID) {
+            SecItemDelete(query(service: windowsService, account: hostID + "\u{1F}" + account) as CFDictionary)
+        }
+        UserDefaults.standard.removeObject(forKey: accountsKey(hostID))
+        UserDefaults.standard.removeObject(forKey: lastKey(hostID))
     }
 }

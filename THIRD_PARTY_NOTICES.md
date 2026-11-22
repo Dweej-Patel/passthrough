@@ -8,6 +8,12 @@ Third-party components distributed with this repository keep their own licences:
   linked into the Mac's root helper, and HevSocks5Tunnel.xcframework (iOS device
   and simulator), linked into the iOS tunnel extension, which uses it on iPad for
   Internet through iPhone. See Vendor/HevSocks5Tunnel/LICENSES.md.
+* Vendor/FreeRDP — FreeRDP 3.33.1 and its WinPR (Apache-2.0), OpenSSL 3.5.9 (Apache-2.0).
+  Built by scripts/build-freerdp.sh from checksum-pinned release archives into
+  FreeRDP.xcframework (iOS device, simulator and Apple Silicon macOS), one static
+  library per slice with Passthrough's shim; linked into the iPhone and iPad app
+  only when present, to show a PC's screen through Remote Desktop. See
+  Vendor/FreeRDP/LICENSES.md.
 * Vendor/VPNEngines/bin/wireguard-go — MIT. See Vendor/VPNEngines/licenses/WIREGUARD-GO-LICENSE.
 * Vendor/VPNEngines/bin/openvpn — GPL-2.0 with the OpenSSL linking exception.
   See Vendor/VPNEngines/licenses/OPENVPN-COPYING. Source is fetched and rebuilt by

@@ -54,6 +54,10 @@ targets:
         product: IrohTransport
       - package: PassthroughCore
         product: ScreenClient
+      # Remote Desktop to a PC. App only: never link it into an extension. Carries the
+      # engine (Vendor/FreeRDP/FreeRDP.xcframework) only when the package found it there.
+      - package: PassthroughCore
+        product: RemoteDesktop
       - package: SwiftTerm
         product: SwiftTerm
       - target: PassthroughTunnel

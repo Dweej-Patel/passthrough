@@ -1,5 +1,12 @@
 // swift-tools-version: 5.10
+import Foundation
 import PackageDescription
+
+/// The Remote Desktop engine (scripts/build-freerdp.sh) is built by hand and
+/// committed separately: until it is there, `RemoteDesktop` builds without it
+/// (its backend is `#if canImport(FreeRDP)`) and the app shows no PC screen.
+let freeRDPPresent = FileManager.default.fileExists(
+    atPath: URL(fileURLWithPath: Context.packageDirectory).appendingPathComponent("../../Vendor/FreeRDP/FreeRDP.xcframework").path)
 
 let package = Package(
     name: "PassthroughCore",
@@ -16,6 +23,8 @@ let package = Package(
         .library(name: "IrohTransport", targets: ["IrohTransport"]),
         .library(name: "ScreenClient", targets: ["ScreenClient"]),
         .library(name: "ScreenHost", targets: ["ScreenHost"]),
+        // Remote Desktop to a PC. App only: never link it into an extension.
+        .library(name: "RemoteDesktop", targets: ["RemoteDesktop"]),
         .executable(name: "passthrough-devserver", targets: ["passthrough-devserver"]),
         .executable(name: "passthrough-term", targets: ["passthrough-term"]),
     ],
@@ -75,5 +84,20 @@ let package = Package(
             "IrohTransport",
             .product(name: "IrohLib", package: "iroh-ffi"),
         ]),
+        .testTarget(name: "RemoteDesktopTests", dependencies: ["RemoteDesktop", "ScreenClient", "PassthroughCore"]),
     ]
 )
+
+// A PC's screen through its Remote Desktop: the backend over the engine when the
+// engine is there; the pure parts (the certificate pin, the key table) always.
+let remoteDesktop = Target.target(name: "RemoteDesktop", dependencies: ["ScreenClient", "PassthroughCore"])
+if freeRDPPresent {
+    package.dependencies.append(.package(path: "../../Vendor/FreeRDP"))
+    remoteDesktop.dependencies.append(.product(name: "FreeRDP", package: "FreeRDP"))
+    remoteDesktop.linkerSettings = [
+        .linkedFramework("VideoToolbox"), .linkedFramework("CoreMedia"), .linkedFramework("CoreVideo"),
+        .linkedFramework("CoreFoundation"), .linkedFramework("Foundation"), .linkedFramework("Security"),
+        .linkedFramework("IOKit", .when(platforms: [.macOS])), .linkedFramework("Carbon", .when(platforms: [.macOS])),
+    ]
+}
+package.targets.append(remoteDesktop)

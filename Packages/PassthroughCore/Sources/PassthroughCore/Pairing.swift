@@ -66,6 +66,9 @@ public struct PairedClient: Codable, Identifiable, Equatable, Sendable {
     public var linkCertificate: String?
     /// How to reach this Mac's shell listener, once it granted a shell key over the cable.
     public var shell: ShellGrant?
+    /// What kind of computer it said it is (`HostInfo.kindMac`, `kindWindows`), from an
+    /// authenticated `hello`, its grant or a live `host`; nil from computers that never said (Macs).
+    public var hostKind: String?
 
     public init(id: String, name: String, kind: ClientKind? = nil, tokenHash: String, pairedAt: Date, lastSeen: Date? = nil) {
         self.id = id; self.name = name; self.kind = kind; self.tokenHash = tokenHash; self.pairedAt = pairedAt; self.lastSeen = lastSeen
@@ -290,6 +293,20 @@ public final class PairingRegistry: @unchecked Sendable {
         notify_post(Self.changedNotification)
     }
 
+    /// Records what kind of computer `clientID` says it is. Called only with what an
+    /// authenticated peer said. No-op (false) for an unknown id, an iPad, a kind this
+    /// build doesn't know, or an unchanged value.
+    @discardableResult
+    public func noteHostKind(clientID: String, kind: String?) -> Bool {
+        guard Hosts.isRecordable(kind) else { return false }
+        lock.lock(); defer { lock.unlock() }
+        var list = loadClients()
+        guard let i = list.firstIndex(where: { $0.id == clientID }), !list[i].isIPad, list[i].hostKind != kind else { return false }
+        list[i].hostKind = kind
+        save(list)
+        return true
+    }
+
     // MARK: Pairing code
 
     /// Generates a fresh six digit code, valid for `PassthroughProtocol.pairingCodeLifetime`.
@@ -379,7 +396,7 @@ public final class PairingRegistry: @unchecked Sendable {
         defaults.removeObject(forKey: Self.codeExpiryKey)
         lock.unlock()
         onChange?()
-        ptLog(.info, "Paired Mac \(name)")
+        ptLog(.info, "Paired \(name)")
         return .success(token)
     }
 

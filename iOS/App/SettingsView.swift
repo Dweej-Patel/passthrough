@@ -131,11 +131,11 @@ private struct RemoteShellSettings: View {
         let shellMacs = granting.isEmpty ? shell.macs.map { (id: $0.macID, name: $0.macName) } : granting
         Section {
             if shellMacs.isEmpty {
-                ShellSetupSteps(paired: !model.pairedClients.isEmpty)
+                ShellSetupSteps(paired: !model.pairedClients.isEmpty, words: model.pairedClients.isEmpty ? .generic(device: ThisDevice.name) : shell.words)
                     .padding(.vertical, 6)
             } else {
                 LabeledContent("Status") {
-                    ShellStatusLabel(reach: shell.reach)
+                    ShellStatusLabel(reach: shell.reach, kind: shell.selectedKind)
                 }
                 LabeledContent("Allowed by", value: ListFormatter.localizedString(byJoining: shellMacs.map(\.name)))
             }

@@ -71,7 +71,7 @@ struct MacSwitcherSheet: View {
                     }
                     PTSurface(padding: 6) {
                         VStack(spacing: 0) {
-                            actionRow("Add a Mac", systemImage: "plus") { close(then: .addMac) }
+                            actionRow("Add a computer", systemImage: "plus") { close(then: .addMac) }
                             Divider().padding(.leading, 62)
                             actionRow("Settings", systemImage: "gearshape") { close(then: .settings) }
                         }
@@ -82,7 +82,7 @@ struct MacSwitcherSheet: View {
                 .padding(.bottom, 24)
             }
             .background(PTColor.background)
-            .navigationTitle("Your Macs")
+            .navigationTitle("Your computers")
             .navigationBarTitleDisplayMode(.inline)
         }
         .presentationDetents([.medium, .large])
@@ -102,7 +102,7 @@ struct MacSwitcherSheet: View {
                     .accessibilityHidden(true)   // the name beside it says the same
                 VStack(alignment: .leading, spacing: 2) {
                     Text(row.name).font(.body.weight(.semibold)).lineLimit(1)
-                    Text(MacProfiles.statusText(status, now: .now))
+                    Text(MacProfiles.statusText(status, now: .now, kind: shell.kind(of: row.id), showKind: shell.mixedKinds))
                         .font(.caption)
                         .foregroundStyle(isAsking ? PTColor.attentionText : Color.secondary)
                         .lineLimit(1)
