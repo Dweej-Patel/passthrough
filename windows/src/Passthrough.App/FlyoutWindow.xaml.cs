@@ -55,7 +55,16 @@ public sealed partial class FlyoutWindow : Window
         RemotePanel.SizeChanged += (_, _) => FitIfOpen();
         // The last tab chosen, as it was left.
         Tabs.SelectedItem = ViewModel.SelectedTab == 1 ? RemoteTab : ThisPcTab;
-        ViewModel.PropertyChanged += (_, _) => DispatcherQueue.TryEnqueue(FitIfOpen);
+        ViewModel.PropertyChanged += (_, e) =>
+        {
+            // The remembered tab is known only once Remote access is attached, after this window was built: the bar follows the panels.
+            if (e.PropertyName == nameof(SessionViewModel.SelectedTab))
+            {
+                var tab = ViewModel.SelectedTab == 1 ? RemoteTab : ThisPcTab;
+                if (Tabs.SelectedItem != tab) Tabs.SelectedItem = tab;
+            }
+            DispatcherQueue.TryEnqueue(FitIfOpen);
+        };
         AppWindow.Closing += (_, args) =>
         {
             // Closing hides: the window is reused until the app quits.
@@ -211,6 +220,25 @@ public sealed partial class FlyoutWindow : Window
             _ => QuitChoice.Cancel,
         };
     }
+
+    /// <summary>Quit and turn off didn't turn it off (the prompt was declined, or setup failed): quit anyway, or stay.</summary>
+    public async Task<bool> AskQuitAnywayAsync(string said)
+    {
+        if (!AppWindow.IsVisible) ShowAtTray();
+        var dialog = new ContentDialog
+        {
+            XamlRoot = Content.XamlRoot,
+            Title = "Remote access is still on",
+            Content = new TextBlock { Text = $"{said} Phones can still reach this PC's screen if you quit now.", TextWrapping = TextWrapping.Wrap },
+            PrimaryButtonText = "Quit anyway",
+            CloseButtonText = "Cancel",
+            DefaultButton = ContentDialogButton.Close,
+        };
+        return await dialog.ShowAsync() == ContentDialogResult.Primary;
+    }
+
+    /// <summary>Quit was chosen again while its question is up: the question is shown, wherever the flyout went.</summary>
+    public void ShowQuestion() => OpenFromNotification();
 
     private async Task Answer(object sender, bool act)
     {

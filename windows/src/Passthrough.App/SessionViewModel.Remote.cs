@@ -114,7 +114,7 @@ public sealed partial class SessionViewModel
         foreach (var name in new[]
         {
             nameof(RemoteTabTitle), nameof(ReachLine), nameof(OnThisPcVisibility), nameof(NobodyHereVisibility), nameof(ViewersVisibility),
-            nameof(TabsVisibility), nameof(HasRemote), nameof(RemoteEnabled), nameof(ThisPcVisibility), nameof(RemoteVisibility),
+            nameof(TabsVisibility), nameof(HasRemote), nameof(RemoteEnabled), nameof(SelectedTab), nameof(ThisPcVisibility), nameof(RemoteVisibility),
         }) Raise(name);
         RaiseHeader();
         _ = ShowStayAwakeAsync();

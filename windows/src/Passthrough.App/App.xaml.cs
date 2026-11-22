@@ -227,7 +227,13 @@ public partial class App : Application
     /// </summary>
     private async void RequestQuit()
     {
-        if (_askingToQuit || _shuttingDown || _flyout is null) return;
+        if (_shuttingDown || _flyout is null) return;
+        if (_askingToQuit)
+        {
+            // The flyout hid when it lost focus, with the question still up in it.
+            _flyout.ShowQuestion();
+            return;
+        }
         if (_flyout.ViewModel.QuitQuestion is not { } question)
         {
             Quit();
@@ -242,7 +248,12 @@ public partial class App : Application
                     Quit();
                     break;
                 case QuitChoice.QuitAndTurnOff:
-                    if (await _flyout.ViewModel.TurnOffRemoteAsync() is { } said) LogFile.Write($"quit: Remote access stays on ({said})");
+                    // Not turned off (declined, or it failed): said, and quitting is asked again rather than done silently.
+                    if (await _flyout.ViewModel.TurnOffRemoteAsync() is { } said)
+                    {
+                        LogFile.Write($"quit: Remote access stays on ({said})");
+                        if (!await _flyout.AskQuitAnywayAsync(said)) break;
+                    }
                     Quit();
                     break;
             }

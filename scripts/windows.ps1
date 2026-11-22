@@ -43,6 +43,8 @@ param(
 )
 $ErrorActionPreference = 'Stop'
 $Root = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
+# Resolved once, as PowerShell resolves it: the folder checked is the folder built and run from.
+$Output = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($Output)
 $ProgramRoot = Join-Path $env:ProgramFiles 'Passthrough'
 $Launcher = Join-Path $ProgramRoot 'Passthrough.Service.exe'
 $SetupLog = Join-Path $env:ProgramData 'Passthrough\logs\setup.log'
@@ -115,18 +117,30 @@ function Get-OtherWriters([string]$path) {
     $trusted = @('S-1-5-18', 'S-1-5-32-544', 'S-1-3-0', $me,
         'S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464') # SYSTEM, Administrators, CREATOR OWNER, you, TrustedInstaller
     # In the folder itself anything that writes counts; above it, only what could rename or replace the way down to it.
-    $writeRights = [System.Security.AccessControl.FileSystemRights]'WriteData, AppendData, Delete, DeleteSubdirectoriesAndFiles, ChangePermissions, TakeOwnership'
-    $replaceRights = [System.Security.AccessControl.FileSystemRights]'Delete, DeleteSubdirectoriesAndFiles, ChangePermissions, TakeOwnership'
+    # GENERIC_ALL (0x10000000) and GENERIC_WRITE (0x40000000) as stored, often on inheritable rules, count as what they mean.
+    $writeRights = [int][System.Security.AccessControl.FileSystemRights]'WriteData, AppendData, Delete, DeleteSubdirectoriesAndFiles, ChangePermissions, TakeOwnership' -bor 0x50000000
+    $replaceRights = [int][System.Security.AccessControl.FileSystemRights]'Delete, DeleteSubdirectoriesAndFiles, ChangePermissions, TakeOwnership' -bor 0x10000000
+    $inherits = [System.Security.AccessControl.InheritanceFlags]'ContainerInherit, ObjectInherit'
     $target = $true
     $found = [System.Collections.Generic.List[string]]::new()
     $dir = [System.IO.DirectoryInfo]::new([System.IO.Path]::GetFullPath($path))
     while ($dir) {
         if ($dir.Exists) {
             $acl = Get-Acl -LiteralPath $dir.FullName
+            # Whoever owns a folder can rewrite its permissions.
+            $owner = $acl.GetOwner([System.Security.Principal.SecurityIdentifier]).Value
+            if ($trusted -notcontains $owner) {
+                try { $name = ([System.Security.Principal.SecurityIdentifier]$owner).Translate([System.Security.Principal.NTAccount]).Value } catch { $name = $owner }
+                $found.Add("$name owns $($dir.FullName)")
+            }
             foreach ($rule in $acl.GetAccessRules($true, $true, [System.Security.Principal.SecurityIdentifier])) {
                 if ($rule.AccessControlType -ne 'Allow') { continue }
-                if ($rule.PropagationFlags -band [System.Security.AccessControl.PropagationFlags]::InheritOnly) { continue }
-                if (($rule.FileSystemRights -band $(if ($target) { $writeRights } else { $replaceRights })) -eq 0) { continue }
+                # An inherit-only rule gives nothing on this folder but everything on what is made inside it: in the
+                # folder itself (the build is made there) that counts; above it, it reaches down as an inherited rule.
+                if ($rule.PropagationFlags -band [System.Security.AccessControl.PropagationFlags]::InheritOnly) {
+                    if (-not $target -or ($rule.InheritanceFlags -band $inherits) -eq 0) { continue }
+                }
+                if (([int]$rule.FileSystemRights -band $(if ($target) { $writeRights } else { $replaceRights })) -eq 0) { continue }
                 $sid = $rule.IdentityReference.Value
                 if ($trusted -contains $sid) { continue }
                 try { $name = ([System.Security.Principal.SecurityIdentifier]$sid).Translate([System.Security.Principal.NTAccount]).Value } catch { $name = $sid }
@@ -160,7 +174,10 @@ function Invoke-Elevated([string]$exe, [string[]]$arguments, [string]$what) {
     try {
         $process = Start-Process -FilePath $exe -ArgumentList $arguments -Verb RunAs -Wait -PassThru
     }
-    catch { Fail "The administrator prompt was declined, so nothing was changed." }
+    catch {
+        if (-not (Test-Path -LiteralPath $exe)) { Fail "$exe is missing, so nothing was changed." }
+        Fail "The administrator prompt was declined, so nothing was changed."
+    }
     $result = Get-Content $SetupLog -Tail 50 -ErrorAction SilentlyContinue | Where-Object { $_ -match '"result"' } | Select-Object -Last 1
     if ($process.ExitCode -ne 0) {
         $said = if ($result -match '"error":"([^"]*)"') { $Matches[1] } else { "it stopped with code $($process.ExitCode); see $SetupLog" }
@@ -172,6 +189,11 @@ function Invoke-Elevated([string]$exe, [string[]]$arguments, [string]$what) {
 function Invoke-Build {
     if (-not (Find-Dotnet)) { Fail 'The .NET 10 SDK is missing. Run: scripts/windows.ps1 deps' }
     if (-not (Find-Cargo)) { Fail 'Rust is missing. Run: scripts/windows.ps1 deps' }
+    # The build replaces the folder: only one it made before (files.json) or an empty one may be used, never, say, Documents.
+    if ((Test-Path -LiteralPath $Output) -and -not (Test-Path -LiteralPath (Join-Path $Output 'files.json')) -and
+        (Get-ChildItem -LiteralPath $Output -Force | Select-Object -First 1)) {
+        Fail "$Output already holds other files, and building there would delete them. Pick an empty or new folder for -Output."
+    }
     Assert-OnlyYouCanWrite 'The source folder' $Root
     Assert-OnlyYouCanWrite 'The build folder' $Output
     if ($WhatIf) { Say "   would build $Root into $Output"; return }
@@ -179,10 +201,14 @@ function Invoke-Build {
     $dotnet = Find-Dotnet
     $env:PATH = "$(Split-Path $dotnet);$(Split-Path (Find-Cargo));$env:PATH"
     New-Item -ItemType Directory -Force $Output | Out-Null
+    # The bundle build's publish rewrites two lock files for win-x64; they are put back only if nobody had changed them.
+    $locks = @('windows/src/Passthrough.Core/packages.lock.json', 'windows/src/Passthrough.Windows/packages.lock.json')
+    git -C $Root diff --quiet -- @locks 2>$null
+    $locksClean = $LASTEXITCODE -eq 0
     try { & (Join-Path $Root 'scripts\build-windows.ps1') -Output $Output }
     catch { Fail "The build failed: $($_.Exception.Message) The errors are above." }
-    # The bundle build's publish rewrites two lock files for win-x64; the repo keeps them as they were.
-    git -C $Root checkout -- windows/src/Passthrough.Core/packages.lock.json windows/src/Passthrough.Windows/packages.lock.json 2>$null
+    if ($locksClean) { git -C $Root checkout -- @locks 2>$null }
+    else { Warn 'The two packages.lock.json files had your own changes, so the build''s rewrite of them is left for you to check.' }
     Good "Built $((Get-Content (Join-Path $Output 'files.json') -Raw | ConvertFrom-Json).build)"
 }
 
@@ -295,9 +321,9 @@ function Invoke-Deps {
     Say 'Open a new terminal if a command above was just installed, so PATH has it.'
 }
 
-function Invoke-Install {
+function Invoke-Install([bool]$built = $false) {
     if (Get-Installed) { Say 'Remote access is already set up here; installing again repairs it and keeps the phones'' access.' }
-    Invoke-Build
+    if (-not $built) { Invoke-Build }
     $arguments = @('--install')
     if ($Screen) { $arguments += '--screen' }
     Invoke-Elevated (Join-Path $Output 'Passthrough.Service.exe') $arguments $(if ($Screen) { 'Setting up Remote access and the screen' } else { 'Setting up Remote access' })
@@ -355,10 +381,15 @@ switch ($Verb) {
     'reinstall' {
         if ($Clean) {
             Say 'A clean reinstall removes everything first: every phone must be plugged in again afterwards.'
+            # Built first: a build that fails (or is refused) leaves the current install as it was.
+            Invoke-Build
             Invoke-Remove $false
+            Invoke-Install $true
         }
-        else { Say 'Reinstalling over the current install: it is repaired, and the phones keep their access.' }
-        Invoke-Install
+        else {
+            Say 'Reinstalling over the current install: it is repaired, and the phones keep their access.'
+            Invoke-Install
+        }
     }
     'off' {
         if (-not (Get-Installed)) { Fail 'Remote access isn''t set up here.' }
