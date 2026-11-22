@@ -28,4 +28,10 @@ public sealed class ComputerAccessRow(PipeComputer computer)
         : "The phone gave it the shell only. To give it the screen too, share again from the phone.";
 
     public string Glyph => computer.Kind == "mac" ? Glyphs.Laptop : Glyphs.Desktop;
+
+    /// <summary>Allow screen while it waits for you; Turn off screen once it may see it; nothing when it was given the shell only.</summary>
+    public string ScreenAction { get; } = computer.Screen ? "Turn off screen" : computer.ScreenPending ? "Allow screen" : "";
+    public Microsoft.UI.Xaml.Visibility ScreenActionVisibility => ScreenAction.Length > 0 ? Microsoft.UI.Xaml.Visibility.Visible : Microsoft.UI.Xaml.Visibility.Collapsed;
+    public string ScreenActionName => $"{ScreenAction} for {computer.Name}";
+    public string RevokeName => $"Revoke {computer.Name}";
 }

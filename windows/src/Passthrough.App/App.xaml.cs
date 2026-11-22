@@ -127,10 +127,10 @@ public partial class App : Application
             var viewModel = new SessionViewModel(_session, settings, DispatcherQueue.GetForCurrentThread(),
                 settings.Get("androidEnabled") != "false", settings.Notice);
             // The icon first: if the flyout fails to build, the failure path below still has something to take down.
-            _tray = new TrayIcon(ToggleFlyout, ShowSettings, Quit, () => _ui?.TryEnqueue(() => _flyout?.OpenFromNotification()));
+            _tray = new TrayIcon(ToggleFlyout, () => ShowSettings(null), RequestQuit, () => _ui?.TryEnqueue(() => _flyout?.OpenFromNotification()));
             // A phone's view resizing this session can leave the taskbar under other windows; it is put back on top.
             _taskbar = new TaskbarKeeper(LogFile.Write);
-            _flyout = new FlyoutWindow(viewModel, ShowSettings, Quit);
+            _flyout = new FlyoutWindow(viewModel, ShowSettings, RequestQuit);
             var remote = _remote;
             remote.NoticesChanged += () =>
             {
@@ -143,6 +143,7 @@ public partial class App : Application
             viewModel.NewShell = remote.OpenShellAsync;
             viewModel.RemoveComputer = c => remote.Reach.RemoveAsync(c.HostId);
             viewModel.OpenScreen = ShowScreen;
+            viewModel.Attach(remote);
             _ui = DispatcherQueue.GetForCurrentThread();
             // Raised after the elevated setup, on a pool thread: the UI's queue is the one captured here.
             remote.HandOffWanted += launcher => _ui?.TryEnqueue(() => HandOff(launcher));
@@ -201,11 +202,12 @@ public partial class App : Application
             if (!_announced.Add(notice.Id)) continue;
             if (notice.Kind is Passthrough.Core.Pipe.PipeNotice.Granted or Passthrough.Core.Pipe.PipeNotice.ComputerScreenPending
                 or Passthrough.Core.Pipe.PipeNotice.ComputerGranted or Passthrough.Core.Pipe.PipeNotice.Exposed)
-                _tray?.Notify(notice.Kind == Passthrough.Core.Pipe.PipeNotice.Exposed ? "Remote Desktop is open" : "Passthrough needs you", notice.Text);
+                _tray?.Notify(NoticeRow.ToastTitle(notice), notice.Text);
         }
     }
 
-    private void ShowSettings()
+    /// <summary>Opens Settings, on <paramref name="page"/> when given (<see cref="SettingsWindow.RemotePage"/> and the rest).</summary>
+    private void ShowSettings(string? page)
     {
         if (_session is null || _flyout is null || _shuttingDown) return;
         if (_settings is null)
@@ -213,7 +215,40 @@ public partial class App : Application
             _settings = new SettingsWindow(_flyout.ViewModel, _remote);
             _settings.Closed += (_, _) => _settings = null;
         }
+        if (page is not null) _settings.ShowPage(page);
         _settings.BringToFront();
+    }
+
+    private bool _askingToQuit;
+
+    /// <summary>
+    /// Quit from the tray or the flyout: asked first when it would end phones' shells or leave Remote access on (the
+    /// screen stays reachable), with the choice to turn Remote access off too. The hand-off after Turn on quits without asking.
+    /// </summary>
+    private async void RequestQuit()
+    {
+        if (_askingToQuit || _shuttingDown || _flyout is null) return;
+        if (_flyout.ViewModel.QuitQuestion is not { } question)
+        {
+            Quit();
+            return;
+        }
+        _askingToQuit = true;
+        try
+        {
+            switch (await _flyout.AskQuitAsync(question, _flyout.ViewModel.RemoteEnabled))
+            {
+                case QuitChoice.Quit:
+                    Quit();
+                    break;
+                case QuitChoice.QuitAndTurnOff:
+                    if (await _flyout.ViewModel.TurnOffRemoteAsync() is { } said) LogFile.Write($"quit: Remote access stays on ({said})");
+                    Quit();
+                    break;
+            }
+        }
+        catch (Exception e) { LogFile.Error(e); }
+        finally { _askingToQuit = false; }
     }
 
     private Microsoft.UI.Dispatching.DispatcherQueue? _ui;

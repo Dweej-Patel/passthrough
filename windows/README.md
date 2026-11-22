@@ -76,7 +76,7 @@ To work in Visual Studio, use Visual Studio 2026 (18.0 or later) with the WinUI 
    - points Start at login and the Start menu at the installed copy.
 
    The copy you started then hands over to the installed one and quits.
-3. **Plug each phone in once.** Unlock it, trust the PC, open Passthrough and pair with the six-digit code shown in the flyout. A phone that is paired and plugged in while Remote access is on gets shell access. Settings ▸ Remote access ▸ *Phones with access* lists it.
+3. **Plug each phone in once.** Unlock it, trust the PC, open Passthrough and pair with the six-digit code shown in the flyout. A phone that is paired and plugged in while Remote access is on gets shell access. Its row in Settings ▸ Remote access ▸ *Phones* then has *Screen*, *Share*, **Stop** and **Revoke…**.
 4. **Set up the screen (optional).** In Settings ▸ Remote access ▸ *Screen, through Remote Desktop*, choose **Set up…**. Windows asks for an administrator once more. Passthrough then:
    - adds its own firewall rules that block Remote Desktop's port (TCP and UDP, every network profile);
    - requires Network Level Authentication;
@@ -84,7 +84,7 @@ To work in Visual Studio, use Visual Studio 2026 (18.0 or later) with the WinUI 
    - turns Remote Desktop on.
 
    If Remote Desktop was already open to your network, Passthrough leaves it as it was; the row says so and offers **Close it to the network**.
-5. **Allow the screen for a phone.** When a phone first gets access, a notice in the flyout offers **Allow screen**. You can also tick *Screen* beside the phone in *Phones with access*. On the phone, the first time it opens the screen, type your Windows password. The phone keeps it behind Face ID.
+5. **Allow the screen for a phone.** When a phone first gets access, a notice in the flyout offers **Allow screen**. You can also tick *Screen* in the phone's row under Settings ▸ Remote access ▸ *Phones*. On the phone, the first time it opens the screen, type your Windows password. The phone keeps it behind Face ID.
 
 Each Windows account that turns Remote access on is added to the accounts the service serves. A phone only ever reaches the account that granted it.
 
@@ -118,22 +118,34 @@ The other verbs are what Settings runs for you (`--configure screen`, `screen-cl
 
 ## Using it
 
-**The flyout** shows:
-- the phones on the cable, with the pairing code box when one needs it;
-- notices that wait for you: a phone or computer was given access, Remote Desktop was found open to the network, and so on;
-- *Your computers*.
+**The flyout.** At the top, always in view:
+- a header saying what Remote access is doing: off, reachable, needs a look (with why), or who is on the PC now ("*iPhone* has 2 shells open");
+- notices that wait for you, each with its button: **Allow screen** / **Not now** for a phone or computer given access, **Revoke…** (asks first) / **OK** for a computer let in, and **Open Settings** when Remote Desktop was found open to the network;
+- anyone viewing the screen, with **Stop**.
 
-The tray icon gets an amber dot, and Windows shows a notification, when a notice needs you.
+Below that, two tabs, and the flyout remembers which one you left open:
+- **This PC:** the phones on the cable, with the pairing code box when one needs it, and *Stay awake while plugged in*.
+- **Remote** (*Remote · 2* while two devices are on the PC):
+  - a line saying who can reach this PC, which opens Settings ▸ Remote access;
+  - *On this PC now*: each phone or computer connected, with shells open or viewing, and **Stop**, which ends its shells and any view and keeps its access;
+  - *Your computers* (below).
 
-**Settings ▸ Remote access:**
-- *Use this PC's shell from your phones*: Remote access on or off, with a line saying how phones reach the PC: on this network, from anywhere, through which relay.
-- *Screen, through Remote Desktop*: its state in one sentence, and the one button that fixes it: **Set up…**, **Turn on**, **Close it**, **Require it** or **Try again**.
-- *Stay awake while plugged in*: a PC that sleeps can't answer. While a phone is connected the PC stays awake anyway.
-- *Keep shell history*: what phones' shells showed, kept for you to look back at. Only your Windows account can open it. You can also delete it.
-- *Relay*: your own iroh relay and its token, or empty for n0's public relays. *Reset this PC's identity…* gives the PC a new identity, and every phone loses its access with the old one. Plug each phone in again to give it access.
-- *Phones with access*: per phone, *Screen* (may see the screen), *Share* (may give your other computers access here), **Stop** (ends its shells and views now) and **Revoke**.
-- *Computers with access*: computers a phone gave access to this PC, with *Screen* (a computer's screen waits for you to allow it here) and **Revoke…**.
-- *Paired phones*: every cable pairing, with **Forget pairing**.
+The tray icon gets an amber dot, and Windows shows a notification titled with what happened, when a notice needs you. Esc closes the flyout.
+
+**Quit** asks first when phones have shells open or Remote access is on: **Quit**, **Quit and turn off Remote access**, or **Cancel**. Quitting ends the phones' shells; the screen stays reachable while Remote access is on.
+
+**Settings** has four pages:
+- **General:** *Start at login*, *Android support*.
+- **Remote access:**
+  - *Use this PC's shell from your phones* turns Remote access on or off, with a line saying how phones reach the PC. The first time, *Set up the screen too* (ticked) sets up Remote Desktop behind the same administrator prompt. Where the screen can't be set up (Windows Home, another firewall), Remote access still turns on and the line says why.
+  - *Screen, through Remote Desktop*: its state in one sentence, and the one button that fixes it: **Set up…**, **Turn on**, **Close it**, **Require it** or **Try again**.
+  - *Stay awake while plugged in*: a PC that sleeps can't answer. While a phone is connected the PC stays awake anyway.
+  - *Phones*: one row per phone paired with this PC. Each row has *Screen* (may see the screen), *Share* (may give your other computers access here), **Stop**, **Revoke…** (takes its access away; it stays paired) and **Forget…** (forgets the pairing and the access).
+- **Your computers:** *Computers with access*, the computers a phone gave access to this PC. Each has **Allow screen** while its screen waits for you (**Turn off screen** once it may see it) and **Revoke…**.
+- **Advanced:**
+  - *Keep shell history*: what phones' shells showed, kept for you to look back at. Only your Windows account can open it. You can also delete it.
+  - *Relay*: your own iroh relay and its token, or empty for the public relays.
+  - *This PC's identity* ▸ **Reset…**: gives the PC a new identity, and every phone loses its access with the old one. Plug each phone in again to give it access.
 
 **On the phone, a PC shows as a PC:**
 - **New shell** lists its shells.
@@ -142,7 +154,7 @@ The tray icon gets an amber dot, and Windows shows a notification, when a notice
 
 While a phone views the screen, the PC's own screen shows the lock screen, and it stays locked afterwards.
 
-**Your computers** (in the flyout) lists the computers a phone handed this PC access to. Windows Hello asks first.
+**Your computers** (the flyout's Remote tab) lists the computers a phone handed this PC access to. Windows Hello asks first.
 - **New shell** opens the other computer's shell in a new Windows Terminal tab, or a console window without Windows Terminal.
 - **Remove…** forgets this PC's copy of that computer, after asking. Use it for a computer you no longer use, or one that changed its keys: a phone can then share it again.
 - **Screen** opens a Mac's screen in a window. The keys go to the Mac: Alt acts as ⌘, Ctrl as ⌃ and the Windows key as ⌥. A setting swaps Alt and Ctrl, so Ctrl acts as ⌘. Alt+Tab, Alt+F4, screenshots and the media keys stay with this PC.
@@ -160,7 +172,6 @@ The logs never hold keys, tokens or passwords, and they name accounts only by th
 - Sound and the microphone, both ways.
 - Pairing two computers directly. Today a phone hands one computer access to the other.
 - `passthrough-term remote` from a Mac's terminal.
-- A quit dialog: quitting the tray ends every phone's shells.
 - A question before taking a PC someone is using.
 - Notifications and the activity timeline from a PC.
 - Android viewing a screen. Android phones get the PC's shell.
@@ -192,7 +203,7 @@ This is Windows only, and must not run as administrator. It covers:
 In this order, from a clean PC.
 
 1. **Install.** Build, open the app, turn Remote access on: one administrator prompt, and the app hands over to the installed copy. `service.log` says `service: started` with the build, then `tls: listening on port 7893` (Windows 11) and `iroh: shell listener started`.
-2. **Pair and grant.** Plug in an iPhone, then an Android phone. Pair each one. Each appears under *Phones with access*. Unplug both.
+2. **Pair and grant.** Plug in an iPhone, then an Android phone. Pair each one. Each one's row under Settings ▸ Remote access ▸ *Phones* shows *Screen* and *Share*. Unplug both.
 3. **Shell.** On the phone, open a shell on Wi-Fi, on Tailscale and on cellular, which goes through the relay. Check that:
    - the New shell list matches what's installed;
    - a session survives a dropped connection;
@@ -207,8 +218,8 @@ In this order, from a clean PC.
    - Try it locked, signed out after a restart, with the monitor off, and with a UAC prompt up.
 6. **Share with a Mac.** On the phone, share this PC with your Mac.
    - The PC shows "*iPhone* gave *MacBook* access to this PC's shell. Let it see the screen too?"
-   - Allow it. The Mac opens a PC window. **Revoke…** in *Computers with access* ends it.
-7. **Your computers.** Share your Mac with this PC from the phone. Then, in the flyout, choose *Your computers*:
+   - Allow it. The Mac opens a PC window. **Revoke…** in Settings ▸ Your computers ends it.
+7. **Your computers.** Share your Mac with this PC from the phone. Then, in the flyout's Remote tab, choose *Show your computers*:
    - Windows Hello asks first;
    - **New shell** opens a Windows Terminal tab titled with the Mac's name;
    - **Screen** shows the Mac.

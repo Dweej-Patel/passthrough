@@ -136,6 +136,12 @@ public sealed class ShellSessionManager
         get { lock (_lock) return [.. _order.Select(id => _table[id].Info)]; }
     }
 
+    /// <summary>How many sessions are running, whoever opened them (what quitting would end).</summary>
+    public int RunningCount
+    {
+        get { lock (_lock) return _table.Values.Count(s => s.Running); }
+    }
+
     /// <summary>How many running sessions <paramref name="phoneId"/> opened (what its Stop would end).</summary>
     public int RunningSessions(string phoneId)
     {

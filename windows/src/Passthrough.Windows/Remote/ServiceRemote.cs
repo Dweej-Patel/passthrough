@@ -77,6 +77,7 @@ public sealed class ServiceRemote : IDisposable
             PowerState = () => (StayAwake, SleepAfter(), PowerFacts.OnMains),
             EndScreen = (phone, reason) => Gate.DisconnectScreen(phone, reason),
             ScreenRow = account => RemoteDesktop?.Verdict(account) is { } v ? new PipeScreenRow(v.Rdp, v.RowState, v.Text, v.Action, v.Reason) : null,
+            Viewing = id => Gate.IsViewing(id),
             SetStayAwake = on =>
             {
                 _secrets.Set(StayAwakeSlot, on ? "true" : "false");
@@ -99,6 +100,8 @@ public sealed class ServiceRemote : IDisposable
             Gate.PushState();
         };
         Directory.Replaced += Disconnect;
+        // Who is on this PC now: the owner's tray lists it (connected, viewing), so it hears each change.
+        Gate.ConnectionsChanged += TellOwner;
         // A phone handing the same computer access again replaces the grant: the old grant's notices go with it.
         Directory.Replaced += Notices.Forget;
         Directory.Changed += account =>
@@ -175,6 +178,12 @@ public sealed class ServiceRemote : IDisposable
     private ISessionHost HostFor(string phoneId) => _trays.HostFor(Directory.Owner(phoneId) ?? "none");
 
     private PipeSessionHost? OwnerHost(string phoneId) => Directory.Owner(phoneId) is { } owner ? _trays.HostFor(owner) : null;
+
+    /// <summary>The account that granted <paramref name="phoneId"/> hears that its phones' state changed.</summary>
+    private void TellOwner(string phoneId)
+    {
+        if (Directory.Owner(phoneId) is { } owner) _trays.Tell(owner, new PipeAdminEvent { What = PipeAdminEvent.Access });
+    }
 
     private int ConnectionsOf(string phoneId) => Gate.ConnectedPhones.Count(p => p == phoneId);
 
@@ -385,12 +394,17 @@ public sealed class ServiceRemote : IDisposable
         Lock = phone => OwnerHost(phone)?.Lock() ?? ShellError.SignedOut,
         RemoteDesktop = RemoteDesktop,
         AccountOf = phone => Directory.Owner(phone),
-        ViewStarted = v => _log($"screen: \"{v.Label}\" ({Short(v.PhoneId)}) account …{Tail(v.Account)} opened a view"),
+        ViewStarted = v =>
+        {
+            _log($"screen: \"{v.Label}\" ({Short(v.PhoneId)}) account …{Tail(v.Account)} opened a view");
+            TellOwner(v.PhoneId);
+        },
         ViewEnded = v =>
         {
             if (v.Account is { } owner && v.End is { } end)
                 Notices.Viewed(owner, v.PhoneId, v.Label, v.Start, end, t => t.ToLocalTime().ToString("HH:mm", System.Globalization.CultureInfo.CurrentCulture));
             ViewLog(v);
+            TellOwner(v.PhoneId);
         },
         SaveComputerPass = (phone, label, m) => OwnerHost(phone) is { } owner ? owner.SavePassAsync(phone, label, m) : Task.FromResult<ShellError?>(ShellError.SignedOut),
         ComputerGranted = (phone, c) =>

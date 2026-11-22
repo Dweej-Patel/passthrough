@@ -15,7 +15,7 @@ namespace Passthrough.App;
 /// <summary>Android support, start at login, Remote access and the phones it lets in, and forgetting any stored pairing.</summary>
 public sealed partial class SettingsWindow : Window
 {
-    private const int WidthDip = 560;
+    private const int WidthDip = 640;
     private const int HeightDip = 760;
 
     private bool _forgetting;
@@ -63,6 +63,7 @@ public sealed partial class SettingsWindow : Window
         // The history choice and the relay's sentence too: they were filled only after a change, so they opened blank.
         ShowHistoryAndRelay();
 
+        ShowPage(GeneralPage);
         // The setting and the pairings can change while the window is open; follow them until it closes.
         viewModel.PropertyChanged += OnViewModelChanged;
         viewModel.PairingsChanged += OnPairingsChanged;
@@ -76,12 +77,48 @@ public sealed partial class SettingsWindow : Window
 
     public SessionViewModel ViewModel { get; }
 
-    /// <summary>The phones allowed to open shells here.</summary>
-    public ObservableCollection<RemotePhoneRow> WithAccess { get; } = new();
+    /// <summary>One row per phone: its pairing, its access here, or both.</summary>
+    public ObservableCollection<PhoneSettingsRow> Phones { get; } = new();
     public ObservableCollection<ComputerAccessRow> ComputersWithAccess { get; } = new();
 
-    /// <summary>The stored pairings, as Core's <see cref="PairedPhone.List"/> names them.</summary>
-    public ObservableCollection<PairedPhoneRow> Paired { get; } = new();
+    /// <summary>The stored pairings, as Core's <see cref="PairedPhone.List"/> names them, as last read.</summary>
+    private IReadOnlyList<PairedPhone> _paired = [];
+
+    public const string GeneralPage = "general", RemotePage = "remote", ComputersPage = "computers", AdvancedPage = "advanced";
+
+    /// <summary>Shows one page: General, Remote access, Your computers or Advanced.</summary>
+    public void ShowPage(string page)
+    {
+        foreach (var item in Pages.MenuItems.OfType<NavigationViewItem>())
+            if ((string)item.Tag == page) Pages.SelectedItem = item;
+    }
+
+    private void OnPageChanged(NavigationView sender, NavigationViewSelectionChangedEventArgs args)
+    {
+        var page = (args.SelectedItem as NavigationViewItem)?.Tag as string ?? GeneralPage;
+        GeneralPanel.Visibility = page == GeneralPage ? Visibility.Visible : Visibility.Collapsed;
+        RemotePanel.Visibility = page == RemotePage ? Visibility.Visible : Visibility.Collapsed;
+        ComputersPanel.Visibility = page == ComputersPage ? Visibility.Visible : Visibility.Collapsed;
+        AdvancedPanel.Visibility = page == AdvancedPage ? Visibility.Visible : Visibility.Collapsed;
+    }
+
+
+    /// <summary>The pairings and the access records, joined by pairing slot into one row per phone.</summary>
+    private void RebuildPhones()
+    {
+        var access = _remote?.Phones ?? [];
+        var connected = _remote?.ConnectedPhones.ToHashSet() ?? [];
+        int Sessions(string id) => _remote?.Sessions.RunningSessions(id) ?? 0;
+        Phones.Clear();
+        foreach (var paired in _paired)
+        {
+            var device = access.FirstOrDefault(a => a.PairingSlot == paired.Slot);
+            Phones.Add(new PhoneSettingsRow(paired, device, device is not null && connected.Contains(device.Phone), device is null ? 0 : Sessions(device.Phone), _screenReady));
+        }
+        foreach (var device in access.Where(a => _paired.All(p => p.Slot != a.PairingSlot)))
+            Phones.Add(new PhoneSettingsRow(null, device, connected.Contains(device.Phone), Sessions(device.Phone), _screenReady));
+        NoPhonesText.Visibility = Phones.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
+    }
 
     /// <summary>Whether Start at login is on; a registry that can't be read shows it off, with the error line, instead of failing the window.</summary>
     private bool ReadStartAtLogin()
@@ -107,10 +144,8 @@ public sealed partial class SettingsWindow : Window
     {
         try
         {
-            var list = await ViewModel.PairedPhonesAsync();
-            Paired.Clear();
-            foreach (var phone in list) Paired.Add(new PairedPhoneRow(phone));
-            NoPairingsText.Visibility = Paired.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
+            _paired = await ViewModel.PairedPhonesAsync();
+            RebuildPhones();
         }
         catch (Exception ex)
         {
@@ -166,15 +201,18 @@ public sealed partial class SettingsWindow : Window
         // One dialog at a time: a second click while it is up would make ShowAsync throw.
         if (_forgetting) return;
         _forgetting = true;
-        var phone = (PairedPhoneRow)((FrameworkElement)sender).DataContext;
+        var phone = (PhoneSettingsRow)((FrameworkElement)sender).DataContext;
+        if (phone.Slot is null) { _forgetting = false; return; }
         try
         {
             var dialog = new ContentDialog
             {
                 XamlRoot = Content.XamlRoot,
                 Title = $"Forget {phone.Title}?",
-                Content = "This PC will no longer be paired with it. You can pair again with the code the phone shows.",
-                PrimaryButtonText = "Forget pairing",
+                Content = phone.HasAccess
+                    ? "This PC forgets its pairing, and it loses its access here: its shells and any view of the screen end. Pair again with the code the phone shows, then plug it in with Remote access on."
+                    : "This PC will no longer be paired with it. You can pair again with the code the phone shows.",
+                PrimaryButtonText = "Forget",
                 CloseButtonText = "Cancel",
                 DefaultButton = ContentDialogButton.Close,
             };
@@ -227,15 +265,12 @@ public sealed partial class SettingsWindow : Window
         var shells = _remote.Catalog.Shells.Select(s => s.Name).ToList();
         ShellsText.Text = (shells.Count == 0 ? "" : $"Shells: {string.Join(", ", shells)}. They open as you, never as administrator.")
             + (_isAdministrator ? " Your Windows account is an administrator, so a phone with access can do anything you can, including approving administrator prompts." : "");
-        var connected = _remote.ConnectedPhones.ToHashSet();
-        WithAccess.Clear();
-        foreach (var phone in _remote.Phones)
-            WithAccess.Add(new RemotePhoneRow(phone.Phone, phone.Label, phone.PairingSlot, connected.Contains(phone.Phone), _remote.Sessions.RunningSessions(phone.Phone),
-                phone.Screen, _screenReady, phone.Share));
-        NoAccessText.Visibility = WithAccess.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
+        // One prompt sets up the shell and the screen together, the first time.
+        ScreenWithTurnOn.Visibility = RemoteAccess.IsInstalled ? Visibility.Collapsed : Visibility.Visible;
+        RebuildPhones();
         ComputersWithAccess.Clear();
         foreach (var computer in _remote.Computers) ComputersWithAccess.Add(new ComputerAccessRow(computer));
-        ComputersSection.Visibility = ComputersWithAccess.Count == 0 ? Visibility.Collapsed : Visibility.Visible;
+        NoComputersText.Visibility = ComputersWithAccess.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
     }
 
     private bool _settingAwake;
@@ -290,8 +325,8 @@ public sealed partial class SettingsWindow : Window
     {
         if (_remote is null) return;
         var box = (CheckBox)sender;
-        var phone = (RemotePhoneRow)box.DataContext;
-        try { await _remote.SetScreenAllowedAsync(phone.PhoneId, box.IsChecked == true); }
+        if (box.DataContext is not PhoneSettingsRow { PhoneId: { } phoneId }) return;
+        try { await _remote.SetScreenAllowedAsync(phoneId, box.IsChecked == true); }
         catch (Exception ex)
         {
             LogFile.Error(ex);
@@ -303,9 +338,9 @@ public sealed partial class SettingsWindow : Window
     private async void OnComputerScreenClick(object sender, RoutedEventArgs e)
     {
         if (_remote is null) return;
-        var box = (CheckBox)sender;
-        var computer = (ComputerAccessRow)box.DataContext;
-        try { await _remote.SetComputerScreenAsync(computer.Id, box.IsChecked == true); }
+        var computer = (ComputerAccessRow)((FrameworkElement)sender).DataContext;
+        // Allow screen while it waits; Turn off screen once it may see it.
+        try { await _remote.SetComputerScreenAsync(computer.Id, !computer.Screen); }
         catch (Exception ex)
         {
             LogFile.Error(ex);
@@ -341,8 +376,8 @@ public sealed partial class SettingsWindow : Window
     {
         if (_remote is null) return;
         var box = (CheckBox)sender;
-        var phone = (RemotePhoneRow)box.DataContext;
-        try { await _remote.SetMayShareAsync(phone.PhoneId, box.IsChecked == true); }
+        if (box.DataContext is not PhoneSettingsRow { PhoneId: { } phoneId }) return;
+        try { await _remote.SetMayShareAsync(phoneId, box.IsChecked == true); }
         catch (Exception ex)
         {
             LogFile.Error(ex);
@@ -400,7 +435,7 @@ public sealed partial class SettingsWindow : Window
         RelayTokenBox.Password = "";
         RelayText.Text = _remote.RelayUrl is { } url
             ? $"Phones away from this network reach this PC through {RelayName(url)}{(_remote.HasRelayToken ? ", with its token" : "")}."
-            : "Phones away from this network reach this PC through n0's public relays. They carry only encrypted traffic.";
+            : "Phones away from this network reach this PC through the public relays run by n0, iroh's makers. They carry only encrypted traffic.";
     }
 
     private void OnHistoryChanged(object sender, SelectionChangedEventArgs e)
@@ -489,7 +524,8 @@ public sealed partial class SettingsWindow : Window
         if (_remote is null) return;
         try
         {
-            if (await _remote.SetEnabledAsync(RemoteSwitch.IsOn) is { } said) ShowError(said);
+            var withScreen = RemoteSwitch.IsOn && !RemoteAccess.IsInstalled && ScreenWithTurnOn.IsChecked == true;
+            if (await _remote.SetEnabledAsync(RemoteSwitch.IsOn, withScreen) is { } said) ShowError(said);
             else ErrorBox.Visibility = Visibility.Collapsed;
         }
         catch (Exception ex)
@@ -503,8 +539,8 @@ public sealed partial class SettingsWindow : Window
 
     private void OnStopClick(object sender, RoutedEventArgs e)
     {
-        var phone = (RemotePhoneRow)((FrameworkElement)sender).DataContext;
-        if (_remote is not null) _ = _remote.DisconnectAsync(phone.PhoneId);
+        if (((FrameworkElement)sender).DataContext is not PhoneSettingsRow { PhoneId: { } phoneId } || _remote is null) return;
+        _ = _remote.DisconnectAsync(phoneId);
         ShowRemote();
         ShowHistoryAndRelay();
     }
@@ -513,19 +549,19 @@ public sealed partial class SettingsWindow : Window
     {
         if (_revoking || _remote is null) return;
         _revoking = true;
-        var phone = (RemotePhoneRow)((FrameworkElement)sender).DataContext;
+        if (((FrameworkElement)sender).DataContext is not PhoneSettingsRow { PhoneId: { } phoneId } phone) { _revoking = false; return; }
         try
         {
             var dialog = new ContentDialog
             {
                 XamlRoot = Content.XamlRoot,
                 Title = $"Take away {phone.Title}'s access?",
-                Content = "Its shells on this PC end now, and it can't open new ones. Plug it in again with Remote access on to give it back.",
+                Content = "Its shells and any view of the screen end now, and it can't open new ones. It stays paired; plug it in again with Remote access on to give it back.",
                 PrimaryButtonText = "Revoke",
                 CloseButtonText = "Cancel",
                 DefaultButton = ContentDialogButton.Close,
             };
-            if (await dialog.ShowAsync() == ContentDialogResult.Primary) await _remote.RevokeAsync(phone.PhoneId);
+            if (await dialog.ShowAsync() == ContentDialogResult.Primary) await _remote.RevokeAsync(phoneId);
         }
         catch (Exception ex)
         {
