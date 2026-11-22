@@ -27,6 +27,21 @@ xcodegen generate
 open Passthrough.xcodeproj
 ```
 
+`Config/Signing.xcconfig` is where your Team ID goes (`DEVELOPMENT_TEAM`), and
+optionally your own bundle ID base (`PASSTHROUGH_ID`), a separate paid team for
+the iPhone (`DEVELOPMENT_TEAM[sdk=iphoneos*]`) and a push key; the example file
+explains each. Everyday Mac installs must be Release builds: a Release root
+helper refuses an app that carries `get-task-allow`, as every Debug build does
+(see *Setup* in [docs/GUIDE.md](docs/GUIDE.md#setup)).
+
+To work on a PC's screen, build the Remote Desktop engine once, before opening
+the project (it isn't committed yet; see *Vendored binaries* below):
+
+```
+brew install cmake ninja
+bash scripts/build-freerdp.sh
+```
+
 The Mac and iPhone apps use SwiftTerm, which compiles a Metal shader. Newer Xcodes ship the Metal Toolchain separately, so install it once with `xcodebuild -downloadComponent MetalToolchain` (CI does this).
 
 The apps need iOS 17.5 and macOS 14.5 or later (iroh-ffi's floors), and the Mac app builds for Apple Silicon only (arm64), like its helper, because iroh-ffi's prebuilt library has no Intel slice. The built-in connection (iroh) adds noticeable size: the iOS zip went from about 2.8 MB to 8.9 MB (+6.1 MB), the Mac zip from about 10.2 MB to 14.2 MB (+4.0 MB) and the Android release APK from about 2.7 MB to 26.9 MB (+24.2 MB), so mind new dependencies.
@@ -76,6 +91,9 @@ dotnet test windows/tests/Passthrough.Core.Tests
 dotnet build windows/src/Passthrough.App -c Release
 ```
 
+An installable PC build, with Remote access's service and the iroh bridge
+(which needs Rust), comes from `scripts/build-windows.ps1`.
+
 The Swift, Kotlin and C# sides speak the same wire protocol, described in
 [protocol/README.md](protocol/README.md). The three test suites check
 themselves against `protocol/fixtures.json`: if you change a message, a port
@@ -98,7 +116,15 @@ or the pairing rules, update the fixtures first, then make all three pass.
   and uploads the result. A rebuild PR bumps the constants at the top of the
   script and commits the xcframework with the new `SOURCES.lock` and `SIZE.md`;
   a reviewer runs the script and compares them. Until it is committed, the
-  iPhone app builds without it (the PC screen is then not in the build).
+  iPhone app and the Mac's sandboxed engine helper (`macOS/ScreenEngine`)
+  build without it, and neither shows a PC's screen. With it in place,
+  `swift test --filter RemoteDesktopTests` in `Packages/PassthroughCore`
+  exercises the engine (macOS slice). The engine runs on the Mac only inside
+  that helper; keep it out of the app itself and out of every extension.
+* **For now, the Mac, the phones and the PC update together.** A protocol
+  change doesn't need to keep older builds working on the other side, so no
+  compatibility shims; say what must be rebuilt under *Before you rebuild* in
+  [CHANGELOG.md](CHANGELOG.md).
 * **No secrets, ever.** Do not commit API keys, VPN credentials, `.ovpn` files
   with embedded keys, screenshots with your device name, or anything from your
   keychain. The repository is scanned, but please do not make us rely on that.

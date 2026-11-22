@@ -9,11 +9,13 @@ Third-party components distributed with this repository keep their own licences:
   and simulator), linked into the iOS tunnel extension, which uses it on iPad for
   Internet through iPhone. See Vendor/HevSocks5Tunnel/LICENSES.md.
 * Vendor/FreeRDP — FreeRDP 3.33.1 and its WinPR (Apache-2.0), OpenSSL 3.5.9 (Apache-2.0).
-  Built by scripts/build-freerdp.sh from checksum-pinned release archives into
-  FreeRDP.xcframework (iOS device, simulator and Apple Silicon macOS), one static
-  library per slice with Passthrough's shim; linked into the iPhone and iPad app
-  only when present, to show a PC's screen through Remote Desktop. See
-  Vendor/FreeRDP/LICENSES.md.
+  Built by scripts/build-freerdp.sh from checksum-pinned release archives (versions and
+  SHA-256 recorded in Vendor/FreeRDP/SOURCES.lock), with Vendor/FreeRDP/patches applied,
+  into FreeRDP.xcframework (iOS device, simulator and Apple Silicon macOS), one static
+  library per slice with Passthrough's shim. Only when present, it is linked into the
+  iPhone and iPad app and into the Mac app's sandboxed Remote Desktop helper
+  (PassthroughScreenEngine.xpc, inside Passthrough.app), never into the Mac app itself or
+  an extension, to show a PC's screen through Remote Desktop. See Vendor/FreeRDP/LICENSES.md.
 * Vendor/VPNEngines/bin/wireguard-go — MIT. See Vendor/VPNEngines/licenses/WIREGUARD-GO-LICENSE.
 * Vendor/VPNEngines/bin/openvpn — GPL-2.0 with the OpenSSL linking exception.
   See Vendor/VPNEngines/licenses/OPENVPN-COPYING. Source is fetched and rebuilt by
@@ -37,6 +39,10 @@ Third-party components distributed with this repository keep their own licences:
   its Rust dependencies (MIT and/or Apache-2.0 licensed crates; versions pinned in
   windows/native/iroh-bridge/Cargo.lock). Built from source into passthrough_iroh.dll by
   windows/native/build-iroh-bridge.ps1 (and CI), which ships beside the Windows app.
+<!-- TODO: the Windows app also ships Microsoft.WindowsAppSDK 1.8.251106002, H.NotifyIcon.WinUI 2.2.0,
+     System.Security.Cryptography.ProtectedData 10.0.0 (MIT) and, in a self-contained build, the .NET runtime.
+     Confirm each licence and add them here (the Windows session owns those packages). -->
+
 * android/app/src/main/res/font/nunito.ttf — Nunito, SIL Open Font License 1.1.
   See android/licenses/NUNITO-OFL.txt.
 * Termux terminal-view and terminal-emulator (https://github.com/termux/termux-app),

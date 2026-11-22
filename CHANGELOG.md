@@ -41,6 +41,22 @@ the **Before you rebuild** notes first. The Mac and phone apps update together.
   goes to sleep, shuts down or has Remote access turned off. A connected phone
   keeps the idle timer off for as long as it is connected and a minute after.
 
+* **Update the Mac, the phones and the PC together.** Sharing a computer
+  (`computerGrant`, `computerPass`, `listComputers`) and the PC's screen need
+  this build on every side; there are no compatibility shims. Install the Mac
+  app as a Release build (docs/GUIDE.md › Setup): the Release helper refuses a
+  Debug app.
+* **Saved Windows logins: type the PC's password once more**, on the iPhone
+  and on the Mac. A saved login is now kept with the PC's keys (its Remote
+  Desktop certificate and iroh id) and used only while they are the same;
+  logins saved before this aren't used.
+* **A PC's screen needs the Remote Desktop engine, built by hand.** It isn't
+  committed yet. Run `brew install cmake ninja`, then
+  `bash scripts/build-freerdp.sh`, before you open the project in Xcode; it
+  writes `Vendor/FreeRDP/FreeRDP.xcframework`. Without it the Mac and iPhone
+  apps build and work as before, and the PC's screen is left out (the Mac's PC
+  Screen window says it isn't in this build).
+
 * **Phone notifications now take their push key from the build, not from
   Settings.** The *Team ID*, *Key ID* and *Choose .p8* fields in
   *Settings › Remote Shell › Notifications* are gone. To keep notifications:
@@ -114,8 +130,38 @@ these steps as written and check each one before building.
   (`listComputers` / `computerList`, protocol/README.md *Computers*), and tells
   it again whenever that changes: what each may do now, what waits for the
   host's owner, and whether it is connected. A phone can take any of them back
-  at any time. The PC answers in this build; the Mac and the iPhone's Share
-  sheet use it in theirs.
+  at any time. The PC and the Mac answer it (each lists only the computers the
+  asking phone shared), and the iPhone's Share sheet shows the list with
+  **Remove**. An older host doesn't answer, and the sheet goes by what the
+  phone remembers sharing.
+* **Share with another computer** (iPhone and iPad). Open a computer, tap
+  *Share with another computer*, pick *Screen only* or *Shell and screen*,
+  pick the computer that should use it and confirm with Face ID. That computer
+  then uses it from anywhere, without the phone. Shown only where the host
+  allows this phone to share: on a Mac, *Settings › Remote Shell › Phones with
+  access › May share access with other computers* (new, off at first); on a
+  PC, its *Share* tick. A Mac grants at once and leaves a notice with
+  *Revoke*. A PC gives the shell at once and holds the screen until its owner
+  clicks *Allow screen* on the PC's notice or ticks *Screen* in *Computers with
+  access*. The access lasts while the sharing phone keeps its own. The Mac has
+  no settings list of the computers it let in yet: remove one from the phone's
+  Share sheet, or revoke the phone that shared it. Not on Android.
+* **A PC's screen on the Mac.** A Mac given a PC's screen lists it under
+  *Your computers* in the menu-bar panel; *View …'s screen* opens a *PC
+  Screen* window after Touch ID, then asks for the Windows account's password
+  (not the PIN), which *Remember on this Mac* keeps behind Touch ID. It asks
+  first when someone is using the PC, sizes the PC's desktop to the window,
+  reconnects by itself up to three times after a drop, and has a *Windows* menu
+  in the menu bar (Ctrl+Alt+Del, Start, Task View, Alt+Tab, Show Desktop,
+  Close Window, *Send Clipboard*, *Copy from PC*, *Forget Saved Sign-In*).
+  The Remote Desktop engine runs in a sandboxed helper inside the app
+  (`macOS/ScreenEngine`), never in the app; it needs Remote shell on on the
+  Mac.
+* **A PC's screen on the iPhone and iPad, behind a developer switch.** Not in
+  normal builds yet: a DEBUG build with the engine built in, launched with
+  `-PTWindowsScreen YES`. It signs in with the Windows password (remembered
+  behind Face ID if you choose), with a Windows menu, the Windows key and
+  Windows' three-finger swipes, and the desktop takes the device's shape.
 * **The iPhone and iPad app knows a PC from a Mac.** A paired PC shows as a
   PC: its own words, only the rows a PC has (no Internet, Keep awake, VPN or
   Share screen), its Lock when it allows it, its own setup steps, why its
