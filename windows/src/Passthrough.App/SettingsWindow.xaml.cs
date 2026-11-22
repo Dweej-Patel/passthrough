@@ -110,13 +110,16 @@ public sealed partial class SettingsWindow : Window
         var connected = _remote?.ConnectedPhones.ToHashSet() ?? [];
         int Sessions(string id) => _remote?.Sessions.RunningSessions(id) ?? 0;
         Phones.Clear();
+        var joined = new HashSet<string>();
         foreach (var paired in _paired)
         {
             var device = access.FirstOrDefault(a => a.PairingSlot == paired.Slot);
+            if (device is not null) joined.Add(device.Phone);
             Phones.Add(new PhoneSettingsRow(paired, device, device is not null && connected.Contains(device.Phone), device is null ? 0 : Sessions(device.Phone), _screenReady));
         }
-        foreach (var device in access.Where(a => _paired.All(p => p.Slot != a.PairingSlot)))
-            Phones.Add(new PhoneSettingsRow(null, device, connected.Contains(device.Phone), Sessions(device.Phone), _screenReady));
+        // Every access record has a row: one without a pairing, or a second id through the same pairing (a reinstalled app).
+        foreach (var device in access.Where(a => !joined.Contains(a.Phone)))
+            Phones.Add(new PhoneSettingsRow(_paired.FirstOrDefault(p => p.Slot == device.PairingSlot), device, connected.Contains(device.Phone), Sessions(device.Phone), _screenReady));
         NoPhonesText.Visibility = Phones.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
     }
 
