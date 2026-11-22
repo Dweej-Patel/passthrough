@@ -141,6 +141,13 @@ public protocol ScreenBackend: AnyObject, Sendable {
     func presented(_ number: UInt32)
     /// The display lost its place: start again from a whole picture.
     func needsKeyframe()
+    /// The app left the foreground (false) or came back (true).
+    func setActive(_ active: Bool)
+}
+
+extension ScreenBackend {
+    /// The Mac's backends do nothing on their own when the app goes away (the model handles their sound and curtain).
+    public func setActive(_ active: Bool) {}
 }
 
 /// The Mac's own stream's extra controls.

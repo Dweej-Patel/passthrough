@@ -1,0 +1,468 @@
+#if canImport(FreeRDP)
+import CoreGraphics
+import Foundation
+import FreeRDP
+import PassthroughCore
+import ScreenClient
+
+/// A PC's screen through its own Remote Desktop, over the stream the app's
+/// connection handed over after `rdpReady` (`ShellClient.Event.rdp`): FreeRDP
+/// in the shim reads and writes two in-process byte queues, which this fills
+/// from the stream and drains into it. No socket, no loopback.
+///
+/// The server must present the certificate whose SHA-256 the host announced;
+/// anything else ends the view before the login leaves (`.identityMismatch`).
+///
+/// Threads: one engine thread per session makes every FreeRDP call; `io`
+/// owns the stream's reads and writes; input comes from main and events go
+/// to the queue given to `init` (main).
+public final class RemoteDesktopBackend: ScreenBackend, @unchecked Sendable {
+    public let capabilities: ScreenCapabilities = [.smoothScroll, .unicodeText, .drawsOwnPointer, .signIn, .windowsKeys]
+    public var macStream: (any MacStreamControls)? { nil }
+
+    /// The first shape asked of Windows.
+    public struct Layout: Equatable, Sendable {
+        public var width: Int
+        public var height: Int
+        /// Windows' scale factor in percent (100…500), and the device's (100, 140 or 180).
+        public var desktopScale: Int
+        public var deviceScale: Int
+        public init(width: Int, height: Int, desktopScale: Int = 100, deviceScale: Int = 100) {
+            // Even, within display control's limits.
+            self.width = max(200, min(width, 8192)) & ~1
+            self.height = max(200, min(height, 8192)) & ~1
+            self.desktopScale = max(100, min(desktopScale, 500))
+            self.deviceScale = [100, 140, 180].contains(deviceScale) ? deviceScale : 100
+        }
+    }
+
+    private let stream: any ByteStream
+    private let initialBytes: Data
+    private let certSHA256: String
+    private let login: ScreenLogin
+    private let layout: Layout
+    private let clientName: String
+    private let callbackQueue: DispatchQueue
+    private let onEvent: (ScreenBackendEvent) -> Void
+    private let io = DispatchQueue(label: "\(PassthroughProtocol.identifier).rdp-io")
+
+    /// Guards `rdp`, `started`, `closing`, `ended`.
+    private let lock = NSLock()
+    private var rdp: OpaquePointer?
+    private var started = false
+    private var closing = false
+    private var ended = false
+
+    // On `io`.
+    private var receiving = false
+    private var sending = false
+    private var ioClosed = false
+
+    /// The desktop's pixels as last painted (BGRA), guarded by `pixelsLock`.
+    private let pixelsLock = NSLock()
+    private var pixels: [UInt8] = []
+    private var desktop = (width: 0, height: 0)
+    private var imageScheduled = false
+
+    // Main only: input state.
+    private var scrollRemainder = CGPoint.zero
+    private var buttons: ScreenButtons = []
+
+    /// `certSHA256`: `rdpReady`'s, 64 lowercase hex. `clientName`: the device's kind ("iPhone"), never its own name.
+    public init(stream: any ByteStream, initialBytes: Data = Data(), certSHA256: String, login: ScreenLogin, layout: Layout,
+                clientName: String, queue: DispatchQueue = .main, onEvent: @escaping (ScreenBackendEvent) -> Void) {
+        self.stream = stream
+        self.initialBytes = initialBytes
+        self.certSHA256 = certSHA256
+        self.login = login
+        self.layout = layout
+        self.clientName = clientName
+        self.callbackQueue = queue
+        self.onEvent = onEvent
+    }
+
+    deinit {
+        // `run` frees the session; one never started is freed here.
+        if let rdp, !started { pt_rdp_free(rdp) }
+    }
+
+    // MARK: Lifetime
+
+    public func start() {
+        lock.lock()
+        guard !started, !closing else { lock.unlock(); return }
+        started = true
+        lock.unlock()
+        guard RemoteDesktop.isEnabled, let rdp = makeSession() else {
+            return finish(.unsupported("Remote Desktop"))
+        }
+        lock.lock()
+        self.rdp = rdp
+        let abortNow = closing
+        lock.unlock()
+        if abortNow { pt_rdp_abort(rdp) }
+
+        io.async { [self] in
+            stream.onTerminated = { [weak self] _ in self?.io.async { self?.networkClosed() } }
+            if !initialBytes.isEmpty { feed(initialBytes) }
+            receiveMore()
+        }
+        let thread = Thread { [self] in run(rdp) }
+        thread.name = "rdp"
+        thread.qualityOfService = .userInteractive
+        thread.stackSize = 4 << 20
+        thread.start()
+    }
+
+    public func close() {
+        lock.lock()
+        let wasClosing = closing
+        closing = true
+        let rdp = self.rdp, started = self.started
+        lock.unlock()
+        guard !wasClosing else { return }
+        if let rdp {
+            pt_rdp_abort(rdp)
+        } else if !started {
+            finish(.closedHere)
+        }
+    }
+
+    private func makeSession() -> OpaquePointer? {
+        var callbacks = pt_rdp_callbacks()
+        callbacks.user = Unmanaged.passUnretained(self).toOpaque()
+        callbacks.verify_certificate = { user, pem, length in
+            guard let user, let pem else { return 0 }
+            let backend = Unmanaged<RemoteDesktopBackend>.fromOpaque(user).takeUnretainedValue()
+            let chain = Data(bytes: pem, count: length)
+            return RDPCertificatePin.matches(pem: chain, sha256Hex: backend.certSHA256) ? 1 : 0
+        }
+        callbacks.phase = { user, phase in
+            guard let user else { return }
+            let backend = Unmanaged<RemoteDesktopBackend>.fromOpaque(user).takeUnretainedValue()
+            let mapped: ScreenConnectPhase
+            switch phase {
+            case Int32(PT_PHASE_NEGOTIATING): mapped = .negotiating
+            case Int32(PT_PHASE_IDENTITY_CHECKED): mapped = .identityChecked
+            default: mapped = .signedIn
+            }
+            backend.emit(.phase(mapped))
+        }
+        callbacks.desktop = { user, width, height in
+            guard let user else { return }
+            Unmanaged<RemoteDesktopBackend>.fromOpaque(user).takeUnretainedValue().desktopChanged(Int(width), Int(height))
+        }
+        callbacks.painted = { user, bgra, stride, width, height, dirty in
+            guard let user, let bgra else { return }
+            Unmanaged<RemoteDesktopBackend>.fromOpaque(user).takeUnretainedValue()
+                .painted(bgra, stride: Int(stride), width: Int(width), height: Int(height), dirty: dirty)
+        }
+        callbacks.pointer_shape = { user, bgra, width, height, hotX, hotY in
+            guard let user, let bgra else { return }
+            let backend = Unmanaged<RemoteDesktopBackend>.fromOpaque(user).takeUnretainedValue()
+            guard let image = RemoteDesktopBackend.pointerImage(bgra, width: Int(width), height: Int(height)) else { return }
+            backend.emit(.pointerShape(image, size: CGSize(width: Int(width), height: Int(height)),
+                                       hotSpot: CGPoint(x: Int(hotX), y: Int(hotY))))
+        }
+        callbacks.pointer_system = { user, visible in
+            guard let user, visible == 0 else { return }
+            Unmanaged<RemoteDesktopBackend>.fromOpaque(user).takeUnretainedValue().emit(.pointerHidden)
+        }
+        callbacks.pointer_moved = { user, x, y in
+            guard let user else { return }
+            Unmanaged<RemoteDesktopBackend>.fromOpaque(user).takeUnretainedValue()
+                .emit(.pointerPosition(CGPoint(x: Int(x), y: Int(y)), visible: true))
+        }
+        callbacks.outbox_ready = { user in
+            guard let user else { return }
+            let backend = Unmanaged<RemoteDesktopBackend>.fromOpaque(user).takeUnretainedValue()
+            backend.io.async { backend.pump() }
+        }
+        callbacks.inbox_space = { user in
+            guard let user else { return }
+            let backend = Unmanaged<RemoteDesktopBackend>.fromOpaque(user).takeUnretainedValue()
+            backend.io.async { backend.receiveMore() }
+        }
+
+        let username = Self.account(login.username)
+        return username.user.withCString { user in
+            (username.domain ?? "").withCString { domain in
+                login.password.withCString { password in
+                    clientName.withCString { name in
+                        var config = pt_rdp_config()
+                        config.username = user
+                        config.domain = domain
+                        config.password = password
+                        config.client_name = name
+                        config.width = UInt32(layout.width)
+                        config.height = UInt32(layout.height)
+                        config.desktop_scale = UInt32(layout.desktopScale)
+                        config.device_scale = UInt32(layout.deviceScale)
+                        config.allow_h264 = 1
+                        return pt_rdp_new(&config, &callbacks)
+                    }
+                }
+            }
+        }
+    }
+
+    /// `DOMAIN\user` → domain and user; `user@host`, `user` and `.\user` → that user, no domain.
+    static func account(_ typed: String) -> (user: String, domain: String?) {
+        let trimmed = typed.trimmingCharacters(in: .whitespaces)
+        guard let slash = trimmed.firstIndex(of: "\\") else { return (trimmed, nil) }
+        let domain = String(trimmed[..<slash]), user = String(trimmed[trimmed.index(after: slash)...])
+        return (user, domain.isEmpty || domain == "." ? nil : domain)
+    }
+
+    /// The engine thread: the whole session, then its teardown.
+    private func run(_ rdp: OpaquePointer) {
+        let end = pt_rdp_run(rdp)
+        // No io call reaches the session from here on.
+        io.sync { ioClosed = true }
+        lock.lock()
+        self.rdp = nil
+        let closedHere = closing
+        lock.unlock()
+        pt_rdp_free(rdp)
+        stream.onTerminated = nil
+        stream.cancel()
+        finish(closedHere && end.kind != PT_END_IDENTITY_MISMATCH ? .closedHere : Self.ending(end))
+    }
+
+    private func finish(_ end: ScreenEnd) {
+        lock.lock()
+        let already = ended
+        ended = true
+        lock.unlock()
+        guard !already else { return }
+        let onEvent = self.onEvent
+        callbackQueue.async { onEvent(.ended(end)) }
+    }
+
+    static func ending(_ end: pt_rdp_end) -> ScreenEnd {
+        switch end.kind {
+        case PT_END_CLOSED_HERE: .closedHere
+        case PT_END_IDENTITY_MISMATCH: .identityMismatch
+        case PT_END_WRONG_PASSWORD: .signIn(.wrongPassword)
+        case PT_END_PASSWORD_EXPIRED: .signIn(.passwordExpired)
+        case PT_END_ACCOUNT_LOCKED: .signIn(.accountLocked)
+        case PT_END_ACCOUNT_DISABLED: .signIn(.accountDisabled)
+        case PT_END_NOT_ALLOWED_REMOTELY: .signIn(.notAllowedRemotely)
+        case PT_END_NO_CREDENTIALS: .signIn(.other(nil))
+        case PT_END_UNSUPPORTED: .unsupported("Remote Desktop")
+        case PT_END_TAKEN_OVER: .takenOver
+        case PT_END_SIGNED_OUT: .signedOut
+        case PT_END_HOST_ENDED: .hostEnded("ended")
+        case PT_END_NO_LICENCE: .hostEnded("licence")
+        case PT_END_PROTOCOL_ERROR: .protocolError("Remote Desktop")
+        default: .connectionLost
+        }
+    }
+
+    private func emit(_ event: ScreenBackendEvent) {
+        lock.lock()
+        let over = ended
+        lock.unlock()
+        guard !over else { return }
+        let onEvent = self.onEvent
+        callbackQueue.async { onEvent(event) }
+    }
+
+    // MARK: The stream (on `io`)
+
+    private func feed(_ data: Data) {
+        guard !ioClosed, let rdp = currentSession() else { return }
+        data.withUnsafeBytes { raw in
+            guard let base = raw.bindMemory(to: UInt8.self).baseAddress else { return }
+            _ = pt_rdp_feed(rdp, base, raw.count)
+        }
+    }
+
+    /// One receive at a time, never more than the inbox has room for: a full inbox
+    /// pauses reading (the network slows the PC), and `inbox_space` resumes it.
+    private func receiveMore() {
+        guard !ioClosed, !receiving, let rdp = currentSession() else { return }
+        let room = pt_rdp_inbox_free(rdp)
+        guard room > 0 else { return }
+        receiving = true
+        stream.receive(maximumLength: min(256 * 1024, room)) { [weak self] data, complete, error in
+            guard let self else { return }
+            self.io.async {
+                self.receiving = false
+                if let data, !data.isEmpty { self.feed(data) }
+                if complete || error != nil { return self.networkClosed() }
+                self.receiveMore()
+            }
+        }
+    }
+
+    /// One send at a time, at most 64 KiB, continued from each completion.
+    private func pump() {
+        guard !ioClosed, !sending, let rdp = currentSession() else { return }
+        var buffer = [UInt8](repeating: 0, count: 64 * 1024)
+        let count = buffer.withUnsafeMutableBufferPointer { pt_rdp_take(rdp, $0.baseAddress, $0.count) }
+        guard count > 0 else { return }
+        sending = true
+        stream.send(Data(buffer[0..<count]), isComplete: false) { [weak self] error in
+            guard let self else { return }
+            self.io.async {
+                self.sending = false
+                if error != nil { return self.networkClosed() }
+                self.pump()
+            }
+        }
+    }
+
+    private func networkClosed() {
+        guard !ioClosed, let rdp = currentSession() else { return }
+        pt_rdp_feed_closed(rdp)
+    }
+
+    private func currentSession() -> OpaquePointer? {
+        lock.lock()
+        defer { lock.unlock() }
+        return rdp
+    }
+
+    // MARK: Pictures (engine thread, then the callback queue)
+
+    private func desktopChanged(_ width: Int, _ height: Int) {
+        pixelsLock.lock()
+        desktop = (width, height)
+        pixels = [UInt8](repeating: 0, count: width * height * 4)
+        pixelsLock.unlock()
+        emit(.size(width: width, height: height))
+    }
+
+    private func painted(_ bgra: UnsafePointer<UInt8>, stride: Int, width: Int, height: Int, dirty: pt_rect) {
+        pixelsLock.lock()
+        guard desktop.width == width, desktop.height == height, pixels.count == width * height * 4 else {
+            pixelsLock.unlock()
+            return
+        }
+        let x0 = max(0, Int(dirty.x)), y0 = max(0, Int(dirty.y))
+        let x1 = min(width, Int(dirty.x) + Int(dirty.w)), y1 = min(height, Int(dirty.y) + Int(dirty.h))
+        if x1 > x0, y1 > y0 {
+            pixels.withUnsafeMutableBytes { target in
+                guard let base = target.baseAddress else { return }
+                for row in y0..<y1 {
+                    memcpy(base + row * width * 4 + x0 * 4, bgra + row * stride + x0 * 4, (x1 - x0) * 4)
+                }
+            }
+        }
+        // One picture waits on the callback queue at most; the newest pixels win.
+        let schedule = !imageScheduled
+        imageScheduled = true
+        pixelsLock.unlock()
+        guard schedule else { return }
+        callbackQueue.async { [weak self] in
+            guard let self, let image = self.makeImage() else { return }
+            self.emit(.image(image))
+        }
+    }
+
+    private func makeImage() -> CGImage? {
+        pixelsLock.lock()
+        imageScheduled = false
+        let (width, height) = desktop
+        let copy = Data(pixels)
+        pixelsLock.unlock()
+        guard width > 0, height > 0, let provider = CGDataProvider(data: copy as CFData) else { return nil }
+        return CGImage(width: width, height: height, bitsPerComponent: 8, bitsPerPixel: 32, bytesPerRow: width * 4,
+                       space: CGColorSpace(name: CGColorSpace.sRGB) ?? CGColorSpaceCreateDeviceRGB(),
+                       bitmapInfo: CGBitmapInfo(rawValue: CGBitmapInfo.byteOrder32Little.rawValue | CGImageAlphaInfo.noneSkipFirst.rawValue),
+                       provider: provider, decode: nil, shouldInterpolate: false, intent: .defaultIntent)
+    }
+
+    /// A pointer shape: BGRA with straight alpha.
+    private static func pointerImage(_ bgra: UnsafePointer<UInt8>, width: Int, height: Int) -> CGImage? {
+        guard width > 0, height > 0 else { return nil }
+        let data = Data(bytes: bgra, count: width * height * 4)
+        guard let provider = CGDataProvider(data: data as CFData) else { return nil }
+        return CGImage(width: width, height: height, bitsPerComponent: 8, bitsPerPixel: 32, bytesPerRow: width * 4,
+                       space: CGColorSpace(name: CGColorSpace.sRGB) ?? CGColorSpaceCreateDeviceRGB(),
+                       bitmapInfo: CGBitmapInfo(rawValue: CGBitmapInfo.byteOrder32Little.rawValue | CGImageAlphaInfo.first.rawValue),
+                       provider: provider, decode: nil, shouldInterpolate: false, intent: .defaultIntent)
+    }
+
+    // MARK: Input (main)
+
+    private func withSession(_ body: (OpaquePointer) -> Void) {
+        guard let rdp = currentSession() else { return }
+        body(rdp)
+    }
+
+    private func clamp(_ point: CGPoint) -> (UInt16, UInt16) {
+        pixelsLock.lock()
+        let (width, height) = desktop
+        pixelsLock.unlock()
+        let x = max(0, min(Int(point.x), max(width - 1, 0))), y = max(0, min(Int(point.y), max(height - 1, 0)))
+        return (UInt16(clamping: x), UInt16(clamping: y))
+    }
+
+    public func pointer(at point: CGPoint, buttons: ScreenButtons) {
+        self.buttons = buttons
+        let (x, y) = clamp(point)
+        withSession { pt_rdp_pointer($0, x, y, buttons.rawValue) }
+    }
+
+    /// 120 wheel units a notch, the remainder kept; vertical and horizontal apart, each at most ±255 an event.
+    public func scroll(at point: CGPoint, by delta: CGPoint, notch: CGFloat) {
+        guard notch > 0 else { return }
+        scrollRemainder.x += delta.x / notch * 120
+        scrollRemainder.y += delta.y / notch * 120
+        let (x, y) = clamp(point)
+        // Fingers down bring earlier content in: positive rotation. Fingers left bring what is to the right: positive tilt.
+        let vertical = Int(scrollRemainder.y), horizontal = Int(-scrollRemainder.x)
+        scrollRemainder.y -= CGFloat(vertical)
+        scrollRemainder.x += CGFloat(horizontal)
+        withSession { rdp in
+            for (amount, sideways) in [(vertical, false), (horizontal, true)] where amount != 0 {
+                var left = amount
+                while left != 0 {
+                    let step = max(-255, min(255, left))
+                    pt_rdp_wheel(rdp, x, y, Int16(step), sideways ? 1 : 0)
+                    left -= step
+                }
+            }
+        }
+    }
+
+    public func scrollEnded() { scrollRemainder = .zero }
+
+    public func key(_ key: ScreenKey, modifiers: ScreenModifiers) {
+        send(WindowsKeymap.strokes(for: key, modifiers: modifiers))
+    }
+
+    public func text(_ text: String) { send(WindowsKeymap.strokes(forText: text)) }
+
+    /// No clipboard channel yet: the text is typed instead.
+    public func paste(_ text: String) -> Bool {
+        guard text.utf16.count <= 4096 else { return false }
+        send(WindowsKeymap.strokes(forText: text))
+        return true
+    }
+
+    /// No clipboard channel yet: nothing answers (the view's copy times out).
+    public func copySelection() {}
+
+    public func presented(_ number: UInt32) {}
+    public func needsKeyframe() {}
+
+    /// Stops the PC's pictures while the app is away, and restarts them.
+    public func setActive(_ active: Bool) {
+        withSession { pt_rdp_suppress_output($0, active ? 0 : 1) }
+    }
+
+    private func send(_ strokes: [WindowsKeymap.Stroke]) {
+        withSession { rdp in
+            for stroke in strokes {
+                switch stroke {
+                case let .key(code, down): pt_rdp_key(rdp, code.code, code.extended ? 1 : 0, down ? 1 : 0)
+                case let .unicode(unit, down): pt_rdp_unicode(rdp, unit, down ? 1 : 0)
+                }
+            }
+        }
+    }
+}
+#endif
