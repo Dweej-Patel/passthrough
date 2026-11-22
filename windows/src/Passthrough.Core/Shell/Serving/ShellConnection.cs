@@ -113,6 +113,7 @@ public sealed class ShellConnection : IShellAttachment
         _view = null;
         _gate.Views.Release(PhoneId);
         if (_ticket is { } ticket) _gate.RelayRate.Closed(ticket);
+        _gate.Log?.Invoke($"screen: {Label}'s view ended ({endedBy}; {fromPhone} bytes in, {toPhone} out)");
         _gate.Hooks.ViewEnded?.Invoke(view with { End = _gate.Time.GetUtcNow(), BytesIn = fromPhone, BytesOut = toPhone, EndedBy = endedBy });
     }
 
@@ -124,14 +125,18 @@ public sealed class ShellConnection : IShellAttachment
     /// </summary>
     private async Task RelayAsync()
     {
-        if (PhoneId.StartsWith("viewer.", StringComparison.Ordinal)) { Fail(ShellError.ScreenOnly); return; }
-        if (!_gate.Access.ScreenAllowed(PhoneId)) { Fail(ShellError.ScreenNotAllowed); return; }
+        // Windows' own log shows only 127.0.0.1: every ask, refusal and view is in the service's, with the device.
+        _gate.Log?.Invoke($"screen: {Label} asked for the screen");
+        if (PhoneId.StartsWith("viewer.", StringComparison.Ordinal)) { Refused("a screen-only pass"); Fail(ShellError.ScreenOnly); return; }
+        if (!_gate.Access.ScreenAllowed(PhoneId)) { Refused("Screen is off for it"); Fail(ShellError.ScreenNotAllowed); return; }
         if (_gate.Hooks.RemoteDesktop is not { } desktop)
         {
-            Send(new ShellEnvelope(ShellEnvelope.Error) { Reason = ShellError.RdpUnavailable.ToWire(), Detail = _gate.Hooks.RdpUnavailable(PhoneId) });
+            var why = _gate.Hooks.RdpUnavailable(PhoneId);
+            Refused($"Remote Desktop can't be relayed to ({why})");
+            Send(new ShellEnvelope(ShellEnvelope.Error) { Reason = ShellError.RdpUnavailable.ToWire(), Detail = why });
             return;
         }
-        if (!_gate.Views.TryTake(PhoneId)) { Fail(ShellError.TooManyScreens); return; }
+        if (!_gate.Views.TryTake(PhoneId)) { Refused("too many views"); Fail(ShellError.TooManyScreens); return; }
         _opening = true;
         var released = false;
         void Release()
@@ -151,6 +156,7 @@ public sealed class ShellConnection : IShellAttachment
             var verdict = await desktop.CheckAsync(account, limit.Token).ConfigureAwait(false);
             if (verdict.Port is not { } port)
             {
+                Refused($"Remote Desktop can't be relayed to ({verdict.Unavailable ?? "service"})");
                 Send(new ShellEnvelope(ShellEnvelope.Error) { Reason = ShellError.RdpUnavailable.ToWire(), Detail = verdict.Unavailable ?? "service" });
                 return;
             }
@@ -158,6 +164,7 @@ public sealed class ShellConnection : IShellAttachment
             var ticket = stopped > 0 ? null : _gate.RelayRate.TryReserve(account ?? "", PhoneId, out stopped);
             if (ticket is null)
             {
+                Refused($"too many views lately; again in {stopped} s");
                 Send(new ShellEnvelope(ShellEnvelope.Error) { Reason = ShellError.TryLater.ToWire(), RetryAfter = stopped });
                 return;
             }
@@ -173,6 +180,7 @@ public sealed class ShellConnection : IShellAttachment
             using var certLimit = new CancellationTokenSource(TimeSpan.FromSeconds(5));
             if (await desktop.CertificateSha256Async(certLimit.Token).ConfigureAwait(false) is not { Length: 64 } pin)
             {
+                Refused("Remote Desktop's certificate couldn't be read");
                 Send(new ShellEnvelope(ShellEnvelope.Error) { Reason = ShellError.RdpUnavailable.ToWire(), Detail = "service" });
                 return;
             }
@@ -190,6 +198,7 @@ public sealed class ShellConnection : IShellAttachment
             await ready.Task.ConfigureAwait(false);
             if (IsClosed) return;
             _view = new Screen.RelayRecord(PhoneId, Label, account, "", _gate.Time.GetUtcNow());
+            _gate.Log?.Invoke($"screen: {Label}'s view started");
             _gate.Hooks.ViewStarted?.Invoke(_view);
             released = true; // the view is the relay's now; it is freed when the splice ends
             _relay = dial;
@@ -197,6 +206,7 @@ public sealed class ShellConnection : IShellAttachment
         }
         catch (OperationCanceledException)
         {
+            Refused("Remote Desktop didn't answer in time");
             Send(new ShellEnvelope(ShellEnvelope.Error) { Reason = ShellError.RdpUnavailable.ToWire(), Detail = "service" });
         }
         finally
@@ -208,6 +218,8 @@ public sealed class ShellConnection : IShellAttachment
             Release();
         }
     }
+
+    private void Refused(string why) => _gate.Log?.Invoke($"screen: refused {Label}: {why}");
 
     /// <summary>
     /// A phone gives another of its computers access (stage 7 a.2): the host's rules decide, then the new id and key go
