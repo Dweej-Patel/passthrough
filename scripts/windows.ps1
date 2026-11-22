@@ -227,10 +227,49 @@ function Stop-Tray {
     Good 'The tray app quit'
 }
 
+function Test-Elevated {
+    ([System.Security.Principal.WindowsPrincipal][System.Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([System.Security.Principal.WindowsBuiltInRole]::Administrator)
+}
+
+# Whether a process runs as administrator (TokenElevation), without opening more than its token for query.
+function Test-ProcessElevated([System.Diagnostics.Process]$process) {
+    if (-not ('PassthroughScript.Token' -as [type])) {
+        Add-Type -Namespace PassthroughScript -Name Token -MemberDefinition @'
+[System.Runtime.InteropServices.DllImport("advapi32.dll", SetLastError = true)]
+public static extern bool OpenProcessToken(System.IntPtr process, uint access, out System.IntPtr token);
+[System.Runtime.InteropServices.DllImport("advapi32.dll", SetLastError = true)]
+public static extern bool GetTokenInformation(System.IntPtr token, int kind, out int value, int length, out int returned);
+[System.Runtime.InteropServices.DllImport("kernel32.dll")]
+public static extern bool CloseHandle(System.IntPtr handle);
+'@
+    }
+    $token = [IntPtr]::Zero
+    try {
+        if (-not [PassthroughScript.Token]::OpenProcessToken($process.Handle, 8, [ref]$token)) { return $false }
+        $value = 0; $returned = 0
+        return [PassthroughScript.Token]::GetTokenInformation($token, 20, [ref]$value, 4, [ref]$returned) -and $value -ne 0
+    }
+    catch { return $false }
+    finally { if ($token -ne [IntPtr]::Zero) { [void][PassthroughScript.Token]::CloseHandle($token) } }
+}
+
 function Start-Tray {
     if ($WhatIf) { Say '   would start the installed tray app'; return }
     if (-not (Test-Path $Launcher)) { Fail "There's no installed copy to start ($Launcher is missing)." }
     Step 'Starting the tray app'
+    if (Test-Elevated) {
+        # Started from here it would run as administrator too, and an elevated tray app hosts no shells (phones
+        # connect but can't open one). Explorer starts it as you.
+        $folder = (Get-Installed).Folder
+        $tray = if ($folder) { Join-Path $folder 'Passthrough.exe' }
+        if (-not $tray -or -not (Test-Path -LiteralPath $tray)) {
+            Warn 'This PowerShell runs as administrator, so the tray app isn''t started from it: open Passthrough from the Start menu.'
+            return
+        }
+        Start-Process -FilePath (Join-Path $env:SystemRoot 'explorer.exe') -ArgumentList "`"$tray`""
+        Good 'The tray app is starting from the installed copy, as you (not as administrator)'
+        return
+    }
     Start-Process -FilePath $Launcher -ArgumentList '--launch'
     Good 'The tray app is starting from the installed copy'
 }
@@ -276,6 +315,7 @@ function Invoke-Doctor {
         $tray = @(Get-TrayProcesses)
         if ($tray.Count -eq 0) { Warn 'The tray app isn''t running: open Passthrough from the Start menu' }
         elseif ($tray[0].Path -notlike "$($installed.Folder)*") { Warn "The tray app runs another build ($($tray[0].Path)): quit it and open it from the Start menu, or run update" }
+        elseif (Test-ProcessElevated $tray[0]) { Warn 'The tray app runs as administrator, so it hosts no shells: quit it and open Passthrough from the Start menu'; $problems++ }
         else { Good 'The tray app runs the installed build' }
         $run = (Get-ItemProperty $RunKey -Name Passthrough -ErrorAction SilentlyContinue).Passthrough
         if ($run) { Good 'Start at login is on' } else { Warn 'Start at login is off (Settings ▸ General)' }
