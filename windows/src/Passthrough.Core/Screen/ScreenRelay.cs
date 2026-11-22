@@ -41,10 +41,39 @@ public static class Splice
 {
     public const int BufferSize = 256 << 10;
 
-    public static async Task<(long AToB, long BToA)> RunAsync(Stream a, Stream b, CancellationToken cancel = default)
+    /// <summary>
+    /// What a splice did since the last report: bytes each way, how long writes to <c>a</c> (the phone) were waited on,
+    /// the longest single such wait, and the longest silence from <c>a</c>. For a view's periodic log line.
+    /// </summary>
+    public readonly record struct Progress(long FromA, long ToA, TimeSpan BlockedToA, TimeSpan LongestWriteToA, TimeSpan LongestQuietFromA);
+
+    public static async Task<(long AToB, long BToA)> RunAsync(Stream a, Stream b, CancellationToken cancel = default,
+        Action<Progress>? report = null, TimeSpan? every = null)
     {
         using var done = CancellationTokenSource.CreateLinkedTokenSource(cancel);
         long aToB = 0, bToA = 0;
+        long blockedTicks = 0, longestWrite = 0, longestQuiet = 0, lastFromA = System.Diagnostics.Stopwatch.GetTimestamp();
+        static void Max(ref long slot, long value) { long seen; while (value > (seen = Interlocked.Read(ref slot)) && Interlocked.CompareExchange(ref slot, value, seen) != seen) { } }
+        async Task Report()
+        {
+            long lastA = 0, lastB = 0;
+            try
+            {
+                while (true)
+                {
+                    await Task.Delay(every ?? TimeSpan.FromSeconds(5), done.Token).ConfigureAwait(false);
+                    var (nowA, nowB) = (Interlocked.Read(ref aToB), Interlocked.Read(ref bToA));
+                    var quiet = Math.Max(Interlocked.Exchange(ref longestQuiet, 0), System.Diagnostics.Stopwatch.GetTimestamp() - Interlocked.Read(ref lastFromA));
+                    report!(new Progress(nowA - lastA, nowB - lastB,
+                        System.Diagnostics.Stopwatch.GetElapsedTime(0, Interlocked.Exchange(ref blockedTicks, 0)),
+                        System.Diagnostics.Stopwatch.GetElapsedTime(0, Interlocked.Exchange(ref longestWrite, 0)),
+                        System.Diagnostics.Stopwatch.GetElapsedTime(0, quiet)));
+                    (lastA, lastB) = (nowA, nowB);
+                }
+            }
+            catch (OperationCanceledException) { }
+        }
+        var reporting = report is null ? Task.CompletedTask : Report();
         async Task Pump(Stream from, Stream to, bool forward)
         {
             var buffer = System.Buffers.ArrayPool<byte>.Shared.Rent(BufferSize);
@@ -54,7 +83,18 @@ public static class Splice
                 {
                     var n = await from.ReadAsync(buffer.AsMemory(0, BufferSize), done.Token).ConfigureAwait(false);
                     if (n == 0) break;
+                    var started = System.Diagnostics.Stopwatch.GetTimestamp();
+                    if (forward)
+                    {
+                        Max(ref longestQuiet, started - Interlocked.Exchange(ref lastFromA, started));
+                    }
                     await to.WriteAsync(buffer.AsMemory(0, n), done.Token).ConfigureAwait(false);
+                    if (!forward)
+                    {
+                        var took = System.Diagnostics.Stopwatch.GetTimestamp() - started;
+                        Interlocked.Add(ref blockedTicks, took);
+                        Max(ref longestWrite, took);
+                    }
                     if (forward) Interlocked.Add(ref aToB, n); else Interlocked.Add(ref bToA, n);
                 }
             }
@@ -67,6 +107,7 @@ public static class Splice
             }
         }
         await Task.WhenAll(Pump(a, b, true), Pump(b, a, false)).ConfigureAwait(false);
+        await reporting.ConfigureAwait(false);
         a.Dispose();
         b.Dispose();
         return (Interlocked.Read(ref aToB), Interlocked.Read(ref bToA));

@@ -20,6 +20,16 @@ public sealed class ShellConnection : IShellAttachment
     private readonly ISessionHost _host;
     private readonly Stream _stream;
 
+    /// <summary>Every 5 s of a view that is carrying something: what passed, how long the phone made us wait, and the link's numbers.</summary>
+    private void LogProgress(Screen.Splice.Progress p)
+    {
+        if (p.FromA == 0 && p.ToA == 0) return;
+        string link;
+        try { link = _stream is IStreamPath s ? s.DescribeLink() : ""; }
+        catch (Exception e) when (e is IOException or ObjectDisposedException or InvalidOperationException) { link = ""; }
+        _gate.Log?.Invoke($"screen: {Label}'s view, last 5 s: {p.ToA} bytes out, {p.FromA} in; writes to it waited {p.BlockedToA.TotalMilliseconds:0} ms (longest {p.LongestWriteToA.TotalMilliseconds:0} ms); longest silence from it {p.LongestQuietFromA.TotalMilliseconds:0} ms; {PathNow()}{(link.Length > 0 ? "; " + link : "")}");
+    }
+
     /// <summary>How this connection reaches the peer now: iroh's path, or the TLS listener on this network.</summary>
     private string PathNow()
     {
@@ -100,7 +110,7 @@ public sealed class ShellConnection : IShellAttachment
             catch (Exception e) when (e is IOException or ObjectDisposedException or OperationCanceledException) { nla = false; }
             if (nla)
             {
-                var (fromPhone, toPhone) = await Screen.Splice.RunAsync(_stream, relay).ConfigureAwait(false);
+                var (fromPhone, toPhone) = await Screen.Splice.RunAsync(_stream, relay, report: LogProgress).ConfigureAwait(false);
                 EndView(fromPhone, toPhone, IsClosed ? "Stop" : "the phone or Remote Desktop");
             }
             else

@@ -764,6 +764,36 @@ pub unsafe extern "C" fn pt_iroh_stream_path(handle: u64, path: *mut i32, buffer
     })
 }
 
+/// The selected path's QUIC numbers, as text for a log line: round trip, congestion window, the controller's
+/// bandwidth estimate, packets sent and lost, congestion events, MTU. No addresses.
+///
+/// # Safety
+/// `buffer` is valid for `capacity` bytes.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn pt_iroh_stream_stats(handle: u64, buffer: *mut u8, capacity: usize) -> i32 {
+    guard(|| {
+        let object = stream(handle)?;
+        let paths = object.connection.paths();
+        let text = match paths.iter().find(|p| p.is_selected()) {
+            Some(p) => {
+                let s = p.stats();
+                format!(
+                    "rtt {} ms, cwnd {} B, est {} kbit/s, sent {} pkts, lost {} pkts, {} congestion events, mtu {}",
+                    s.rtt.as_millis(),
+                    s.cwnd,
+                    s.bandwidth_estimate.map(|b| (b / 1000).to_string()).unwrap_or_else(|| "?".into()),
+                    s.sent_packets,
+                    s.lost_packets,
+                    s.congestion_events,
+                    s.current_mtu
+                )
+            }
+            None => String::new(),
+        };
+        Ok(unsafe { text_out(&text, buffer, capacity) })
+    })
+}
+
 // MARK: Freeing
 
 /// Forgets a handle. An endpoint is closed, an attempt not yet handled is refused, a stream is closed as by
