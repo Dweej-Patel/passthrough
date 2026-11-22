@@ -68,6 +68,26 @@ public sealed class SetupTests
     }
 
     [Fact]
+    public void WhatSetupWritesStaysTrustedForTheNextUpdate()
+    {
+        // Only an elevated run can give a file to Administrators, as setup does. New files take the token's default
+        // owner, which a parent may set to the account itself (Git Bash does), and then the next --update refused
+        // the folders the install made.
+        using (var identity = WindowsIdentity.GetCurrent())
+            if (!new WindowsPrincipal(identity).IsInRole(WindowsBuiltInRole.Administrator)) return;
+        var folder = Path.Combine(Path.GetTempPath(), "pt-setup-" + Guid.NewGuid().ToString("N"));
+        var files = new WindowsSecuredFiles();
+        files.CreateFolder(folder, ServiceDefinition.ProgramFolderSddl);
+        try
+        {
+            files.WriteNew(Path.Combine(folder, "build", "en-US", "Passthrough.resources.dll"), "x"u8.ToArray());
+            files.Write(Path.Combine(folder, "install.json"), "{}"u8.ToArray());
+            Assert.Equal(FolderCheck.Trusted, files.Check(folder));
+        }
+        finally { Directory.Delete(folder, true); }
+    }
+
+    [Fact]
     public void ReadLockedRefusesALink()
     {
         var folder = Path.Combine(Path.GetTempPath(), "pt-setup-" + Guid.NewGuid().ToString("N"));
