@@ -14,15 +14,33 @@ public static class RdpNegotiation
     public const uint ProtocolSsl = 1, ProtocolHybrid = 2, ProtocolHybridEx = 8;
     private const int MaxFirstPdu = 1024;
 
-    /// <summary>Reads the first PDU from the phone, forwards it if it offers NLA, then the confirm back if Remote Desktop chose NLA. False: close both.</summary>
-    public static async Task<bool> EnforceAsync(Stream phone, Stream desktop, CancellationToken cancel)
+    /// <summary>
+    /// Reads the first PDU from the phone, forwards it if it offers NLA, then the confirm back if Remote Desktop chose NLA.
+    /// False: close both; <paramref name="refused"/> hears which side and what its PDU was (sizes, codes and the
+    /// negotiation's last 8 bytes; never the request's cookie, which names the account).
+    /// </summary>
+    public static async Task<bool> EnforceAsync(Stream phone, Stream desktop, CancellationToken cancel, Action<string>? refused = null)
     {
-        if (await ReadPduAsync(phone, cancel).ConfigureAwait(false) is not { } request || !OffersNla(request)) return false;
+        var request = await ReadPduAsync(phone, cancel).ConfigureAwait(false);
+        if (request is null || !OffersNla(request))
+        {
+            refused?.Invoke($"the phone's connection request {Describe(request)}");
+            return false;
+        }
         await desktop.WriteAsync(request, cancel).ConfigureAwait(false);
-        if (await ReadPduAsync(desktop, cancel).ConfigureAwait(false) is not { } confirm || !ChoseNla(confirm)) return false;
+        var confirm = await ReadPduAsync(desktop, cancel).ConfigureAwait(false);
+        if (confirm is null || !ChoseNla(confirm))
+        {
+            refused?.Invoke($"Remote Desktop's confirm {Describe(confirm)}");
+            return false;
+        }
         await phone.WriteAsync(confirm, cancel).ConfigureAwait(false);
         return true;
     }
+
+    private static string Describe(byte[]? pdu) => pdu is null
+        ? "wasn't a TPKT PDU of 11 to 1024 bytes, or the stream ended"
+        : $"was {pdu.Length} bytes, X.224 code 0x{pdu[5]:x2}, length indicator {pdu[4]}, ending {Convert.ToHexStringLower(pdu.AsSpan(Math.Max(0, pdu.Length - 8)))}";
 
     /// <summary>One TPKT PDU (version 3, its length in bytes 2–3); null when it isn't one or is too long for a first PDU.</summary>
     internal static async Task<byte[]?> ReadPduAsync(Stream stream, CancellationToken cancel)

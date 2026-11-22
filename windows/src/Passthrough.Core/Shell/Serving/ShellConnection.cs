@@ -87,7 +87,8 @@ public sealed class ShellConnection : IShellAttachment
             try
             {
                 using var limit = new CancellationTokenSource(TimeSpan.FromSeconds(10));
-                nla = await Screen.RdpNegotiation.EnforceAsync(_stream, relay, limit.Token).ConfigureAwait(false);
+                nla = await Screen.RdpNegotiation.EnforceAsync(_stream, relay, limit.Token,
+                    why => _gate.Log?.Invoke($"screen: no Network Level Authentication: {why}")).ConfigureAwait(false);
             }
             catch (Exception e) when (e is IOException or ObjectDisposedException or OperationCanceledException) { nla = false; }
             if (nla)
