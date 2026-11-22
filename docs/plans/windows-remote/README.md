@@ -84,11 +84,33 @@ facts measured on a real PC.
   logs are administrators-only; the Remote Desktop block rules have a firewall
   group of their own; the relay reads the first PDU each way and closes any
   connection without NLA.
-* Not yet on the PC: stage 5's exposure notice to tray apps, the after-view
-  and "Allow screen" notices, `host.console`; the quit dialog and the hand-off
-  to the installed copy after Turn on.
+  * #65–#68 stage 5's notices (exposure, after-view, Allow screen), the
+    hand-off to the installed copy, and stage 7 (a) on the PC: computer
+    access (`computer.` ids, HMAC plus a signature bound to this host, a
+    decoy check), Hello-sealed passes handed to this PC.
+  * #69 and #71 stage 2 on iOS and Android: phones know a PC (kind, words,
+    the PC page and its states, the split New shell, a screen gate that never
+    sends a PC to the Mac's Screen Sharing login).
+  * #70 stage 8 (a): the PC as a shell client (pinned TLS and iroh),
+    `passthrough-term.exe`, Your computers in the flyout.
+  * #72 stage 7 (a) on the Mac and iPhone: the Mac lets in computers a phone
+    shares, the iPhone's share flow, the Mac keeps passes handed to it.
+  * #73 stage 8 (b): a Mac's screen in a window on the PC (Media Foundation
+    decoding on the GPU, input, clipboard).
+  * #74 stage 6: a PC's screen on the iPhone and iPad through Remote Desktop,
+    behind a debug-only switch; FreeRDP 3.33.1 built by a script and a
+    workflow, never committed.
+  * #75 fixes from an independent review of stages 4, 5, 7 and 8 on the PC;
+    review fixes for #69–#74 are on their own branches.
+* Not yet: the quit dialog; `host.console` and the takeover question; stage 6's
+  clipboard, display resize, Windows menu, gestures and shared-surface path;
+  stage 7 (b) direct pairing, (c) the Mac's window onto a PC, (d)
+  `passthrough-term remote`; stage 8 (c) sound and microphone; fixtures for
+  the computer messages; keeping a replaced computer grant until the new one
+  first connects.
 * Not run for real on this PC (each changes it; left for the owner):
   `--install`, Screen setup, stock FreeRDP through the relay, `--remove`.
-* Needs the Mac and a phone: spikes 0.1, 0.3, 0.5, 0.6; stage 2 (the phones
-  call the PC a PC: until then a PC works but is named a Mac); the first real
-  test of #56 (turn on, plug in, open a shell from cellular).
+* Needs the Mac and a phone: spikes 0.1, 0.3, 0.5, 0.6; stage 2 on real
+  phones; the first real test of #56 (turn on, plug in, open a shell from
+  cellular); stage 6 against a real PC (sign-in, pin, NLA over the hook);
+  stage 7 and 8 against a real Mac.
