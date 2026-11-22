@@ -172,6 +172,8 @@ struct PCScreenWindow: View {
                         if let login { WindowsLoginStore.save(login, hostID: hostID, pin: pin, context: context) } else { WindowsLoginStore.delete(hostID: hostID) }
                     })
         // A login saved for this PC signs in without asking; the picture's area is known by now.
+        let shell = self.shell
+        model.onScreenAccess = { allowed in shell.noteScreen(allowed: allowed, hostID: hostID) }
         model.connectRemembered(pixels: viewPixels, scale: displayScale)
     }
 
@@ -290,6 +292,8 @@ final class PCScreenModel: ObservableObject, RemoteScreenSource {
     var onSurface: ((IOSurface?) -> Void)?
     var onSurfaceChanged: (() -> Void)?
     var onCursorChange: (() -> Void)?
+    /// What the PC said about its screen for this Mac (true: allowed), so the panel's state follows it.
+    var onScreenAccess: ((Bool) -> Void)?
     private(set) var surface: IOSurface?
 
     private var computer: ReachableComputer?
@@ -541,6 +545,7 @@ final class PCScreenModel: ObservableObject, RemoteScreenSource {
         case let .host(info):
             host = info
             hostWait?.cancel()
+            if let screen = info.access?.screen { onScreenAccess?(screen) }
             let inUse = info.console == "active" && (info.idleSeconds ?? .max) < HostInfo.inUseIdleSeconds
             // Not asked again for a reconnect, or once the user said to go ahead.
             if inUse, !askedAnyway, retries == 0, !rdpAsked {
@@ -549,9 +554,11 @@ final class PCScreenModel: ObservableObject, RemoteScreenSource {
                 askForScreen()
             }
         case let .rdp(stream, initialBytes, certSHA256):
+            onScreenAccess?(true)
             client = nil   // it let go of the stream; the dialer stays up for it
             startEngine(stream: stream, initialBytes: initialBytes, certSHA256: certSHA256, generation: gen)
         case .rdpRefused(.screenNotAllowed, _, _):
+            onScreenAccess?(false)
             // A computer's screen waits for the PC's owner, who allows it on the notice the hand-over left there.
             fail("Screen is off for this Mac. On \(name), click Passthrough's icon and choose Allow screen on the notice about this Mac, "
                  + "or Allow screen for this Mac in Passthrough's Settings on \(name) (Computers with access).")

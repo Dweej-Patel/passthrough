@@ -83,6 +83,31 @@ public final class ComputerReachStore: @unchecked Sendable {
         return .saved(replaced: kept)
     }
 
+    /// What that host says now about its screen for this Mac (its `host.access.screen`, or the screen opening or
+    /// being refused): "waiting for its owner" becomes "given" once the owner allowed it, and back if they took it
+    /// away. Only the screen scope moves, and only for a host already kept. False when nothing changed.
+    @discardableResult
+    public func noteScreen(allowed: Bool, hostID: String) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        guard var list = load(), let index = list.firstIndex(where: { $0.id == hostID && !isDenied($0) }) else { return false }
+        var computer = list[index]
+        let screen = Computers.scopeScreen
+        let has = computer.scopes.contains(screen), waits = computer.pending?.contains(screen) == true
+        guard has || waits else { return false }   // the screen was never shared: nothing to say about it
+        if allowed {
+            guard !has else { return false }
+            computer.scopes = Computers.allScopes.filter((computer.scopes + [screen]).contains)
+            computer.pending = computer.pending?.filter { $0 != screen }
+        } else {
+            guard !waits else { return false }
+            computer.scopes = computer.scopes.filter { $0 != screen }
+            computer.pending = Computers.allScopes.filter(((computer.pending ?? []) + [screen]).contains)
+        }
+        if computer.pending?.isEmpty == true { computer.pending = nil }
+        list[index] = computer
+        return write(list)
+    }
+
     /// A phone was granted access here (again): what it hands over is kept once more.
     public func allowSender(_ phoneID: String) {
         lock.lock(); revokedSenders.remove(phoneID); lock.unlock()

@@ -1015,6 +1015,13 @@ final class RemoteShellController: ObservableObject {
         reachableComputers = reachStore.computers
     }
 
+    /// What a PC said about its screen for this Mac when it was reached: the panel's "waiting for its owner"
+    /// follows it (the hand-over only recorded how things stood then).
+    func noteScreen(allowed: Bool, hostID: String) {
+        guard reachStore.noteScreen(allowed: allowed, hostID: hostID) else { return }
+        refreshReachableComputers()
+    }
+
     /// The owner forgets this Mac's access to another computer, and the Windows login saved for it.
     /// That computer still lists this Mac until it is removed there too.
     func removeReachableComputer(_ hostID: String) {
