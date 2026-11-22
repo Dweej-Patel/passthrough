@@ -49,7 +49,8 @@ public sealed class ServiceRemote : IDisposable
     public string? NetworkProblem { get; private set; }
 
     public ServiceRemote(ISecretStore secrets, string installFolder, ITrayHosts trays, Func<string?> relayUrl, Action<string> log, string? hostName = null, IrohRelay? relayOverride = null,
-        TlsOptions? tls = null, Func<Passthrough.Core.Screen.RemoteDesktopSetup?>? screenSetup = null)
+        TlsOptions? tls = null, Func<Passthrough.Core.Screen.RemoteDesktopSetup?>? screenSetup = null,
+        Func<IReadOnlyCollection<string>>? allowedAccounts = null)
     {
         _secrets = secrets;
         _trays = trays;
@@ -59,13 +60,20 @@ public sealed class ServiceRemote : IDisposable
         _tls = tls;
         _relayOverride = relayOverride;
         Directory = new AccessDirectory(_secrets, log: log);
+        if (allowedAccounts is not null) Directory.IsAllowed = account => allowedAccounts().Contains(account, StringComparer.OrdinalIgnoreCase);
         IrohEndpoint.UseLibraryIn(installFolder);
         // Screen through Remote Desktop, when it is set up (install.json's rdp); a PC without it answers rdp_unavailable.
         RemoteDesktop = screenSetup is null ? null : new Passthrough.Windows.Screen.RemoteDesktopGate(screenSetup, IsWorkAccount, log);
         Gate = new ShellGate(HostFor, Directory, new HandshakeLimiter(TimeSpan.FromSeconds(10), TimeProvider.System), Hooks(), log: log);
         Gate.RelayRate.LockoutThreshold = LockoutThreshold();
+        Notices.Changed += account =>
+        {
+            if (account is null) trays.TellAll(new PipeAdminEvent { What = PipeAdminEvent.Notice });
+            else trays.Tell(account, new PipeAdminEvent { What = PipeAdminEvent.Notice });
+        };
         Admin = new PipeAdminHandler(Directory, Grant, ConnectionsOf, Disconnect, log)
         {
+            Board = Notices,
             PowerState = () => (StayAwake, SleepAfter(), PowerFacts.OnMains),
             EndScreen = (phone, reason) => Gate.DisconnectScreen(phone, reason),
             ScreenRow = account => RemoteDesktop?.Verdict(account) is { } v ? new PipeScreenRow(v.Rdp, v.RowState, v.Text, v.Action, v.Reason) : null,
@@ -90,10 +98,43 @@ public sealed class ServiceRemote : IDisposable
             Gate.PushHost(host);
             Gate.PushState();
         };
+        Directory.Replaced += Disconnect;
         Directory.Changed += account => trays.Tell(account, new PipeAdminEvent { What = PipeAdminEvent.Access });
     }
 
     public AccessDirectory Directory { get; }
+
+    /// <summary>What the person at the PC should know, until they answer it.</summary>
+    public NoticeBoard Notices { get; } = new();
+
+    private DateTime _lastExposureCheck = DateTime.MinValue;
+    private string? _lastVerdict;
+
+    /// <summary>
+    /// Every minute: is Remote Desktop open to the network where Passthrough promised it isn't? The notice follows.
+    /// What phones are told (<c>host</c>'s <c>rdp</c>) is logged when it changes, with the read that failed if one did.
+    /// </summary>
+    private void CheckExposure()
+    {
+        if (DateTime.UtcNow - _lastExposureCheck < TimeSpan.FromSeconds(60)) return;
+        _lastExposureCheck = DateTime.UtcNow;
+        if (RemoteDesktop is null)
+        {
+            LogVerdict("screen: Screen isn't set up on this PC");
+            return;
+        }
+        var verdict = RemoteDesktop.Verdict(null);
+        var failed = RemoteDesktop.Facts().FailedRead;
+        LogVerdict($"screen: Remote Desktop is {verdict.Rdp}{(verdict.Reason is { } why ? $": {why}" : "")}{(failed is null ? "" : $" (couldn't read {failed})")}");
+        Notices.Exposed(Directory.Accounts, verdict.Rdp == Passthrough.Core.Screen.RemoteDesktopVerdict.Exposed ? verdict.Reason ?? "" : null);
+    }
+
+    private void LogVerdict(string line)
+    {
+        if (line == _lastVerdict) return;
+        _lastVerdict = line;
+        _log(line);
+    }
 
     /// <summary>This PC's Remote Desktop, when Screen is set up.</summary>
     public Passthrough.Windows.Screen.RemoteDesktopGate? RemoteDesktop { get; }
@@ -128,7 +169,16 @@ public sealed class ServiceRemote : IDisposable
 
     private int ConnectionsOf(string phoneId) => Gate.ConnectedPhones.Count(p => p == phoneId);
 
-    private void Disconnect(string phoneId) => Gate.Disconnect(phoneId);
+    /// <summary>
+    /// Ends a phone's or computer's connections and the sessions it opened. Its access is already gone by now (taken
+    /// first, so a reconnect is refused), so its owner can't be looked up: its sessions are closed on every account's
+    /// shells (an id belongs to one account; the others have none of its).
+    /// </summary>
+    private void Disconnect(string phoneId)
+    {
+        Gate.Disconnect(phoneId);
+        foreach (var host in _trays.Hosts) host.CloseSessions(phoneId);
+    }
 
     public void Start()
     {
@@ -171,6 +221,7 @@ public sealed class ServiceRemote : IDisposable
     /// </summary>
     private void UpdatePower()
     {
+        CheckExposure();
         if (Gate.ConnectedPhones.Count > 0) _lastConnected = DateTime.UtcNow;
         _connectedRequest?.Set(DateTime.UtcNow - _lastConnected < AwakeAfterLast);
         _awakeRequest?.Set(StayAwake && PowerFacts.OnMains);
@@ -297,9 +348,11 @@ public sealed class ServiceRemote : IDisposable
                 Shells = state?.Shells ?? [],
                 Screens = rdp == Passthrough.Core.Screen.RemoteDesktopVerdict.Ready ? [HostInfo.ScreenRdp] : [],
                 Rdp = rdp,
-                Access = new HostAccess { Shell = true, Screen = screen },
+                Access = new HostAccess { Shell = true, Screen = screen, Share = Directory.MayShare(phone) },
                 Lock = true,
                 User = screen ? state?.User : null,
+                // This account can keep access to other computers (stage 7): phones may hand it some.
+                IdKey = state?.IdKey,
                 SleepAfter = SleepAfter(),
             }.Cleaned();
         },
@@ -311,9 +364,24 @@ public sealed class ServiceRemote : IDisposable
         RemoteDesktop = RemoteDesktop,
         AccountOf = phone => Directory.Owner(phone),
         ViewStarted = v => _log($"screen: \"{v.Label}\" ({Short(v.PhoneId)}) account …{Tail(v.Account)} opened a view"),
-        ViewEnded = v => _log($"screen: \"{v.Label}\" ({Short(v.PhoneId)}) account …{Tail(v.Account)} view ended after {(v.End - v.Start)?.ToString(@"h\:mm\:ss")}; {v.BytesOut / 1e6:F1} MB out, {v.BytesIn / 1e6:F1} MB in; ended by {v.EndedBy}"),
+        ViewEnded = v =>
+        {
+            if (v.Account is { } owner && v.End is { } end)
+                Notices.Viewed(owner, v.PhoneId, v.Label, v.Start, end, t => t.ToLocalTime().ToString("HH:mm", System.Globalization.CultureInfo.CurrentCulture));
+            ViewLog(v);
+        },
+        SaveComputerPass = (phone, label, m) => OwnerHost(phone) is { } owner ? owner.SavePassAsync(phone, label, m) : Task.FromResult<ShellError?>(ShellError.SignedOut),
+        ComputerGranted = (phone, c) =>
+        {
+            if (Directory.Owner(c.Id) is not { } owner) return;
+            Notices.Add(owner, c.ScreenPending == true ? PipeNotice.ComputerScreenPending : PipeNotice.ComputerGranted, c.ScreenPending == true
+                ? $"{phone} gave {c.Name} access to this PC's shell. Let it see the screen too? Windows still asks for your password."
+                : $"{phone} gave {c.Name} access to this PC's {(c.Shell == true ? "shell" : "screen")}.", c.Id);
+        },
         Event = e => _log($"shell: {e}"),
     };
+
+    private void ViewLog(Passthrough.Core.Screen.RelayRecord v) => _log($"screen: \"{v.Label}\" ({Short(v.PhoneId)}) account …{Tail(v.Account)} view ended after {(v.End - v.Start)?.ToString(@"h\:mm\:ss")}; {v.BytesOut / 1e6:F1} MB out, {v.BytesIn / 1e6:F1} MB in; ended by {v.EndedBy}");
 
     private static string Short(string id) => id.Length > 8 ? id[..8] : id;
     private static string Tail(string? sid) => sid?.Split('-')[^1] ?? "?";

@@ -463,7 +463,7 @@
         "line": "{\"t\":\"error\",\"reason\":\"too_many_screens\"}"
       }
     ],
-    "errors": ["not_authorized", "too_many_sessions", "no_such_session", "bad_request", "screen_not_allowed", "screen_unavailable", "screen_video_unavailable", "too_many_screens", "not_allowed", "vpn_not_set_up", "screen_only", "pass_not_saved", "signed_out", "rdp_unavailable", "try_later"],
+    "errors": ["not_authorized", "too_many_sessions", "no_such_session", "bad_request", "screen_not_allowed", "screen_unavailable", "screen_video_unavailable", "too_many_screens", "not_allowed", "vpn_not_set_up", "screen_only", "pass_not_saved", "signed_out", "rdp_unavailable", "try_later", "too_many_computers", "pass_conflict"],
     "host": {
       "kinds": [
         "mac",

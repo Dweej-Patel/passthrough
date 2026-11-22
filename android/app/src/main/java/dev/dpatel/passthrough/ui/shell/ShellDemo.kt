@@ -1,6 +1,10 @@
 package dev.dpatel.passthrough.ui.shell
 
 import dev.dpatel.passthrough.core.BatterySample
+import dev.dpatel.passthrough.core.HostAccess
+import dev.dpatel.passthrough.core.HostFarewell
+import dev.dpatel.passthrough.core.HostInfo
+import dev.dpatel.passthrough.core.HostShell
 import dev.dpatel.passthrough.core.MacEvent
 import dev.dpatel.passthrough.core.MacState
 import dev.dpatel.passthrough.core.MacStates
@@ -19,7 +23,8 @@ import dev.dpatel.passthrough.core.ShellSessionInfo
  *
  *     adb shell am start -n dev.dpatel.passthrough.android/dev.dpatel.passthrough.MainActivity --es pt.demo.shell ready
  *
- * Values: ready, connecting, unreachable, no_access, needs_passcode, key_unavailable.
+ * Values: ready, connecting, unreachable, no_access, needs_passcode, key_unavailable, and the
+ * demo PC's states ([pcHost]).
  */
 internal object ShellDemo {
     const val EXTRA = "pt.demo.shell"
@@ -31,17 +36,58 @@ internal object ShellDemo {
 
     fun reach(value: String): ShellReach = when (value) {
         "connecting" -> ShellReach.CONNECTING
-        "unreachable" -> ShellReach.UNREACHABLE
+        "unreachable", "pc_asleep", "pc_turned_off" -> ShellReach.UNREACHABLE
         "no_access" -> ShellReach.NO_ACCESS
         "needs_passcode" -> ShellReach.NEEDS_PASSCODE
         "key_unavailable" -> ShellReach.KEY_UNAVAILABLE
         else -> ShellReach.READY
     }
 
+    /** The demo PC: pick it under Your computers. */
+    const val PC = "demo-pc"
+
     val macs = listOf(
         ShellCredential("demo-mac-1", "MacBook Pro", "", ByteArray(0), "demo-phone", 0, emptyList()),
         ShellCredential(STUDIO, "Home Studio", "", ByteArray(0), "demo-phone", 0, emptyList()),
+        ShellCredential(PC, "Office-PC", "", ByteArray(0), "demo-phone", 0, emptyList(), hostKind = HostInfo.KIND_WINDOWS),
     )
+
+    /**
+     * What the demo PC says about itself. Values (with `pt.demo.shell`): pc_signed_out,
+     * pc_other_user, pc_app_closed, pc_shell_off, pc_home; pc_asleep and pc_turned_off
+     * leave it unreachable with that farewell.
+     */
+    fun pcHost(value: String): HostInfo {
+        val ready = HostInfo(
+            kind = HostInfo.KIND_WINDOWS, os = "Windows 11 Pro", signedIn = true, app = true, console = "active", idleSeconds = 30,
+            shells = listOf(
+                HostShell("pwsh", "PowerShell", default = true),
+                HostShell("powershell", "Windows PowerShell"),
+                HostShell("cmd", "Command Prompt"),
+                HostShell("wsl:Ubuntu", "Ubuntu"),
+                HostShell("gitbash", "Git Bash"),
+            ),
+            screens = listOf("rdp"), rdp = "ready", access = HostAccess(shell = true, screen = true), lock = true, sleepAfter = 1800,
+        )
+        return when (value) {
+            "pc_signed_out" -> ready.copy(signedIn = false, app = false, console = "signedOut")
+            "pc_other_user" -> ready.copy(signedIn = false, app = false, console = "otherUser")
+            "pc_app_closed" -> ready.copy(app = false)
+            "pc_shell_off" -> ready.copy(access = HostAccess(shell = false, screen = true))
+            "pc_home" -> ready.copy(screens = emptyList(), rdp = "edition", os = "Windows 11 Home")
+            else -> ready
+        }
+    }
+
+    /** Why the demo PC left, for the states that say. */
+    fun pcFarewell(value: String): String? = when (value) {
+        "pc_asleep" -> HostFarewell.SLEEPING
+        "pc_turned_off" -> HostFarewell.TURNED_OFF
+        else -> null
+    }
+
+    /** The demo PC's state: a battery and a screen lock, and nothing a phone may change but the lock. */
+    val pcState = MacState(battery = 0.82, charging = true, locked = false, control = false)
 
     private fun now() = System.currentTimeMillis() / 1000.0
 
@@ -51,7 +97,12 @@ internal object ShellDemo {
     /** Each demo Mac's own sessions, plus the ones opened in the demo ([extra]). */
     fun sessions(macID: String, extra: List<String> = emptyList()): List<ShellSessionInfo> {
         val t = now()
-        val base = if (macID == STUDIO) {
+        val base = if (macID == PC) {
+            listOf(
+                ShellSessionInfo("pc-1", "PowerShell — C:\\dev", startedAt = t - 600, lastOutputAt = t - 20, running = true, shell = "pwsh"),
+                ShellSessionInfo("pc-2", "ubuntu — ~/src", startedAt = t - 5400, lastOutputAt = t - 900, running = true, shell = "wsl:Ubuntu"),
+            )
+        } else if (macID == STUDIO) {
             listOf(
                 ShellSessionInfo("studio-1", "zsh — ~/music", startedAt = t - 3000, lastOutputAt = t - 300, running = true),
                 ShellSessionInfo(STUDIO_ASKING, "codex", startedAt = t - 1200, lastOutputAt = t - 90, running = true,

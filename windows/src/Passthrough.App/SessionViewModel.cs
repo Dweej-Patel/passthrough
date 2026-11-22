@@ -45,6 +45,47 @@ public sealed class SessionViewModel : ObservableBase
 
     public ObservableCollection<PhoneRow> Rows { get; } = new();
 
+    /// <summary>Remote access's notices (the screen was used, a phone was given access…), each until answered.</summary>
+    public ObservableCollection<NoticeRow> Notices { get; } = new();
+
+    /// <summary>The other computers this PC can reach, once opened with Windows Hello.</summary>
+    public ObservableCollection<ComputerRow> Computers { get; } = new();
+
+    private bool _computersShown;
+
+    /// <summary>"Your computers" shows a Show button until the list has been opened (one Hello confirmation).</summary>
+    public Visibility ShowComputersVisibility => _computersShown ? Visibility.Collapsed : Visibility.Visible;
+    public Visibility ComputersVisibility => _computersShown && Computers.Count > 0 ? Visibility.Visible : Visibility.Collapsed;
+
+    /// <summary>Opens the kept computers (Windows Hello); null when none can be kept here.</summary>
+    public Func<Task<IReadOnlyList<Passthrough.Core.Trust.ReachableComputer>?>>? OpenComputers { get; set; }
+
+    /// <summary>A new shell on a computer, in a terminal.</summary>
+    public Func<Passthrough.Core.Trust.ReachableComputer, Task>? NewShell { get; set; }
+
+    /// <summary>A Mac's screen in a window of its own (Windows Hello again for it).</summary>
+    public Action<Passthrough.Core.Trust.ReachableComputer>? OpenScreen { get; set; }
+
+    public async Task ShowComputersAsync()
+    {
+        if (OpenComputers is not { } open || await open() is not { } list) return;
+        _computersShown = true;
+        Computers.Clear();
+        foreach (var c in list) Computers.Add(new ComputerRow(c));
+        Raise(nameof(ShowComputersVisibility));
+        Raise(nameof(ComputersVisibility));
+    }
+
+    /// <summary>Answers a notice (OK, or its action first).</summary>
+    public Func<Passthrough.Core.Pipe.PipeNotice, bool, Task>? AnswerNotice { get; set; }
+
+    /// <summary>Replaces the notices (on the UI thread).</summary>
+    public void ShowNotices(IReadOnlyList<Passthrough.Core.Pipe.PipeNotice> notices) => _ui.TryEnqueue(() =>
+    {
+        Notices.Clear();
+        foreach (var notice in notices) Notices.Add(new NoticeRow(notice));
+    });
+
     /// <summary>Raised on the UI thread when an attached phone's pairing or saved name changed, so Settings can list the stored pairings again.</summary>
     public event Action? PairingsChanged;
 

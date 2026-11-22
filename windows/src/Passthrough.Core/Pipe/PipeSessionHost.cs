@@ -15,6 +15,7 @@ public sealed class PipeSessionHost : ISessionHost
 {
     public static readonly TimeSpan OpenLimit = TimeSpan.FromSeconds(15);
     public static readonly TimeSpan ReplyLimit = TimeSpan.FromSeconds(5);
+    private const long MaxTranscript = 64L << 20;
     private const int TimeoutsBeforeDrop = 3;
 
     private readonly Lock _lock = new();
@@ -41,6 +42,7 @@ public sealed class PipeSessionHost : ISessionHost
     {
         public readonly TaskCompletionSource<PipeMessage> Reply = new(TaskCreationOptions.RunContinuationsAsynchronously);
         public List<string>? Lines;
+        public long Bytes;
     }
 
     public PipeSessionHost(string account, TimeProvider? time = null, Action<string>? log = null)
@@ -253,6 +255,9 @@ public sealed class PipeSessionHost : ISessionHost
         {
             if (!_pending.TryGetValue(id, out pending)) return;
             (pending.Lines ??= []).AddRange(chunk.Lines ?? []);
+            pending.Bytes += (chunk.Lines ?? []).Sum(l => (long)l.Length);
+            // A transcript is at most what a phone is sent (its end): more than this is a tray app misbehaving.
+            if (pending.Bytes > MaxTranscript || pending.Lines.Count > 100_000) chunk = chunk with { Error = ShellError.NoSuchSession.ToWire() };
             if (chunk.Last != true && chunk.Error is null) return;
             _pending.Remove(id);
         }
@@ -354,6 +359,20 @@ public sealed class PipeSessionHost : ISessionHost
     }
 
     private static ShellError Wire(string error, ShellError otherwise) => ShellErrorWire.IsKnown(error) ? ShellErrorWire.Parse(error) : otherwise;
+
+    /// <summary>A phone handed this account access to another computer: the tray app keeps it (behind Windows Hello). Null when kept, else why not.</summary>
+    public async Task<ShellError?> SavePassAsync(string phone, string from, ShellEnvelope m)
+    {
+        try
+        {
+            var reply = await AskAsync(PipeKind.SavePass, id => new PipeMessage
+            {
+                Id = id, Phone = phone, Label = from, Pass = m.Pass, Scopes = m.Scopes, Pending = m.Pending, HostKind = m.Kind,
+            }, TimeSpan.FromSeconds(40)).ConfigureAwait(false);
+            return null;
+        }
+        catch (ShellException e) { return e.Error; }
+    }
 
     /// <summary>Asks the tray app to lock its Windows session; null when asked, else why not.</summary>
     public ShellError? Lock()

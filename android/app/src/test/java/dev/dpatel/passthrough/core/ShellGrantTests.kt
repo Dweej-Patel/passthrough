@@ -289,5 +289,63 @@ class ShellGrantTests {
         val c = PairingRegistry(s).clients.single()
         assertEquals("mac1", c.id)
         assertNull(c.shell)
+        assertNull("written before kinds: a Mac", c.hostKind)
+        assertEquals(HostKind.MAC, Hosts.kind(null, c.hostKind))
+    }
+
+    // Phones know a PC
+
+    @Test fun helloKindIsKeptOnlyOnceThePairingIsProved() {
+        connect()
+        send(ControlEnvelope(ControlEnvelope.HELLO, protocolVersion = 2, clientID = "pc1", name = "Office-PC", nonce = b64(ControlAuth.nonce()), hostKind = "windows"))
+        assertEquals(ControlEnvelope.WELCOME, receive().t)
+        sync()
+        assertTrue("nothing recorded for a stranger", registry.clients.none { it.id == "pc1" })
+        send(ControlEnvelope(ControlEnvelope.PAIR, clientID = "pc1", name = "Office-PC", code = registry.issueCode().code))
+        assertEquals(ControlEnvelope.PAIRED, receive().t)
+        assertEquals("windows", registry.clients.single { it.id == "pc1" }.hostKind)
+        assertEquals("windows", control.connectedMacs.single().kind)
+        assertFalse(control.connectedMacs.single().isMac)
+    }
+
+    @Test fun anUnknownHelloKindIsIgnored() {
+        connect()
+        send(ControlEnvelope(ControlEnvelope.HELLO, protocolVersion = 2, clientID = "x1", name = "Thing", nonce = b64(ControlAuth.nonce()), hostKind = "toaster"))
+        assertEquals(ControlEnvelope.WELCOME, receive().t)
+        send(ControlEnvelope(ControlEnvelope.PAIR, clientID = "x1", name = "Thing", code = registry.issueCode().code))
+        assertEquals(ControlEnvelope.PAIRED, receive().t)
+        assertNull(registry.clients.single { it.id == "x1" }.hostKind)
+    }
+
+    @Test fun aGrantWithAKindRecordsIt() {
+        pair()
+        send(ControlEnvelope(ControlEnvelope.SHELL_GRANT, shellKey = b64(key()), certSHA256 = cert, shellPort = 7893, addresses = listOf("192.168.1.5"),
+            macName = "MacBook", hostKind = "windows"))
+        var reply = receive()
+        while (reply.t == ControlEnvelope.STATUS) reply = receive()
+        assertEquals(ControlEnvelope.SHELL_GRANTED, reply.t)
+        val client = registry.clients.single()
+        assertEquals("windows", client.hostKind)
+        assertEquals("windows", client.shell?.hostKind)
+    }
+
+    @Test fun aGrantWithoutAKindLeavesItAlone() {
+        pair()
+        grant()
+        var reply = receive()
+        while (reply.t == ControlEnvelope.STATUS) reply = receive()
+        assertEquals(ControlEnvelope.SHELL_GRANTED, reply.t)
+        assertNull(registry.clients.single().hostKind)
+    }
+
+    @Test fun noteHostKind() {
+        assertTrue(registry.pair(registry.issueCode().code, "pc1", "Office-PC") is PairingRegistry.PairResult.Success)
+        assertFalse("an unknown id", registry.noteHostKind("nobody", "windows"))
+        assertFalse("an unknown kind", registry.noteHostKind("pc1", "toaster"))
+        assertTrue(registry.noteHostKind("pc1", "windows"))
+        assertFalse("unchanged", registry.noteHostKind("pc1", "windows"))
+        assertEquals("windows", registry.clients.single().hostKind)
+        assertEquals("windows", ShellCredentials.build(registry.clients.map { it.copy(shell = ShellGrant(cert, 7893, emptyList(), "Office-PC")) }, "p",
+            key = { ByteArray(32) }, manualAddress = { null }).single().hostKind)
     }
 }

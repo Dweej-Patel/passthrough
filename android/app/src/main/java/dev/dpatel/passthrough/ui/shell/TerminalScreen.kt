@@ -87,6 +87,7 @@ import androidx.core.view.WindowCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import dev.dpatel.passthrough.core.ShellError
 import dev.dpatel.passthrough.ui.LocalPT
+import dev.dpatel.passthrough.core.HostWords
 import dev.dpatel.passthrough.ui.PT
 import dev.dpatel.passthrough.ui.PTColors
 import dev.dpatel.passthrough.ui.lock.HideFromCapture
@@ -145,7 +146,7 @@ class ShellTerminalController(context: Context, private val vm: ShellViewModel) 
         view.onResize = { cols, rows -> vm.resize(cols, rows) }
         view.onCtrlChanged = { ctrl = it }
         view.onLongPress = { menu = true }
-        view.macName = { vm.macs.value.firstOrNull { it.macID == vm.selectedMacID.value }?.macName ?: "your Mac" }
+        view.macName = { vm.macs.value.firstOrNull { it.macID == vm.selectedMacID.value }?.macName ?: HostWords(vm.selectedKind.value, null).your }
     }
 
     /** Runs the screen's opening request once the terminal has its real size. */
@@ -389,7 +390,7 @@ private fun TabStrip(
                         .clip(CircleShape)
                         .background(PT.accentEnd.copy(alpha = if (enabled) 0.16f else 0.07f), CircleShape)
                         .clickable(enabled = enabled, role = Role.Button) { controller.newSession() }
-                        .semantics { contentDescription = "New session" },
+                        .semantics { contentDescription = "New shell" },
                     contentAlignment = Alignment.Center,
                 ) {
                     Icon(Icons.Filled.Add, null, tint = PT.accentEnd.copy(alpha = if (enabled) 1f else 0.4f), modifier = Modifier.size(18.dp))

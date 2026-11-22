@@ -84,6 +84,9 @@ public sealed class SetupContext
     public string? RelayUrl { get; init; }
     public string? RelayToken { get; init; }
 
+    /// <summary>The Remote Desktop step added the asking account to Remote Desktop Users in this run (its undo removes only that).</summary>
+    public bool AddedUser { get; set; }
+
     public SetupMachine Machine => System.Machine;
 }
 

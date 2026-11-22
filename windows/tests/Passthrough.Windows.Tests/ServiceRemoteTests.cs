@@ -70,6 +70,7 @@ public sealed class ServiceRemoteTests : IDisposable
         private readonly Dictionary<string, PipeSessionHost> _hosts = [];
         private readonly Dictionary<string, PipeLink> _links = [];
         public Func<string, PipeAdminRequest, PipeAdminReply>? Admin;
+        public IReadOnlyList<PipeSessionHost> Hosts { get { lock (_hosts) return [.. _hosts.Values]; } }
         public event Action<PipeSessionHost>? Changed;
 
         public PipeSessionHost HostFor(string account)
@@ -251,6 +252,64 @@ public sealed class ServiceRemoteTests : IDisposable
             Mac = Convert.ToBase64String(RemoteShell.Proof(Key, Convert.FromBase64String(challenge.Nonce!))),
         });
         Assert.Equal(ShellEnvelope.Ready, (await lines.Next())?.T);
+    }
+
+    /// <summary>This PC as a viewer (stage 8): its own shell client, against the service, opening a real shell.</summary>
+    private async Task ViewerOpensAShell(Passthrough.Core.Client.ShellCredential credential, Passthrough.Core.Client.ShellConnectMode mode)
+    {
+        var events = System.Threading.Channels.Channel.CreateUnbounded<Passthrough.Core.Client.ShellClientEvent>();
+        await using var client = new Passthrough.Core.Client.ShellClient(credential, new Passthrough.Core.Client.PinnedTlsDialer(), new IrohShellDialer(IrohRelay.None),
+            e => events.Writer.TryWrite(e), mode);
+        client.Connect();
+        async Task<T> Next<T>() where T : Passthrough.Core.Client.ShellClientEvent
+        {
+            while (true)
+            {
+                var e = await events.Reader.ReadAsync().AsTask().WaitAsync(Patience);
+                if (e is Passthrough.Core.Client.ShellClientEvent.Disconnected d) throw new IOException("disconnected", d.Error);
+                if (e is T t) return t;
+            }
+        }
+        await Next<Passthrough.Core.Client.ShellClientEvent.Ready>();
+        var host = await Next<Passthrough.Core.Client.ShellClientEvent.Host>();
+        Assert.Equal("windows", host.Value.Kind);
+        client.Open(80, 24, "cmd");
+        var session = (await Next<Passthrough.Core.Client.ShellClientEvent.Opened>()).Session;
+        await Next<Passthrough.Core.Client.ShellClientEvent.Attached>();
+        client.Input("echo viewer-%PASSTHROUGH_SESSION%\r"u8.ToArray());
+        var seen = new StringBuilder();
+        while (!seen.ToString().Contains($"viewer-{session}", StringComparison.Ordinal))
+            seen.Append(Encoding.UTF8.GetString((await Next<Passthrough.Core.Client.ShellClientEvent.Output>()).Data.Span));
+    }
+
+    [Fact]
+    public async Task ThisPcsShellClientOpensAShellOverPinnedTls()
+    {
+        await LinkTrayAsync();
+        Assert.True(await _admin.AddKeyAsync("phone-a", "iPhone", "token.iphone.A", Key));
+        var grant = (await _admin.GrantContentsAsync())!;
+        await ViewerOpensAShell(new Passthrough.Core.Client.ShellCredential("host", "TEST-PC", grant.CertSHA256, Key, "phone-a", grant.Port, ["127.0.0.1"]),
+            Passthrough.Core.Client.ShellConnectMode.LocalOnly);
+    }
+
+    [Fact]
+    public async Task ThisPcsShellClientOpensAShellOverIroh()
+    {
+        await LinkTrayAsync();
+        Assert.True(await _admin.AddKeyAsync("phone-a", "iPhone", "token.iphone.A", Key));
+        await ViewerOpensAShell(new Passthrough.Core.Client.ShellCredential("host", "TEST-PC", new string('0', 64), Key, "phone-a", 7893, [.. _remote.LoopbackAddresses],
+            IrohId: _remote.IrohId), Passthrough.Core.Client.ShellConnectMode.Automatic);
+    }
+
+    [Fact]
+    public async Task AWrongPinIsNeverTalkedTo()
+    {
+        await LinkTrayAsync();
+        Assert.True(await _admin.AddKeyAsync("phone-a", "iPhone", "token.iphone.A", Key));
+        var grant = (await _admin.GrantContentsAsync())!;
+        await Assert.ThrowsAsync<IOException>(() => ViewerOpensAShell(
+            new Passthrough.Core.Client.ShellCredential("host", "TEST-PC", new string('b', 64), Key, "phone-a", grant.Port, ["127.0.0.1"]),
+            Passthrough.Core.Client.ShellConnectMode.LocalOnly));
     }
 
     [Fact]

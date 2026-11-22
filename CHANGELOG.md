@@ -122,6 +122,13 @@ these steps as written and check each one before building.
   Screen Sharing login. The switcher is *Your computers*; "New session" is
   "New shell" everywhere. A Mac reads as before. Nothing to do when you
   rebuild.
+* **Android knows a PC.** A paired Windows PC shows as a PC: its own words, only
+  the rows a PC has (no Internet, Keep awake or VPN; Lock, and a dimmed Screen
+  row saying Android can't show it), why a shell can't start (nobody signed in,
+  Passthrough closed there, Shell off for this phone), why it went away (asleep,
+  Remote access turned off, shut down), its own setup steps, and a split New
+  shell that picks among its shells and remembers the last one. The switcher is
+  *Your computers*. A Mac reads as before. Nothing to do when you rebuild.
 * **A Windows tray app (first stage).** `windows/` holds a C# port of the host
   side: a tray flyout that lists the phones on the cable, pairs an iPhone or an
   Android phone with the six-digit code and shows its live status. An iPad is

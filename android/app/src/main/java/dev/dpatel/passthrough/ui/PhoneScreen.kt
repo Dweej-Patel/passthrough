@@ -70,6 +70,8 @@ import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.compose.currentStateAsState
 import dev.dpatel.passthrough.core.ByteFormat
+import dev.dpatel.passthrough.core.HostWords
+import dev.dpatel.passthrough.core.Hosts
 import dev.dpatel.passthrough.core.PairedClient
 import dev.dpatel.passthrough.service.ServiceState
 import java.text.SimpleDateFormat
@@ -88,11 +90,13 @@ fun PhoneScreen(
     onSettings: () -> Unit,
     onDone: () -> Unit,
     scroll: ScrollState = rememberScrollState(),
+    /** The first tab's title ("Mac", "PC", "Computer"), which back returns to. */
+    backLabel: String = "Back",
 ) {
     val state by vm.state.collectAsStateWithLifecycle()
     PTBackground(glow = if (state == ServiceState.Running) 1f else 0.45f) {
         Column(Modifier.windowInsetsPadding(WindowInsets.safeDrawing)) {
-            PTTopBar("This phone", onBack = onDone, backLabel = "Mac")
+            PTTopBar("This phone", onBack = onDone, backLabel = backLabel)
             Column(
                 Modifier
                     .verticalScroll(scroll)
@@ -109,7 +113,7 @@ fun PhoneScreen(
                 UsageCard(vm)
                 MacsCard(vm, onPair)
                 Text(
-                    "Traffic between the Mac and this phone travels only over the USB cable. The Mac's connections are opened by this phone's own network stack.",
+                    "Traffic between the Mac and this phone travels only over the USB cable. The Mac's connections are opened by this phone's own network stack.", // mac-only
                     style = PT.display(12.sp, FontWeight.Normal), color = LocalPT.current.tertiary, textAlign = TextAlign.Center,
                     modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp),
                 )
@@ -133,11 +137,13 @@ private fun Header(vm: AppViewModel, onSettings: () -> Unit) {
     val stats by vm.stats.collectAsStateWithLifecycle()
     val name by vm.settings.deviceName.collectAsStateWithLifecycle()
     val subtitle = when (state) {
-        ServiceState.Running -> stats.macs.size.let { n -> if (n == 0) "Waiting for a Mac on USB" else "Serving ${if (n == 1) "1 Mac" else "$n Macs"} over USB" }
+        // Only Macs are served (a PC on the cable just pairs and renews its access).
+        ServiceState.Running -> if (stats.macs.isEmpty()) "Waiting for a computer on USB"
+            else stats.onlineMacs.size.let { n -> if (n == 0) "A computer is plugged in" else "Serving ${if (n == 1) "1 Mac" else "$n Macs"} over USB" } // mac-only
         ServiceState.Starting -> "Starting…"
         ServiceState.Stopping -> "Stopping…"
         is ServiceState.Failed -> "Something went wrong"
-        ServiceState.Stopped -> "USB internet for your Mac"
+        ServiceState.Stopped -> "USB internet for your Mac" // mac-only
     }
     Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
         Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
@@ -169,8 +175,8 @@ private fun HeroCard(vm: AppViewModel, onPower: () -> Unit, onPair: () -> Unit) 
         ServiceState.Starting -> "Bringing the proxy up"
         ServiceState.Stopping -> "Shutting down"
         is ServiceState.Failed -> "Could not start"
-        ServiceState.Running -> stats.macs.firstOrNull()?.let { "${it.name} is online through this phone" }
-            ?: "Ready. Plug in your Mac and connect from the menu bar."
+        ServiceState.Running -> stats.onlineMacs.firstOrNull()?.let { "${it.name} is online through this phone" }
+            ?: "Ready. Plug in your Mac or PC."
     }
     PTCard(padding = 22.dp) {
         Column(Modifier.fillMaxWidth(), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(18.dp)) {
@@ -193,7 +199,7 @@ private fun HeroCard(vm: AppViewModel, onPower: () -> Unit, onPair: () -> Unit) 
             if (!usbDebugging) {
                 PTNotice(
                     "USB debugging is off", PT.warning, Icons.Filled.Warning,
-                    detail = "The Mac reaches this phone through Android's USB debugging bridge. Turn it on in Developer options " +
+                    detail = "A computer reaches this phone through Android's USB debugging bridge. Turn it on in Developer options " +
                         "(tap Build number seven times in About phone to reveal them).",
                     action = "Open Developer options",
                     onAction = { openDeveloperOptions(context) },
@@ -207,7 +213,7 @@ private fun HeroCard(vm: AppViewModel, onPower: () -> Unit, onPair: () -> Unit) 
                 ) {
                     Icon(Icons.Filled.Devices, null, modifier = Modifier.size(18.dp))
                     Spacer(Modifier.size(8.dp))
-                    Text("Pair your Mac", style = PT.display(15.sp, FontWeight.SemiBold))
+                    Text("Pair a Mac or PC", style = PT.display(15.sp, FontWeight.SemiBold))
                 }
             }
         }
@@ -222,9 +228,9 @@ private fun FlowCard(vm: AppViewModel) {
     val radio by vm.radio.collectAsStateWithLifecycle()
     val name by vm.settings.deviceName.collectAsStateWithLifecycle()
     val lifecycle by LocalLifecycleOwner.current.lifecycle.currentStateAsState()
-    val macs = stats.macs
+    val macs = stats.onlineMacs
     val flow = FlowMapState(
-        macName = if (macs.size > 1) "${macs.size} Macs" else macs.firstOrNull()?.name ?: "Mac",
+        macName = if (macs.size > 1) "${macs.size} Macs" else macs.firstOrNull()?.name ?: "Mac", // mac-only: the internet's path
         phoneName = name,
         linkUp = state == ServiceState.Running && macs.isNotEmpty(),
         busy = state == ServiceState.Starting || (state == ServiceState.Running && macs.isEmpty()),
@@ -317,7 +323,7 @@ private fun MacsCard(vm: AppViewModel, onPair: () -> Unit) {
     PTCard {
         Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
-                PTSectionTitle("Paired Macs", Modifier.weight(1f), icon = Icons.Filled.LaptopMac)
+                PTSectionTitle("Paired computers", Modifier.weight(1f), icon = Icons.Filled.LaptopMac)
                 FilledTonalButton(
                     onClick = onPair,
                     colors = ButtonDefaults.filledTonalButtonColors(containerColor = PT.accentEnd.copy(alpha = 0.16f), contentColor = PT.accentEnd),
@@ -362,7 +368,7 @@ private fun MacRow(vm: AppViewModel, client: PairedClient, live: Boolean, now: L
             IconButton(onClick = { menu = true }) { Icon(Icons.Filled.MoreHoriz, "Options for ${client.name}", tint = c.secondary) }
             DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
                 DropdownMenuItem(
-                    text = { Text("Forget this Mac", color = PT.danger) },
+                    text = { Text("Forget this ${HostWords(Hosts.kind(null, client.hostKind ?: client.shell?.hostKind), null).noun}", color = PT.danger) },
                     leadingIcon = { Icon(Icons.Filled.Delete, null, tint = PT.danger) },
                     onClick = { menu = false; vm.revoke(client) },
                 )

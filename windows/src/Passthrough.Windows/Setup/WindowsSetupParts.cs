@@ -202,10 +202,20 @@ public sealed class WindowsSecuredFiles : ISecuredFiles
 
     public void WriteNew(string path, byte[] bytes)
     {
-        Directory.CreateDirectory(Path.GetDirectoryName(path)!);
-        using var stream = new FileStream(path, FileMode.CreateNew, FileAccess.Write, FileShare.None);
-        stream.Write(bytes);
-        stream.Flush(flushToDisk: true);
+        var missing = new Stack<string>();
+        for (var folder = Path.GetDirectoryName(path); folder is not null && !Directory.Exists(folder); folder = Path.GetDirectoryName(folder))
+            missing.Push(folder);
+        foreach (var folder in missing)
+        {
+            Directory.CreateDirectory(folder);
+            OwnByAdministrators(folder);
+        }
+        using (var stream = new FileStream(path, FileMode.CreateNew, FileAccess.Write, FileShare.None))
+        {
+            stream.Write(bytes);
+            stream.Flush(flushToDisk: true);
+        }
+        OwnByAdministrators(path);
     }
 
     public void Write(string path, byte[] bytes)
@@ -216,7 +226,32 @@ public sealed class WindowsSecuredFiles : ISecuredFiles
             stream.Write(bytes);
             stream.Flush(flushToDisk: true);
         }
+        OwnByAdministrators(temp);
         File.Move(temp, path, overwrite: true);
+    }
+
+    /// <summary>
+    /// New files take the token's default owner, which a parent process may set to the account itself (Git Bash
+    /// does). The owner may always rewrite a file's permissions, so the account unelevated could then change what setup
+    /// wrote, and <see cref="Check"/> rightly refuses the folder at the next update. Setup owns what it writes.
+    /// </summary>
+    public static void OwnByAdministrators(string path)
+    {
+        var administrators = new SecurityIdentifier(WellKnownSidType.BuiltinAdministratorsSid, null);
+        if (Directory.Exists(path))
+        {
+            var folder = new DirectoryInfo(path);
+            var security = folder.GetAccessControl(AccessControlSections.Owner);
+            security.SetOwner(administrators);
+            folder.SetAccessControl(security);
+        }
+        else
+        {
+            var file = new FileInfo(path);
+            var security = file.GetAccessControl(AccessControlSections.Owner);
+            security.SetOwner(administrators);
+            file.SetAccessControl(security);
+        }
     }
 
     public void DeleteFile(string path)

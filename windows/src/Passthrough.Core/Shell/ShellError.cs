@@ -29,4 +29,8 @@ public enum ShellError
     RdpUnavailable,
     /// <summary>Too many tries in a short time (<c>retryAfter</c>).</summary>
     TryLater,
+    /// <summary>The host already lets in as many computers as it allows (8 a phone, 16 in all).</summary>
+    TooManyComputers,
+    /// <summary>A hand-over would replace access to a host with different details (its certificate or iroh id).</summary>
+    PassConflict,
 }

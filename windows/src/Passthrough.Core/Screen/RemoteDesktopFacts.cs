@@ -31,6 +31,8 @@ public sealed record RemoteDesktopFacts
     public bool? LocalRulesIgnored { get; init; }
     /// <summary>Any read failed: the check can't promise anything.</summary>
     public bool ReadFailed { get; init; }
+    /// <summary>The first read that failed and how, for the service's log.</summary>
+    public string? FailedRead { get; init; }
 }
 
 /// <summary>What the elevated step found and did, from install.json's <c>rdp</c> (null: Screen isn't set up).</summary>

@@ -57,7 +57,7 @@ public sealed class RemoteDesktopGate(Func<RemoteDesktopSetup?> setup, Func<stri
             }
             return client.GetStream();
         }
-        catch (Exception e) when (e is SocketException or OperationCanceledException or IOException)
+        catch (Exception e) when (e is SocketException or OperationCanceledException or IOException or System.ComponentModel.Win32Exception or InvalidOperationException)
         {
             client.Dispose();
             return null;

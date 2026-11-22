@@ -174,8 +174,9 @@ public enum HostCopy {
         case .signedOut: w.kind == .mac ? "Nobody is signed in there, so its shell can't start. Sign in at the computer first." : shell(.appNotOpen, w)
         case .rdpUnavailable: "That computer's screen isn't available right now."
         case .tryLater: "Too many tries just now. Wait a few minutes, then try again."
-        case .tooManyComputers: "That computer already lets in as many other computers as it allows. Remove one in its settings first."
-        case .passConflict: "That computer already has access to one with this name but different details. Remove it there, then try again."
+        // Sharing access with another computer (stage 7).
+        case .tooManyComputers: "\(w.That) already lets in as many other computers as it allows. Remove one in its settings first."
+        case .passConflict: "\(w.That) already has access to one with this name but different details. Remove it there, then try again."
         case .notAuthorized: nil
         }
     }

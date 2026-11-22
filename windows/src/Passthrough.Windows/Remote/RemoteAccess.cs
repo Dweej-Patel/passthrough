@@ -66,6 +66,15 @@ public sealed class RemoteAccess : IAccessAdmin, IDisposable
         _admin = new PipeAccessAdmin(_server);
         _admin.Changed += () => _ = RefreshGrantAsync();
         _admin.AccessChanged += () => _ = RefreshPhonesAsync();
+        _admin.NoticesChanged += () => _ = RefreshNoticesAsync();
+        Reach = new Passthrough.Core.Trust.ComputerReachStore(secrets, new Passthrough.Windows.Trust.HelloSigner());
+        _server.SavePass = KeepPassAsync;
+        _ = Task.Run(async () =>
+        {
+            // Only with Windows Hello can this PC keep access to other computers; then phones are told its identity key.
+            _canKeep = await new Passthrough.Windows.Trust.HelloSigner().IsAvailableAsync().ConfigureAwait(false);
+            _server.PushState();
+        });
         _server.LinkChanged += linked =>
         {
             if (linked) _ = Task.Run(AfterLinkAsync);
@@ -85,6 +94,12 @@ public sealed class RemoteAccess : IAccessAdmin, IDisposable
 
     /// <summary>Fires, on any thread, when the state, the relay or the connected phones change: what the UI shows.</summary>
     public event Action? StatusChanged;
+
+    /// <summary>
+    /// Fires, after Turn on installed the service, with the launcher (the installed exe at the path that never changes):
+    /// this copy should start the installed one with <c>--launch --handoff &lt;pid&gt;</c> and quit.
+    /// </summary>
+    public event Action<string>? HandOffWanted;
 
     /// <summary>Fires when the phones with access change.</summary>
     public event Action? PhonesChanged;
@@ -225,6 +240,8 @@ public sealed class RemoteAccess : IAccessAdmin, IDisposable
                     _secrets.Delete(RelayTokenSlot);
                     _settings.Set(EnabledSetting, "false");
                     await StartIfEnabledAsync().ConfigureAwait(false);
+                    // From here the installed copy is this account's Passthrough: this one hands over to it.
+                    if (InstalledExe() is { } launcher) HandOffWanted?.Invoke(launcher);
                 }
             }
             else
@@ -343,7 +360,61 @@ public sealed class RemoteAccess : IAccessAdmin, IDisposable
     {
         Shells = [.. Catalog.Shells],
         User = Environment.UserName,
+        IdKey = _canKeep && Identity() is { } identity ? Convert.ToHexStringLower(identity.PublicKey) : null, // lowercase hex, as host.idKey is on the wire
     };
+
+    private volatile bool _canKeep;
+    private Passthrough.Windows.Trust.CngComputerIdentity? _identity;
+
+    /// <summary>The computers this PC can reach (stage 7 a.5), sealed behind Windows Hello.</summary>
+    public Passthrough.Core.Trust.ComputerReachStore Reach { get; }
+
+    /// <summary>This account's identity key as a viewer, made on first need.</summary>
+    public Passthrough.Core.Trust.IComputerIdentity? Identity()
+    {
+        try { return _identity ??= Passthrough.Windows.Trust.CngComputerIdentity.LoadOrCreate(); }
+        catch (System.Security.Cryptography.CryptographicException e) { _log?.Invoke($"trust: no identity key ({e.HResult:X8})"); return null; }
+    }
+
+    /// <summary>A new shell on another computer this PC can reach, in a terminal (its own connection, signed with this PC's identity).</summary>
+    public Task OpenShellAsync(Passthrough.Core.Trust.ReachableComputer computer) =>
+        Identity() is { } identity ? Passthrough.Windows.Client.TermBridge.OpenAsync(computer, identity, null, _log) : Task.CompletedTask;
+
+    /// <summary>
+    /// Windows Hello for one screen window (stage 8: every window asks, so someone at an unlocked PC can't take over the
+    /// Mac with a click): a signature over a fresh challenge with this account's Hello key. False when not confirmed.
+    /// </summary>
+    public async Task<bool> ConfirmPresenceAsync() =>
+        await new Passthrough.Windows.Trust.HelloSigner().SignAsync(System.Security.Cryptography.RandomNumberGenerator.GetBytes(32)) is not null;
+
+    /// <summary>Fires when this PC was handed access to another computer.</summary>
+    public event Action<string>? ComputerReceived;
+
+    /// <summary>A phone handed this account access to another computer: kept behind Windows Hello, after one confirmation.</summary>
+    private async Task<string?> KeepPassAsync(PipeMessage m)
+    {
+        if (m.Pass is not { } pass) return ShellError.BadRequest.ToWire();
+        // The service waits 40 s for this answer; past that the phone was told it failed, so nothing is written.
+        using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(35));
+        var result = await Reach.SaveAsync(new Passthrough.Core.Trust.ReachableComputer
+        {
+            Credential = pass, HostKind = m.HostKind, Scopes = m.Scopes ?? [], Pending = m.Pending, From = m.Label, FromPhoneId = m.Phone,
+            ReceivedAt = DateTimeOffset.UtcNow,
+        }, deadline.Token).ConfigureAwait(false);
+        switch (result)
+        {
+            case Passthrough.Core.Trust.ComputerReachStore.SaveResult.Saved:
+                _log?.Invoke("trust: kept access to another computer");
+                ComputerReceived?.Invoke(pass.MacName);
+                return null;
+            case Passthrough.Core.Trust.ComputerReachStore.SaveResult.Conflict:
+                return ShellError.PassConflict.ToWire();
+            case Passthrough.Core.Trust.ComputerReachStore.SaveResult.NotUsable:
+                return ShellError.BadRequest.ToWire();
+            default:
+                return ShellError.PassNotSaved.ToWire();
+        }
+    }
 
     private static ShellError? LockScreen() => Native.LockWorkStation() ? null : ShellError.BadRequest;
 
@@ -368,6 +439,8 @@ public sealed class RemoteAccess : IAccessAdmin, IDisposable
     public async Task RevokeAsync(string phoneId)
     {
         await _admin.RevokeAsync(phoneId).ConfigureAwait(false);
+        if (Reach.Computers is { } kept)
+            foreach (var c in kept.Where(c => c.FromPhoneId == phoneId).ToList()) await Reach.RemoveAsync(c.HostId).ConfigureAwait(false);
         Sessions.CloseSessions(phoneId);
         await RefreshPhonesAsync().ConfigureAwait(false);
     }
@@ -378,6 +451,34 @@ public sealed class RemoteAccess : IAccessAdmin, IDisposable
         await _admin.DisconnectAsync(phoneId).ConfigureAwait(false);
         Sessions.CloseSessions(phoneId);
         await RefreshPhonesAsync().ConfigureAwait(false);
+    }
+
+    private IReadOnlyList<PipeNotice> _notices = [];
+
+    /// <summary>What the service wants the person at the PC to know, until they answer it.</summary>
+    public IReadOnlyList<PipeNotice> Notices { get { lock (_lock) return _notices; } }
+
+    /// <summary>Fires, on any thread, when <see cref="Notices"/> changes.</summary>
+    public event Action? NoticesChanged;
+
+    private async Task RefreshNoticesAsync()
+    {
+        var notices = await _admin.NoticesAsync().ConfigureAwait(false);
+        lock (_lock) _notices = notices;
+        NoticesChanged?.Invoke();
+    }
+
+    /// <summary>Answers a notice: OK, or its action first (Allow screen: the phone may see the screen).</summary>
+    public async Task AnswerNoticeAsync(PipeNotice notice, bool act)
+    {
+        if (act && notice.Subject is { } subject)
+        {
+            if (notice.Kind == PipeNotice.Granted) await SetScreenAllowedAsync(subject, true).ConfigureAwait(false);
+            else if (notice.Kind == PipeNotice.ComputerScreenPending) await _admin.AllowComputerScreenAsync(subject).ConfigureAwait(false);
+            else if (notice.Kind == PipeNotice.ComputerGranted) await _admin.RevokeComputerAsync(subject).ConfigureAwait(false);
+        }
+        await _admin.AnswerNoticeAsync(notice.Id).ConfigureAwait(false);
+        await RefreshNoticesAsync().ConfigureAwait(false);
     }
 
     /// <summary>The Screen row for this account, from the service.</summary>
@@ -396,6 +497,13 @@ public sealed class RemoteAccess : IAccessAdmin, IDisposable
     }
 
     public Task<PipeAdminReply> StopScreenAsync(string phoneId) => _admin.StopScreenAsync(phoneId);
+
+    /// <summary>"May share access with other computers" for a phone (stage 7).</summary>
+    public async Task SetMayShareAsync(string phoneId, bool on)
+    {
+        await _admin.SetMayShareAsync(phoneId, on).ConfigureAwait(false);
+        await RefreshPhonesAsync().ConfigureAwait(false);
+    }
 
     /// <summary>Stay awake while plugged in and the sleep timer, from the service.</summary>
     public Task<PipeAdminReply> PowerAsync() => _admin.PowerAsync();

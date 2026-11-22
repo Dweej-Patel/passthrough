@@ -81,4 +81,7 @@ data class ProviderStats(
     val startedAt: Long? = null,
     /** When this snapshot was taken; makes every tick a distinct value so idle seconds still reach the meter. */
     val sampledAt: Long = System.currentTimeMillis(),
-)
+) {
+    /** The connected computers that are Macs: the ones online through this phone (a PC only pairs and renews its access). */
+    val onlineMacs: List<ConnectedMac> get() = macs.filter { it.isMac }
+}

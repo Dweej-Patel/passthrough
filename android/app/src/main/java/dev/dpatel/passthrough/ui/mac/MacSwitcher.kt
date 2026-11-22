@@ -81,20 +81,20 @@ fun MacAvatar(macID: String, name: String, modifier: Modifier = Modifier, badge:
     }
 }
 
-/** The Mac tab's top-trailing button: the avatar of the Mac showing, opening "Your Macs". */
+/** The Mac tab's top-trailing button: the avatar of the computer showing, opening "Your computers". */
 @Composable
 fun MacAvatarButton(macID: String, name: String, badge: Boolean, onClick: () -> Unit) {
     Box(
         Modifier.size(48.dp).clickable(role = Role.Button, onClick = onClick).semantics {
-            contentDescription = "Your Macs"
-            stateDescription = if (badge) "$name, another Mac needs you" else name
+            contentDescription = "Your computers"
+            stateDescription = if (badge) "$name, another computer needs you" else name
         },
         contentAlignment = Alignment.Center,
     ) { MacAvatar(macID, name, badge = badge) }
 }
 
 /**
- * "Your Macs": every paired Mac with what it's doing, then Add a Mac and
+ * "Your computers": every paired computer with what it's doing, then Add a computer and
  * Settings. Those two, and an asking row's terminal, are handed to the host
  * only once the sheet has finished closing.
  */
@@ -144,9 +144,11 @@ fun MacSwitcherSheet(
             verticalArrangement = Arrangement.spacedBy(14.dp),
         ) {
             Text(
-                "Your Macs", style = PT.display(20.sp), color = c.primary,
+                "Your computers", style = PT.display(20.sp), color = c.primary,
                 modifier = Modifier.fillMaxWidth().padding(bottom = 2.dp).semantics { heading() },
             )
+            // Each row names its kind only once the list isn't all Macs.
+            val showKind = MacProfiles.showsKind(paired.map { shell.kind(it.id) })
             PTCard(padding = 6.dp) {
                 paired.forEachIndexed { index, client ->
                     if (index > 0) HorizontalDivider(Modifier.padding(start = 62.dp), color = c.cardBorder)
@@ -155,7 +157,7 @@ fun MacSwitcherSheet(
                     val current = client.id == selected
                     val asking = status is MacStatus.Asking
                     MacRow(
-                        macID = client.id, name = name, status = MacProfiles.statusText(status, nowMillis),
+                        macID = client.id, name = name, status = MacProfiles.statusText(status, nowMillis, shell.kind(client.id), showKind),
                         asking = asking, current = current,
                     ) {
                         if (acting) return@MacRow
@@ -169,7 +171,7 @@ fun MacSwitcherSheet(
                 }
             }
             PTCard(padding = 6.dp) {
-                ActionRow("Add a Mac", Icons.Filled.Add) { if (!acting) close(onAddMac) }
+                ActionRow("Add a computer", Icons.Filled.Add) { if (!acting) close(onAddMac) }
                 HorizontalDivider(Modifier.padding(start = 62.dp), color = c.cardBorder)
                 ActionRow("Settings", Icons.Filled.Settings) { if (!acting) close(onSettings) }
             }

@@ -33,8 +33,10 @@ public sealed class ShellConnection : IShellAttachment
     private Screen.RelayRecord? _view;
     private Screen.RelayRateLimit.Ticket? _ticket;
 
-    /// <summary>This connection carries a view of the screen now (Remote Desktop's bytes, no more lines).</summary>
-    internal bool IsRelaying => _relaying;
+    /// <summary>This connection carries a view of the screen now, or is opening one (Remote Desktop's bytes, no more lines).</summary>
+    internal bool IsRelaying => _relaying || _opening;
+
+    private volatile bool _opening;
     private volatile bool _looking;
     private int _closed;
 
@@ -61,8 +63,9 @@ public sealed class ShellConnection : IShellAttachment
         Send(new ShellEnvelope(ShellEnvelope.Ready));
         if (_gate.Hooks.MacInfo() is { } info) Send(info);
         SendHost();
-        SendState();
-        SendSessions(_host.Sessions);
+        // A computer without the shell scope gets no state and no sessions (stage 7 a.3).
+        if (ShellScope) SendState();
+        if (ShellScope) SendSessions(_host.Sessions);
         try
         {
             while (await _reader.ReadLineAsync(_closing.Token).ConfigureAwait(false) is { } line)
@@ -84,7 +87,8 @@ public sealed class ShellConnection : IShellAttachment
             try
             {
                 using var limit = new CancellationTokenSource(TimeSpan.FromSeconds(10));
-                nla = await Screen.RdpNegotiation.EnforceAsync(_stream, relay, limit.Token).ConfigureAwait(false);
+                nla = await Screen.RdpNegotiation.EnforceAsync(_stream, relay, limit.Token,
+                    why => _gate.Log?.Invoke($"screen: no Network Level Authentication: {why}")).ConfigureAwait(false);
             }
             catch (Exception e) when (e is IOException or ObjectDisposedException or OperationCanceledException) { nla = false; }
             if (nla)
@@ -98,6 +102,8 @@ public sealed class ShellConnection : IShellAttachment
                 EndView(0, 0, "no Network Level Authentication");
             }
         }
+        // Closed between rdpReady and the splice: the view's slot is freed all the same.
+        EndView(0, 0, "Stop");
         Close();
         await writer.ConfigureAwait(false);
     }
@@ -108,6 +114,7 @@ public sealed class ShellConnection : IShellAttachment
         _view = null;
         _gate.Views.Release(PhoneId);
         if (_ticket is { } ticket) _gate.RelayRate.Closed(ticket);
+        _gate.Log?.Invoke($"screen: {Label}'s view ended ({endedBy}; {fromPhone} bytes in, {toPhone} out)");
         _gate.Hooks.ViewEnded?.Invoke(view with { End = _gate.Time.GetUtcNow(), BytesIn = fromPhone, BytesOut = toPhone, EndedBy = endedBy });
     }
 
@@ -119,14 +126,19 @@ public sealed class ShellConnection : IShellAttachment
     /// </summary>
     private async Task RelayAsync()
     {
-        if (PhoneId.StartsWith("viewer.", StringComparison.Ordinal)) { Fail(ShellError.ScreenOnly); return; }
-        if (!_gate.Access.ScreenAllowed(PhoneId)) { Fail(ShellError.ScreenNotAllowed); return; }
+        // Windows' own log shows only 127.0.0.1: every ask, refusal and view is in the service's, with the device.
+        _gate.Log?.Invoke($"screen: {Label} asked for the screen");
+        if (PhoneId.StartsWith("viewer.", StringComparison.Ordinal)) { Refused("a screen-only pass"); Fail(ShellError.ScreenOnly); return; }
+        if (!_gate.Access.ScreenAllowed(PhoneId)) { Refused("Screen is off for it"); Fail(ShellError.ScreenNotAllowed); return; }
         if (_gate.Hooks.RemoteDesktop is not { } desktop)
         {
-            Send(new ShellEnvelope(ShellEnvelope.Error) { Reason = ShellError.RdpUnavailable.ToWire(), Detail = _gate.Hooks.RdpUnavailable(PhoneId) });
+            var why = _gate.Hooks.RdpUnavailable(PhoneId);
+            Refused($"Remote Desktop can't be relayed to ({why})");
+            Send(new ShellEnvelope(ShellEnvelope.Error) { Reason = ShellError.RdpUnavailable.ToWire(), Detail = why });
             return;
         }
-        if (!_gate.Views.TryTake(PhoneId)) { Fail(ShellError.TooManyScreens); return; }
+        if (!_gate.Views.TryTake(PhoneId)) { Refused("too many views"); Fail(ShellError.TooManyScreens); return; }
+        _opening = true;
         var released = false;
         void Release()
         {
@@ -145,6 +157,7 @@ public sealed class ShellConnection : IShellAttachment
             var verdict = await desktop.CheckAsync(account, limit.Token).ConfigureAwait(false);
             if (verdict.Port is not { } port)
             {
+                Refused($"Remote Desktop can't be relayed to ({verdict.Unavailable ?? "service"})");
                 Send(new ShellEnvelope(ShellEnvelope.Error) { Reason = ShellError.RdpUnavailable.ToWire(), Detail = verdict.Unavailable ?? "service" });
                 return;
             }
@@ -152,6 +165,7 @@ public sealed class ShellConnection : IShellAttachment
             var ticket = stopped > 0 ? null : _gate.RelayRate.TryReserve(account ?? "", PhoneId, out stopped);
             if (ticket is null)
             {
+                Refused($"too many views lately; again in {stopped} s");
                 Send(new ShellEnvelope(ShellEnvelope.Error) { Reason = ShellError.TryLater.ToWire(), RetryAfter = stopped });
                 return;
             }
@@ -167,14 +181,25 @@ public sealed class ShellConnection : IShellAttachment
             using var certLimit = new CancellationTokenSource(TimeSpan.FromSeconds(5));
             if (await desktop.CertificateSha256Async(certLimit.Token).ConfigureAwait(false) is not { Length: 64 } pin)
             {
+                Refused("Remote Desktop's certificate couldn't be read");
                 Send(new ShellEnvelope(ShellEnvelope.Error) { Reason = ShellError.RdpUnavailable.ToWire(), Detail = "service" });
                 return;
             }
             // The phone must have waited for the answer: anything it sent since would go to Remote Desktop unasked.
             if (_reader.HasBuffered) { Close(); return; }
-            await SendAndWaitAsync(new ShellEnvelope(ShellEnvelope.RdpReady) { CertSHA256 = pin }).ConfigureAwait(false);
+            // Screen may have been turned off, or the view stopped, while this was dialling: asked again, last thing.
+            if (!_gate.Access.ScreenAllowed(PhoneId)) { Fail(ShellError.ScreenNotAllowed); return; }
+            if (_gate.StoppedFor(PhoneId) is > 0 and var stoppedNow)
+            {
+                Send(new ShellEnvelope(ShellEnvelope.Error) { Reason = ShellError.TryLater.ToWire(), RetryAfter = stoppedNow });
+                return;
+            }
+            var ready = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            Enqueue(new ShellEnvelope(ShellEnvelope.RdpReady) { CertSHA256 = pin }.EncodeLine(), ready, last: true);
+            await ready.Task.ConfigureAwait(false);
             if (IsClosed) return;
             _view = new Screen.RelayRecord(PhoneId, Label, account, "", _gate.Time.GetUtcNow());
+            _gate.Log?.Invoke($"screen: {Label}'s view started");
             _gate.Hooks.ViewStarted?.Invoke(_view);
             released = true; // the view is the relay's now; it is freed when the splice ends
             _relay = dial;
@@ -182,15 +207,44 @@ public sealed class ShellConnection : IShellAttachment
         }
         catch (OperationCanceledException)
         {
+            Refused("Remote Desktop didn't answer in time");
             Send(new ShellEnvelope(ShellEnvelope.Error) { Reason = ShellError.RdpUnavailable.ToWire(), Detail = "service" });
         }
         finally
         {
+            _opening = false;
             dial?.Dispose();
             // Refused after the ticket was taken: it reached nothing, so it doesn't count.
             if (_relay is null && _ticket is { } unused) { _gate.RelayRate.Cancel(unused); _ticket = null; }
             Release();
         }
+    }
+
+    private void Refused(string why) => _gate.Log?.Invoke($"screen: refused {Label}: {why}");
+
+    /// <summary>
+    /// A phone gives another of its computers access (stage 7 a.2): the host's rules decide, then the new id and key go
+    /// back (<c>computerGranted</c>), with the scopes that wait for the owner here (<c>pending</c>).
+    /// </summary>
+    private void GrantComputer(ShellEnvelope m)
+    {
+        byte[]? idKey = null;
+        try { idKey = m.IdKey is { } k ? Convert.FromBase64String(k) : null; } catch (FormatException) { }
+        if (m.Name is not { } name || m.Viewer is not { } viewer || idKey is null || m.Scopes is not { Count: > 0 } scopes) { Fail(ShellError.BadRequest); return; }
+        var (computer, error) = _gate.Access.GrantComputer(PhoneId, name, viewer, m.Kind, idKey, scopes.ToHashSet(StringComparer.Ordinal), _gate.Hooks.ScreenNeedsOwner);
+        if (computer is null) { Fail(error ?? ShellError.BadRequest); return; }
+        var granted = new List<string>();
+        if (computer.Shell == true) granted.Add(Access.Computers.ScopeShell);
+        if (computer.Screen == true && computer.ScreenPending != true) granted.Add(Access.Computers.ScopeScreen);
+        Send(new ShellEnvelope(ShellEnvelope.ComputerGranted)
+        {
+            PhoneID = computer.Id,
+            Key = Convert.ToBase64String(computer.Key),
+            Scopes = granted,
+            Pending = computer.ScreenPending == true ? [Access.Computers.ScopeScreen] : null,
+        });
+        _gate.Hooks.ComputerGranted?.Invoke(Label, computer);
+        Event($"gave {computer.Name} access");
     }
 
     /// <summary>Another of this phone's connections had its view stopped from the PC (<c>screenEnded</c>).</summary>
@@ -213,13 +267,54 @@ public sealed class ShellConnection : IShellAttachment
 
     // MARK: Requests
 
+    /// <summary>A computer's connection (stage 7 a.3): what it may do is its scopes, asked from memory each time.</summary>
+    private bool IsComputer => Access.Computers.IsComputerId(PhoneId);
+
+    /// <summary>It may use the shell: a phone always (its Shell switch is checked elsewhere), a computer with its shell scope.</summary>
+    private bool ShellScope => !IsComputer || _gate.Access.Computer(PhoneId)?.Shell == true;
+
+    /// <summary>What a computer may ask (stage 7 a.3's table); null when it may, else why not.</summary>
+    private ShellError? ComputerRefusal(string? t)
+    {
+        if (!IsComputer) return null;
+        if (_gate.Access.Computer(PhoneId) is not { } computer) return ShellError.NotAuthorized; // revoked since
+        return t switch
+        {
+            ShellEnvelope.Ping or ShellEnvelope.Pong => null,
+            ShellEnvelope.List or ShellEnvelope.Open or ShellEnvelope.Attach or ShellEnvelope.Input or ShellEnvelope.Resize
+                or ShellEnvelope.Close or ShellEnvelope.Viewing => computer.Shell == true ? null : ShellError.NotAllowed,
+            // rdp: the relay checks the screen scope itself; screen and screenVideo are refused as for anyone on a PC.
+            ShellEnvelope.Rdp or ShellEnvelope.Screen or ShellEnvelope.ScreenVideo => null,
+            _ => ShellError.NotAllowed,
+        };
+    }
+
     private async Task HandleAsync(byte[] line)
     {
         ShellEnvelope message;
         try { message = ShellEnvelope.Decode(line); }
         catch (Protocol.ProtocolException) { Fail(ShellError.BadRequest); return; }
+        if (ComputerRefusal(message.T) is { } computerRefusal)
+        {
+            Fail(computerRefusal, message.Session, message.Ref);
+            if (computerRefusal == ShellError.NotAuthorized) Close();
+            return;
+        }
         switch (message.T)
         {
+            case ShellEnvelope.ComputerGrant:
+                GrantComputer(message);
+                break;
+            case ShellEnvelope.ComputerPass:
+                if (message.Pass is null || _gate.Hooks.SaveComputerPass is not { } save) { Fail(ShellError.BadRequest); break; }
+                if (await save(PhoneId, Label, message).ConfigureAwait(false) is { } notSaved) Fail(notSaved);
+                else Send(new ShellEnvelope(ShellEnvelope.ComputerPassSaved));
+                break;
+            case ShellEnvelope.ComputerRevoke:
+                if (message.PhoneID is not { } revoking || !_gate.Access.RevokeComputer(revoking, PhoneId)) { Fail(ShellError.BadRequest); break; }
+                _gate.Disconnect(revoking);
+                Send(new ShellEnvelope(ShellEnvelope.ComputerRevoked));
+                break;
             case ShellEnvelope.List:
                 SendSessions(_host.Sessions);
                 break;
@@ -397,16 +492,21 @@ public sealed class ShellConnection : IShellAttachment
 
     // MARK: Unasked
 
-    internal void SendSessions(IReadOnlyList<ShellSessionInfo> list) => Send(new ShellEnvelope(ShellEnvelope.Sessions) { SessionList = [.. list] });
+    internal void SendSessions(IReadOnlyList<ShellSessionInfo> list)
+    {
+        if (ShellScope) Send(new ShellEnvelope(ShellEnvelope.Sessions) { SessionList = [.. list] });
+    }
 
     internal void SendState()
     {
-        if (_gate.Hooks.State(PhoneId) is { } state) Send(new ShellEnvelope(ShellEnvelope.MacState) { State = state });
+        if (ShellScope && _gate.Hooks.State(PhoneId) is { } state) Send(new ShellEnvelope(ShellEnvelope.MacState) { State = state });
     }
 
     internal void SendHost()
     {
-        if (_gate.Hooks.Host(PhoneId) is { } host) Send(new ShellEnvelope(ShellEnvelope.Host) { HostInfo = host });
+        if (_gate.Hooks.Host(PhoneId) is not { } host) return;
+        // A computer without the shell scope isn't told the shells.
+        Send(new ShellEnvelope(ShellEnvelope.Host) { HostInfo = ShellScope ? host : host with { Shells = [] } });
     }
 
     // MARK: Sending
@@ -425,10 +525,16 @@ public sealed class ShellConnection : IShellAttachment
         return written.Task;
     }
 
-    private void Enqueue(byte[] line, TaskCompletionSource? written)
+    /// <summary>Set as <c>rdpReady</c> is queued: it is the last line, and anything after it would corrupt Remote Desktop's bytes.</summary>
+    private bool _sealed;
+
+    private void Enqueue(byte[] line, TaskCompletionSource? written, bool last = false)
     {
-        // Relaying: the stream is Remote Desktop's; a line now would corrupt it.
-        if (IsClosed || _relaying) { written?.TrySetResult(); return; }
+        lock (_lock)
+        {
+            if (IsClosed || _relaying || _sealed) { written?.TrySetResult(); return; }
+            if (last) _sealed = true;
+        }
         if (Interlocked.Add(ref _backlog, line.Length) > SendBacklogLimit)
         {
             _gate.Log?.Invoke("shell: a phone is not reading its output; disconnected");

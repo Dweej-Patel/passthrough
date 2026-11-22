@@ -74,6 +74,37 @@ public sealed partial class FlyoutWindow : Window
 
     public SessionViewModel ViewModel { get; }
 
+    private async void OnShowComputers(object sender, RoutedEventArgs e)
+    {
+        try { await ViewModel.ShowComputersAsync(); }
+        catch (Exception ex) { Platform.LogFile.Error(ex); }
+    }
+
+    private async void OnNewShell(object sender, RoutedEventArgs e)
+    {
+        if (((FrameworkElement)sender).DataContext is not ComputerRow row || ViewModel.NewShell is not { } open) return;
+        try { await open(row.Computer); }
+        catch (Exception ex) { Platform.LogFile.Error(ex); }
+    }
+
+    private void OnScreen(object sender, RoutedEventArgs e)
+    {
+        if (((FrameworkElement)sender).DataContext is not ComputerRow row || ViewModel.OpenScreen is not { } open) return;
+        try { open(row.Computer); }
+        catch (Exception ex) { Platform.LogFile.Error(ex); }
+    }
+
+    private async void OnNoticeOk(object sender, RoutedEventArgs e) => await Answer(sender, act: false);
+
+    private async void OnNoticeAction(object sender, RoutedEventArgs e) => await Answer(sender, act: true);
+
+    private async Task Answer(object sender, bool act)
+    {
+        if (((FrameworkElement)sender).DataContext is not NoticeRow row || ViewModel.AnswerNotice is not { } answer) return;
+        try { await answer(row.Notice, act); }
+        catch (Exception ex) { Platform.LogFile.Error(ex); }
+    }
+
     /// <summary>Lets the window really close, for quitting.</summary>
     public void AllowClose() => _quitting = true;
 

@@ -36,6 +36,9 @@ public sealed class PipeSessionServer
         _host.Changed += () => Send(PipeFrame.Json(PipeKind.Sessions, new PipeMessage { Sessions = [.. _host.Sessions] }));
     }
 
+    /// <summary>Keeps a pass a phone handed this account (stage 7); returns an error's wire name, or null when kept.</summary>
+    public Func<PipeMessage, Task<string?>>? SavePass { get; set; }
+
     /// <summary>Frames this end doesn't serve itself (the answers to the tray app's own requests: <see cref="PipeAccessAdmin"/>).</summary>
     public event Action<PipeFrame>? OtherFrame;
 
@@ -118,7 +121,7 @@ public sealed class PipeSessionServer
             return ValueTask.CompletedTask;
         }
         if (frame.Kind is not (PipeKind.Open or PipeKind.Attach or PipeKind.Detach or PipeKind.Resize or PipeKind.Close or PipeKind.SetViewing
-            or PipeKind.History or PipeKind.Transcript or PipeKind.Lock or PipeKind.ConnClosed or PipeKind.PhoneGone))
+            or PipeKind.History or PipeKind.Transcript or PipeKind.Lock or PipeKind.SavePass or PipeKind.ConnClosed or PipeKind.PhoneGone))
             return ValueTask.CompletedTask; // a kind this build doesn't know
         if (frame.Read<PipeMessage>() is not { } m) return ValueTask.CompletedTask;
         switch (frame.Kind)
@@ -167,6 +170,9 @@ public sealed class PipeSessionServer
             case PipeKind.Lock:
                 _lock();
                 break;
+            case PipeKind.SavePass:
+                _ = SavePassAsync(m);
+                break;
             case PipeKind.ConnClosed:
                 if (m.Conn is { } closed)
                 {
@@ -191,6 +197,12 @@ public sealed class PipeSessionServer
             _log?.Invoke($"shell: a shell could not start ({e.GetType().Name})");
             Fail(id, ShellError.BadRequest);
         }
+    }
+
+    private async Task SavePassAsync(PipeMessage m)
+    {
+        var error = SavePass is { } save ? await save(m).ConfigureAwait(false) : ShellError.PassNotSaved.ToWire();
+        Reply(new PipeMessage { Id = m.Id, Error = error });
     }
 
     private async Task HistoryAsync(uint? id)

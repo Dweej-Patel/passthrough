@@ -129,4 +129,13 @@ data class DeviceStatus(
 )
 
 /** A connected Mac as seen by the phone. */
-data class ConnectedMac(val id: String, val name: String, val since: Long)
+data class ConnectedMac(
+    val id: String,
+    val name: String,
+    val since: Long,
+    /** What kind of computer it is, as recorded for its pairing (`mac`, `windows`); null from a Mac that never said. */
+    val kind: String? = null,
+) {
+    /** A Mac (or one that never said otherwise): the computers that use this phone's internet. */
+    val isMac: Boolean get() = kind == null || kind == HostInfo.KIND_MAC
+}

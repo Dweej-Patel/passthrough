@@ -15,7 +15,9 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.style.TextOverflow
-import dev.dpatel.passthrough.ui.shell.SHELL_SETUP_STEPS
+import dev.dpatel.passthrough.core.HostWords
+import dev.dpatel.passthrough.core.Hosts
+import dev.dpatel.passthrough.ui.shell.HostCopy
 import dev.dpatel.passthrough.ui.shell.ShellReach
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -117,7 +119,7 @@ fun SettingsScreen(vm: AppViewModel, shell: ShellViewModel, onDone: () -> Unit) 
                             textStyle = PT.display(16.sp, FontWeight.Normal).copy(color = c.primary),
                             cursorBrush = SolidColor(PT.accentEnd), modifier = Modifier.fillMaxWidth(),
                             decorationBox = { inner ->
-                                if (name.isEmpty()) Text("Name shown on the Mac", style = PT.display(16.sp, FontWeight.Normal), color = c.tertiary)
+                                if (name.isEmpty()) Text("Name shown on your computers", style = PT.display(16.sp, FontWeight.Normal), color = c.tertiary)
                                 inner()
                             },
                         )
@@ -134,7 +136,7 @@ fun SettingsScreen(vm: AppViewModel, shell: ShellViewModel, onDone: () -> Unit) 
                 }
                 Section(
                     "Network",
-                    footer = "On: the Mac always uses cellular data, even when this phone is on Wi-Fi. Off: the Mac rides whatever this phone is using." +
+                    footer = "On: the Mac always uses cellular data, even when this phone is on Wi-Fi. Off: the Mac rides whatever this phone is using." + // mac-only
                         if (locked) " Stop the proxy to change these." else " Changes apply the next time you start the proxy.",
                 ) {
                     ToggleRow("Cellular only", cellularOnly, enabled = !locked) { s.setCellularOnly(it) }
@@ -160,16 +162,19 @@ fun SettingsScreen(vm: AppViewModel, shell: ShellViewModel, onDone: () -> Unit) 
                 }
                 val shellMacs = clients.filter { it.shell != null }
                 if (shellReach != ShellReach.UNSUPPORTED && shellMacs.isEmpty()) {
-                    Section("Remote shell", footer = "Connection options for each Mac appear here once it has shared its shell.") {
+                    Section("Remote shell", footer = "Connection options for each computer appear here once it has shared its shell.") {
                         Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
-                            Text("Open your Mac's shell from this phone. To set it up:", style = PT.display(15.sp, FontWeight.Normal), color = c.secondary)
-                            PTSteps(SHELL_SETUP_STEPS)
+                            // Steps for the one kind paired, else for either.
+                            val kinds = clients.map { Hosts.kind(null, it.hostKind ?: it.shell?.hostKind) }.distinct()
+                            val w = if (kinds.size == 1) HostWords(kinds.single(), null) else HostWords.generic()
+                            Text(HostCopy.setupIntro(w), style = PT.display(15.sp, FontWeight.Normal), color = c.secondary)
+                            PTSteps(HostCopy.setupSteps(w, paired = clients.isNotEmpty()))
                         }
                     }
                 } else if (shellMacs.isNotEmpty()) {
                     Section(
                         "Remote shell",
-                        footer = "Automatic also reaches your Mac from anywhere through its built-in connection, when the Mac offers it. " +
+                        footer = "Automatic also reaches a computer from anywhere through its built-in connection, when it offers it. " +
                             "Local and Tailscale only never leaves the local network and Tailscale.",
                     ) {
                         Text("Connect using", style = PT.display(13.sp, FontWeight.Normal), color = c.secondary,
@@ -180,8 +185,8 @@ fun SettingsScreen(vm: AppViewModel, shell: ShellViewModel, onDone: () -> Unit) 
                     }
                     Section(
                         "Address to try first",
-                        footer = "Used when the Mac isn't found on the local network: its Tailscale name or IP, for example. " +
-                            "Leave empty to use the addresses the Mac sent.",
+                        footer = "Used when a computer isn't found on the local network: its Tailscale name or IP, for example. " +
+                            "Leave empty to use the addresses it sent.",
                     ) {
                         shellMacs.forEachIndexed { i, client ->
                             if (i > 0) Divider()
@@ -202,7 +207,7 @@ fun SettingsScreen(vm: AppViewModel, shell: ShellViewModel, onDone: () -> Unit) 
                     Divider()
                     PortRow("Control port", controlPort, enabled = !locked) { s.setControlPort(it) }
                     Divider()
-                    Text("Forget all paired Macs", style = PT.display(16.sp, FontWeight.Normal), color = PT.danger,
+                    Text("Forget all paired computers", style = PT.display(16.sp, FontWeight.Normal), color = PT.danger,
                         modifier = Modifier.fillMaxWidth().alpha(if (locked) 0.4f else 1f)
                             .clickable(enabled = !locked, role = Role.Button) { confirmForget = true }.padding(horizontal = 16.dp, vertical = 14.dp))
                 }
@@ -216,7 +221,7 @@ fun SettingsScreen(vm: AppViewModel, shell: ShellViewModel, onDone: () -> Unit) 
                     AnimatedVisibility(showLog) {
                         Column(Modifier.padding(horizontal = 16.dp).padding(bottom = 12.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
                             if (log.isEmpty()) {
-                                Text("Nothing logged yet. Start the proxy and connect a Mac; messages appear here.",
+                                Text("Nothing logged yet. Start the proxy and connect a computer; messages appear here.",
                                     style = PT.display(13.sp, FontWeight.Normal), color = c.secondary)
                             } else {
                                 LogList(log, showDebug, Modifier.fillMaxWidth().height(260.dp))
@@ -245,7 +250,7 @@ fun SettingsScreen(vm: AppViewModel, shell: ShellViewModel, onDone: () -> Unit) 
                 Section(null) {
                     Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
                         Text("Passthrough $version", style = PT.display(13.sp, FontWeight.SemiBold), color = c.primary)
-                        Text("The Mac connects through adb, Android's USB debugging bridge, which needs USB debugging turned on. This app listens on loopback only, so nothing is reachable over Wi-Fi or cellular. Every Mac authenticates with a per-device key that only its own keychain holds.",
+                        Text("A computer connects through adb, Android's USB debugging bridge, which needs USB debugging turned on. This app listens on loopback only, so nothing is reachable over Wi-Fi or cellular. Every computer authenticates with its own key, which only it holds.",
                             style = PT.display(13.sp, FontWeight.Normal), color = c.secondary)
                     }
                 }
@@ -255,8 +260,8 @@ fun SettingsScreen(vm: AppViewModel, shell: ShellViewModel, onDone: () -> Unit) 
     if (confirmForget) {
         androidx.compose.material3.AlertDialog(
             onDismissRequest = { confirmForget = false },
-            title = { Text("Forget all paired Macs?") },
-            text = { Text("Every Mac will need a new pairing code to connect again.") },
+            title = { Text("Forget all paired computers?") },
+            text = { Text("Every computer will need a new pairing code to connect again.") },
             confirmButton = { androidx.compose.material3.TextButton(onClick = { vm.revokeAll(); confirmForget = false }) { Text("Forget all", color = PT.danger) } },
             dismissButton = { androidx.compose.material3.TextButton(onClick = { confirmForget = false }) { Text("Cancel") } },
         )

@@ -39,11 +39,15 @@ try {
     if ($LASTEXITCODE -ne 0) { throw 'The app did not build.' }
     dotnet publish (Join-Path $windows 'src\Passthrough.Service') -c $Configuration -r win-x64 --self-contained -p:PublishSingleFile=true -o $service --artifacts-path $artifacts "-p:InformationalVersion=$build"
     if ($LASTEXITCODE -ne 0) { throw 'The service did not build.' }
+    $term = Join-Path $staging 'term'
+    dotnet publish (Join-Path $windows 'src\Passthrough.Term') -c $Configuration -r win-x64 --self-contained -p:PublishSingleFile=true -o $term --artifacts-path $artifacts "-p:InformationalVersion=$build"
+    if ($LASTEXITCODE -ne 0) { throw 'The terminal did not build.' }
 
     if (Test-Path $Output) { Remove-Item -Recurse -Force $Output }
     New-Item -ItemType Directory -Force $Output | Out-Null
     Copy-Item -Recurse (Join-Path $app '*') $Output
     Copy-Item (Join-Path $service 'Passthrough.Service.exe') $Output
+    Copy-Item (Join-Path $term 'passthrough-term.exe') $Output
     Get-ChildItem $Output -Recurse -Filter *.pdb | Remove-Item
 
     $full = (Resolve-Path $Output).Path.TrimEnd('\') + '\'

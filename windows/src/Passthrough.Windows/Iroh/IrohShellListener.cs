@@ -99,6 +99,7 @@ public sealed class IrohShellListener : IDisposable
             return;
         }
         finally { incoming.Dispose(); }
-        await _gate.ServeAsync(admission!, stream!).ConfigureAwait(false);
+        // A computer's signature is bound to this endpoint's id (stage 7 a.1).
+        await _gate.ServeAsync(admission!, stream!, binding: new Passthrough.Core.Shell.Access.ProofBinding(Passthrough.Core.Shell.Access.ComputerProof.PathIroh, Convert.FromHexString(_endpoint.Id))).ConfigureAwait(false);
     }
 }

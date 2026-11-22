@@ -20,5 +20,6 @@
 
   <ItemGroup>
     <ProjectReference Include="..\..\src\Passthrough.Windows\Passthrough.Windows.csproj" />
+    <ProjectReference Include="..\..\src\Passthrough.Media\Passthrough.Media.csproj" />
   </ItemGroup>
 </Project>

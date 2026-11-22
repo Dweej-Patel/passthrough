@@ -65,6 +65,13 @@ public sealed class ShellEnvelope
     public const string RdpReady = "rdpReady";
     /// <summary>A view of the screen on this device's other connection ended (<c>reason</c>: <c>switched_off</c>, <c>stopped</c>, <c>taken</c>).</summary>
     public const string ScreenEnded = "screenEnded";
+    /// <summary>
+    /// Computers (stage 7): a phone gives another of its computers access (<c>computerGrant</c>, answered
+    /// <c>computerGranted</c>), hands it over (<c>computerPass</c>, answered <c>computerPassSaved</c>), or takes back one it
+    /// couldn't hand over (<c>computerRevoke</c>, answered <c>computerRevoked</c>).
+    /// </summary>
+    public const string ComputerGrant = "computerGrant", ComputerGranted = "computerGranted", ComputerPass = "computerPass",
+        ComputerPassSaved = "computerPassSaved", ComputerRevoke = "computerRevoke", ComputerRevoked = "computerRevoked";
 
     private static readonly JsonSerializerOptions Options = new()
     {
@@ -122,6 +129,16 @@ public sealed class ShellEnvelope
     [JsonPropertyName("retryAfter")] public int? RetryAfter { get; set; }
     /// <summary>rdpReady: SHA-256 of the certificate Remote Desktop presents, lowercase hex.</summary>
     [JsonPropertyName("certSHA256")] public string? CertSHA256 { get; set; }
+    /// <summary>computerGrant, computerGranted, computerPass: what the computer may do (<c>shell</c>, <c>screen</c>).</summary>
+    [JsonPropertyName("scopes")] public List<string>? Scopes { get; set; }
+    /// <summary>computerGranted, computerPass: scopes waiting for the owner at the host (<c>screen</c> on a PC).</summary>
+    [JsonPropertyName("pending")] public List<string>? Pending { get; set; }
+    /// <summary>computerGrant: the computer's identity public key (65-byte point, base64).</summary>
+    [JsonPropertyName("idKey")] public string? IdKey { get; set; }
+    /// <summary>computerGrant: what kind of computer it is (<c>mac</c>, <c>windows</c>).</summary>
+    [JsonPropertyName("kind")] public string? Kind { get; set; }
+    /// <summary>proof from a <c>computer.</c> id: the identity key's signature (raw r ‖ s, base64).</summary>
+    [JsonPropertyName("sig")] public string? Sig { get; set; }
 
     public ShellEnvelope() { }
     public ShellEnvelope(string t) { T = t; }

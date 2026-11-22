@@ -35,6 +35,7 @@ internal sealed class TrayLinks(Func<IReadOnlyCollection<string>> allowedAccount
     }
     private readonly Lock _lock = new();
     private DateTime _lastRefusalLog;
+    private int _alive;
 
     /// <summary>Fires when an account's tray app comes or goes, or its sessions or state change.</summary>
     public event Action<PipeSessionHost>? Changed;
@@ -58,21 +59,22 @@ internal sealed class TrayLinks(Func<IReadOnlyCollection<string>> allowedAccount
     /// <summary>Accepts tray apps until <paramref name="stopping"/>. Never opens a pipe it didn't make first.</summary>
     public async Task RunAsync(CancellationToken stopping)
     {
-        var first = true;
         while (!stopping.IsCancellationRequested)
         {
             NamedPipeServerStream instance;
+            // With none of its own instances alive, the name may have lapsed: only one the service makes first counts.
+            var first = Volatile.Read(ref _alive) == 0;
             try { instance = ServicePipe.CreateInstance(first); }
             catch (Win32Exception e) when (e.NativeErrorCode is 5 or 231) // access denied, pipe busy
             {
                 if (first) log("pipe: another program holds the service's pipe name; trying again in 5 s");
-                await Task.Delay(TimeSpan.FromSeconds(5), stopping).ConfigureAwait(false);
+                await Task.Delay(first ? TimeSpan.FromSeconds(5) : TimeSpan.FromMilliseconds(100), stopping).ConfigureAwait(false);
                 continue;
             }
-            first = false;
+            Interlocked.Increment(ref _alive);
             try { await instance.WaitForConnectionAsync(stopping).ConfigureAwait(false); }
-            catch (OperationCanceledException) { await instance.DisposeAsync().ConfigureAwait(false); break; }
-            catch (IOException) { await instance.DisposeAsync().ConfigureAwait(false); continue; }
+            catch (OperationCanceledException) { Interlocked.Decrement(ref _alive); await instance.DisposeAsync().ConfigureAwait(false); break; }
+            catch (IOException) { Interlocked.Decrement(ref _alive); await instance.DisposeAsync().ConfigureAwait(false); continue; }
             _ = Task.Run(() => ServeAsync(instance, stopping), stopping);
         }
     }
@@ -112,7 +114,11 @@ internal sealed class TrayLinks(Func<IReadOnlyCollection<string>> allowedAccount
             lock (_lock) if (_links.TryGetValue(account, out var current) && ReferenceEquals(current, link)) _links.Remove(account);
         }
         catch (Exception e) when (e is IOException or ObjectDisposedException or OperationCanceledException) { }
-        finally { await pipe.DisposeAsync().ConfigureAwait(false); }
+        finally
+        {
+            Interlocked.Decrement(ref _alive);
+            await pipe.DisposeAsync().ConfigureAwait(false);
+        }
     }
 
     /// <summary>An account in the log: the last part of its SID, never its name.</summary>

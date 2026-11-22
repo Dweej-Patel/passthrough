@@ -58,6 +58,18 @@ public partial class App : Application
 
     protected override async void OnLaunched(LaunchActivatedEventArgs args)
     {
+        // Started by a copy handing over to the installed one (after Turn on): it goes first, then this one runs.
+        var command = Environment.GetCommandLineArgs();
+        var handoff = Array.IndexOf(command, "--handoff");
+        if (handoff >= 0 && handoff + 1 < command.Length && int.TryParse(command[handoff + 1], out var earlier))
+        {
+            try
+            {
+                using var before = System.Diagnostics.Process.GetProcessById(earlier);
+                await before.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(15));
+            }
+            catch (Exception e) when (e is ArgumentException or InvalidOperationException or TimeoutException) { }
+        }
         // One copy per Windows user session; a second launch just exits.
         _singleInstance = new Mutex(initiallyOwned: true, @"Local\Passthrough.App", out var isFirst);
         if (!isFirst)
@@ -114,6 +126,14 @@ public partial class App : Application
             // The icon first: if the flyout fails to build, the failure path below still has something to take down.
             _tray = new TrayIcon(ToggleFlyout, ShowSettings, Quit);
             _flyout = new FlyoutWindow(viewModel, ShowSettings, Quit);
+            var remote = _remote;
+            remote.NoticesChanged += () => viewModel.ShowNotices(remote.Notices);
+            viewModel.AnswerNotice = remote.AnswerNoticeAsync;
+            viewModel.OpenComputers = async () => await remote.Reach.UnlockAsync() ? remote.Reach.Computers : null;
+            viewModel.NewShell = remote.OpenShellAsync;
+            viewModel.OpenScreen = ShowScreen;
+            remote.HandOffWanted += launcher => DispatcherQueue.GetForCurrentThread()?.TryEnqueue(() => HandOff(launcher));
+            _ui = DispatcherQueue.GetForCurrentThread();
 
             await _session.StartAsync();
             await _remote.StartIfEnabledAsync();
@@ -166,6 +186,52 @@ public partial class App : Application
         _settings.BringToFront();
     }
 
+    private Microsoft.UI.Dispatching.DispatcherQueue? _ui;
+
+    /// <summary>One screen window per computer; a second Screen click brings it forward.</summary>
+    private readonly Dictionary<string, Screen.ScreenWindow> _screens = [];
+
+    private async void ShowScreen(Passthrough.Core.Trust.ReachableComputer computer)
+    {
+        if (_remote is null || _shuttingDown) return;
+        try
+        {
+            if (_screens.TryGetValue(computer.HostId, out var open))
+            {
+                open.BringToFront();
+                return;
+            }
+            if (_remote.Identity() is not { } identity) return;
+            var window = new Screen.ScreenWindow(computer, identity, _remote.ConfirmPresenceAsync);
+            _screens[computer.HostId] = window;
+            window.Closed += (_, _) => _screens.Remove(computer.HostId);
+            await window.StartAsync();
+        }
+        catch (Exception e) { LogFile.Error(e); }
+    }
+
+    /// <summary>
+    /// After Turn on: Start at login follows the installed copy, the installed copy starts (it waits for this one to
+    /// go), and this one quits. A copy that already is the installed one stays.
+    /// </summary>
+    private void HandOff(string launcher)
+    {
+        if (StartupRegistration.IsInstalledCopy()) return;
+        _ui?.TryEnqueue(() =>
+        {
+            try
+            {
+                if (StartupRegistration.IsEnabled()) StartupRegistration.SetEnabled(true);
+                var start = new System.Diagnostics.ProcessStartInfo(launcher) { UseShellExecute = false };
+                foreach (var a in new[] { "--launch", "--handoff", Environment.ProcessId.ToString(System.Globalization.CultureInfo.InvariantCulture) }) start.ArgumentList.Add(a);
+                using var _ = System.Diagnostics.Process.Start(start);
+                LogFile.Write("handed over to the installed copy of Passthrough");
+                Quit();
+            }
+            catch (Exception e) when (e is System.ComponentModel.Win32Exception or InvalidOperationException) { LogFile.Error(e); }
+        });
+    }
+
     private async void Quit()
     {
         try
@@ -199,6 +265,7 @@ public partial class App : Application
             LogFile.Error(e);
         }
         Try(() => _settings?.Close());
+        foreach (var screen in _screens.Values.ToList()) Try(screen.Close);
         Try(() =>
         {
             _flyout?.AllowClose();

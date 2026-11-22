@@ -153,3 +153,14 @@ public sealed class PipeTests
         public override async ValueTask WriteAsync(ReadOnlyMemory<byte> buffer, CancellationToken cancel = default) => await Task.Delay(Timeout.Infinite, cancel);
     }
 }
+
+public sealed class TermWireTests
+{
+    [Fact]
+    public void SizesAndStatusRoundTrip()
+    {
+        Assert.Equal((120, 40), Passthrough.Core.Client.TermWire.ReadSize(Passthrough.Core.Client.TermWire.Size(Passthrough.Core.Client.TermWire.Hello, 120, 40)));
+        Assert.Equal(-3, Passthrough.Core.Client.TermWire.ReadStatus(Passthrough.Core.Client.TermWire.EndedWith(-3)));
+        Assert.Equal((1, 1000), Passthrough.Core.Client.TermWire.ReadSize(Passthrough.Core.Client.TermWire.Size(3, 0, 5000)));
+    }
+}

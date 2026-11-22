@@ -40,9 +40,65 @@
         </Grid>
 
         <!-- The phones, one card each -->
-        <ScrollViewer Grid.Row="1" Margin="0,12,0,0" VerticalScrollBarVisibility="Auto"
-                      Visibility="{x:Bind ViewModel.RowsVisibility, Mode=OneWay}">
-            <ItemsControl x:Name="Body" ItemsSource="{x:Bind ViewModel.Rows}">
+        <ScrollViewer Grid.Row="1" Margin="0,12,0,0" VerticalScrollBarVisibility="Auto">
+          <StackPanel Spacing="8">
+            <!-- Remote access's notices, each until answered -->
+            <ItemsControl ItemsSource="{x:Bind ViewModel.Notices}">
+                <ItemsControl.ItemsPanel>
+                    <ItemsPanelTemplate>
+                        <StackPanel Spacing="8" />
+                    </ItemsPanelTemplate>
+                </ItemsControl.ItemsPanel>
+                <ItemsControl.ItemTemplate>
+                    <DataTemplate x:DataType="local:NoticeRow">
+                        <Border Style="{StaticResource PtCardStyle}">
+                            <StackPanel Spacing="8">
+                                <TextBlock Text="{x:Bind Text}" TextWrapping="Wrap" AutomationProperties.LiveSetting="Polite" />
+                                <StackPanel Orientation="Horizontal" Spacing="8" HorizontalAlignment="Right">
+                                    <Button Content="{x:Bind ActionText}" Visibility="{x:Bind ActionVisibility}" Click="OnNoticeAction" />
+                                    <Button Content="OK" Visibility="{x:Bind OkVisibility}" Click="OnNoticeOk" />
+                                </StackPanel>
+                            </StackPanel>
+                        </Border>
+                    </DataTemplate>
+                </ItemsControl.ItemTemplate>
+            </ItemsControl>
+            <!-- Your computers: other computers this PC can reach, opened with Windows Hello -->
+            <Button Content="Your computers" HorizontalAlignment="Stretch" Click="OnShowComputers"
+                    Visibility="{x:Bind ViewModel.ShowComputersVisibility, Mode=OneWay}"
+                    ToolTipService.ToolTip="Other computers this PC can reach. Windows asks for your PIN or fingerprint." />
+            <ItemsControl ItemsSource="{x:Bind ViewModel.Computers}" Visibility="{x:Bind ViewModel.ComputersVisibility, Mode=OneWay}">
+                <ItemsControl.ItemsPanel>
+                    <ItemsPanelTemplate>
+                        <StackPanel Spacing="8" />
+                    </ItemsPanelTemplate>
+                </ItemsControl.ItemsPanel>
+                <ItemsControl.ItemTemplate>
+                    <DataTemplate x:DataType="local:ComputerRow">
+                        <Border Style="{StaticResource PtCardStyle}">
+                            <Grid ColumnSpacing="10">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="Auto" />
+                                </Grid.ColumnDefinitions>
+                                <StackPanel VerticalAlignment="Center">
+                                    <TextBlock Text="{x:Bind Title}" Style="{StaticResource BodyStrongTextBlockStyle}" TextTrimming="CharacterEllipsis" />
+                                    <TextBlock Text="{x:Bind Detail}" Style="{StaticResource CaptionTextBlockStyle}"
+                                               Foreground="{ThemeResource TextFillColorSecondaryBrush}" TextTrimming="CharacterEllipsis" />
+                                </StackPanel>
+                                <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="6">
+                                    <Button Content="Screen" Visibility="{x:Bind ScreenVisibility}" Click="OnScreen"
+                                            AutomationProperties.Name="Show this computer's screen"
+                                            ToolTipService.ToolTip="Shows its screen in a window. Windows asks for your PIN or fingerprint." />
+                                    <Button Content="New shell" IsEnabled="{x:Bind CanOpenShell}" Click="OnNewShell"
+                                            AutomationProperties.Name="New shell on this computer" />
+                                </StackPanel>
+                            </Grid>
+                        </Border>
+                    </DataTemplate>
+                </ItemsControl.ItemTemplate>
+            </ItemsControl>
+            <ItemsControl x:Name="Body" ItemsSource="{x:Bind ViewModel.Rows}" Visibility="{x:Bind ViewModel.RowsVisibility, Mode=OneWay}">
                 <ItemsControl.ItemsPanel>
                     <ItemsPanelTemplate>
                         <StackPanel Spacing="8" />
@@ -122,6 +178,7 @@
                     </DataTemplate>
                 </ItemsControl.ItemTemplate>
             </ItemsControl>
+          </StackPanel>
         </ScrollViewer>
 
         <!-- What the user should do: install Apple Devices, allow USB debugging, ... -->

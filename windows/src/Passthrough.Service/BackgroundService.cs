@@ -24,6 +24,7 @@ internal sealed class BackgroundService
 
     public TrayLinks? Trays { get; private set; }
     public ServiceRemote? Remote { get; private set; }
+    private readonly SemaphoreSlim _reload = new(1, 1);
 
     /// <summary>
     /// What an administrator's <c>--configure</c> left for the service in its store folder (only administrators and the
@@ -65,7 +66,8 @@ internal sealed class BackgroundService
             ? new ServiceRemote.TlsOptions(Path.Combine(_machine.StoreFolder, "tls.cer"))
             : null;
         if (tls is null) Log("tls: this Windows has no TLS 1.3 server; phones use the built-in connection only");
-        Remote = new ServiceRemote(store, _installed.InstallFolder, Trays!, () => _state.Relay.Url, Log, tls: tls, screenSetup: () => _state.Rdp);
+        Remote = new ServiceRemote(store, _installed.InstallFolder, Trays!, () => _state.Relay.Url, Log, tls: tls, screenSetup: () => _state.Rdp,
+            allowedAccounts: () => _state.AllowedAccounts);
         Trays!.Admin = Remote.Admin.Handle;
         Remote.Start();
     }
@@ -127,10 +129,15 @@ internal sealed class BackgroundService
             case ServiceControl.UserDefined when control.Code == ServiceDefinition.ControlReload:
                 // Only what administrators wrote is re-read (install.json, the pending files); a stray control changes nothing.
                 Log(ReadState() ? "service: re-read its settings" : "service: couldn't re-read install.json");
-                _ = Task.Run(() =>
+                _ = Task.Run(async () =>
                 {
-                    Remote?.Dispose();
-                    StartRemote();
+                    await _reload.WaitAsync().ConfigureAwait(false);
+                    try
+                    {
+                        Remote?.Dispose();
+                        StartRemote();
+                    }
+                    finally { _reload.Release(); }
                 });
                 return true;
             case ServiceControl.PowerEvent when control.EventType == PbtApmSuspend:

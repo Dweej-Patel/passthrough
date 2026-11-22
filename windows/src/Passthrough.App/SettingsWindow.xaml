@@ -116,6 +116,10 @@
                         <ColumnDefinition Width="*" />
                         <ColumnDefinition Width="Auto" />
                     </Grid.ColumnDefinitions>
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto" />
+                        <RowDefinition Height="Auto" />
+                    </Grid.RowDefinitions>
                     <StackPanel VerticalAlignment="Center">
                         <TextBlock Text="Keep shell history" />
                         <TextBlock Text="What phones' shells showed, kept on this PC for you to look back at. Only your Windows account can open it."
@@ -124,7 +128,7 @@
                     </StackPanel>
                     <ComboBox x:Name="HistoryChoice" Grid.Column="1" VerticalAlignment="Center" MinWidth="120"
                               AutomationProperties.Name="Keep shell history" />
-                    <HyperlinkButton x:Name="DeleteHistoryButton" Grid.Row="1" Content="Delete shell history" Padding="0"
+                    <HyperlinkButton x:Name="DeleteHistoryButton" Grid.Row="1" Grid.ColumnSpan="2" Content="Delete shell history…" Padding="0"
                                      Click="OnDeleteHistoryClick" />
                 </Grid>
             </Border>
@@ -141,7 +145,7 @@
                         <Button Content="Use this relay" Click="OnRelayClick" />
                         <HyperlinkButton Content="Reset this PC's identity…" Click="OnResetIdentityClick" />
                     </StackPanel>
-                    <TextBlock Text="Once Remote access runs as a background service, changing either asks for an administrator."
+                    <TextBlock Text="Changing the relay or this PC's identity asks for an administrator, since every account on this PC shares them."
                                Style="{StaticResource CaptionTextBlockStyle}" TextWrapping="Wrap"
                                Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
                 </StackPanel>

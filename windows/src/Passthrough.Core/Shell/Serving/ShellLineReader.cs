@@ -14,6 +14,14 @@ public sealed class ShellLineReader(Stream stream, int limit)
     /// <summary>Bytes read off the stream that no line has taken yet (a phone sent more than it should have).</summary>
     public bool HasBuffered => _count > 0;
 
+    /// <summary>The bytes read off the stream after the last line, taken out (what follows a hand-over to another protocol).</summary>
+    public byte[] TakePending()
+    {
+        var rest = _buffer.AsSpan(_start, _count).ToArray();
+        _start = _count = 0;
+        return rest;
+    }
+
     /// <summary>The next line, without its newline; null once the stream ends between lines.</summary>
     public async Task<byte[]?> ReadLineAsync(CancellationToken ct = default)
     {
