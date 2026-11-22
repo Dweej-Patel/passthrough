@@ -122,6 +122,11 @@ final class ScreenModel: ObservableObject {
     private var onScreenSharing: Bool { backend is ScreenSharingBackend }
     /// This view shows a PC (through its Remote Desktop), not a Mac.
     private var windowsView = false
+    /// How the sign-in sheet asks: a Mac's account, or a PC's Windows account (the last used here, else the one the PC named).
+    var loginStyle: ScreenLoginForm.Style {
+        guard windowsView else { return .mac }
+        return .windows(account: macID.flatMap { ScreenLoginStore.lastAccount(hostID: $0) ?? shell?.factsByMac[$0]?.user })
+    }
     /// The login this PC view signed in with, kept while the view is open so a dropped
     /// view (or one back from the background) reconnects without asking again.
     private var windowsLogin: (login: ScreenLogin, remember: Bool)?
@@ -470,7 +475,10 @@ final class ScreenModel: ObservableObject {
             screenSize = CGSize(width: width, height: height)
             phase = .live
             if windowsView {
-                if liveSince == nil { liveSince = ProcessInfo.processInfo.systemUptime }
+                if liveSince == nil {
+                    liveSince = ProcessInfo.processInfo.systemUptime
+                    windowsSignedIn()
+                }
             } else if isStream {
                 let first = !videoStarted
                 videoStarted = true
@@ -640,6 +648,12 @@ final class ScreenModel: ObservableObject {
         observeApp()
         reconnects = 0
         if let held = windowsLogin { return connectWindows(held.login, remember: held.remember) }
+        // The account last used here, else the one the PC says Remote Desktop takes; its saved
+        // login is read with the app lock's context, so it never prompts.
+        let account = ScreenLoginStore.lastAccount(hostID: pc.macID) ?? shell?.factsByMac[pc.macID]?.user
+        if let account, let context, let saved = ScreenLoginStore.readWindows(hostID: pc.macID, account: account, context: context) {
+            return connectWindows(saved, remember: true)
+        }
         stop()
         phase = .login(error: nil)
     }
@@ -696,6 +710,8 @@ final class ScreenModel: ObservableObject {
             made.start()
         case let .rdpRefused(error, detail, retryAfter):
             stop()
+            // Access was revoked: nothing saved for this PC stays.
+            if error == .notAuthorized, let macID { ScreenLoginStore.deleteAll(hostID: macID) }
             let words = windowsWords
             phase = .failed(WindowsScreenCopy.refusal(error, detail: detail, retryAfter: retryAfter, words)?.sentence
                             ?? error.message(for: words) ?? "\(macName) refused the connection.")
@@ -707,6 +723,17 @@ final class ScreenModel: ObservableObject {
             phase = .failed("Can't reach \(macName). It may be asleep, off, or offline.")
         default:
             break
+        }
+    }
+
+    /// Windows took the login: kept (or forgotten) as the user chose, only now.
+    private func windowsSignedIn() {
+        guard let held = windowsLogin, let macID else { return }
+        ScreenLoginStore.setLastAccount(held.login.username, hostID: macID)
+        if !held.remember {
+            ScreenLoginStore.deleteWindows(hostID: macID, account: held.login.username)
+        } else if let context {
+            ScreenLoginStore.saveWindows(held.login, hostID: macID, context: context)
         }
     }
 
@@ -722,9 +749,13 @@ final class ScreenModel: ObservableObject {
         case .closedHere:
             return
         case .signIn(.wrongPassword):
+            // A saved password Windows refused is forgotten: it costs one attempt, then the sheet.
+            if let held = windowsLogin, let macID { ScreenLoginStore.deleteWindows(hostID: macID, account: held.login.username) }
             windowsLogin = nil
             phase = .login(error: WindowsScreenCopy.signInError(end))
             return
+        case .signIn(.passwordExpired):
+            if let held = windowsLogin, let macID { ScreenLoginStore.deleteWindows(hostID: macID, account: held.login.username) }
         case .signIn(.other):
             windowsLogin = nil
             phase = .login(error: nil)

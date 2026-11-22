@@ -374,7 +374,7 @@ struct ScreenView: View, Equatable {
                 .ignoresSafeArea(.container, edges: .bottom)
             }
         case let .login(error):
-            ScreenLoginForm(macName: model.macName, error: error) { login, remember in
+            ScreenLoginForm(macName: model.macName, error: error, style: model.loginStyle) { login, remember in
                 model.connect(login, remember: remember)
             }
         case .confirmScreenSharing:
@@ -636,21 +636,37 @@ struct ScreenSharingPrompt: View {
     }
 }
 
-/// The Mac account's name and password, which Screen Sharing on the Mac checks.
+/// The account name and password the far computer checks: a Mac's for Screen
+/// Sharing, or a PC's Windows account for Remote Desktop.
 struct ScreenLoginForm: View {
+    enum Style: Equatable {
+        case mac
+        /// `account`: the one to sign in as (the last used, or the one the PC named); nil asks for it.
+        case windows(account: String?)
+    }
+
     let macName: String
     let error: String?
+    var style: Style = .mac
     let onConnect: (ScreenLogin, Bool) -> Void
     @State private var username = ""
     @State private var password = ""
     @State private var remember = true
-    @FocusState private var focused: Bool
+    /// Windows: the account field is shown (none was known, or "Use a different account").
+    @State private var editsAccount = false
+    @FocusState private var focus: Field?
+
+    private enum Field { case account, password }
+
+    private var windows: Bool { style != .mac }
 
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
-                Text("Log in to \(macName)").font(.title3.weight(.semibold))
-                Text("Use the name and password of your account on \(macName). Screen Sharing on the Mac checks them.")
+                Text(windows ? "Sign in to \(macName)" : "Log in to \(macName)").font(.title3.weight(.semibold))
+                Text(windows
+                     ? "Windows asks for your account's password, not your PIN. Passthrough passes it to Windows and keeps it on this \(ThisDevice.name) behind Face ID."
+                     : "Use the name and password of your account on \(macName). Screen Sharing on the Mac checks them.")
                     .font(.subheadline).foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
                 if let error {
@@ -658,15 +674,18 @@ struct ScreenLoginForm: View {
                         .font(.subheadline).foregroundStyle(PTTheme.warning)
                 }
                 VStack(spacing: 0) {
-                    TextField("Account name", text: $username)
-                        .textContentType(.username)
-                        .textInputAutocapitalization(.never)
-                        .autocorrectionDisabled()
-                        .focused($focused)
-                        .padding(12)
-                    Divider()
-                    SecureField("Password", text: $password)
+                    if !windows || editsAccount {
+                        TextField(windows ? "Account name or email" : "Account name", text: $username)
+                            .textContentType(.username)
+                            .textInputAutocapitalization(.never)
+                            .autocorrectionDisabled()
+                            .focused($focus, equals: .account)
+                            .padding(12)
+                        Divider()
+                    }
+                    SecureField(windows && !username.isEmpty ? "Password for \(username)" : "Password", text: $password)
                         .textContentType(.password)
+                        .focused($focus, equals: .password)
                         .padding(12)
                         .onSubmit(connect)
                 }
@@ -676,8 +695,15 @@ struct ScreenLoginForm: View {
                     .tint(PTTheme.accentEnd)
                 Text("Kept in this \(ThisDevice.name)'s Keychain behind Face ID, like your shell keys.")
                     .font(.caption).foregroundStyle(.secondary)
+                if windows, !editsAccount {
+                    Button("Use a different account") {
+                        editsAccount = true
+                        focus = .account
+                    }
+                    .font(.subheadline)
+                }
                 Button(action: connect) {
-                    Text("Connect").font(.subheadline.weight(.semibold)).frame(maxWidth: .infinity, minHeight: 34)
+                    Text(windows ? "Sign in" : "Connect").font(.subheadline.weight(.semibold)).frame(maxWidth: .infinity, minHeight: 34)
                 }
                 .buttonStyle(.borderedProminent)
                 .buttonBorderShape(.capsule)
@@ -686,11 +712,20 @@ struct ScreenLoginForm: View {
             }
             .padding(24)
         }
-        .onAppear { focused = true }
+        .onAppear {
+            if case let .windows(account) = style, let account, !account.isEmpty {
+                username = account
+                focus = .password
+            } else {
+                editsAccount = true
+                focus = .account
+            }
+        }
     }
 
     private func connect() {
-        guard !username.isEmpty, !password.isEmpty else { return }
-        onConnect(ScreenLogin(username: username, password: password), remember)
+        let name = username.trimmingCharacters(in: .whitespaces)
+        guard !name.isEmpty, !password.isEmpty else { return }
+        onConnect(ScreenLogin(username: name, password: password), remember)
     }
 }
