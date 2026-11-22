@@ -40,6 +40,15 @@ the **Before you rebuild** notes first. The Mac and phone apps update together.
 * **Windows: Stay awake while plugged in**, and phones are told when the PC
   goes to sleep, shuts down or has Remote access turned off. A connected phone
   keeps the idle timer off for as long as it is connected and a minute after.
+* **Windows: after `--update`, restart the tray app.** Quit Passthrough from
+  the tray and open it from the Start menu. The service updates at once; the
+  tray app runs the new build only once it is started again. Several fixes run
+  inside the tray app: the taskbar, the hand-off after Turn on, quitting.
+* **Windows: build from a folder only you can write to, on a PC with other
+  accounts.** Setup copies the build folder into Program Files behind your
+  administrator prompt, and it doesn't yet check who else can change that
+  folder. `D:\` and other second drives let every account change files by
+  default (windows/README.md, SECURITY.md).
 
 * **Update the Mac, the phones and the PC together.** Sharing a computer
   (`computerGrant`, `computerPass`, `listComputers`) and the PC's screen need
@@ -294,6 +303,32 @@ these steps as written and check each one before building.
   microphone is on only while its button is, and goes off when the view
   closes or the app leaves the screen. While it is on, any app on the Mac
   that may use a microphone can hear it.
+
+### Fixed (Windows, from the security and code review)
+
+* Opening a shell on another computer from the tray put that computer's name
+  on Windows Terminal's command line, where a `;` starts another command: a
+  computer named that way could run a program on the PC. The name now reaches
+  only the terminal's title, set from inside it.
+* Removing Passthrough could leave Remote Desktop on and open to the network
+  when Windows' own Remote Desktop rule was already on before setup.
+* A view of the screen that was just starting could outlive Screen being
+  turned off or Stop. A computer a phone revoked kept its shells running.
+* A refused Remote Desktop attempt could write the end of the Windows account
+  name to the service's log.
+* An account removed from Remote access kept its tray app's link to the
+  service until it restarted.
+* The service and its libraries look up Windows' system libraries in System32
+  only.
+* After Turn on, the copy you started didn't hand over to the installed one.
+* A shell that failed to start left its console process and handles behind.
+  Closing a shell could, in rare timing, hang every shell.
+* Quitting could skip ending phones' shells. Stopping the service could crash
+  it.
+* The taskbar is kept on top after a Remote Desktop resize, but no longer over
+  a full-screen video or game.
+* The notice for a computer given only the screen no longer says it was given
+  the shell.
 
 ### Changed
 
