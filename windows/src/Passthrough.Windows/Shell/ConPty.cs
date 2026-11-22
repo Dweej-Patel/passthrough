@@ -106,7 +106,14 @@ public sealed unsafe class ConPty : IPty
             if (_started) throw new InvalidOperationException("started already");
             _started = true;
         }
-        (_process, _shellPid) = StartProcess();
+        try { (_process, _shellPid) = StartProcess(); }
+        catch
+        {
+            // No thread runs to close what was made: the pseudoconsole (its OpenConsole process), the job and the pipes go now.
+            lock (_lock) _started = false;
+            Cleanup();
+            throw;
+        }
         new Thread(ReadOutput) { IsBackground = true, Name = "conpty output" }.Start();
         new Thread(WriteTyping) { IsBackground = true, Name = "conpty input" }.Start();
         new Thread(WaitForExit) { IsBackground = true, Name = "conpty exit" }.Start();
@@ -214,11 +221,16 @@ public sealed unsafe class ConPty : IPty
         // What the shell left running goes with it, as a hangup would end it on a Mac.
         lock (_lock) if (!_job.IsClosed) Native.TerminateJobObject(_job, unchecked((uint)TerminatedExitCode));
         _typing.CompleteAdding();
+        // Closing the pseudoconsole flushes what it still holds and ends the output pipe. It can wait for the reader to
+        // drain, and the reader may be waiting on this lock (Counts, through the session's status), so it is closed
+        // outside the lock; marked closed first, so a resize after this point never reaches it.
+        bool close;
         lock (_lock)
         {
-            // Closing the pseudoconsole flushes what it still holds and ends the output pipe.
-            if (!_consoleClosed) { Functions.Value.Close(_console); _consoleClosed = true; }
+            close = !_consoleClosed;
+            _consoleClosed = true;
         }
+        if (close) Functions.Value.Close(_console);
         _readerDone.Wait(TimeSpan.FromSeconds(5));
         Cleanup();
         try { OnExit?.Invoke(code); }

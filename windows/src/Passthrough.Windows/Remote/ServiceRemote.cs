@@ -228,6 +228,16 @@ public sealed class ServiceRemote : IDisposable
     /// </summary>
     private void UpdatePower()
     {
+        try { UpdatePowerNow(); }
+        // A timer callback's exception would end the service: a failed check waits for the next one.
+        catch (Exception e) when (e is ObjectDisposedException or InvalidOperationException or System.ComponentModel.Win32Exception or IOException)
+        {
+            _log($"service: the power and exposure check failed: {e.GetType().Name}");
+        }
+    }
+
+    private void UpdatePowerNow()
+    {
         CheckExposure();
         if (Gate.ConnectedPhones.Count > 0) _lastConnected = DateTime.UtcNow;
         _connectedRequest?.Set(DateTime.UtcNow - _lastConnected < AwakeAfterLast);
@@ -398,7 +408,9 @@ public sealed class ServiceRemote : IDisposable
 
     public void Dispose()
     {
-        _power.Dispose();
+        // A check running now finishes before the power requests it sets are released.
+        using (var stopped = new ManualResetEvent(false))
+            if (_power.Dispose(stopped)) stopped.WaitOne(TimeSpan.FromSeconds(5));
         _connectedRequest?.Dispose();
         _awakeRequest?.Dispose();
         _dnsSd?.Dispose();
