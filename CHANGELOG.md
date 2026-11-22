@@ -38,7 +38,7 @@ the **Before you rebuild** notes first. The Mac and phone apps update together.
   Authentication, and caps quick sign-in attempts below Windows' own lockout.
   Removing Passthrough puts back every Remote Desktop setting it changed and
   nothing else.
-* **Windows: Stay awake while plugged in**, and phones are told when the PC
+* **Windows: Stay awake on mains power**, and phones are told when the PC
   goes to sleep, shuts down or has Remote access turned off. A connected phone
   keeps the idle timer off for as long as it is connected and a minute after.
 * **Windows: after `--update`, restart the tray app.** Quit Passthrough from
@@ -141,11 +141,11 @@ these steps as written and check each one before building.
   - *This Mac*: pairing, the three switches and Details (the flow map, speeds, top apps), as before.
   - *Remote · N*:
     - *Who can reach this Mac*, one row that opens Settings ▸ Remote Shell;
-    - *On this Mac now*, which was *From your phone*: each session says who opened it (*From \<phone or computer\>*), with **Open here** or **Stop**;
+    - *On this Mac now*, which was *From your phone*: each session says who opened it (*From \<phone or computer\>*), with **Open here** or **Stop Showing Here**, and **End Session…** in the row's menu;
     - *Your computers*: other Macs' screen passes and PCs in one list, each with its state.
   - The panel remembers the last tab. A phone waiting for its pairing code brings *This Mac* forward.
 * **The Mac lists the computers it let in, and the ones it can reach.** Settings ▸ Remote Shell:
-  - *Computers with access* (new): each computer a phone gave access to this Mac, which phone shared it and when, and what it may do and has open. **Stop** ends what it has open now; **Revoke…** takes its access away, whichever phone shared it. The notice for a new computer points here.
+  - *Computers with access* (new): each computer a phone gave access to this Mac, which phone shared it and when, and what it may do and has open. **Stop** ends what it has open now; **Revoke…** takes its access away, whichever phone shared it. The notice for a new computer points here. Other Macs' screen passes are listed here too (*Mac · screen pass*, with **Remove…**), in place of *Macs that can see this screen*.
   - *Computers this Mac can reach* replaces *Other Macs' screens*. It lists PCs and other Macs' screen passes, with **View**, **Forget Saved Sign-In** and **Remove…**. **Remove…** also clears an older copy of a computer that blocks sharing it again.
 * **iPhone and iPad: one Share row, and a computer switcher on Shells and Activity.**
   - **Share with another computer…** replaces *Share screen with a Mac* and *Share with another computer*. Where the host doesn't let this phone share, the row stays, greyed out, with the switch to turn on. A Mac with sharing off still offers its screen to your other Macs, as the screen pass did before.
@@ -166,7 +166,7 @@ these steps as written and check each one before building.
   - Notices and anyone viewing the screen (with **Stop**) sit above two tabs, which the flyout remembers:
     - *This PC*: the phones on the cable and Stay awake;
     - *Remote · N*: who can reach the PC, who is on it now (each with **Stop**) and Your computers.
-  - Settings has four pages: General, Remote access, Your computers and Advanced.
+  - Settings has four pages: General, Remote access, Computers with access and Advanced.
     - Each phone has one row: Screen, Share, Stop, Revoke… and Forget…. Before, a phone was listed once for its pairing and again for its access.
     - Computers with access get **Allow screen** and **Revoke…**.
   - The first Turn on can set up the screen in the same administrator prompt.
@@ -184,7 +184,7 @@ these steps as written and check each one before building.
   host's owner, and whether it is connected. A phone can take any of them back
   at any time. The PC and the Mac answer it (each lists only the computers the
   asking phone shared), and the iPhone's Share sheet shows the list with
-  **Remove**. An older host doesn't answer, and the sheet goes by what the
+  **Remove Access**. An older host doesn't answer, and the sheet goes by what the
   phone remembers sharing.
 * **Share with another computer** (iPhone and iPad). Open a computer, tap
   *Share with another computer…*, pick *Screen only* or *Shell and screen*,
@@ -397,6 +397,47 @@ these steps as written and check each one before building.
   PC desktop past 16384 pixels a side or 50 million pixels isn't drawn on the
   iPhone, a Remote Desktop request answered with a screen hand-over is
   refused, and a shared computer's name loses control and format characters.
+* **Sharing a computer again never breaks the access it has.** On a Mac or a
+  PC, the earlier grant keeps working until the computer first uses the new
+  one, so a hand-over that fails leaves it what it had; revoking takes both.
+  A PC Screen window that is open takes up the new access when its PC is
+  shared again (only with the same certificate and iroh id). On the iPhone,
+  a computer that drops after the access was sent keeps it, and the phone
+  says to share again if the host isn't under *Your computers* there.
+* **Who is viewing the Mac's screen is plain.** A computer reads
+  *(a computer)* and a Mac with a pass *(a Mac with a pass)*, each with its
+  own icon, so neither can pass for one of your phones. Computers' names are
+  stored without control, bidi or zero-width characters, and the phone's
+  *connected now* counts a computer on either path (local and Tailscale, or
+  the built-in connection).
+* **The Mac's Stop, End and Quit say what they do.**
+  - The panel's session **Stop** is **Stop Showing Here**; **End Session…**
+    (it asks first) is in the row's **⋯** menu.
+  - The power button and ⌘Q ask first while phones' or computers' shells run
+    or someone is viewing the screen. Logging out, shutting down and the
+    install script don't ask.
+  - *Who can reach this Mac* says *Remote shell is on* (it said Remote
+    access), and the *Remote* tab has an amber dot while Remote shell isn't
+    running. *Your computers* says how to add one when it has none.
+  - Settings ▸ Remote Shell: screen passes are listed under *Computers with
+    access* (*Mac · screen pass*); *Macs that can see this screen* is gone.
+    Each phone in *Phones with access* has **Stop…**, which ends what it has
+    open and keeps its access.
+  - The PC Screen window says *Turn on Remote Shell on this Mac first*
+    before asking for Touch ID, and *Screen is off for this Mac* also names
+    the PC's Settings (*Computers with access*).
+* **iPhone: copy that names real controls.**
+  - The Share sheet's button is **Remove Access**: it takes the access away
+    on the host, unlike **Remove…** on a Mac or PC, which only forgets a copy
+    there.
+  - Sharing a PC with your PCs starts on *Shell and screen*, the only choice
+    they can take.
+  - A host that doesn't let this phone open shells no longer says to turn on
+    a switch that doesn't exist: it says to plug the phone in with Remote
+    shell (Mac) or Remote access (PC) on. Setup steps name the switch you see
+    on each host.
+  - An unreachable computer's card says each thing once, and the Lock button
+    is at least 44 pt tall.
 
 ### Changed
 
@@ -440,8 +481,9 @@ these steps as written and check each one before building.
   the phone in use, so two phones on two cables both pair and both show live
   status, and an iPad pairs with its code like a phone. *Use this phone* only
   marks which phone the PC will go online through; it no longer closes the
-  other phone's channel, and it is never offered for an iPad. *Try again*
-  works on any row that failed.
+  other phone's channel, and it is never offered for an iPad (for now it is
+  hidden, until the PC can go online through a phone). *Try again* works on
+  any row that failed.
 * Windows: each paired phone whose cable connection checks out is offered a
   shell key while Remote access has something to hand out, and the key is kept
   once the phone confirms it; an unanswered grant is tried again with the Mac's
