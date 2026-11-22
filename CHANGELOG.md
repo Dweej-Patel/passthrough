@@ -439,6 +439,39 @@ these steps as written and check each one before building.
   - An unreachable computer's card says each thing once, and the Lock button
     is at least 44 pt tall.
 
+### Fixed (Windows, from the second review)
+
+* One Windows account's phones could use up the 16 computers a PC lets in, for
+  every account; the limit now counts one account's own. A phone already kept
+  by an account an administrator turned off can't be taken by another, and a
+  phone's id now reaches only its own account's tray app.
+* Stop in the tray keeps that device's screen closed for 30 seconds, as Stop on
+  a view already did.
+* Settings showed a computer's screen as allowed while the phone that shared it
+  had Screen off; it now says the screen is held back, and why.
+* A phone waiting for its pairing code was hidden behind the Remote tab: the
+  flyout now brings This PC forward, and the tab reads *This PC · Pair*.
+* Quit and turn off Remote access quit anyway when the administrator prompt
+  was declined; it now says so and asks again. After a restart the tab bar
+  could show This PC over the Remote panel.
+* *Use this phone* is hidden: it promised internet through the phone, which
+  the PC doesn't do yet.
+* `scripts/windows.ps1`: the build-folder check also counts permissions
+  inherited into what the build creates and the owner of each folder, and runs
+  again just before the administrator prompt. It needs PowerShell 7 (`pwsh`),
+  refuses an `-Output` folder that holds other files (the build deletes it),
+  builds before a clean reinstall removes anything, keeps your own changes to
+  the lock files, and refuses `install` and `update` from a standard account
+  (turn Remote access on from the tray app's Settings instead).
+
+### Changed (Windows, from the second review)
+
+* The flyout's header has **Turn on…** or **Fix…** when Remote access needs it,
+  and says *This PC's screen is in use* while someone views it. Settings' page
+  for the computers let in here is *Computers with access*; *Your computers*
+  is what this PC reaches. *Stay awake on mains power*. **Open the log folder**
+  in Settings' error box and on Advanced.
+
 ### Changed
 
 * **CI builds and tests the Windows app.** A Windows job runs the Windows Core
