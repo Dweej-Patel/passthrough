@@ -88,6 +88,26 @@ public sealed partial class FlyoutWindow : Window
         catch (Exception ex) { Platform.LogFile.Error(ex); }
     }
 
+    /// <summary>Remove… asks first, beside the link: "Remove <i>MacBook</i> from this PC?" with a Remove button.</summary>
+    private void OnRemoveComputer(object sender, RoutedEventArgs e)
+    {
+        if (sender is not FrameworkElement link || link.DataContext is not ComputerRow row) return;
+        var confirm = new Microsoft.UI.Xaml.Controls.Flyout();
+        var remove = new Microsoft.UI.Xaml.Controls.Button { Content = "Remove", Style = (Style)Application.Current.Resources["AccentButtonStyle"] };
+        Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(remove, row.RemoveName);
+        remove.Click += async (_, _) =>
+        {
+            confirm.Hide();
+            try { await ViewModel.RemoveComputerAsync(row); }
+            catch (Exception ex) { Platform.LogFile.Error(ex); }
+        };
+        var panel = new Microsoft.UI.Xaml.Controls.StackPanel { Spacing = 10, MaxWidth = 260 };
+        panel.Children.Add(new Microsoft.UI.Xaml.Controls.TextBlock { Text = row.RemoveQuestion, TextWrapping = TextWrapping.Wrap });
+        panel.Children.Add(remove);
+        confirm.Content = panel;
+        confirm.ShowAt(link);
+    }
+
     private void OnScreen(object sender, RoutedEventArgs e)
     {
         if (((FrameworkElement)sender).DataContext is not ComputerRow row || ViewModel.OpenScreen is not { } open) return;

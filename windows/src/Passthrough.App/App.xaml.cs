@@ -141,6 +141,7 @@ public partial class App : Application
             viewModel.AnswerNotice = remote.AnswerNoticeAsync;
             viewModel.OpenComputers = async () => await remote.Reach.UnlockAsync() ? remote.Reach.Computers : null;
             viewModel.NewShell = remote.OpenShellAsync;
+            viewModel.RemoveComputer = c => remote.Reach.RemoveAsync(c.HostId);
             viewModel.OpenScreen = ShowScreen;
             _ui = DispatcherQueue.GetForCurrentThread();
             // Raised after the elevated setup, on a pool thread: the UI's queue is the one captured here.

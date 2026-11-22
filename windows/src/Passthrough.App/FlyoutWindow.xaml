@@ -85,6 +85,8 @@
                                     <TextBlock Text="{x:Bind Title}" Style="{StaticResource BodyStrongTextBlockStyle}" TextTrimming="CharacterEllipsis" />
                                     <TextBlock Text="{x:Bind Detail}" Style="{StaticResource CaptionTextBlockStyle}"
                                                Foreground="{ThemeResource TextFillColorSecondaryBrush}" TextTrimming="CharacterEllipsis" />
+                                    <HyperlinkButton Content="Remove…" Padding="0" FontSize="12" Click="OnRemoveComputer"
+                                                     AutomationProperties.Name="{x:Bind RemoveName}" />
                                 </StackPanel>
                                 <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="6">
                                     <Button Content="Screen" Visibility="{x:Bind ScreenVisibility}" Click="OnScreen"

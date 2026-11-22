@@ -24,8 +24,9 @@ the **Before you rebuild** notes first. The Mac and phone apps update together.
   only, with a key that can't leave the PC, and names itself on the network as
   the PC's host name. The firewall rule lets in the local subnet and the
   private and Tailscale ranges only.
-* **Windows: the PC's screen, through Remote Desktop** (the PC side; the
-  iPhone's viewer comes next). Settings ▸ Remote access ▸ *Screen* sets it up
+* **Windows: the PC's screen, through Remote Desktop.** The Mac shows it in
+  a window once a phone shares the PC with it. On the iPhone and iPad it is
+  still behind a developer switch (docs/GUIDE.md, *A PC's screen*). Settings ▸ Remote access ▸ *Screen* sets it up
   behind one administrator prompt. If Remote Desktop was off, Passthrough turns
   it on blocked from the network (its own firewall rules, which a block makes
   win over any allow rule), with Network Level Authentication required. If you
