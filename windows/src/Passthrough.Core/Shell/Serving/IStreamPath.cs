@@ -7,4 +7,7 @@ namespace Passthrough.Core.Shell.Serving;
 public interface IStreamPath
 {
     string DescribePath();
+
+    /// <summary>The link's numbers now (round trip, loss, congestion), for a view's periodic log line; empty when unknown.</summary>
+    string DescribeLink() => "";
 }
