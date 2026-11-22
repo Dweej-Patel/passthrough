@@ -92,6 +92,7 @@ public sealed class IrohShellListener : IDisposable
                 return;
             }
             stream = incoming.AcceptStream();
+            stream.HomeRelay = () => _endpoint.HomeRelay;
         }
         catch (IrohException)
         {
