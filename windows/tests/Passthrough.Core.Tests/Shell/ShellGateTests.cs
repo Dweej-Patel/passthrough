@@ -241,7 +241,10 @@ public class ShellGateTests : IAsyncDisposable
         Assert.Equal(ShellEnvelope.MacState, (await phone.Next())?.T);
         Assert.Empty((await phone.Next())!.SessionList!);
         await phone.Send("{\"t\":\"ping\"}");
-        Assert.Equal(ShellEnvelope.Pong, (await phone.Next())?.T);
+        // Over the pipe the session list can be pushed again as the service's snapshot arrives: that is allowed.
+        var next = await phone.Next();
+        while (next?.T == ShellEnvelope.Sessions) next = await phone.Next();
+        Assert.Equal(ShellEnvelope.Pong, next?.T);
         Assert.Equal(["phone-a"], _gate.ConnectedPhones);
     }
 
