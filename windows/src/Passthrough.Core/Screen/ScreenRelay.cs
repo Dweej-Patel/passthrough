@@ -45,11 +45,33 @@ public static class Splice
     /// What a splice did since the last report: bytes each way, how long writes to <c>a</c> (the phone) were waited on,
     /// the longest single such wait, and the longest silence from <c>a</c>. For a view's periodic log line.
     /// </summary>
-    public readonly record struct Progress(long FromA, long ToA, TimeSpan BlockedToA, TimeSpan LongestWriteToA, TimeSpan LongestQuietFromA);
+    public readonly record struct Progress(long FromA, long ToA, TimeSpan BlockedToA, TimeSpan LongestWriteToA, TimeSpan LongestQuietFromA, TimeSpan Held = default);
+
+    /// <summary>Above this round trip over a relay, what goes to the viewer waits: the queue on the way is kept to about this much.</summary>
+    public static readonly TimeSpan PaceAbove = TimeSpan.FromMilliseconds(600);
+    /// <summary>The longest one write is held: a path that stays slow still gets the picture, late, and each write brings a new measurement.</summary>
+    public static readonly TimeSpan PaceLimit = TimeSpan.FromMilliseconds(1500);
+
+    /// <summary>
+    /// Waits while <paramref name="roundTrip"/> says the relay's queue is long (above <see cref="PaceAbove"/>), up to
+    /// <see cref="PaceLimit"/>; returns how long it waited. Only what goes to the viewer is held, never its input.
+    /// </summary>
+    public static async ValueTask<TimeSpan> PaceAsync(Func<TimeSpan?> roundTrip, TimeProvider time, CancellationToken cancel)
+    {
+        if (roundTrip() is not { } first || first <= PaceAbove) return TimeSpan.Zero;
+        var started = time.GetTimestamp();
+        while (time.GetElapsedTime(started) < PaceLimit)
+        {
+            await Task.Delay(TimeSpan.FromMilliseconds(50), time, cancel).ConfigureAwait(false);
+            if (roundTrip() is not { } now || now <= PaceAbove) break;
+        }
+        return time.GetElapsedTime(started);
+    }
 
     public static async Task<(long AToB, long BToA)> RunAsync(Stream a, Stream b, CancellationToken cancel = default,
-        Action<Progress>? report = null, TimeSpan? every = null)
+        Action<Progress>? report = null, TimeSpan? every = null, Func<TimeSpan?>? roundTripToA = null, TimeProvider? time = null)
     {
+        long heldTicks = 0;
         using var done = CancellationTokenSource.CreateLinkedTokenSource(cancel);
         long aToB = 0, bToA = 0;
         long blockedTicks = 0, longestWrite = 0, longestQuiet = 0, lastFromA = System.Diagnostics.Stopwatch.GetTimestamp();
@@ -67,7 +89,7 @@ public static class Splice
                     report!(new Progress(nowA - lastA, nowB - lastB,
                         System.Diagnostics.Stopwatch.GetElapsedTime(0, Interlocked.Exchange(ref blockedTicks, 0)),
                         System.Diagnostics.Stopwatch.GetElapsedTime(0, Interlocked.Exchange(ref longestWrite, 0)),
-                        System.Diagnostics.Stopwatch.GetElapsedTime(0, quiet)));
+                        System.Diagnostics.Stopwatch.GetElapsedTime(0, quiet), TimeSpan.FromTicks(Interlocked.Exchange(ref heldTicks, 0))));
                     (lastA, lastB) = (nowA, nowB);
                 }
             }
@@ -83,6 +105,8 @@ public static class Splice
                 {
                     var n = await from.ReadAsync(buffer.AsMemory(0, BufferSize), done.Token).ConfigureAwait(false);
                     if (n == 0) break;
+                    if (!forward && roundTripToA is not null)
+                        Interlocked.Add(ref heldTicks, (await PaceAsync(roundTripToA, time ?? TimeProvider.System, done.Token).ConfigureAwait(false)).Ticks);
                     var started = System.Diagnostics.Stopwatch.GetTimestamp();
                     if (forward)
                     {

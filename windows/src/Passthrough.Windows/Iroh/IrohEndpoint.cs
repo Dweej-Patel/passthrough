@@ -193,6 +193,21 @@ public sealed class IrohStream : Stream, Passthrough.Core.Shell.Serving.IStreamP
     /// <summary>This end's home relay, for <see cref="DescribePath"/> (set by the listener that accepted it).</summary>
     public Func<string?>? HomeRelay { get; set; }
 
+    public unsafe TimeSpan? RelayRoundTrip
+    {
+        get
+        {
+            try
+            {
+                uint rtt = 0;
+                var relayed = 0;
+                if (IrohNative.pt_iroh_stream_rtt(_handle, &rtt, &relayed) < 0 || relayed == 0 || rtt == uint.MaxValue) return null;
+                return TimeSpan.FromMilliseconds(rtt);
+            }
+            catch (EntryPointNotFoundException) { return null; }
+        }
+    }
+
     /// <summary>The selected path's QUIC numbers (round trip, window, loss), or empty with an older bridge.</summary>
     public unsafe string DescribeLink()
     {
