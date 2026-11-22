@@ -120,6 +120,11 @@ these steps as written and check each one before building.
 
 ### Added
 
+* **Windows: one command for each job.** `scripts/windows.ps1 doctor | deps | build | install | update | reinstall | off | remove`.
+  - `update` restarts the tray app by itself.
+  - `doctor` changes nothing.
+  - `-WhatIf` shows what a command would do.
+  - It refuses to build or install from a folder another account on the PC can change, unless `-Force`. It builds into `%LOCALAPPDATA%\PassthroughBuild` (windows/README.md).
 * **Windows: the tray and Settings, reorganised around what you use.**
   - The flyout's header follows Remote access, not the cable: off, reachable, needs a look (and why), or who is on the PC now.
   - Notices and anyone viewing the screen (with **Stop**) sit above two tabs, which the flyout remembers:
