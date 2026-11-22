@@ -144,8 +144,11 @@ struct PCScreenWindow: View {
         }
         .onChange(of: shell.reachableComputers) { _, computers in
             // The access was taken away while the window was open.
-            guard !computers.contains(where: { $0.id == hostID }) else { return }
-            model.end("This Mac no longer has access to \(model.name).")
+            guard let updated = computers.first(where: { $0.id == hostID }) else {
+                return model.end("This Mac no longer has access to \(model.name).")
+            }
+            // Handed over again (a new key, say): the next connect or retry uses it.
+            model.adopt(updated)
         }
     }
 
@@ -153,6 +156,11 @@ struct PCScreenWindow: View {
         // Access still waiting for the PC's owner is tried too: the PC says whether it has been allowed since.
         guard let computer, computer.mayAskForScreen else {
             model.end("This Mac has no access to that computer's screen. Share it again from your phone.")
+            return
+        }
+        // Before Touch ID and the password: without it nothing past them could connect.
+        guard shell.identityForReaching != nil else {
+            model.end(PCScreenModel.needsIdentity(computer.credential.macName), canRetry: true)
             return
         }
         guard unlocked else { return unlock(computer) }
@@ -374,6 +382,19 @@ final class PCScreenModel: ObservableObject, RemoteScreenSource {
         if let current = held { held = (current.login, false) }
     }
 
+    /// The access was handed over again while the window is open: a later connect or retry signs in with
+    /// it. What is live now carries on with the connection it has. The saved login is bound to the PC's
+    /// certificate and iroh id, which the store never lets a hand-over change; one that did isn't taken.
+    func adopt(_ updated: ReachableComputer) {
+        guard let current = computer, current != updated, current.credential.loginPin == updated.credential.loginPin else { return }
+        computer = updated
+    }
+
+    /// Why nothing can connect: this Mac proves itself to the PC with the identity Remote Shell makes.
+    static func needsIdentity(_ name: String) -> String {
+        "Turn on Remote Shell on this Mac first: it proves to \(name) which Mac this is."
+    }
+
     /// Waiting for Touch ID or the password before anything else.
     func locked(_ name: String) {
         stop()
@@ -405,7 +426,7 @@ final class PCScreenModel: ObservableObject, RemoteScreenSource {
         rdpAsked = false
         phase = .connecting
         guard let identity else {
-            return fail("Turn on Remote Shell on this Mac first: it proves to \(name) which Mac this is.")
+            return fail(Self.needsIdentity(name))
         }
         let credential = computer.credential
         let dialer = credential.irohID.map(IrohInfo.isValidID) == true ? IrohShellDialer() : nil
@@ -532,7 +553,8 @@ final class PCScreenModel: ObservableObject, RemoteScreenSource {
             startEngine(stream: stream, initialBytes: initialBytes, certSHA256: certSHA256, generation: gen)
         case .rdpRefused(.screenNotAllowed, _, _):
             // A computer's screen waits for the PC's owner, who allows it on the notice the hand-over left there.
-            fail("Screen is off for this Mac. On \(name), click Passthrough's icon and choose Allow screen on the notice about this Mac.")
+            fail("Screen is off for this Mac. On \(name), click Passthrough's icon and choose Allow screen on the notice about this Mac, "
+                 + "or Allow screen for this Mac in Passthrough's Settings on \(name) (Computers with access).")
         case let .rdpRefused(error, detail, retryAfter):
             let refusal = WindowsScreenCopy.refusal(error, detail: detail, retryAfter: retryAfter, words)
             fail(refusal?.sentence ?? HostCopy.error(error, words) ?? "\(name) refused the connection.")

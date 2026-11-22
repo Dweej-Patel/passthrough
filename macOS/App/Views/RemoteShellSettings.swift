@@ -23,7 +23,6 @@ struct RemoteShellSettings: View {
                 setup
                 PhonesSection()
                 ComputersWithAccessSection()
-                if !shell.screenGuests.isEmpty { ScreenGuestsSection() }
                 OpenSessionsSection()
                 MacTerminalsSection()
                 PhoneNotificationsSection()
@@ -346,48 +345,38 @@ private struct NotificationsContent: View {
     }
 }
 
-/// Other Macs a phone let see this screen (screen-only passes): each can
-/// only view and control the screen, and goes when removed here or when the
-/// phone that let it in loses access.
-private struct ScreenGuestsSection: View {
+/// Another Mac a phone let see this screen (a screen-only pass), listed among the computers with
+/// access: it can only view and control the screen, and goes when removed here or when the phone
+/// that let it in loses access.
+private struct ScreenGuestRow: View {
     @EnvironmentObject private var shell: RemoteShellController
-    @State private var removing: ShellPhone?
+    let guest: ShellPhone
+    let remove: () -> Void
 
     var body: some View {
-        Section {
-            ForEach(shell.screenGuests, id: \.phoneID) { guest in
-                HStack(spacing: 12) {
-                    Image(systemName: "desktopcomputer")
-                        .font(.system(size: 17))
-                        .foregroundStyle(.secondary)
-                        .frame(width: 22)
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text(guest.label)
-                        Text(detail(for: guest)).font(.caption).foregroundStyle(.secondary)
-                    }
-                    Spacer()
-                    Button("Remove…") { removing = guest }
-                }
-                .padding(.vertical, 1)
+        HStack(spacing: 12) {
+            Image(systemName: "display")
+                .font(.system(size: 17))
+                .foregroundStyle(.secondary)
+                .frame(width: 22)
+                .accessibilityHidden(true)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(guest.label)
+                Text(detail).font(.caption).foregroundStyle(.secondary)
+                Text("May see and control the screen only").font(.caption).foregroundStyle(.secondary)
             }
-        } header: {
-            Text("Macs that can see this screen")
-        } footer: {
-            Text("Let in from a phone. They can see and control this screen, so they can type into any app open on it, but can't open Passthrough's shells, switches or history.")
-                .font(.caption).foregroundStyle(.secondary)
+            Spacer()
+            Button("Remove…", action: remove)
+                .accessibilityLabel("Remove \(guest.label)'s screen pass")
         }
-        .confirmationDialog("Stop \(removing?.label ?? "this Mac") from seeing this screen?",
-                            isPresented: Binding(get: { removing != nil }, set: { if !$0 { removing = nil } }),
-                            presenting: removing) { guest in
-            Button("Remove", role: .destructive) { shell.revoke(guest.phoneID) }
-        } message: { _ in
-            Text("Any view it has open closes and its pass stops working. A phone can let it in again.")
-        }
+        .padding(.vertical, 1)
     }
 
-    private func detail(for guest: ShellPhone) -> String {
-        var parts = ["Added \(guest.grantedAt.formatted(date: .abbreviated, time: .omitted))"]
+    /// "Mac · screen pass · through Dweej's iPhone · Nov 20, 2026 · viewing the screen".
+    private var detail: String {
+        var parts = ["Mac · screen pass"]
         if let by = shell.granterLabel(of: guest) { parts.append("through \(by)") }
+        parts.append(guest.grantedAt.formatted(date: .abbreviated, time: .omitted))
         if shell.screenViewers.contains(where: { $0.phoneID == guest.phoneID }) { parts.append("viewing the screen") }
         return parts.joined(separator: " · ")
     }
@@ -561,31 +550,74 @@ private struct ScreenPassRow: View {
 
 /// Computers a phone gave access to this Mac (`Computers`): what each is and
 /// may do, which phone shared it, and Stop (end what it has open now) or
-/// Revoke (take its access away).
+/// Revoke (take its access away). Other Macs a phone gave a screen pass are
+/// here too, marked so, with Remove.
 private struct ComputersWithAccessSection: View {
     @EnvironmentObject private var shell: RemoteShellController
-    @State private var revoking: ShellPhone?
+    @State private var removing: Removal?
+
+    /// One question for either kind of row.
+    enum Removal: Identifiable {
+        case computer(ShellPhone)
+        case pass(ShellPhone)
+
+        var entry: ShellPhone {
+            switch self {
+            case .computer(let entry), .pass(let entry): entry
+            }
+        }
+
+        var id: String { entry.phoneID }
+    }
 
     var body: some View {
         Section {
-            if shell.computerGuests.isEmpty {
+            if shell.computerGuests.isEmpty && shell.screenGuests.isEmpty {
                 Text("No computers yet.").foregroundStyle(.secondary)
             }
             ForEach(shell.computerGuests, id: \.phoneID) { computer in
-                ComputerGuestRow(computer: computer, revoke: { revoking = computer })
+                ComputerGuestRow(computer: computer, revoke: { removing = .computer(computer) })
+            }
+            ForEach(shell.screenGuests, id: \.phoneID) { guest in
+                ScreenGuestRow(guest: guest, remove: { removing = .pass(guest) })
             }
         } header: {
             Text("Computers with access")
         } footer: {
-            Text("A phone you let share access with other computers gave these access. Stop ends a computer's shells and its view of the screen now; it can connect again. Revoke takes its access away.")
+            Text(footer)
         }
-        .confirmationDialog("Revoke \(revoking?.label ?? "this computer")'s access?",
-                            isPresented: Binding(get: { revoking != nil }, set: { if !$0 { revoking = nil } }),
-                            presenting: revoking) { computer in
-            Button("Revoke Access", role: .destructive) { shell.revokeComputer(computer.phoneID) }
-        } message: { _ in
-            Text("Its shells and any view of the screen close, and its key stops working. A phone you let share access can give it access again.")
+        .confirmationDialog(title, isPresented: Binding(get: { removing != nil }, set: { if !$0 { removing = nil } }),
+                            presenting: removing) { removal in
+            switch removal {
+            case .computer(let computer):
+                Button("Revoke Access", role: .destructive) { shell.revokeComputer(computer.phoneID) }
+            case .pass(let guest):
+                Button("Remove", role: .destructive) { shell.revoke(guest.phoneID) }
+            }
+        } message: { removal in
+            switch removal {
+            case .computer:
+                Text("Its shells and any view of the screen close, and its key stops working. A phone you let share access can give it access again.")
+            case .pass:
+                Text("Any view it has open closes and its pass stops working. A phone can let it in again.")
+            }
         }
+    }
+
+    private var title: String {
+        switch removing {
+        case .computer(let computer)?: "Revoke \(computer.label)'s access?"
+        case .pass(let guest)?: "Stop \(guest.label) from seeing this screen?"
+        case nil: ""
+        }
+    }
+
+    private var footer: String {
+        var text = "A phone you let share access with other computers gave these access. Stop ends a computer's shells and its view of the screen now; it can connect again. Revoke takes its access away."
+        if !shell.screenGuests.isEmpty {
+            text += " A Mac with a screen pass was let in from a phone: it can see and control this screen, so it can type into any app open on it, but can't open Passthrough's shells, switches or history."
+        }
+        return text
     }
 }
 
@@ -659,8 +691,12 @@ private struct ComputerGuestRow: View {
         case .unknown?: parts.append("connecting")
         case nil: break
         }
+        // By the id it opened with; by name only for a session from before ids were kept, as a phone
+        // and a computer, or two computers, may share a name.
         let shells = shell.terminals.filter { terminal in
-            shell.opener(of: terminal).map { $0.name == computer.label && $0.isComputer != false } ?? false
+            guard terminal.origin == .phone else { return false }
+            if let id = terminal.openedBy { return id == computer.phoneID }
+            return shell.opener(of: terminal).map { $0.name == computer.label && $0.isComputer != false } ?? false
         }.count
         if shells > 0 { parts.append(shells == 1 ? "1 shell open" : "\(shells) shells open") }
         return parts
@@ -675,6 +711,7 @@ private extension String {
 private struct PhonesSection: View {
     @EnvironmentObject private var shell: RemoteShellController
     @State private var revoking: ShellPhone?
+    @State private var stopping: ShellPhone?
 
     var body: some View {
         Section {
@@ -693,6 +730,9 @@ private struct PhonesSection: View {
                             Text(detail(for: phone)).font(.caption).foregroundStyle(.secondary)
                         }
                         Spacer()
+                        Button("Stop…") { stopping = phone }
+                            .help("End \(phone.label)'s connections, its view of the screen and the shells it opened, now. It keeps its access and can connect again.")
+                            .accessibilityLabel("Stop \(phone.label)'s connections")
                         Button("Revoke…") { revoking = phone }
                     }
                     // What else this phone may do, under its name so long details don't squeeze it.
@@ -718,6 +758,14 @@ private struct PhonesSection: View {
             if !shell.phones.isEmpty {
                 Text("May share access with other computers lets that phone give another of your computers access to this Mac, from anywhere. Turning it off stops new sharing; computers it already let in stay until you remove them.")
             }
+        }
+        // A phone's own shells may be what you're working in, so this asks first.
+        .confirmationDialog("End what \(stopping?.label ?? "this phone") has open?",
+                            isPresented: Binding(get: { stopping != nil }, set: { if !$0 { stopping = nil } }),
+                            presenting: stopping) { phone in
+            Button("End Shells and Connections", role: .destructive) { shell.disconnectPhone(phone.phoneID) }
+        } message: { _ in
+            Text("The shells it opened close, as when you close a Terminal window, and its view of the screen ends. Their recordings are kept. It keeps its access and can connect again.")
         }
         .confirmationDialog("Revoke \(revoking?.label ?? "this phone")'s access?",
                             isPresented: Binding(get: { revoking != nil }, set: { if !$0 { revoking = nil } }),

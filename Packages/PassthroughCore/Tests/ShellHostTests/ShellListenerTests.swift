@@ -1806,6 +1806,51 @@ extension ShellListenerTests {
         wait(for: [probe.expect(self, "connected") { _ in self.computerLists(probe).last?.first?.connected == true }], timeout: 5)
     }
 
+    /// A computer on the other listener is connected too: both share one presence, and both push the lists.
+    func testAComputerOnEitherListenerShowsAsConnected() {
+        let me = KeyIdentity()
+        let shared = ComputerPresence()
+        let phoneSide = computerListener(recorded: me, scopes: [Computers.scopeShell])
+        let computerSide = computerListener(recorded: me, scopes: [Computers.scopeShell])
+        phoneSide.computerPresence = shared
+        computerSide.computerPresence = shared
+        let id = computerID
+        phoneSide.computerList = { phoneID in
+            phoneID == "phone-1" ? [ComputerAccess(phoneID: id, viewer: "mac-2", name: "Office Mac", scopes: ["shell"], connected: false,
+                                                   grantedAt: 1_763_790_000)] : []
+        }
+        let (phone, probe) = readyClient(phoneSide)
+        phone.listComputers()
+        wait(for: [probe.expect(self, "list") { _ in self.computerLists(probe).first?.first?.connected == false }], timeout: 5)
+        let (computer, computerProbe) = computerClient(computerSide, identity: me)
+        wait(for: [computerProbe.expect(self, "ready") { _ in computerProbe.isReady }], timeout: 5)
+        wait(for: [probe.expect(self, "connected") { _ in self.computerLists(probe).last?.first?.connected == true }], timeout: 5)
+        XCTAssertTrue(shared.isConnected(id))
+        // It leaves: the phone hears that too.
+        computer.disconnect()
+        wait(for: [probe.expect(self, "gone") { _ in self.computerLists(probe).last?.first?.connected == false }], timeout: 5)
+        XCTAssertFalse(shared.isConnected(id))
+    }
+
+    /// A computer that proves itself is reported, so the grant it replaced can go; a phone isn't.
+    func testAComputerConnectingIsReportedAsUsed() {
+        let me = KeyIdentity()
+        let listener = computerListener(recorded: me, scopes: [Computers.scopeShell])
+        let used = Locked<[String]>([])
+        listener.onComputerUsed = { id in used.set(used.get() + [id]) }
+        _ = readyClient(listener)
+        let (_, probe) = computerClient(listener, identity: me)
+        wait(for: [probe.expect(self, "ready") { _ in probe.isReady }], timeout: 5)
+        let reported = expectation(description: "reported")
+        let id = computerID
+        func check() {
+            if used.get() == [id] { return reported.fulfill() }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.05, execute: check)
+        }
+        check()
+        wait(for: [reported], timeout: 5)
+    }
+
     func testAComputerMayNotListComputers() {
         let me = KeyIdentity()
         let listener = computerListener(recorded: me, scopes: [Computers.scopeShell, Computers.scopeScreen])

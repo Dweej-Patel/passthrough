@@ -352,6 +352,8 @@ final class SessionCoordinator: ObservableObject {
         NotificationCenter.default.publisher(for: .passthroughWillTerminate)
             .sink { [weak self] _ in self?.shutdownForQuit() }
             .store(in: &cancellables)
+        // Quitting asks first while phones' or computers' shells run, or someone views the screen.
+        AppDelegate.quitWarning = { [weak self] in self?.shell.quitWarning }
         Task {
             await ensureHelperCurrent()
             keepAwake.resume()

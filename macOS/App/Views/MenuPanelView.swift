@@ -47,7 +47,8 @@ struct MenuPanelView: View {
             AskingRows()
             // Someone seeing this screen is never behind a tab.
             ScreenViewerRows()
-            PanelTabPicker(tab: $tab, remoteCount: remoteCount)
+            PanelTabPicker(tab: $tab, remoteCount: remoteCount,
+                           remoteAttention: session.remoteShellEnabled && shell.listenerError != nil)
             ScrollView {
                 VStack(spacing: 12) {
                     switch tab {
@@ -471,10 +472,12 @@ struct MintSwitchStyle: ToggleStyle {
     }
 }
 
-/// Asks before letting the Mac sleep while phones' shells run: asleep, it pauses them.
+/// Asks before letting the Mac sleep while phones' shells run: asleep, it pauses them. Also asks
+/// before ending a session from the panel.
 struct SleepConfirm: View {
     let warning: String
     let action: String
+    var cancelTitle = "Keep it awake"
     let confirm: () -> Void
     let cancel: () -> Void
 
@@ -486,7 +489,7 @@ struct SleepConfirm: View {
                 .fixedSize(horizontal: false, vertical: true)
             HStack(spacing: 8) {
                 Button(action, action: confirm).buttonStyle(PTPillButtonStyle())
-                Button("Keep it awake", action: cancel)
+                Button(cancelTitle, action: cancel)
                     .controlSize(.small)
                     .buttonStyle(.plain)
                     .foregroundStyle(.secondary)
@@ -561,8 +564,8 @@ struct ScreenViewerRows: View {
         if !viewers.isEmpty {
             VStack(spacing: 4) {
                 ForEach(viewers) { viewer in
-                    PanelRow(symbol: "eye", symbolColor: PTColor.tintText, fill: PTColor.surfaceOn) {
-                        Text("\(viewer.label) is viewing this screen")
+                    PanelRow(symbol: Self.symbol(viewer.phoneID), symbolColor: PTColor.tintText, fill: PTColor.surfaceOn) {
+                        Text(Self.viewing(viewer))
                             .font(.system(size: 12.5, weight: .medium)).lineLimit(1).truncationMode(.middle)
                     } trailing: {
                         Button("Stop") { shell.endScreen(for: viewer.phoneID) }
@@ -575,6 +578,21 @@ struct ScreenViewerRows: View {
             }
         }
     }
+
+    /// By the id it connected with, which only this Mac mints for a computer or a pass: a name
+    /// alone could pass for a phone's.
+    private static func symbol(_ id: String) -> String {
+        if Computers.isComputerID(id) { return "desktopcomputer" }
+        if ScreenPass.isViewerID(id) { return "display" }
+        return "eye"
+    }
+
+    /// "Office PC (a computer) is viewing this screen".
+    private static func viewing(_ viewer: RemoteShellController.ScreenViewer) -> String {
+        if Computers.isComputerID(viewer.phoneID) { return "\(viewer.label) (a computer) is viewing this screen" }
+        if ScreenPass.isViewerID(viewer.phoneID) { return "\(viewer.label) (a Mac with a pass) is viewing this screen" }
+        return "\(viewer.label) is viewing this screen"
+    }
 }
 
 /// "This Mac" and "Remote". Drawn here rather than a native segmented control,
@@ -583,34 +601,41 @@ struct PanelTabPicker: View {
     @Binding var tab: PanelTab
     /// Phones and computers on this Mac now; shown on Remote when there are any.
     let remoteCount: Int
+    /// Remote shell is on but not running: an amber dot on Remote, whichever tab is showing.
+    var remoteAttention = false
 
     var body: some View {
         HStack(spacing: 2) {
             segment(.thisMac, title: "This Mac", spoken: "This Mac")
             segment(.remote, title: remoteCount > 0 ? "Remote · \(remoteCount)" : "Remote",
-                    spoken: remoteCount > 0 ? "Remote, \(remoteCount) on this Mac now" : "Remote")
+                    spoken: (remoteCount > 0 ? "Remote, \(remoteCount) on this Mac now" : "Remote")
+                        + (remoteAttention ? ", remote shell isn't running" : ""),
+                    dot: remoteAttention)
         }
         .padding(2)
         .background(Color.primary.opacity(0.07), in: RoundedRectangle(cornerRadius: 9, style: .continuous))
         .accessibilityElement(children: .contain)
     }
 
-    private func segment(_ value: PanelTab, title: String, spoken: String) -> some View {
+    private func segment(_ value: PanelTab, title: String, spoken: String, dot: Bool = false) -> some View {
         let selected = tab == value
         return Button { tab = value } label: {
-            Text(title)
-                .font(.system(size: 12, weight: .semibold))
-                .lineLimit(1)
-                .foregroundStyle(selected ? Color.primary : Color.secondary)
-                .frame(maxWidth: .infinity, minHeight: 24)
-                .background {
-                    if selected {
-                        RoundedRectangle(cornerRadius: 7, style: .continuous)
-                            .fill(PTColor.surface)
-                            .shadow(color: .black.opacity(0.12), radius: 1, y: 0.5)
-                    }
+            HStack(spacing: 5) {
+                Text(title)
+                    .font(.system(size: 12, weight: .semibold))
+                    .lineLimit(1)
+                if dot { Circle().fill(PTColor.attention).frame(width: 6, height: 6) }
+            }
+            .foregroundStyle(selected ? Color.primary : Color.secondary)
+            .frame(maxWidth: .infinity, minHeight: 24)
+            .background {
+                if selected {
+                    RoundedRectangle(cornerRadius: 7, style: .continuous)
+                        .fill(PTColor.surface)
+                        .shadow(color: .black.opacity(0.12), radius: 1, y: 0.5)
                 }
-                .contentShape(Rectangle())
+            }
+            .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
         .accessibilityLabel(spoken)
@@ -735,7 +760,7 @@ private struct ReachSection: View {
 
     private var title: String {
         guard session.remoteShellEnabled else { return "Remote shell is off" }
-        return shell.listenerError != nil ? "Remote shell isn't running" : "Remote access is on"
+        return shell.listenerError != nil ? "Remote shell isn't running" : "Remote shell is on"
     }
 
     private var detail: String {
@@ -822,23 +847,38 @@ private struct OnThisMacSection: View {
 }
 
 /// One running session: its title, who opened it (a phone or a computer, by
-/// name once its recording says), and Open here or Stop.
+/// name once its recording says), Open here or Stop Showing Here, and End
+/// (asked first, under the row).
 private struct SessionRow: View {
     @EnvironmentObject private var shell: RemoteShellController
     let terminal: ShellSessionDetail
+    @State private var ending = false
 
     var body: some View {
+        VStack(spacing: 4) {
+            row
+            if ending {
+                SleepConfirm(warning: "End \(terminal.info.title)? The shell and anything running in it close, as when you close a Terminal window. Its recording is kept.",
+                             action: "End Session", cancelTitle: "Keep it running") {
+                    ending = false
+                    shell.close(terminal.id)
+                } cancel: { ending = false }
+            }
+        }
+    }
+
+    private var row: some View {
         let opener = shell.opener(of: terminal)
-        PanelRow(symbol: symbol(opener)) {
+        return PanelRow(symbol: symbol(opener)) {
             RowText(title: terminal.info.title, detail: place(opener))
         } trailing: {
-            if terminal.macViewers == 0 {
-                Button("Open here") { shell.openInTerminal(terminal.id) }
-                    .controlSize(.small)
-                    .help("Show this session in a terminal window on this Mac. Whoever is attached to it keeps it too.")
-                    .accessibilityLabel("Open \(terminal.info.title) in a terminal here")
-            } else {
-                HStack(spacing: 6) {
+            HStack(spacing: 6) {
+                if terminal.macViewers == 0 {
+                    Button("Open here") { shell.openInTerminal(terminal.id) }
+                        .controlSize(.small)
+                        .help("Show this session in a terminal window on this Mac. Whoever is attached to it keeps it too.")
+                        .accessibilityLabel("Open \(terminal.info.title) in a terminal here")
+                } else {
                     if terminal.phoneAttached {
                         Image(systemName: "dot.radiowaves.left.and.right").font(.caption.weight(.semibold)).foregroundStyle(PTColor.tintText)
                             .help("\(someone.capitalizedFirst) is looking at this terminal")
@@ -846,15 +886,31 @@ private struct SessionRow: View {
                     }
                     // A phone's or computer's session shown here: take it off this Mac's windows at any time.
                     if terminal.origin == .phone {
-                        Button("Stop") { shell.stopShowingHere(terminal.id) }
+                        Button("Stop Showing Here") { shell.stopShowingHere(terminal.id) }
                             .controlSize(.small)
                             .help("Stop showing this session in terminal windows here. It keeps running for whoever opened it.")
                             .accessibilityLabel("Stop showing \(terminal.info.title) here")
                     }
                 }
+                endMenu
             }
         }
         .accessibilityElement(children: .contain)
+    }
+
+    /// Ending the session is apart from the buttons beside it: those only change where it shows.
+    private var endMenu: some View {
+        Menu {
+            Button("End Session…") { ending = true }
+        } label: {
+            Image(systemName: "ellipsis.circle").font(.system(size: 12, weight: .semibold))
+        }
+        .menuStyle(.borderlessButton)
+        .menuIndicator(.hidden)
+        .fixedSize()
+        .foregroundStyle(.secondary)
+        .help("End this session")
+        .accessibilityLabel("More for \(terminal.info.title)")
     }
 
     /// Whoever an attachment may be: a computer may attach too, once one has access.
@@ -924,11 +980,16 @@ private struct YourComputersSection: View {
 
     var body: some View {
         let items = self.items
-        if !items.isEmpty {
-            VStack(alignment: .leading, spacing: 4) {
-                PanelSectionTitle("Your computers")
-                ForEach(items) { ComputerRow(item: $0) }
+        VStack(alignment: .leading, spacing: 4) {
+            PanelSectionTitle("Your computers")
+            if items.isEmpty {
+                // Where the list comes from, so the heading doesn't vanish without a word.
+                Text("None yet. Share one from your phone: Share with another computer…")
+                    .font(.system(size: 10.5)).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(.horizontal, 4)
             }
+            ForEach(items) { ComputerRow(item: $0) }
         }
     }
 }

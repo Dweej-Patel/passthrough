@@ -49,6 +49,24 @@ final class RemoteShellController: ObservableObject {
     /// terminal window's of this Mac's that a phone is attached to.
     var phoneShells: [ShellSessionDetail] { terminals.filter { $0.origin == .phone || $0.phoneAttached } }
 
+    /// What quitting would end for phones and computers, for the question before it: their running
+    /// shells (quitting ends every session) and their views of the screen. Nil when there is nothing.
+    var quitWarning: String? {
+        var parts: [String] = []
+        let shells = phoneShells
+        if !shells.isEmpty {
+            let computers = shells.contains { $0.openedBy.map(Computers.isComputerID) ?? false }
+            let from = computers ? "your phones and computers" : "your phones"
+            parts.append(shells.count == 1 ? "1 shell from \(from) ends." : "\(shells.count) shells from \(from) end.")
+        }
+        switch screenViewers.count {
+        case 0: break
+        case 1: parts.append("\(screenViewers[0].label) stops viewing this screen.")
+        case let viewers: parts.append("\(viewers) viewers of this screen are disconnected.")
+        }
+        return parts.isEmpty ? nil : parts.joined(separator: " ")
+    }
+
     /// Phones' sessions waiting on a question. A terminal window on this Mac
     /// asking is in front of whoever is at the Mac already, so not one of
     /// them, unless a phone is attached to it.
@@ -187,6 +205,8 @@ final class RemoteShellController: ObservableObject {
     private let contestedNotice = TerminalContestedNotice()
     /// Shared by both listeners, so the caps on views of the screen hold across them.
     private let screenViews = ScreenViewLimit()
+    /// Shared by both listeners, so a phone's list says a computer is connected whichever path it came in on.
+    private let computerPresence = ComputerPresence()
     /// Phones' addresses that proved a shell key lately, kept across launches
     /// for the LAN/Tailscale listener's reserved handshake slots.
     private let provenPeers = FileProvenAddressStore.inApplicationSupport(named: "ProvenShellPeers")
@@ -305,6 +325,8 @@ final class RemoteShellController: ObservableObject {
         listener.computerKey = { store.computerKey($0) }
         listener.computerScopes = { store.scopes(of: $0) }
         listener.computerList = { store.computers(grantedBy: $0) }
+        listener.computerPresence = computerPresence
+        listener.onComputerUsed = computerUsedHandler()
         listener.onComputerGrant = computerGrantHandler()
         listener.onComputerPass = computerPassHandler()
         listener.onComputerRevoke = computerRevokeHandler()
@@ -396,6 +418,7 @@ final class RemoteShellController: ObservableObject {
         let onScreenGrant = screenGrantHandler(), onScreenPass = screenPassHandler(), onScreenRevoke = screenRevokeHandler()
         let onScreenPassUsed = screenPassUsedHandler()
         let onComputerGrant = computerGrantHandler(), onComputerPass = computerPassHandler(), onComputerRevoke = computerRevokeHandler()
+        let onComputerUsed = computerUsedHandler(), computerPresence = self.computerPresence
         let computerIdentity = self.computerIdentity
         lifecycle.async { [weak self] in
             let host: IrohEndpointHost
@@ -447,6 +470,8 @@ final class RemoteShellController: ObservableObject {
             listener.computerKey = { store.computerKey($0) }
             listener.computerScopes = { store.scopes(of: $0) }
             listener.computerList = { store.computers(grantedBy: $0) }
+            listener.computerPresence = computerPresence
+            listener.onComputerUsed = onComputerUsed
             listener.onComputerGrant = onComputerGrant
             listener.onComputerPass = onComputerPass
             listener.onComputerRevoke = onComputerRevoke
@@ -859,7 +884,9 @@ final class RemoteShellController: ObservableObject {
         let all = store.phones.sorted { $0.grantedAt > $1.grantedAt }
         phones = all.filter { !$0.isScreenOnly && !$0.isComputer }
         screenGuests = all.filter(\.isScreenOnly)
-        computerGuests = all.filter(\.isComputer)
+        // One row a computer: an earlier grant waiting to be retired is the newer one's.
+        let waiting = store.waitingComputerIDs
+        computerGuests = all.filter { $0.isComputer && !waiting.contains($0.phoneID) }
         // Phones that asked for their computers hear the change.
         listener?.pushComputerLists()
         iroh?.listener?.pushComputerLists()
@@ -889,7 +916,7 @@ final class RemoteShellController: ObservableObject {
                     }
                     self.refreshPhones()
                     // Said out loud here too: whoever is at this Mac learns another can now see and control it.
-                    self.passNotice.show(.quiet(title: "\(label) gave \(name) a pass to this screen",
+                    self.passNotice.show(.quiet(title: "\(label) gave \(ScreenPass.cleanName(name)) a pass to this screen",
                                                 detail: "It can see and control this Mac. Remove it in Passthrough's Remote Shell settings.",
                                                 symbol: "display"))
                 }
@@ -1032,6 +1059,15 @@ final class RemoteShellController: ObservableObject {
     func disconnectComputer(_ id: String) {
         guard Computers.isComputerID(id) else { return }
         ptLog(.info, "shell: ended \(computerGuests.first { $0.phoneID == id }?.label ?? "a computer")'s connections")
+        // Also an earlier grant of its still waiting to be retired: it may be connected with that one.
+        disconnectAll(Set(store.sameComputer(as: id) + [id]))
+    }
+
+    /// Stop, for a phone: as `disconnectComputer`, its connections, its view of the screen and the
+    /// shells it opened end now; its access stays (and the phone may connect again by itself).
+    func disconnectPhone(_ id: String) {
+        guard let phone = phones.first(where: { $0.phoneID == id }) else { return }
+        ptLog(.info, "shell: ended \(phone.label)'s connections")
         disconnectAll([id])
     }
 
@@ -1081,15 +1117,19 @@ final class RemoteShellController: ObservableObject {
             case let .success(granted):
                 ptLog(.info, "shell: \(label) gave \(request.name) access")
                 let shell = granted.scopes.contains(Computers.scopeShell)
+                // As the store keeps it, and said to be a computer: a name alone could pass for a phone's.
+                let name = ScreenPass.cleanName(request.name)
                 Task { @MainActor [weak self] in
                     guard let self else { return }
+                    // Only grants the store dropped now: the one before this stays until this one is used.
                     self.disconnectAll(Set(granted.replaced))
                     self.refreshPhones()
                     // Stays until dismissed: whoever is at this Mac learns another computer can now get in.
                     let id = granted.id
                     let remove = "Revoke it in Passthrough's settings ▸ Remote Shell ▸ Computers with access."
                     self.passNotice.show(.lowered(
-                        title: shell ? "\(label) gave \(request.name) access to this Mac" : "\(label) gave \(request.name) access to this Mac's screen",
+                        title: shell ? "\(label) gave \(name) (a computer) access to this Mac"
+                                     : "\(label) gave \(name) (a computer) access to this Mac's screen",
                         detail: shell ? "It can open shells as you\(granted.scopes.contains(Computers.scopeScreen) ? " and see the screen" : ""). \(remove)"
                                       : "It can see and control this Mac. \(remove)",
                         action: "Revoke") { [weak self] in self?.revokeComputer(id) })
@@ -1098,6 +1138,22 @@ final class RemoteShellController: ObservableObject {
             case let .failure(error):
                 ptLog(.warning, "shell: refused \(label)'s access for \(request.name): \(error.rawValue)")
                 return .failure(error)
+            }
+        }
+    }
+
+    /// A computer connected with a grant, so it has it: the earlier grant the same phone made for it
+    /// goes now, with its connections and shells (it was kept in case the hand-over failed). Runs off
+    /// the listener's queue.
+    private func computerUsedHandler() -> @Sendable (String) -> Void {
+        let store = self.store
+        return { [weak self] computerID in
+            let gone = store.retireComputers(supersededBy: computerID)
+            guard !gone.isEmpty else { return }
+            ptLog(.info, "shell: a computer used its new access; its earlier access is gone")
+            Task { @MainActor [weak self] in
+                self?.disconnectAll(Set(gone.map(\.phoneID)))
+                self?.refreshPhones()
             }
         }
     }

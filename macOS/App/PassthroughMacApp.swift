@@ -103,8 +103,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private var quitObserver: NSObjectProtocol?
+    /// What quitting would end for phones and computers (`RemoteShellController.quitWarning`); set by the coordinator.
+    static var quitWarning: (() -> String?)?
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        // Asked only for a quit from Passthrough itself (⌘Q, the panel's power button). One that comes
+        // as an Apple event (logging out, shutting down, the install script) goes ahead: nobody may be
+        // there to answer, and the script checks for shells itself.
+        if !SessionCoordinator.isSnapshotRun, NSAppleEventManager.shared().currentAppleEvent == nil,
+           let warning = Self.quitWarning?(), !Self.confirmQuit(warning) {
+            return .terminateCancel
+        }
         // Let the coordinator tear the tunnel down and turn the VPN off (else
         // the helper keeps its kill switch blocking, as after a crash): quit
         // once it says it is done, or after 4 s regardless.
@@ -123,6 +132,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 }
 
 extension AppDelegate {
+    /// "Quit Passthrough? 2 shells from your phones end." True to quit.
+    static func confirmQuit(_ warning: String) -> Bool {
+        let alert = NSAlert()
+        alert.messageText = "Quit Passthrough?"
+        alert.informativeText = warning
+        alert.addButton(withTitle: "Quit")
+        alert.addButton(withTitle: "Cancel")
+        // A menu bar app isn't in front: the question would open behind whatever is.
+        NSApp.activate()
+        return alert.runModal() == .alertFirstButtonReturn
+    }
+
     /// Every proxied flow costs two descriptors (loopback + usbmuxd); the GUI
     /// default of 256 is exhausted by a single busy browser tab.
     static func raiseFileDescriptorLimit() {

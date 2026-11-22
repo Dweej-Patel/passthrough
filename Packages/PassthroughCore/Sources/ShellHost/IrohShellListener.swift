@@ -146,6 +146,18 @@ public final class IrohShellListener: @unchecked Sendable {
     /// As `ShellListener.pushComputerLists`.
     public func pushComputerLists() { gate.pushComputerLists() }
 
+    /// As `ShellListener.computerPresence`: give both listeners the same one.
+    public var computerPresence: ComputerPresence {
+        get { gate.computerPresence }
+        set { gate.useComputerPresence(newValue) }
+    }
+
+    /// As `ShellListener.onComputerUsed`.
+    public var onComputerUsed: (@Sendable (_ computerID: String) -> Void)? {
+        get { gate.computerUsed.get() }
+        set { gate.computerUsed.set(newValue) }
+    }
+
     /// As `ShellListener.onComputerGrant`.
     public var onComputerGrant: (@Sendable (_ phoneID: String, _ label: String, _ request: ComputerGrantRequest) -> Result<(id: String, key: Data, scopes: [String]), ShellError>)? {
         get { gate.computerGrant.get() }
