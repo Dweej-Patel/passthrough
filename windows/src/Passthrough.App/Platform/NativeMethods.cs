@@ -45,6 +45,10 @@ internal static class NativeMethods
 
     [DllImport("user32.dll")]
     [return: MarshalAs(UnmanagedType.Bool)]
+    public static extern bool DestroyIcon(IntPtr icon);
+
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool IsHungAppWindow(IntPtr hwnd);
 
     [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]

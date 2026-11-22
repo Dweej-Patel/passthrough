@@ -48,6 +48,7 @@ public sealed class RemoteAccess : IAccessAdmin, IDisposable
     private readonly PipeAccessAdmin _admin;
     private ServiceLink? _link;
     private IReadOnlyList<PipeDevice> _phones = [];
+    private IReadOnlyList<PipeComputer> _computers = [];
     private GrantContents? _grant;
     private string? _problem;
     private bool _busy;
@@ -198,6 +199,22 @@ public sealed class RemoteAccess : IAccessAdmin, IDisposable
     public string? HomeRelay => _grant?.IrohRelay;
 
     public IReadOnlyList<PipeDevice> Phones { get { lock (_lock) return _phones; } }
+
+    /// <summary>Computers a phone gave access to this PC (Settings, Remote access, Computers with access).</summary>
+    public IReadOnlyList<PipeComputer> Computers { get { lock (_lock) return _computers; } }
+
+    /// <summary>A computer's screen: on lets it see the screen; off makes it wait for Allow screen again.</summary>
+    public async Task SetComputerScreenAsync(string id, bool on)
+    {
+        await _admin.AllowComputerScreenAsync(id, on).ConfigureAwait(false);
+        await RefreshPhonesAsync().ConfigureAwait(false);
+    }
+
+    public async Task RevokeComputerAsync(string id)
+    {
+        await _admin.RevokeComputerAsync(id).ConfigureAwait(false);
+        await RefreshPhonesAsync().ConfigureAwait(false);
+    }
 
     public IReadOnlyList<string> ConnectedPhones => [.. Phones.Where(p => p.Connections > 0).Select(p => p.Phone)];
 
@@ -357,8 +374,8 @@ public sealed class RemoteAccess : IAccessAdmin, IDisposable
 
     private async Task RefreshPhonesAsync()
     {
-        var phones = await _admin.ListAsync().ConfigureAwait(false);
-        lock (_lock) _phones = phones;
+        var (phones, computers) = await _admin.ListAllAsync().ConfigureAwait(false);
+        lock (_lock) { _phones = phones; _computers = computers; }
         PhonesChanged?.Invoke();
         StatusChanged?.Invoke();
     }

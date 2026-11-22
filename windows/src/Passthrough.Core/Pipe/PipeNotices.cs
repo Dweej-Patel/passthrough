@@ -102,6 +102,21 @@ public sealed class NoticeBoard(TimeProvider? time = null)
         if (changed) Changed?.Invoke(null);
     }
 
+    /// <summary>
+    /// Every notice about <paramref name="subject"/> goes, in every account: a computer's grant was replaced or removed,
+    /// so its Allow screen and Revoke would act on nothing.
+    /// </summary>
+    public void Forget(string subject)
+    {
+        var changed = new List<string>();
+        lock (_lock)
+        {
+            foreach (var (account, list) in _byAccount)
+                if (list.RemoveAll(n => n.Notice.Subject == subject && n.Notice.Kind != PipeNotice.Exposed) > 0) changed.Add(account);
+        }
+        foreach (var account in changed) Changed?.Invoke(account);
+    }
+
     /// <summary>The account answered it (OK, Allow screen, Revoke): it goes.</summary>
     public bool Answer(string account, string id)
     {

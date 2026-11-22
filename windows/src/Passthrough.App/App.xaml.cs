@@ -26,6 +26,7 @@ public partial class App : Application
     private HostSession? _session;
     private RemoteAccess? _remote;
     private TrayIcon? _tray;
+    private TaskbarKeeper? _taskbar;
     private FlyoutWindow? _flyout;
     private SettingsWindow? _settings;
     private bool _shuttingDown;
@@ -124,10 +125,17 @@ public partial class App : Application
             var viewModel = new SessionViewModel(_session, settings, DispatcherQueue.GetForCurrentThread(),
                 settings.Get("androidEnabled") != "false", settings.Notice);
             // The icon first: if the flyout fails to build, the failure path below still has something to take down.
-            _tray = new TrayIcon(ToggleFlyout, ShowSettings, Quit);
+            _tray = new TrayIcon(ToggleFlyout, ShowSettings, Quit, () => _ui?.TryEnqueue(() => _flyout?.OpenFromNotification()));
+            // A phone's view resizing this session can leave the taskbar under other windows; it is put back on top.
+            _taskbar = new TaskbarKeeper(LogFile.Write);
             _flyout = new FlyoutWindow(viewModel, ShowSettings, Quit);
             var remote = _remote;
-            remote.NoticesChanged += () => viewModel.ShowNotices(remote.Notices);
+            remote.NoticesChanged += () =>
+            {
+                var notices = remote.Notices;
+                viewModel.ShowNotices(notices);
+                _ui?.TryEnqueue(() => ShowWaiting(notices));
+            };
             viewModel.AnswerNotice = remote.AnswerNoticeAsync;
             viewModel.OpenComputers = async () => await remote.Reach.UnlockAsync() ? remote.Reach.Computers : null;
             viewModel.NewShell = remote.OpenShellAsync;
@@ -174,6 +182,24 @@ public partial class App : Application
     }
 
     private void ToggleFlyout() => _flyout?.ToggleFromTray();
+
+    private readonly HashSet<string> _announced = [];
+
+    /// <summary>
+    /// The tray icon's dot for every notice waiting, and a Windows notification for each new one that asks for an
+    /// answer (Allow screen, Revoke, Remote Desktop open), once: the flyout alone was easy to miss.
+    /// </summary>
+    private void ShowWaiting(IReadOnlyList<Passthrough.Core.Pipe.PipeNotice> notices)
+    {
+        _tray?.ShowWaiting(notices.Count);
+        foreach (var notice in notices)
+        {
+            if (!_announced.Add(notice.Id)) continue;
+            if (notice.Kind is Passthrough.Core.Pipe.PipeNotice.Granted or Passthrough.Core.Pipe.PipeNotice.ComputerScreenPending
+                or Passthrough.Core.Pipe.PipeNotice.ComputerGranted or Passthrough.Core.Pipe.PipeNotice.Exposed)
+                _tray?.Notify(notice.Kind == Passthrough.Core.Pipe.PipeNotice.Exposed ? "Remote Desktop is open" : "Passthrough needs you", notice.Text);
+        }
+    }
 
     private void ShowSettings()
     {
@@ -272,6 +298,7 @@ public partial class App : Application
             _flyout?.Close();
         });
         Try(() => _tray?.Dispose());
+        Try(() => _taskbar?.Dispose());
         Try(() => _singleInstance?.ReleaseMutex());
         _singleInstance?.Dispose();
         _singleInstance = null;

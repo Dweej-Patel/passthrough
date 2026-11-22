@@ -171,6 +171,7 @@
                                     <ColumnDefinition Width="Auto" />
                                     <ColumnDefinition Width="Auto" />
                                     <ColumnDefinition Width="Auto" />
+                                    <ColumnDefinition Width="Auto" />
                                 </Grid.ColumnDefinitions>
                                 <Grid Width="32" Height="32">
                                     <Ellipse Fill="{ThemeResource ControlFillColorSecondaryBrush}" />
@@ -184,14 +185,58 @@
                                 <CheckBox Grid.Column="2" Content="Screen" MinWidth="0" IsChecked="{x:Bind Screen}" IsEnabled="{x:Bind ScreenSwitchEnabled}"
                                           Click="OnScreenClick" AutomationProperties.Name="Let it see the screen"
                                           ToolTipService.ToolTip="Let it see and control this PC's screen. Windows still asks for your password." />
-                                <Button Grid.Column="3" Content="Stop" Click="OnStopClick" IsEnabled="{x:Bind CanStop}"
+                                <CheckBox Grid.Column="3" Content="Share" MinWidth="0" IsChecked="{x:Bind Share}"
+                                          Click="OnShareClick" AutomationProperties.Name="May share access with other computers"
+                                          ToolTipService.ToolTip="Let it give your other computers access to this PC, from Share with another computer on the phone. A computer's screen still waits for you to allow it here." />
+                                <Button Grid.Column="4" Content="Stop" Click="OnStopClick" IsEnabled="{x:Bind CanStop}"
                                         ToolTipService.ToolTip="End its connection and the shells it opened. It keeps its access." />
-                                <Button Grid.Column="4" Content="Revoke" Click="OnRevokeClick" />
+                                <Button Grid.Column="5" Content="Revoke" Click="OnRevokeClick" />
                             </Grid>
                         </Border>
                     </DataTemplate>
                 </ItemsControl.ItemTemplate>
             </ItemsControl>
+            <StackPanel x:Name="ComputersSection" Spacing="8" Visibility="Collapsed">
+                <TextBlock Text="Computers with access" Style="{StaticResource BodyStrongTextBlockStyle}" Margin="0,16,0,0" />
+                <TextBlock Text="Your other computers a phone gave access to this PC. A computer's screen waits for you to allow it here."
+                           Style="{StaticResource CaptionTextBlockStyle}" TextWrapping="Wrap"
+                           Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                <ItemsControl ItemsSource="{x:Bind ComputersWithAccess}">
+                    <ItemsControl.ItemsPanel>
+                        <ItemsPanelTemplate>
+                            <StackPanel Spacing="8" />
+                        </ItemsPanelTemplate>
+                    </ItemsControl.ItemsPanel>
+                    <ItemsControl.ItemTemplate>
+                        <DataTemplate x:DataType="local:ComputerAccessRow">
+                            <Border Style="{StaticResource PtCardStyle}" Padding="16,12">
+                                <Grid ColumnSpacing="8">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="Auto" />
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="Auto" />
+                                        <ColumnDefinition Width="Auto" />
+                                    </Grid.ColumnDefinitions>
+                                    <Grid Width="32" Height="32">
+                                        <Ellipse Fill="{ThemeResource ControlFillColorSecondaryBrush}" />
+                                        <FontIcon Glyph="{x:Bind Glyph}" FontSize="15" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                                    </Grid>
+                                    <StackPanel Grid.Column="1" VerticalAlignment="Center" Margin="4,0,0,0">
+                                        <TextBlock Text="{x:Bind Title}" TextTrimming="CharacterEllipsis" />
+                                        <TextBlock Text="{x:Bind Detail}" Style="{StaticResource CaptionTextBlockStyle}" TextWrapping="Wrap"
+                                                   Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                                    </StackPanel>
+                                    <CheckBox Grid.Column="2" Content="Screen" MinWidth="0" IsChecked="{x:Bind Screen}" IsEnabled="{x:Bind ScreenSwitchEnabled}"
+                                              Click="OnComputerScreenClick" AutomationProperties.Name="Let it see the screen"
+                                              ToolTipService.ToolTip="{x:Bind ScreenTip}" />
+                                    <Button Grid.Column="3" Content="Revoke" Click="OnComputerRevokeClick"
+                                            ToolTipService.ToolTip="Its shells and any view of the screen close, and it loses access to this PC." />
+                                </Grid>
+                            </Border>
+                        </DataTemplate>
+                    </ItemsControl.ItemTemplate>
+                </ItemsControl>
+            </StackPanel>
             <TextBlock Text="Paired phones" Style="{StaticResource BodyStrongTextBlockStyle}" Margin="0,16,0,0" />
             <TextBlock Text="Every phone this PC holds a pairing for, attached or not. Forget one you no longer use."
                        Style="{StaticResource CaptionTextBlockStyle}" TextWrapping="Wrap"
