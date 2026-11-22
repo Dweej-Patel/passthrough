@@ -177,6 +177,8 @@ public final class ShellClient: @unchecked Sendable {
         case computerPassSaved
         /// The answer to `revokeComputer`: the computer's access is gone.
         case computerRevoked
+        /// `computerList`: the computers this device gave access to the host, cleaned (`ComputerAccess.cleaned`).
+        case computerList([ComputerAccess])
     }
 
     public enum ConnectError: Error, Sendable {
@@ -542,12 +544,18 @@ public final class ShellClient: @unchecked Sendable {
         command(m)
     }
 
-    /// Takes back access `grantComputer` got (`computerID`) that couldn't be handed over;
+    /// Takes back access `grantComputer` got (`computerID`), whether or not it was handed over;
     /// `.computerRevoked` answers, or `.failed`.
     public func revokeComputer(_ computerID: String) {
         var m = ShellEnvelope(t: ShellEnvelope.computerRevoke)
         m.phoneID = computerID
         command(m)
+    }
+
+    /// Asks for the computers this device gave access to the host: `.computerList` answers, and again
+    /// whenever the list changes while this connection lasts. An older host answers `.failed(.badRequest)`.
+    public func listComputers() {
+        command(ShellEnvelope(t: ShellEnvelope.listComputers))
     }
 
     public func requestTranscript(_ session: String) {
@@ -893,6 +901,8 @@ public final class ShellClient: @unchecked Sendable {
             emit(.computerPassSaved)
         case ShellEnvelope.computerRevoked:
             emit(.computerRevoked)
+        case ShellEnvelope.computerList:
+            emit(.computerList(ComputerAccess.cleaned(message.computers ?? [])))
         case ShellEnvelope.screenPassSaved:
             emit(.screenPassSaved)
         case ShellEnvelope.screenRevoked:

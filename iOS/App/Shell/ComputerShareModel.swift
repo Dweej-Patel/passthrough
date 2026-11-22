@@ -291,3 +291,98 @@ enum SharedComputers {
         all = stored
     }
 }
+
+extension SharedComputers {
+    /// The shared computer listed what this phone gave it (`computerList`): that is what holds, so this phone's
+    /// memory for it becomes exactly that.
+    static func sync(shared: String, with list: [ComputerAccess]) {
+        var stored = all
+        var entries: [String: Entry] = [:]
+        for computer in list {
+            guard let viewer = computer.viewer else { continue }
+            let shell = (computer.scopes + (computer.pending ?? [])).contains(Computers.scopeShell)
+            entries[viewer] = Entry(shell: shell, at: Date(timeIntervalSince1970: TimeInterval(computer.grantedAt)))
+        }
+        stored[shared] = entries.isEmpty ? nil : entries
+        all = stored
+    }
+}
+
+/// What the computer being shared says about the computers this phone gave access to it (`computerList`),
+/// asked on a connection of its own while the Share sheet is open, which also takes access back
+/// (`computerRevoke`). `list` stays nil until the computer answers: an older one never does, and the
+/// sheet then goes by this phone's own memory (`SharedComputers`).
+@MainActor
+final class HostComputersModel: ObservableObject {
+    @Published private(set) var list: [ComputerAccess]?
+    /// The computer whose access is being taken back, until the host answers.
+    @Published private(set) var removing: String?
+    @Published private(set) var error: String?
+
+    private var connection: (client: ShellClient, dialer: IrohShellDialer?)?
+    private var hostName = ""
+    private var generation = 0
+
+    /// Asks `host` for its list, and keeps hearing it change until `stop`.
+    func watch(_ host: ShellCredential, shell: ShellModel) {
+        stop()
+        generation += 1
+        let gen = generation
+        hostName = host.macName
+        connection = shell.oneOffConnection(to: host) { [weak self] event in
+            MainActor.assumeIsolated {
+                guard let self, gen == self.generation else {
+                    switch event {
+                    case let .screen(stream, _), let .rdp(stream, _, _): stream.cancel()
+                    default: break
+                    }
+                    return
+                }
+                switch event {
+                case .ready:
+                    self.connection?.client.listComputers()
+                case let .computerList(list):
+                    self.list = list
+                    SharedComputers.sync(shared: host.macID, with: list)
+                case .computerRevoked:
+                    // The list that follows shows it gone.
+                    self.removing = nil
+                case let .failed(error, _):
+                    // Without a removal under way, this is an older computer refusing `listComputers`: the sheet keeps its memory.
+                    guard self.removing != nil else { return }
+                    self.removing = nil
+                    self.error = error.message ?? "\(self.hostName) didn't remove it. Try again."
+                case .disconnected:
+                    if self.removing != nil {
+                        self.removing = nil
+                        self.error = "Couldn't reach \(self.hostName) to remove it. Try again when it's awake."
+                    }
+                    self.connection = nil
+                case let .screen(stream, _), let .rdp(stream, _, _):
+                    stream.cancel()
+                default:
+                    break
+                }
+            }
+        }
+    }
+
+    /// Takes back `computer`'s access to the host: it can't use it until it is shared again, and what it has open there ends.
+    func remove(_ computer: ComputerAccess) {
+        guard removing == nil, let client = connection?.client else {
+            error = "Couldn't reach \(hostName) to remove it. Try again when it's awake."
+            return
+        }
+        error = nil
+        removing = computer.phoneID
+        client.revokeComputer(computer.phoneID)
+    }
+
+    func stop() {
+        generation += 1
+        connection?.client.disconnect()
+        connection?.dialer?.shutdown()
+        connection = nil
+        removing = nil
+    }
+}

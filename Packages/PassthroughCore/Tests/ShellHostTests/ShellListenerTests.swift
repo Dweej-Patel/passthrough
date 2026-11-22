@@ -1779,5 +1779,53 @@ extension ShellListenerTests {
         wait(for: [probe.expect(self, "refused") { _ in probe.failures == [.badRequest] }], timeout: 5)
         XCTAssertEqual(asked.get().count, 1)
     }
+
+    private func computerLists(_ probe: Probe) -> [[ComputerAccess]] {
+        probe.events.get().compactMap { if case let .computerList(list) = $0 { return list } else { return nil } }
+    }
+
+    func testAPhoneListsItsComputersAndHearsOneConnect() {
+        let me = KeyIdentity()
+        let listener = computerListener(recorded: me, scopes: [Computers.scopeShell])
+        let id = computerID
+        listener.computerList = { phoneID in
+            phoneID == "phone-1"
+                ? [ComputerAccess(phoneID: id, viewer: "mac-2", name: "Office\tMac", kind: HostInfo.kindMac, scopes: ["shell"],
+                                  connected: true, grantedAt: 1_763_790_000)]
+                : []
+        }
+        let (phone, probe) = readyClient(listener)
+        phone.listComputers()
+        wait(for: [probe.expect(self, "list") { _ in !self.computerLists(probe).isEmpty }], timeout: 5)
+        // The listener says whether it is connected, whatever the store did; the name arrives cleaned.
+        XCTAssertEqual(computerLists(probe).first, [ComputerAccess(phoneID: id, viewer: "mac-2", name: "Office Mac", kind: HostInfo.kindMac,
+                                                                     scopes: ["shell"], connected: false, grantedAt: 1_763_790_000)])
+        // The computer connects: the phone that asked hears it, unasked.
+        let (_, computer) = computerClient(listener, identity: me)
+        wait(for: [computer.expect(self, "ready") { _ in computer.isReady }], timeout: 5)
+        wait(for: [probe.expect(self, "connected") { _ in self.computerLists(probe).last?.first?.connected == true }], timeout: 5)
+    }
+
+    func testAComputerMayNotListComputers() {
+        let me = KeyIdentity()
+        let listener = computerListener(recorded: me, scopes: [Computers.scopeShell, Computers.scopeScreen])
+        listener.computerList = { _ in [] }
+        let (c, probe) = computerClient(listener, identity: me)
+        wait(for: [probe.expect(self, "ready") { _ in probe.isReady }], timeout: 5)
+        c.listComputers()
+        wait(for: [probe.expect(self, "refused") { _ in probe.failures == [.notAllowed] }], timeout: 5)
+        XCTAssertTrue(computerLists(probe).isEmpty)
+    }
+
+    func testAPhoneThatNeverAskedHearsNoList() {
+        let listener = startListener()
+        listener.computerList = { _ in [] }
+        let (_, probe) = readyClient(listener)
+        listener.pushComputerLists()
+        let settle = expectation(description: "settle")
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { settle.fulfill() }
+        wait(for: [settle], timeout: 2)
+        XCTAssertTrue(computerLists(probe).isEmpty)
+    }
 }
 #endif

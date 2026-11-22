@@ -304,6 +304,7 @@ final class RemoteShellController: ObservableObject {
         listener.onScreenPassUsed = screenPassUsedHandler()
         listener.computerKey = { store.computerKey($0) }
         listener.computerScopes = { store.scopes(of: $0) }
+        listener.computerList = { store.computers(grantedBy: $0) }
         listener.onComputerGrant = computerGrantHandler()
         listener.onComputerPass = computerPassHandler()
         listener.onComputerRevoke = computerRevokeHandler()
@@ -445,6 +446,7 @@ final class RemoteShellController: ObservableObject {
             listener.onScreenPassUsed = onScreenPassUsed
             listener.computerKey = { store.computerKey($0) }
             listener.computerScopes = { store.scopes(of: $0) }
+            listener.computerList = { store.computers(grantedBy: $0) }
             listener.onComputerGrant = onComputerGrant
             listener.onComputerPass = onComputerPass
             listener.onComputerRevoke = onComputerRevoke
@@ -858,6 +860,9 @@ final class RemoteShellController: ObservableObject {
         phones = all.filter { !$0.isScreenOnly && !$0.isComputer }
         screenGuests = all.filter(\.isScreenOnly)
         computerGuests = all.filter(\.isComputer)
+        // Phones that asked for their computers hear the change.
+        listener?.pushComputerLists()
+        iroh?.listener?.pushComputerLists()
     }
 
     /// The label of the phone that granted a screen pass, if it still has access.

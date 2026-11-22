@@ -11,6 +11,10 @@ struct ShareComputerSheet: View {
     /// The computer being shared.
     let shared: ShellCredential
     @StateObject private var model = ComputerShareModel()
+    /// What the computer being shared says has access (nil until it answers; an older one never does).
+    @StateObject private var hosted = HostComputersModel()
+    /// Access the user asked to take back: confirmed first.
+    @State private var removal: ComputerAccess?
     @State private var withShell = false
     /// A computer that already has access was tapped: asked before it is shared again.
     @State private var again: ShellCredential?
@@ -36,7 +40,11 @@ struct ShareComputerSheet: View {
 
                 Section {
                     ForEach(others, id: \.macID) { viewer in
-                        let had = SharedComputers.entry(shared: shared.macID, viewer: viewer.macID)
+                        // The shared computer's own word when it gave it, else this phone's memory.
+                        let listed = hosted.list?.first { $0.viewer == viewer.macID }
+                        let had = hosted.list == nil ? SharedComputers.entry(shared: shared.macID, viewer: viewer.macID)
+                            : listed.map { SharedComputers.Entry(shell: ($0.scopes + ($0.pending ?? [])).contains(Computers.scopeShell),
+                                                                 at: Date(timeIntervalSince1970: TimeInterval($0.grantedAt))) }
                         Button {
                             // One that already has access isn't given it again by a stray tap.
                             if had != nil { again = viewer } else { model.share(shared, with: viewer, scopes: scopes, shell: shell) }
@@ -48,7 +56,9 @@ struct ShareComputerSheet: View {
                                     .frame(width: 30)
                                 VStack(alignment: .leading, spacing: 2) {
                                     Text(viewer.macName).foregroundStyle(.primary)
-                                    if let had {
+                                    if let listed {
+                                        Text(Self.caption(listed, on: shared.macName)).font(.caption).foregroundStyle(.secondary)
+                                    } else if let had {
                                         Text("Has access (\(had.shell ? "shell and screen" : "screen only")), shared \(had.at.formatted(.relative(presentation: .named)))")
                                             .font(.caption).foregroundStyle(.secondary)
                                     } else {
@@ -66,7 +76,34 @@ struct ShareComputerSheet: View {
                 } header: {
                     Text("Which computer should use \(shared.macName)?")
                 } footer: {
-                    Text("That computer gets its own access to \(shared.macName), from anywhere, without this \(ThisDevice.name). It stops working if this \(ThisDevice.name) loses access to \(shared.macName). Remove it any time in Passthrough's settings on \(shared.macName).")
+                    Text("That computer gets its own access to \(shared.macName), from anywhere, without this \(ThisDevice.name). It stops working if this \(ThisDevice.name) loses access to \(shared.macName)."
+                         + (hosted.list == nil ? "" : " Remove it any time below."))
+                }
+
+                if let list = hosted.list, !list.isEmpty {
+                    Section {
+                        ForEach(list, id: \.phoneID) { computer in
+                            HStack(spacing: 12) {
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(computer.name)
+                                    Text(Self.caption(computer, on: shared.macName)).font(.caption).foregroundStyle(.secondary)
+                                }
+                                Spacer()
+                                if hosted.removing == computer.phoneID {
+                                    ProgressView()
+                                } else {
+                                    Button("Remove", role: .destructive) { removal = computer }
+                                        .buttonStyle(.borderless)
+                                        .disabled(hosted.removing != nil || model.isWorking)
+                                        .accessibilityLabel("Remove \(computer.name)'s access")
+                                }
+                            }
+                        }
+                    } header: {
+                        Text("With access to \(shared.macName)")
+                    } footer: {
+                        if let error = hosted.error { Text(error).foregroundStyle(PTColor.attentionText) }
+                    }
                 }
 
                 switch model.phase {
@@ -109,8 +146,37 @@ struct ShareComputerSheet: View {
         } message: {
             Text("Sharing again replaces what it has with \(withShell ? "shell and screen" : "screen only"). If you removed its access on \(shared.macName), this gives it back.")
         }
+        .confirmationDialog(removal.map { "Remove \($0.name)'s access to \(shared.macName)?" } ?? "",
+                            isPresented: Binding(get: { removal != nil }, set: { if !$0 { removal = nil } }), titleVisibility: .visible) {
+            Button("Remove Access", role: .destructive) {
+                if let computer = removal { hosted.remove(computer) }
+                removal = nil
+            }
+            Button("Cancel", role: .cancel) { removal = nil }
+        } message: {
+            Text("It can't use \(shared.macName) until you share it again, and anything it has open there ends.")
+        }
         .sensoryFeedback(.success, trigger: model.phase) { _, new in if case .done = new { true } else { false } }
         .sensoryFeedback(.error, trigger: model.phase) { _, new in if case .failed = new { true } else { false } }
-        .onDisappear { model.reset() }
+        .onAppear { hosted.watch(shared, shell: shell) }
+        .onDisappear {
+            model.reset()
+            hosted.stop()
+        }
+    }
+
+    /// "Shell and screen · connected now", "Shell · the screen waits for you on Office-PC", "Screen only".
+    static func caption(_ computer: ComputerAccess, on host: String) -> String {
+        let shell = computer.scopes.contains(Computers.scopeShell), screen = computer.scopes.contains(Computers.scopeScreen)
+        var parts: [String] = []
+        switch (shell, screen) {
+        case (true, true): parts.append("Shell and screen")
+        case (true, false): parts.append("Shell")
+        case (false, true): parts.append("Screen only")
+        case (false, false): parts.append("Nothing yet")
+        }
+        if computer.pending?.contains(Computers.scopeScreen) == true { parts.append("the screen waits for you to allow it on \(host)") }
+        if computer.connected { parts.append("connected now") }
+        return parts.joined(separator: " · ")
     }
 }

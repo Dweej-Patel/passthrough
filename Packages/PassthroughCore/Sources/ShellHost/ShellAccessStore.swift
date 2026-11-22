@@ -306,6 +306,21 @@ public final class ShellAccessStore: @unchecked Sendable {
         return scopes
     }
 
+    /// The computers `granter` gave access here, oldest first, as `computerList` lists them (`connected`
+    /// is the listener's to say). On a Mac nothing waits for the owner: there is no `pending`.
+    public func computers(grantedBy granter: String) -> [ComputerAccess] {
+        let list = phones
+        return list.filter { $0.isComputer && $0.grantedBy == granter }
+            .sorted { $0.grantedAt < $1.grantedAt }
+            .prefix(Computers.maxTotal)
+            .map { computer in
+                let scopes = Self.scopes(of: computer.phoneID, in: list)
+                return ComputerAccess(phoneID: computer.phoneID, viewer: computer.viewerOf, name: computer.label, kind: computer.kind,
+                                      scopes: Computers.allScopes.filter(scopes.contains), connected: false,
+                                      grantedAt: Int64(computer.grantedAt.timeIntervalSince1970))
+            }
+    }
+
     /// Takes back one computer `granter` gave access (one it couldn't hand over after all), as
     /// `revokeViewer`. Returns what it removed (empty: nothing of that phone's by that id).
     @discardableResult

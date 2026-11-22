@@ -1004,7 +1004,7 @@ final class ShellModel: ObservableObject {
             // Why a PC's screen view ended, for the view whose relay just closed (`ScreenModel`).
             guard let mac = clientMacID else { return }
             screenEnded = (mac, reason, Date())
-        case .screenGranted, .screenPassSaved, .screenRevoked, .computerGranted, .computerPassSaved, .computerRevoked:
+        case .screenGranted, .screenPassSaved, .screenRevoked, .computerGranted, .computerPassSaved, .computerRevoked, .computerList:
             // Screen passes and computers' access have their own clients (`ScreenShareModel`, `ComputerShareModel`); this one never asks.
             break
         case let .host(info):
