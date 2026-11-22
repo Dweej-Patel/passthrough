@@ -483,6 +483,10 @@ targets:
         PRODUCT_BUNDLE_IDENTIFIER: $(PASSTHROUGH_ID).microphone
         PRODUCT_NAME: PassthroughMicrophone
         WRAPPER_EXTENSION: driver
+        # The driver's own version (its CFBundleVersion): what the app compares with the installed driver's to decide
+        # whether to offer an update. Raise it when macOS/Microphone/PassthroughMicrophone.c changes
+        # (MicrophoneDriverVersionTests fails until it is).
+        PASSTHROUGH_MICROPHONE_VERSION: "1"
         INFOPLIST_FILE: macOS/Microphone/Info.plist
         GENERATE_INFOPLIST_FILE: NO
         ENABLE_HARDENED_RUNTIME: YES

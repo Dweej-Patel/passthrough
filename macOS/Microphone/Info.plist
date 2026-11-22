@@ -17,7 +17,7 @@
 	<key>CFBundleShortVersionString</key>
 	<string>$(MARKETING_VERSION)</string>
 	<key>CFBundleVersion</key>
-	<string>$(CURRENT_PROJECT_VERSION)</string>
+	<string>$(PASSTHROUGH_MICROPHONE_VERSION)</string>
 	<key>CFPlugInFactories</key>
 	<dict>
 		<key>7C1F0B5E-3D52-4E0B-9C52-5B0E6B6F2A41</key>
