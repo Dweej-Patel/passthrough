@@ -35,4 +35,13 @@
   <ItemGroup>
     <Content Include="Assets\app.ico" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
+
+  <!-- Publishing (scripts/build-windows.ps1) leaves out the app's own resource index and compiled XAML, though the
+       build makes them; without them WinUI can't load a window and the app crashes as it starts. -->
+  <Target Name="PublishOwnXamlResources" AfterTargets="ComputeResolvedFilesToPublishList">
+    <ItemGroup>
+      <_OwnXamlResource Include="$(OutDir)$(AssemblyName).pri;$(OutDir)*.xbf" />
+      <ResolvedFileToPublish Include="@(_OwnXamlResource)" RelativePath="%(Filename)%(Extension)" CopyToPublishDirectory="PreserveNewest" />
+    </ItemGroup>
+  </Target>
 </Project>
