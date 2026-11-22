@@ -47,7 +47,8 @@ public sealed partial class FlyoutWindow : Window
         AppWindow.SetIcon(AppIcon.Path);
         // What the Windows 11 tray flyouts are made of; where it isn't supported the window keeps its plain background.
         SystemBackdrop = new DesktopAcrylicBackdrop();
-        // A phone arriving, a code box or a hint appearing changes how tall the content is.
+        // A phone or a notice arriving, a code box, your computers or a hint appearing changes how tall the content is.
+        Scrolled.SizeChanged += (_, _) => FitIfOpen();
         Body.SizeChanged += (_, _) => FitIfOpen();
         HintsBox.SizeChanged += (_, _) => FitIfOpen();
         ViewModel.PropertyChanged += (_, _) => DispatcherQueue.TryEnqueue(FitIfOpen);
@@ -107,6 +108,12 @@ public sealed partial class FlyoutWindow : Window
 
     /// <summary>Lets the window really close, for quitting.</summary>
     public void AllowClose() => _quitting = true;
+
+    /// <summary>A notification was clicked: open the flyout (never closes it).</summary>
+    public void OpenFromNotification()
+    {
+        if (!AppWindow.IsVisible) ShowAtTray();
+    }
 
     /// <summary>The tray icon was clicked: open the flyout, or close it if it is open (or was just closed by that click).</summary>
     public void ToggleFromTray()
