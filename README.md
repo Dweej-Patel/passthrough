@@ -119,7 +119,7 @@ To update, rebuild the Mac and the phones from the same commit:
 
 To uninstall: `./passthrough mac remove` (add `--purge` to delete its settings and data too), `./passthrough iphone remove --device <name>`, `./passthrough android remove`. Each verb takes `--help` and `--dry-run`, which prints every step without doing it. `./passthrough mac rollback` puts the previous Mac app back.
 
-Before it quits or replaces the Mac app, `install` refuses (unless `--force`) when the new build isn't Release, when it would drop the push key, when the Mac is online through the phone, or while a phone's shell is running on the Mac. `remove` asks for your password once, for the helper and the microphone driver. On a Windows PC, run `scripts\windows.ps1` there ([windows/README.md](windows/README.md)).
+Before it quits or replaces the Mac app, `install` refuses (unless `--force`) when the new build isn't Release, when it would drop the push key, when the Mac is online through the phone, or while a phone's shell is running on the Mac. `remove` asks for your password once, for the helper and the microphone driver. On a Windows PC, in PowerShell in the repository: `scripts/windows.ps1 install` the first time, `scripts/windows.ps1 update -Pull` after that, and `scripts/windows.ps1 doctor` when something's off. It refuses to build from a folder other Windows accounts can change (clone under your user folder, or add `-Force`); more in [windows/README.md](windows/README.md).
 
 ### What the scripts do
 

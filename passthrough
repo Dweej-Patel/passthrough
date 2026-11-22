@@ -11,7 +11,9 @@ case "$platform" in
   android) exec /bin/bash "$here/scripts/android.sh" "$@" ;;
   windows|pc)
     echo "The Windows host builds and installs on the PC itself. In PowerShell, in the repository:"
-    echo "  powershell -ExecutionPolicy Bypass -File scripts\\windows.ps1 ${*:-help}"
+    echo "  scripts/windows.ps1 ${*:-doctor}"
+    echo "(or, if scripts are blocked there: powershell -ExecutionPolicy Bypass -File scripts\\windows.ps1 ${*:-doctor})"
+    echo "Verbs: doctor | deps | build | install | update [-Pull] | reinstall | off | remove [-Purge]; -WhatIf shows the plan."
     echo "See windows/README.md."
     ;;
   *)

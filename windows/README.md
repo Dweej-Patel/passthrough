@@ -36,7 +36,7 @@ windows/
 
 ## Build
 
-You build Passthrough yourself, and builds aren't signed. Install:
+You build Passthrough yourself, and builds aren't signed. `scripts/windows.ps1 deps` installs what building needs, and `scripts/windows.ps1 build` builds (see [the next section](#install-update-and-remove-one-command)). By hand, install:
 
 - the .NET 10 SDK (`global.json` takes 10.0.100 or any later 10.0 feature band);
 - Rust through rustup (https://rustup.rs), which needs the MSVC build tools from Visual Studio's C++ workload.
@@ -53,7 +53,7 @@ The first command builds `passthrough_iroh.dll`, Passthrough's iroh endpoint, fr
 - The bridge pins iroh 1.0.2, the version the phones and the Mac use.
 
 The second command builds one self-contained folder: the tray app, the service, `passthrough-term.exe`, the iroh bridge, the bundled pseudoconsole, and `files.json` (every file's size and SHA-256).
-- The output is `windows/artifacts/Passthrough` (about 420 MB), and the script prints the build's name, for example `2026.11.22.1808+bf22927`.
+- Its output is `windows/artifacts/Passthrough` unless you pass `-Output` (`scripts/windows.ps1` uses `%LOCALAPPDATA%\PassthroughBuild`). It's about 420 MB, and the script prints the build's name, for example `2026.11.22.1808+bf22927`.
 - It must be self-contained, because the service's account can't use a .NET installed in one user's profile.
 
 Packages come only from nuget.org (`windows/nuget.config`). Each project's versions and content hashes are pinned in its `packages.lock.json`, and CI restores with `--locked-mode`. To change a package:
@@ -63,56 +63,72 @@ Packages come only from nuget.org (`windows/nuget.config`). Each project's versi
 
 To work in Visual Studio, use Visual Studio 2026 (18.0 or later) with the WinUI application development workload, and open `windows/Passthrough.Windows.sln`. Visual Studio 2022 can't target .NET 10.
 
-> **Build where only you can write.** Setup copies whatever is in the build folder into `C:\Program Files` after you approve an administrator prompt. A second drive such as `D:\` lets every account on the PC change files by default. On a PC with other accounts, build from a folder under your own profile, for example `%USERPROFILE%\src\passthrough`, until setup checks this itself (SECURITY.md).
+## Install, update and remove: one command
 
-## Install
+`scripts/windows.ps1` does each job in one command, from the repo root in PowerShell. Claude or you can run it as it is.
 
-1. **Open the app.** Run `Passthrough.exe` from `windows/artifacts/Passthrough`. It sits in the tray: left-click opens the flyout, and right-click shows Settings… and Quit.
-2. **Turn Remote access on.** Go to Settings ▸ Remote access and switch on *Use this PC's shell from your phones*. Windows asks for an administrator once. That one step:
-   - copies the build into a new folder under `C:\Program Files\Passthrough`;
-   - installs the background service *Passthrough Remote Access*, which runs before anyone signs in, under its own account with almost no privileges;
-   - creates `C:\ProgramData\Passthrough`;
-   - adds the firewall rules;
-   - points Start at login and the Start menu at the installed copy.
+| Command | What it does |
+|---|---|
+| `scripts/windows.ps1 doctor` | Says what's missing or wrong, and changes nothing. It checks: Windows' version and edition; the .NET 10 SDK, Rust and the MSVC build tools; who else can change the source and build folders; the installed build and whether the service is running; whether the tray app runs that build; Start at login; Remote Desktop; Apple Devices and adb. |
+| `scripts/windows.ps1 deps` | Installs whatever is missing with winget (the .NET 10 SDK, Rustup, the Visual Studio Build Tools' C++ workload), asking before each one. |
+| `scripts/windows.ps1 build` | Builds the self-contained folder (`scripts/build-windows.ps1`) into `%LOCALAPPDATA%\PassthroughBuild`, a folder only you can change. |
+| `scripts/windows.ps1 install` | Builds, then sets up Remote access behind one administrator prompt, turns on Start at login and starts the tray app. `-Screen` also sets up the screen in the same prompt. |
+| `scripts/windows.ps1 update` | Builds, updates the service behind one administrator prompt, then restarts the tray app so it runs the new build too. `-Pull` runs `git pull --ff-only` first. Phones keep their access. |
+| `scripts/windows.ps1 reinstall` | Installs over the current install, which repairs it and keeps the phones' access. `-Clean` removes everything first, after which every phone must be plugged in again. |
+| `scripts/windows.ps1 off` | Turns Remote access off. Phones can't reach the PC until it's turned on again; the tray app stays for phones on the cable. |
+| `scripts/windows.ps1 remove` | Removes the service and everything it set up (below), quits the tray app and turns off Start at login. Your settings and cable pairings stay. `-Purge` deletes them too, after asking. |
 
-   The copy you started then hands over to the installed one and quits.
-3. **Plug each phone in once.** Unlock it, trust the PC, open Passthrough and pair with the six-digit code shown in the flyout. A phone that is paired and plugged in while Remote access is on gets shell access. Its row in Settings ▸ Remote access ▸ *Phones* then has *Screen*, *Share*, **Stop** and **Revoke…**.
-4. **Set up the screen (optional).** In Settings ▸ Remote access ▸ *Screen, through Remote Desktop*, choose **Set up…**. Windows asks for an administrator once more. Passthrough then:
-   - adds its own firewall rules that block Remote Desktop's port (TCP and UDP, every network profile);
-   - requires Network Level Authentication;
-   - adds your account to Remote Desktop Users if it needs to be;
-   - turns Remote Desktop on.
+Flags for any command:
+- `-WhatIf` says what would happen and changes nothing.
+- `-Yes` doesn't ask.
+- `-Output <folder>` builds somewhere else.
 
-   If Remote Desktop was already open to your network, Passthrough leaves it as it was; the row says so and offers **Close it to the network**.
-5. **Allow the screen for a phone.** When a phone first gets access, a notice in the flyout offers **Allow screen**. You can also tick *Screen* in the phone's row under Settings ▸ Remote access ▸ *Phones*. On the phone, the first time it opens the screen, type your Windows password. The phone keeps it behind Face ID.
+Each command prints what it does, and on failure it ends with one sentence saying what failed and exits 1.
 
-Each Windows account that turns Remote access on is added to the accounts the service serves. A phone only ever reaches the account that granted it.
+**Who can change the source.** `build`, `install` and `update` refuse to run when another account on the PC can change the source or build folder, or replace a folder above either one. A second drive such as `D:\` lets every account do that by default. The administrator prompt copies the build into Program Files, so whoever can change the source or the build could run code as administrator. Keep the clone under your profile, for example `git clone … %USERPROFILE%\src\passthrough`. Or, if you're the only one who uses this PC, pass `-Force`. `doctor` says which folder and which account.
 
-### Update
+**From the tray instead.** Everything `install` does can also be done by hand:
+1. Open `Passthrough.exe` from a build.
+2. Turn Remote access on in Settings ▸ Remote access. The first time, *Set up the screen too* is ticked, so one administrator prompt sets up both. The copy you started then hands over to the installed one and quits.
 
-Rebuild with `scripts/build-windows.ps1`, then in an administrator's prompt:
+### What setup does
 
-```
-windows\artifacts\Passthrough\Passthrough.Service.exe --update
-```
+One administrator prompt:
+- copies the build into a new folder under `C:\Program Files\Passthrough`, after checking each file against `files.json`;
+- installs the background service *Passthrough Remote Access*, which runs before anyone signs in, under its own account with almost no privileges;
+- creates `C:\ProgramData\Passthrough`;
+- adds the firewall rules;
+- points Start at login and the Start menu at the installed copy.
 
-From Git Bash, write the path with forward slashes: `/d/…/Passthrough.Service.exe --update`. The update:
+With the screen, the same prompt also:
+- adds Passthrough's own firewall rules blocking Remote Desktop's port (TCP and UDP, every network profile);
+- requires Network Level Authentication;
+- adds your account to Remote Desktop Users if it needs to be;
+- turns Remote Desktop on.
+
+If Remote Desktop was already open to your network, Passthrough leaves it as it was. Settings says so and offers **Close it to the network**. Where the screen can't be set up (Windows Home, another program managing the firewall), Remote access still turns on, and the reason is shown.
+
+Each Windows account that turns Remote access on is added to the accounts the service serves. A phone only ever reaches the account that granted it. When `install` runs from a standard account, Windows asks for an administrator's password, and that administrator's account is the one set up. On a standard account, use the tray's Turn on instead, which sets up your own account.
+
+### Then, on each phone
+
+1. **Plug it in once.** Unlock it, trust the PC, open Passthrough and pair with the six-digit code shown in the flyout. A phone that is paired and plugged in while Remote access is on gets shell access. Its row in Settings ▸ Remote access ▸ *Phones* then has *Screen*, *Share*, **Stop** and **Revoke…**.
+2. **Allow the screen.** When a phone first gets access, a notice in the flyout offers **Allow screen**. You can also tick *Screen* in the phone's row. The first time the phone opens the screen, type your Windows password. The phone keeps it behind Face ID.
+
+### Update and remove by hand
+
+`update` runs `Passthrough.Service.exe --update` from the new build, in an administrator's prompt. From Git Bash, write the path with forward slashes (`/c/Users/…/Passthrough.Service.exe --update`). The update:
 - stops the service;
-- copies the new build into a fresh folder and checks every file against `files.json`;
+- copies the new build into a fresh folder and checks every file;
 - starts the service again.
 
-It refuses a program or data folder that someone other than an administrator has changed. It doesn't yet check who can change the build folder: see the note under [Build](#build). Afterwards, quit Passthrough from the tray and open it from the Start menu, so the tray app runs the new build too.
+It refuses a program or data folder that someone other than an administrator has changed. Run by hand, it doesn't restart the tray app: quit Passthrough from the tray and open it from the Start menu.
 
-### Turn off and remove
-
-Both commands run from the installed launcher, in an administrator's prompt.
-
-- **Turn off:** switch Remote access off in Settings. That runs `"C:\Program Files\Passthrough\Passthrough.Service.exe" --off`. Phones can't reach the PC until you turn it on again. The files, the phones' access and the settings stay.
-- **Remove:** `"C:\Program Files\Passthrough\Passthrough.Service.exe" --remove` undoes everything, in reverse:
-  - the service and its key;
-  - the firewall rules;
-  - the data folder, and the program folder when they're Passthrough's;
-  - Remote Desktop as it was before Screen was set up. Passthrough turns it off again if it turned it on, and removes your account from Remote Desktop Users if it added it.
+`off` and `remove` run the installed launcher, `"C:\Program Files\Passthrough\Passthrough.Service.exe" --off` or `--remove`. `--remove` undoes everything, in reverse:
+- the service and its key;
+- the firewall rules;
+- the data folder, and the program folder when they're Passthrough's;
+- Remote Desktop as it was before the screen was set up. Passthrough turns it off again if it turned it on, and removes your account from Remote Desktop Users if it added it.
 
 The other verbs are what Settings runs for you (`--configure screen`, `screen-close`, `screen-open`, `relay`, `reset-identity`, `allow`). Each asks for an administrator.
 

@@ -152,7 +152,15 @@ these steps as written and check each one before building.
   - The sheet offers each computer only what it can open: a PC the shell, and the screen only from a Mac; a Mac another Mac's screen as a screen pass, or a PC's screen. A Mac isn't offered shells.
   - With two or more computers, the *Shells* and *Activity* titles are a computer switcher.
   - A PC is called a PC everywhere, and its Activity tab says it doesn't record activity yet.
-
+* **One command for each job on the Mac, iPhone and Android.** `./passthrough mac|iphone|android doctor | deps | build | install | update | remove` (and `rollback` on the Mac).
+  - `doctor` changes nothing; `--dry-run` shows what any command would do.
+  - Before it replaces the Mac app, `install` and `update` refuse (unless `--force`) a Debug build, a lost push key, a Mac online through the phone right now, or phones' shells still running. The app it replaced is kept for `rollback`.
+  - `remove` takes the helper, the microphone driver and the login item with it; `--purge` also deletes settings and history.
+* **Windows: one command for each job.** `scripts/windows.ps1 doctor | deps | build | install | update | reinstall | off | remove`.
+  - `update` restarts the tray app by itself.
+  - `doctor` changes nothing.
+  - `-WhatIf` shows what a command would do.
+  - It refuses to build or install from a folder another account on the PC can change, unless `-Force`. It builds into `%LOCALAPPDATA%\PassthroughBuild` (windows/README.md).
 * **Windows: the tray and Settings, reorganised around what you use.**
   - The flyout's header follows Remote access, not the cable: off, reachable, needs a look (and why), or who is on the PC now.
   - Notices and anyone viewing the screen (with **Stop**) sit above two tabs, which the flyout remembers:
