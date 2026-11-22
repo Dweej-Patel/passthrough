@@ -76,6 +76,16 @@ public sealed class SessionViewModel : ObservableBase
         Raise(nameof(ComputersVisibility));
     }
 
+    /// <summary>Forgets this PC's copy of a computer (true: it is gone).</summary>
+    public Func<Passthrough.Core.Trust.ReachableComputer, Task<bool>>? RemoveComputer { get; set; }
+
+    public async Task RemoveComputerAsync(ComputerRow row)
+    {
+        if (RemoveComputer is not { } remove || !await remove(row.Computer)) return;
+        Computers.Remove(row);
+        Raise(nameof(ComputersVisibility));
+    }
+
     /// <summary>Answers a notice (OK, or its action first).</summary>
     public Func<Passthrough.Core.Pipe.PipeNotice, bool, Task>? AnswerNotice { get; set; }
 

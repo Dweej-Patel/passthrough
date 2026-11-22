@@ -144,6 +144,7 @@ While a phone views the screen, the PC's own screen shows the lock screen, and i
 
 **Your computers** (in the flyout) lists the computers a phone handed this PC access to. Windows Hello asks first.
 - **New shell** opens the other computer's shell in a new Windows Terminal tab, or a console window without Windows Terminal.
+- **Remove…** forgets this PC's copy of that computer, after asking. Use it for a computer you no longer use, or one that changed its keys: a phone can then share it again.
 - **Screen** opens a Mac's screen in a window. The keys go to the Mac: Alt acts as ⌘, Ctrl as ⌃ and the Windows key as ⌥. A setting swaps Alt and Ctrl, so Ctrl acts as ⌘. Alt+Tab, Alt+F4, screenshots and the media keys stay with this PC.
 
 The PC's own logs:
