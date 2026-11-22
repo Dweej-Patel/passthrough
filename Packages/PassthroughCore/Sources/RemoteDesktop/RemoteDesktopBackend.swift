@@ -57,6 +57,17 @@ public final class RemoteDesktopBackend: ScreenBackend, @unchecked Sendable {
     // On `io`.
     private var receiving = false
     private var sending = false
+    /// Over a relay, what the link did, logged every 5 s (io queue; frames under `pixelsLock`): to tell a slow
+    /// network from a phone that holds its own sends back.
+    private var stats = LinkStats()
+    private var framesPainted = 0
+    private struct LinkStats {
+        var bytesOut = 0, bytesIn = 0, sends = 0
+        var longestSend: TimeInterval = 0
+        /// Outgoing data (input, frame acknowledgements) that had to wait for the send before it.
+        var queuedSince: TimeInterval?
+        var waited: TimeInterval = 0, longestWait: TimeInterval = 0
+    }
     private var ioClosed = false
 
     /// The desktop's pixels as last painted (BGRA), guarded by `pixelsLock`.
@@ -123,6 +134,7 @@ public final class RemoteDesktopBackend: ScreenBackend, @unchecked Sendable {
             stream.onTerminated = { [weak self] _ in self?.io.async { self?.networkClosed() } }
             if !initialBytes.isEmpty { feed(initialBytes) }
             receiveMore()
+            if slowLink { logLink() }
         }
         let thread = Thread { [self] in run(rdp) }
         thread.name = "rdp"
@@ -214,7 +226,10 @@ public final class RemoteDesktopBackend: ScreenBackend, @unchecked Sendable {
         callbacks.outbox_ready = { user in
             guard let user else { return }
             let backend = Unmanaged<RemoteDesktopBackend>.fromOpaque(user).takeUnretainedValue()
-            backend.io.async { backend.pump() }
+            backend.io.async {
+                if backend.sending, backend.stats.queuedSince == nil { backend.stats.queuedSince = ProcessInfo.processInfo.systemUptime }
+                backend.pump()
+            }
         }
         callbacks.inbox_space = { user in
             guard let user else { return }
@@ -334,7 +349,7 @@ public final class RemoteDesktopBackend: ScreenBackend, @unchecked Sendable {
             guard let self else { return }
             self.io.async {
                 self.receiving = false
-                if let data, !data.isEmpty { self.feed(data) }
+                if let data, !data.isEmpty { self.stats.bytesIn += data.count; self.feed(data) }
                 if complete || error != nil { return self.networkClosed() }
                 self.receiveMore()
             }
@@ -348,13 +363,38 @@ public final class RemoteDesktopBackend: ScreenBackend, @unchecked Sendable {
         let count = buffer.withUnsafeMutableBufferPointer { pt_rdp_take(rdp, $0.baseAddress, $0.count) }
         guard count > 0 else { return }
         sending = true
+        let started = ProcessInfo.processInfo.systemUptime
+        if let since = stats.queuedSince {
+            stats.waited += started - since
+            stats.longestWait = max(stats.longestWait, started - since)
+            stats.queuedSince = nil
+        }
+        stats.bytesOut += count
+        stats.sends += 1
         stream.send(Data(buffer[0..<count]), isComplete: false) { [weak self] error in
             guard let self else { return }
             self.io.async {
+                self.stats.longestSend = max(self.stats.longestSend, ProcessInfo.processInfo.systemUptime - started)
                 self.sending = false
                 if error != nil { return self.networkClosed() }
                 self.pump()
             }
+        }
+    }
+
+    /// Every 5 s while the session lasts (io queue).
+    private func logLink() {
+        io.asyncAfter(deadline: .now() + 5) { [weak self] in
+            guard let self, !self.ioClosed else { return }
+            self.pixelsLock.lock()
+            let frames = self.framesPainted
+            self.framesPainted = 0
+            self.pixelsLock.unlock()
+            let s = self.stats
+            ptLog(.info, "screen: relay 5 s: out \(s.bytesOut / 1024) KB in \(s.bytesIn / 1024) KB, \(s.sends) sends, longest send "
+                + "\(Int(s.longestSend * 1000)) ms, waited \(Int(s.waited * 1000)) ms (longest \(Int(s.longestWait * 1000)) ms), \(frames) paints")
+            self.stats = LinkStats(queuedSince: s.queuedSince)
+            self.logLink()
         }
     }
 
@@ -396,6 +436,7 @@ public final class RemoteDesktopBackend: ScreenBackend, @unchecked Sendable {
                                    dirty: CGRect(x: Int(dirty.x), y: Int(dirty.y), width: Int(dirty.w), height: Int(dirty.h)))
         }
         pixelsLock.lock()
+        framesPainted += 1
         guard desktop.width == width, desktop.height == height, pixels.count == width * height * 4 else {
             pixelsLock.unlock()
             return
