@@ -91,7 +91,14 @@ or the pairing rules, update the fixtures first, then make all three pass.
 * **Vendored binaries.** `Vendor/HevSocks5Tunnel` and `Vendor/VPNEngines` are
   prebuilt. If you need to change them, change the build script
   (`scripts/build-hev.sh`, `scripts/build-vpn-engines.sh`) and say in the PR
-  which upstream commit you built from.
+  which upstream commit you built from. `Vendor/FreeRDP/FreeRDP.xcframework`
+  (the PC screen's Remote Desktop engine) comes only from
+  `scripts/build-freerdp.sh`, which pins FreeRDP and OpenSSL by version and
+  archive SHA-256; the *Remote Desktop engine* workflow runs it on a clean Mac
+  and uploads the result. A rebuild PR bumps the constants at the top of the
+  script and commits the xcframework with the new `SOURCES.lock` and `SIZE.md`;
+  a reviewer runs the script and compares them. Until it is committed, the
+  iPhone app builds without it (the PC screen is then not in the build).
 * **No secrets, ever.** Do not commit API keys, VPN credentials, `.ovpn` files
   with embedded keys, screenshots with your device name, or anything from your
   keychain. The repository is scanned, but please do not make us rely on that.
