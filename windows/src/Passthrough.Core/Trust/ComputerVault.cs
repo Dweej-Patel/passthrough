@@ -58,12 +58,14 @@ public sealed record ReachableComputer
 
 /// <summary>
 /// The computers this PC can reach, sealed with a key from Windows Hello (stage 8 a4) in one secret slot. Reading needs
-/// one Hello confirmation per run; the list is then answered from memory. A credential for a host already kept replaces
+/// one Hello confirmation per run; the list is then answered from memory. On a PC without Hello the fallback signer
+/// (the Windows password) seals it instead, and the slot records which one did. A credential for a host already kept replaces
 /// it only when its certificate and iroh id are the same (stage 7's replace rule): over iroh the viewer knows a host by
 /// its id alone, so a swapped one would send the next sign-in to someone else.
 /// </summary>
-public sealed class ComputerReachStore(ISecretStore secrets, IHelloSigner hello)
+public sealed class ComputerReachStore(ISecretStore secrets, IHelloSigner hello, IHelloSigner? fallback = null)
 {
+    private const string ByHello = "hello", ByFallback = "password";
     public const string Slot = "computers.reach";
     public const int MaxComputers = 16;
     private static readonly byte[] Info = "passthrough-computers-v1"u8.ToArray();
@@ -71,25 +73,36 @@ public sealed class ComputerReachStore(ISecretStore secrets, IHelloSigner hello)
     private readonly SemaphoreSlim _gate = new(1, 1);
     private List<ReachableComputer>? _open;
     private byte[]? _salt, _key;
+    private string? _by;
 
     public enum SaveResult { Saved, Conflict, NotUsable, Failed, Locked }
 
-    private sealed record Sealed(int V, string Salt, string Nonce, string Box, string Tag);
+    /// <summary><c>By</c>: which signer sealed it (absent: Hello, the only one there was).</summary>
+    private sealed record Sealed(int V, string Salt, string Nonce, string Box, string Tag, string? By = null);
 
     /// <summary>The computers, once opened (null until <see cref="UnlockAsync"/> worked).</summary>
     public IReadOnlyList<ReachableComputer>? Computers => _open;
 
-    /// <summary>Opens the store with one Hello confirmation; false when Hello is missing, declined, or the data can't be opened.</summary>
+    /// <summary>
+    /// Opens the store with one confirmation, by the signer that sealed it; false when it was declined, there is no
+    /// signer, or the data can't be opened. A new store is sealed with Hello when this PC has it, else the fallback.
+    /// </summary>
     public async Task<bool> UnlockAsync()
     {
         await _gate.WaitAsync().ConfigureAwait(false);
         try
         {
             if (_open is not null) return true;
-            if (!await hello.IsAvailableAsync().ConfigureAwait(false)) return false;
             var stored = secrets.Get(Slot) is { } text ? JsonSerializer.Deserialize<Sealed>(text, Json) : null;
+            var helloHere = await hello.IsAvailableAsync().ConfigureAwait(false);
+            // Sealed with Hello on a PC that no longer has it: Hello's key went with it, so nothing in there can be
+            // opened again. With a fallback the store starts empty (the slot is replaced by the next save).
+            if (stored is not null && (stored.By ?? ByHello) == ByHello && !helloHere && fallback is not null) stored = null;
+            var by = stored is not null ? stored.By ?? ByHello : helloHere ? ByHello : ByFallback;
+            var signer = by == ByHello ? (helloHere ? hello : null) : by == ByFallback ? fallback : null;
+            if (signer is null || !await signer.IsAvailableAsync().ConfigureAwait(false)) return false;
             var salt = stored is null ? RandomNumberGenerator.GetBytes(32) : Convert.FromBase64String(stored.Salt);
-            if (await hello.SignAsync(salt).ConfigureAwait(false) is not { } signature) return false;
+            if (await signer.SignAsync(salt).ConfigureAwait(false) is not { } signature) return false;
             var key = HKDF.DeriveKey(HashAlgorithmName.SHA256, signature, 32, salt, Info);
             List<ReachableComputer> list = [];
             if (stored is not null)
@@ -99,12 +112,12 @@ public sealed class ComputerReachStore(ISecretStore secrets, IHelloSigner hello)
                 aes.Decrypt(Convert.FromBase64String(stored.Nonce), Convert.FromBase64String(stored.Box), Convert.FromBase64String(stored.Tag), plain, Info);
                 list = JsonSerializer.Deserialize<List<ReachableComputer>>(plain, Json) ?? [];
             }
-            (_open, _salt, _key) = (list, salt, key);
+            (_open, _salt, _key, _by) = (list, salt, key, by);
             return true;
         }
         catch (AuthenticationTagMismatchException)
         {
-            // Sealed under a Hello key that no longer exists (reset or re-made): nothing in it can be opened again, so it
+            // Sealed under a key that no longer exists (Hello reset or re-made, or the fallback's key lost): nothing in it can be opened again, so it
             // is set aside and the store starts empty; the computers in it need handing over again.
             secrets.Delete(Slot);
             return false;
@@ -151,7 +164,8 @@ public sealed class ComputerReachStore(ISecretStore secrets, IHelloSigner hello)
             var box = new byte[plain.Length];
             var tag = new byte[16];
             using (var aes = new AesGcm(_key!, 16)) aes.Encrypt(nonce, plain, box, tag, Info);
-            secrets.Set(Slot, JsonSerializer.Serialize(new Sealed(1, Convert.ToBase64String(_salt!), Convert.ToBase64String(nonce), Convert.ToBase64String(box), Convert.ToBase64String(tag)), Json));
+            secrets.Set(Slot, JsonSerializer.Serialize(new Sealed(1, Convert.ToBase64String(_salt!), Convert.ToBase64String(nonce), Convert.ToBase64String(box), Convert.ToBase64String(tag),
+                _by == ByHello ? null : _by), Json));
             _open = list;
             return true;
         }

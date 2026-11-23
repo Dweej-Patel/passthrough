@@ -229,21 +229,21 @@ internal sealed class ScreenWindow : Window, IScreenView
             switch (e)
             {
                 case ShellClientEvent.Ready ready:
-                    _ui.TryEnqueue(() => { if (generation == _generation) _path = ready.Path; });
+                    OnUi(() => { if (generation == _generation) _path = ready.Path; });
                     shell!.RequestScreen(video: true);
                     break;
                 case ShellClientEvent.Screen screen:
                     screenGiven = true;
                     var codecs = SafeCodecs(); // probed off the UI thread
-                    _ui.TryEnqueue(() => StartStream(generation, screen, codecs));
+                    OnUi(() => StartStream(generation, screen, codecs));
                     break;
                 case ShellClientEvent.Failed failed:
-                    _ui.TryEnqueue(() => { if (generation == _generation) Fail(ScreenFrame.Refusal(failed.Reason, _name)); });
+                    OnUi(() => { if (generation == _generation) Fail(ScreenFrame.Refusal(failed.Reason, _name)); });
                     shell!.Disconnect();
                     break;
                 case ShellClientEvent.Disconnected d when !screenGiven:
                     LogFile.Write($"screen: no connection ({d.Error?.GetType().Name ?? "clean"})");
-                    _ui.TryEnqueue(() => { if (generation == _generation && _phase is Phase.Connecting or Phase.Reconnecting) Lost(); });
+                    OnUi(() => { if (generation == _generation && _phase is Phase.Connecting or Phase.Reconnecting) Lost(); });
                     break;
             }
         }, identity: _identity);
@@ -259,7 +259,11 @@ internal sealed class ScreenWindow : Window, IScreenView
 
     private ScreenVideoClient.Layout Layout()
     {
-        var sides = DisplayArea.FindAll().Select(d => Math.Max(d.OuterBounds.Width, d.OuterBounds.Height));
+        // By index, never enumerated: the list DisplayArea.FindAll returns can't be cast to IEnumerable by the WinRT
+        // projection (InvalidCastException, E_NOINTERFACE), so foreach or LINQ over it throws.
+        var areas = DisplayArea.FindAll();
+        var sides = new List<int>();
+        for (var i = 0; i < areas.Count; i++) sides.Add(Math.Max(areas[i].OuterBounds.Width, areas[i].OuterBounds.Height));
         var side = ScreenFrame.RequestedSide(sides);
         return new ScreenVideoClient.Layout(side, side, ScreenFit.Mac, _minimized ? 15 : 60);
     }
@@ -288,6 +292,22 @@ internal sealed class ScreenWindow : Window, IScreenView
         ShowSubtitle();
     }
 
+    /// <summary>
+    /// Runs on the window's thread. Anything thrown there is logged and ends the view with a sentence: an exception
+    /// left in a dispatcher callback ends the whole app, and Windows keeps no trace of where.
+    /// </summary>
+    private void OnUi(Action action) => _ui.TryEnqueue(() =>
+    {
+        try { action(); }
+        catch (Exception e) when (e is not OutOfMemoryException)
+        {
+            LogFile.Error(e);
+            LogFile.Flush();
+            try { if (_phase != Phase.Closed) Fail($"{_name}'s screen couldn't be shown on this PC."); }
+            catch (Exception again) when (again is not OutOfMemoryException) { LogFile.Error(again); }
+        }
+    });
+
     private void Lost()
     {
         if (_redial < Redials.Length)
@@ -297,7 +317,7 @@ internal sealed class ScreenWindow : Window, IScreenView
             _picture.Opacity = 0.4;
             Status("Reconnecting…", retry: false);
             var generation = _generation;
-            _ = Task.Delay(delay).ContinueWith(_ => _ui.TryEnqueue(() =>
+            _ = Task.Delay(delay).ContinueWith(_ => OnUi(() =>
             {
                 if (generation == _generation && _phase == Phase.Reconnecting) Connect();
             }), TaskScheduler.Default);
@@ -423,6 +443,7 @@ internal sealed class ScreenWindow : Window, IScreenView
             PlacePointer();
         }
         catch (Exception e) when (e is COMException or ArgumentException or InvalidOperationException) { } // the last shape stays
+        catch (Exception e) when (e is not OutOfMemoryException) { LogFile.Error(e); LogFile.Flush(); } // async void: anything left here would end the app
     }
 
     public void Viewers(IReadOnlyList<string> names)

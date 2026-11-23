@@ -493,6 +493,12 @@ these steps as written and check each one before building.
   `doctor` says when the tray app runs as administrator; the app logs why it
   doesn't link to the service then.
 
+### Fixed (Windows: Your computers on a PC without Windows Hello)
+
+* **Sharing a Mac with a PC no longer needs Windows Hello set up.** A PC whose account had no Hello PIN didn't tell phones it could keep access to other computers, so *Share with another computer…* failed on the iPhone with "needs the latest Passthrough", and setting up a PIN only helped after Passthrough was restarted. Now every PC can keep it: behind Windows Hello when the PC has it, and otherwise behind the account's Windows password, which Windows' own prompt asks for before *Your computers* opens and before a screen window, at most once in five minutes. Nothing of the password is kept. The flyout now stays open while Windows asks. Without Hello, a program already running as you could read the stored access; with Hello it can't.
+
+* **A Mac's screen on a PC: the app closed as soon as the picture started.** The viewer listed the PC's monitors in a way Windows' projection can't enumerate, which threw on the window's thread and ended the whole app with nothing in the log. The monitors are now read by index, and anything thrown while the picture is being shown is logged and closes only that window, with a sentence.
+
 ### Fixed (Windows: a PC's screen through a relay)
 
 * A PC's screen seen through a relay could fall many seconds behind (23 s

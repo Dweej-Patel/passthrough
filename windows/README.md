@@ -32,7 +32,7 @@ windows/
   - None of these limits apply to the shell.
 - **For iPhones: Apple Devices** (Microsoft Store), which brings Apple Mobile Device Service.
 - **For Android: platform-tools** (`adb.exe`), found in `ANDROID_HOME`, `ANDROID_SDK_ROOT`, `%LOCALAPPDATA%\Android\Sdk` or `PATH`.
-- **For Your computers: Windows Hello** (a PIN is enough). Access to your other computers is kept behind it. A PC without Hello can't hold it.
+- **For Your computers: nothing to set up.** Access to your other computers is kept behind Windows Hello (a PIN is enough) when this PC has it, and behind your Windows password when it doesn't.
 
 ## Build
 
@@ -170,7 +170,7 @@ The tray icon gets an amber dot, and Windows shows a notification titled with wh
 
 While a phone views the screen, the PC's own screen shows the lock screen, and it stays locked afterwards.
 
-**Your computers** (the flyout's Remote tab) lists the computers a phone handed this PC access to. Windows Hello asks first.
+**Your computers** (the flyout's Remote tab) lists the computers a phone handed this PC access to. Windows Hello asks first, or Windows asks for your password on a PC without Hello.
 - **New shell** opens the other computer's shell in a new Windows Terminal tab, or a console window without Windows Terminal.
 - **Remove…** forgets this PC's copy of that computer, after asking. Use it for a computer you no longer use, or one that changed its keys: a phone can then share it again.
 - **Screen** opens a Mac's screen in a window. The keys go to the Mac: Alt acts as ⌘, Ctrl as ⌃ and the Windows key as ⌥. A setting swaps Alt and Ctrl, so Ctrl acts as ⌘. Alt+Tab, Alt+F4, screenshots and the media keys stay with this PC.
@@ -236,7 +236,7 @@ In this order, from a clean PC.
    - The PC shows "*iPhone* gave *MacBook* access to this PC's shell. Let it see the screen too?"
    - Allow it. The Mac opens a PC window. **Revoke…** in Settings ▸ Computers with access ends it.
 7. **Your computers.** Share your Mac with this PC from the phone. Then, in the flyout's Remote tab, choose *Show your computers*:
-   - Windows Hello asks first;
+   - Windows Hello asks first (your Windows password on a PC without Hello; try both);
    - **New shell** opens a Windows Terminal tab titled with the Mac's name;
    - **Screen** shows the Mac.
 8. **Update and remove.**

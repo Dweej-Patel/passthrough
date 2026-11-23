@@ -80,7 +80,8 @@ public sealed partial class FlyoutWindow : Window
                 DispatcherQueue.TryEnqueue(FitIfOpen);
                 return;
             }
-            if (!AppWindow.IsVisible) return;
+            // Windows' "is it you" prompt takes the focus: the flyout stays, so the list it opens is there to see.
+            if (!AppWindow.IsVisible || _confirming) return;
             AppWindow.Hide();
             _toggle.HiddenByDeactivation();
         };
@@ -88,10 +89,19 @@ public sealed partial class FlyoutWindow : Window
 
     public SessionViewModel ViewModel { get; }
 
+    private bool _confirming;
+
     private async void OnShowComputers(object sender, RoutedEventArgs e)
     {
+        _confirming = true;
         try { await ViewModel.ShowComputersAsync(); }
         catch (Exception ex) { Platform.LogFile.Error(ex); }
+        finally
+        {
+            _confirming = false;
+            // Focus comes back here, so the flyout closes on the next click elsewhere as it always does.
+            if (AppWindow.IsVisible) Activate();
+        }
     }
 
     private async void OnNewShell(object sender, RoutedEventArgs e)
