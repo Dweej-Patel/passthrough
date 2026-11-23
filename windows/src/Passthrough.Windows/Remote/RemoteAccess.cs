@@ -75,6 +75,8 @@ public sealed class RemoteAccess : IAccessAdmin, IDisposable
         // Clipboard sync with the computers viewing this account's screen: the service hands each one's connection here.
         ClipSync.ClipStaging.ClearAtLaunch();
         _clipHost = new ClipSync.ClipSyncHost(() => ClipSyncOn, OpenClipPipeAsync, log);
+        _clipHost.Changed += () => StatusChanged?.Invoke();
+        _clipHost.Notice += (title, text) => ClipNotice?.Invoke(title, text);
         _server.ClipOpen = _clipHost.OpenAsync;
         _server.LinkChanged += linked =>
         {
@@ -104,6 +106,12 @@ public sealed class RemoteAccess : IAccessAdmin, IDisposable
             if (!value) _clipHost.EndAll();
         }
     }
+
+    /// <summary>Whether a computer with access is syncing its clipboard with this account's now (the flyout says so beside its view).</summary>
+    public bool IsSyncingClipboard(string id) => _clipHost.IsSyncing(id);
+
+    /// <summary>Fires, on any thread, with a title and a sentence when a viewer drops files on this PC.</summary>
+    public event Action<string, string>? ClipNotice;
 
     private static string BuildName() =>
         typeof(RemoteAccess).Assembly.GetCustomAttributes(typeof(System.Reflection.AssemblyInformationalVersionAttribute), false)

@@ -39,6 +39,9 @@ public sealed class ClipSyncSessionTests : IDisposable
         }
     }
 
+    /// <summary>Each received file, as the session said it was whole.</summary>
+    private readonly List<string> _whole = [];
+
     private (Side Viewer, Side Host) Pair(Func<ulong?>? hostRoom = null)
     {
         var (a, b) = DuplexStreams.Create();
@@ -49,8 +52,11 @@ public sealed class ClipSyncSessionTests : IDisposable
     {
         var staging = Path.Combine(_root, name);
         var events = Channel.CreateUnbounded<ClipEvent>();
-        var session = new ClipSyncSession(stream, default, new ClipSyncOptions { Staging = staging, AcceptDrops = acceptDrops, Room = room ?? (() => null) },
-            e => events.Writer.TryWrite(e));
+        var session = new ClipSyncSession(stream, default, new ClipSyncOptions
+        {
+            Staging = staging, AcceptDrops = acceptDrops, Room = room ?? (() => ulong.MaxValue),
+            FileReceived = path => { lock (_whole) _whole.Add(path); },
+        }, e => events.Writer.TryWrite(e));
         var side = new Side { Session = session, Run = null!, Staging = staging };
         _ = Task.Run(async () => { await foreach (var e in events.Reader.ReadAllAsync()) side.Events.Writer.TryWrite(e); });
         side.Run = session.RunAsync();
@@ -139,6 +145,8 @@ public sealed class ClipSyncSessionTests : IDisposable
         Assert.Equal("a note", File.ReadAllText(Path.Combine(folder, "why_ 2.TXT")));
         Assert.Equal(4, received.TopLevel.Count);
         Assert.Equal((100, 200), (received.X, received.Y));
+        // Every file was said to be whole (each is then marked as from another computer), folders weren't.
+        lock (_whole) Assert.Equal(received.Items.Where(i => i.Format == ClipFormat.File).Select(i => i.Path).Order(), _whole.Order());
         // Passed on to another viewer under the names it came with.
         Assert.Contains(received.ToPayload().Items, i => i.Name == "Why?.txt" && i.Size == 6);
     }
@@ -224,17 +232,74 @@ public sealed class ClipSyncSessionTests : IDisposable
     [Fact]
     public async Task AFifthTransferAtOnce_IsDeclined_AndRoomCountsWhatIsStillComing()
     {
-        var (host, peer, fromHost) = Raw(room: () => 100);
+        // Each one-item drop of 20 bytes may take 20 + 4096 of the disk: room for four of them and 36 bytes more.
+        var (host, peer, fromHost) = Raw(room: () => 4 * (20 + 4096) + 36);
         for (uint t = 1; t <= 4; t++) await Write(peer, Offer(t, ClipKind.Drop, 1, 20));
         await Write(peer, Offer(5, ClipKind.Drop, 1, 1));
         Assert.Equal(new ClipMessage.Decline(5, ClipDecline.NoRoom), await Read<ClipMessage.Decline>(fromHost));
-        // One finishes: there is a place again, but only 100 - 3 x 20 bytes of room.
+        // One finishes: there is a place again, with the room less what the three still coming may write.
         await Write(peer, Item(1, 0, ClipFormat.File, 20, "a"), Data(1, 0, new string('x', 20)), new ClipMessage.Done(1));
         await host.Next<ClipEvent.Received>();
-        await Write(peer, Offer(6, ClipKind.Drop, 1, 41));
+        await Write(peer, Offer(6, ClipKind.Drop, 1, 57));
         Assert.Equal(new ClipMessage.Decline(6, ClipDecline.NoRoom), await Read<ClipMessage.Decline>(fromHost));
-        await Write(peer, Offer(7, ClipKind.Drop, 1, 40), Item(7, 0, ClipFormat.File, 40, "b"), Data(7, 0, new string('y', 40)), new ClipMessage.Done(7));
+        await Write(peer, Offer(7, ClipKind.Drop, 1, 56), Item(7, 0, ClipFormat.File, 56, "b"), Data(7, 0, new string('y', 56)), new ClipMessage.Done(7));
         Assert.Equal(7u, (await host.Next<ClipEvent.Received>()).Transfer.Transfer);
+    }
+
+    [Fact]
+    public async Task WithRoomThatCantBeRead_NoDropIsTaken_ButACopyStillIs()
+    {
+        var (host, peer, fromHost) = Raw(room: () => null);
+        await Write(peer, Offer(1, ClipKind.Drop, 1, 1));
+        Assert.Equal(new ClipMessage.Decline(1, ClipDecline.NoRoom), await Read<ClipMessage.Decline>(fromHost));
+        await Write(peer, Offer(2, ClipKind.Clipboard, 1, 1), Item(2, 0, ClipFormat.File, 1, "a"), Data(2, 0, "x"), new ClipMessage.Done(2));
+        Assert.Equal(2u, (await host.Next<ClipEvent.Received>()).Transfer.Transfer);
+    }
+
+    [Fact]
+    public async Task ALargeCopyThePersonStops_IsDeclined_AndWhatCameIsThrownAway()
+    {
+        var (host, peer, fromHost) = Raw();
+        await Write(peer, Offer(1, ClipKind.Clipboard, 2, 8), Item(1, 0, ClipFormat.File, 4, "a.bin"), Data(1, 0, "ab"));
+        await host.Next<ClipEvent.Incoming>();
+        host.Session.StopIncoming(1);
+        // Acted on as its next bytes arrive.
+        await Write(peer, Data(1, 0, "cd"));
+        Assert.Equal(new ClipMessage.Decline(1, ClipDecline.Failed), await Read<ClipMessage.Decline>(fromHost));
+        Assert.Equal(1u, (await host.Next<ClipEvent.IncomingEnded>()).Transfer);
+        Assert.Empty(Directory.GetDirectories(host.Staging));
+        // One already finished isn't touched, and the session goes on.
+        host.Session.StopIncoming(1);
+        await Write(peer, Offer(2, ClipKind.Clipboard, 1, 1), Item(2, 0, ClipFormat.Text, 1), Data(2, 0, "x"), new ClipMessage.Done(2));
+        Assert.Equal(2u, (await host.Next<ClipEvent.Received>()).Transfer.Transfer);
+    }
+
+    [Fact]
+    public async Task AFileIsOpenedTheWayTheSideSays_AndOneItRefusesAbandonsTheTransfer()
+    {
+        var (a, b) = DuplexStreams.Create();
+        var host = Make(b, "host", true, null);
+        var events = Channel.CreateUnbounded<ClipEvent>();
+        var opened = new List<string>();
+        var good = Path.Combine(_root, "good.txt");
+        File.WriteAllText(good, "good");
+        var viewer = new ClipSyncSession(a, default, new ClipSyncOptions
+        {
+            Staging = Path.Combine(_root, "viewer"),
+            OpenToSend = path =>
+            {
+                lock (opened) opened.Add(path);
+                // What a PC says of a link swapped in for the file since it was listed.
+                if (path.EndsWith("swapped.txt", StringComparison.Ordinal)) throw new IOException("not a plain file");
+                return new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read, 1, FileOptions.Asynchronous);
+            },
+        }, e => events.Writer.TryWrite(e));
+        _ = viewer.RunAsync();
+        var first = viewer.Send(new ClipPayload([ClipItem.File("good.txt", 4, good)]), ClipKind.Drop);
+        Assert.Equal(first, (await host.Next<ClipEvent.Received>()).Transfer.Transfer);
+        var second = viewer.Send(new ClipPayload([ClipItem.File("swapped.txt", 4, Path.Combine(_root, "swapped.txt"))]), ClipKind.Drop);
+        Assert.Equal(second, (await host.Next<ClipEvent.IncomingEnded>()).Transfer);
+        lock (opened) Assert.Equal([good, Path.Combine(_root, "swapped.txt")], opened);
     }
 
     [Fact]

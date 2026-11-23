@@ -20,15 +20,17 @@ public enum RemoteTone
 }
 
 /// <summary>A phone or computer with access, as the service lists it, and the shells it has open in this account.</summary>
-public sealed record RemoteDevice(string Id, string Name, bool IsComputer, int Connections, bool Viewing, int Shells);
+/// <param name="Syncing">It is viewing the screen and its clipboard is synced with this account's.</param>
+public sealed record RemoteDevice(string Id, string Name, bool IsComputer, int Connections, bool Viewing, int Shells, bool Syncing = false);
 
 /// <summary>One device on this PC now: connected, with shells open, or viewing the screen.</summary>
-public sealed record OnThisPc(string Id, string Name, bool IsComputer, int Shells, bool Viewing, bool Connected)
+public sealed record OnThisPc(string Id, string Name, bool IsComputer, int Shells, bool Viewing, bool Connected, bool Syncing = false)
 {
-    /// <summary>"Viewing the screen · 2 shells open", "1 shell open", "Connected".</summary>
+    /// <summary>"Viewing the screen · syncing the clipboard · 2 shells open", "1 shell open", "Connected".</summary>
     public string Detail => string.Join(" · ", new[]
     {
         Viewing ? "Viewing the screen" : null,
+        Viewing && Syncing ? "syncing the clipboard" : null,
         Shells switch { 0 => null, 1 => "1 shell open", var n => $"{n} shells open" },
         !Viewing && Shells == 0 ? "Connected" : null,
     }.OfType<string>());
@@ -46,7 +48,7 @@ public static class RemoteSummary
     /// <summary>The devices on this PC now, viewers first, then by name.</summary>
     public static IReadOnlyList<OnThisPc> Here(IEnumerable<RemoteDevice> devices) =>
         [.. devices.Where(d => d.Connections > 0 || d.Shells > 0 || d.Viewing)
-            .Select(d => new OnThisPc(d.Id, d.Name, d.IsComputer, d.Shells, d.Viewing, d.Connections > 0))
+            .Select(d => new OnThisPc(d.Id, d.Name, d.IsComputer, d.Shells, d.Viewing, d.Connections > 0, d.Syncing))
             .OrderByDescending(d => d.Viewing).ThenBy(d => d.Name, StringComparer.CurrentCultureIgnoreCase)];
 
     /// <summary>The header; null while Remote access was never set up (the cable's header stays).</summary>

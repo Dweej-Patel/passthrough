@@ -3,18 +3,25 @@ using Passthrough.Core.ClipSync;
 
 namespace Passthrough.Windows.ClipSync;
 
+/// <summary>A line a screen window shows about clipboard sync: one that stays until replaced, or goes after a few seconds; with buttons when it asks something.</summary>
+public sealed record ClipStatus(string Text, bool Hold, IReadOnlyList<ClipStatusAction> Actions);
+
+/// <summary>A button beside a <see cref="ClipStatus"/>; <see cref="Run"/> may be called on any thread.</summary>
+public sealed record ClipStatusAction(string Label, Action Run);
+
 /// <summary>
-/// A screen window's side of clipboard sync with the computer it shows (protocol/README.md, "Clipboard sync"): this
-/// PC's copies go there, that computer's land here, and files dropped on the window are sent to be dropped there. One
-/// per window, across reconnects, so the copies it keeps for pasting span them. <c>onStatus</c> gets a line to show
-/// (and whether it stays until replaced; null clears it), on any thread.
+/// A screen window's side of clipboard sync with the computer it shows (protocol/README.md, "Clipboard sync"): what is
+/// copied on this PC after the window opens goes there, that computer's copies land here, and files dropped on the
+/// window are sent to be dropped there. A copy of files over 50 MB asks before it is sent, and one that large coming
+/// in can be stopped. One per window, across reconnects, so the copies it keeps for pasting span them.
+/// <c>onStatus</c> gets what to show (null clears it), on any thread.
 /// </summary>
 public sealed class ClipSyncViewer : IDisposable
 {
-    private const ulong Large = 20 << 20;
+    private const ulong Large = 20_000_000;
 
     private readonly string _host;
-    private readonly Action<string?, bool> _onStatus;
+    private readonly Action<ClipStatus?> _onStatus;
     private readonly Action<string>? _log;
     private readonly Func<WinClipboard> _clipboard;
     private readonly string _staging = Path.Combine(ClipStaging.Root, "viewer-" + Guid.NewGuid().ToString("N"));
@@ -26,9 +33,10 @@ public sealed class ClipSyncViewer : IDisposable
     private IAsyncDisposable? _owner;
     private IDisposable? _watch;
     private uint? _copyingOut, _copyingIn;
-    private bool _offered;
+    /// <summary>A copy of files too large to send unasked, waiting for Send or Don't send.</summary>
+    private ClipPayload? _asking;
 
-    public ClipSyncViewer(string hostName, Action<string?, bool> onStatus, Action<string>? log = null, Func<WinClipboard>? clipboard = null)
+    public ClipSyncViewer(string hostName, Action<ClipStatus?> onStatus, Action<string>? log = null, Func<WinClipboard>? clipboard = null)
     {
         _host = hostName;
         _onStatus = onStatus;
@@ -40,36 +48,21 @@ public sealed class ClipSyncViewer : IDisposable
 
     /// <summary>
     /// Syncs over <paramref name="stream"/> (after <c>clipSyncReady</c>) until it ends or <see cref="Stop"/>;
-    /// <paramref name="ended"/> runs when the stream ends by itself. What's on this PC's clipboard now goes over the
-    /// first time only (not on a reconnect, where it would replace what was copied there meanwhile), unless it's files.
+    /// <paramref name="ended"/> runs when the stream ends by itself. Nothing is sent as it starts: only what is copied
+    /// from then on goes across, never what was on the clipboard when the window opened.
     /// </summary>
     public void Start(Stream stream, ReadOnlyMemory<byte> initialBytes, IAsyncDisposable? owner, Action ended)
     {
         Stop(forget: false);
         ClipSyncSession? session = null;
-        session = new ClipSyncSession(stream, initialBytes, new ClipSyncOptions { Staging = _staging, AcceptDrops = false }, e => Handle(session!, e, ended));
-        bool offer;
+        session = new ClipSyncSession(stream, initialBytes, ClipFileSystem.Options(_staging, acceptDrops: false), e => Handle(session!, e, ended));
         lock (_lock)
         {
             _session = session;
             _owner = owner;
-            _watch = _clipboard().Watch(snapshot => Copied(snapshot, announce: true));
-            offer = !_offered;
-            _offered = true;
+            _watch = _clipboard().Watch(Copied);
         }
         _ = session.RunAsync();
-        if (offer) _ = OfferCurrentAsync();
-    }
-
-    private async Task OfferCurrentAsync()
-    {
-        try
-        {
-            var snapshot = await _clipboard().CurrentAsync().ConfigureAwait(false);
-            // Files would be an upload nobody asked for.
-            if (snapshot is ClipSnapshot.Contents { Payload.HasFiles: false }) Copied(snapshot, announce: false);
-        }
-        catch (Exception e) when (e is InvalidOperationException or IOException or COMException or OperationCanceledException) { }
     }
 
     /// <summary>Ends the sync. With <paramref name="forget"/> (the window closed, or sync was turned off) the received files go too.</summary>
@@ -85,11 +78,8 @@ public sealed class ClipSyncViewer : IDisposable
             _watch = null;
             _drops.Clear();
             _copyingIn = _copyingOut = null;
-            if (forget)
-            {
-                _offered = false;
-                _clipboardFolders.Clear();
-            }
+            _asking = null;
+            if (forget) _clipboardFolders.Clear();
         }
         session?.Close();
         if (owner is not null) _ = owner.DisposeAsync().AsTask();
@@ -119,28 +109,59 @@ public sealed class ClipSyncViewer : IDisposable
         });
     }
 
-    private void Copied(ClipSnapshot snapshot, bool announce)
+    private void Copied(ClipSnapshot snapshot)
     {
         ClipSyncSession? session;
         lock (_lock) session = _session;
         if (session is null) return;
         switch (snapshot)
         {
+            case ClipSnapshot.Contents { Payload: var payload } when payload.HasFiles && payload.Total > ClipSyncWire.AskAbove:
+                // A big upload nobody asked for: it waits for a yes. A newer copy replaces the question.
+                lock (_lock) _asking = payload;
+                _onStatus(new ClipStatus($"Send {Size(payload.Total)} to {_host}?", true,
+                [
+                    new ClipStatusAction("Send", () => Answer(payload, send: true)),
+                    new ClipStatusAction("Don't send", () => Answer(payload, send: false)),
+                ]));
+                break;
             case ClipSnapshot.Contents { Payload: var payload }:
-                var id = session.Send(payload, ClipKind.Clipboard);
-                bool replaced;
-                lock (_lock)
-                {
-                    replaced = _copyingOut is not null;
-                    _copyingOut = announce && payload.Total > Large ? id : null;
-                }
-                if (announce && payload.Total > Large) Status($"Copying {Size(payload.Total)} to {_host}…", hold: true);
-                else if (replaced) Status(null); // the big copy was replaced by this one
+                bool wasAsking;
+                lock (_lock) { wasAsking = _asking is not null; _asking = null; }
+                Send(session, payload, cleared: wasAsking);
                 break;
             case ClipSnapshot.TooLarge:
-                if (announce) Status("Too large to sync (over 500 MB). Drag it onto the window instead.");
+                lock (_lock) _asking = null;
+                Status("Too large to sync (over 500 MB). Drag it onto the window instead.");
                 break;
         }
+    }
+
+    private void Send(ClipSyncSession session, ClipPayload payload, bool cleared)
+    {
+        var id = session.Send(payload, ClipKind.Clipboard);
+        bool replaced;
+        lock (_lock)
+        {
+            replaced = _copyingOut is not null || cleared;
+            _copyingOut = payload.Total > Large ? id : null;
+        }
+        if (payload.Total > Large) Status($"Copying {Size(payload.Total)} to {_host}…", hold: true);
+        else if (replaced) Status(null); // the big copy, or the question about it, was replaced by this one
+    }
+
+    /// <summary>Send or Don't send, for the copy that asked (a newer copy since makes the answer moot).</summary>
+    private void Answer(ClipPayload payload, bool send)
+    {
+        ClipSyncSession? session;
+        lock (_lock)
+        {
+            if (!ReferenceEquals(_asking, payload)) return;
+            _asking = null;
+            session = _session;
+        }
+        if (send && session is not null) Send(session, payload, cleared: false);
+        else Status(send ? $"Clipboard sync with {_host} isn't running, so it wasn't sent." : null);
     }
 
     private void Handle(ClipSyncSession session, ClipEvent e, Action ended)
@@ -159,7 +180,11 @@ public sealed class ClipSyncViewer : IDisposable
                 break;
             case ClipEvent.Incoming { Kind: ClipKind.Clipboard } incoming when incoming.Total > Large:
                 lock (_lock) _copyingIn = incoming.Transfer;
-                Status($"Copying {Size(incoming.Total)} from {_host}…", hold: true);
+                // A large one can be stopped: it is declined, and what came of it thrown away.
+                var stop = incoming.Total > ClipSyncWire.AskAbove
+                    ? new[] { new ClipStatusAction("Stop", () => session.StopIncoming(incoming.Transfer)) }
+                    : [];
+                _onStatus(new ClipStatus($"Copying {Size(incoming.Total)} from {_host}…", true, stop));
                 break;
             case ClipEvent.IncomingEnded ended1:
                 bool shown;
@@ -218,6 +243,7 @@ public sealed class ClipSyncViewer : IDisposable
                     _watch = null;
                     _drops.Clear();
                     _copyingIn = _copyingOut = null;
+                    _asking = null;
                 }
                 if (owner is not null) _ = owner.DisposeAsync().AsTask();
                 if (closed.Error is { } error) _log?.Invoke($"clipsync: the sync with {_host} ended ({error.GetType().Name})");
@@ -253,16 +279,17 @@ public sealed class ClipSyncViewer : IDisposable
         catch (Exception e) when (e is IOException or UnauthorizedAccessException) { }
     }
 
-    private void Status(string? text, bool hold = false) => _onStatus(text, hold);
+    private void Status(string? text, bool hold = false) => _onStatus(text is null ? null : new ClipStatus(text, hold, []));
 
     private static string Things(int count, ulong? bytes = null) =>
         (count == 1 ? "1 item" : $"{count} items") + (bytes is > 0 ? $" ({Size(bytes.Value)})" : "");
 
+    /// <summary>A size as the other computer says it too: in thousands, so the same copy reads the same on both.</summary>
     internal static string Size(ulong bytes) => bytes switch
     {
-        >= 1 << 30 => $"{bytes / (double)(1 << 30):0.#} GB",
-        >= 1 << 20 => $"{bytes / (double)(1 << 20):0.#} MB",
-        >= 1 << 10 => $"{bytes / (double)(1 << 10):0} KB",
+        >= 1_000_000_000 => $"{bytes / 1e9:0.#} GB",
+        >= 1_000_000 => $"{bytes / 1e6:0.#} MB",
+        >= 1_000 => $"{bytes / 1e3:0} KB",
         _ => $"{bytes} bytes",
     };
 }

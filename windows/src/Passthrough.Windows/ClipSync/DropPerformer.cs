@@ -27,6 +27,9 @@ public static class DropPerformer
     private const int Lead = 60;
     private const int Side = 24;
     private static readonly Lock Busy = new();
+    /// <summary>Drops waiting for the one in progress: past this many, a new one is not taken.</summary>
+    public const int MaxWaiting = 3;
+    private static int _waiting;
 
     /// <summary>What is at a point: the top-level window there and the process that owns it.</summary>
     public readonly record struct Target(IntPtr Window, uint Process);
@@ -58,6 +61,18 @@ public static class DropPerformer
     public static DropOutcome Drop(IReadOnlyList<string> paths, int x, int y, TimeSpan limit, Action<string>? log = null)
     {
         if (paths.Count == 0) return DropOutcome.NotTaken;
+        if (Interlocked.Increment(ref _waiting) > MaxWaiting + 1)
+        {
+            Interlocked.Decrement(ref _waiting);
+            log?.Invoke("drop: too many drops are waiting; this one isn't dragged");
+            return DropOutcome.NotTaken;
+        }
+        try { return DropNow(paths, x, y, limit, log); }
+        finally { Interlocked.Decrement(ref _waiting); }
+    }
+
+    private static DropOutcome DropNow(IReadOnlyList<string> paths, int x, int y, TimeSpan limit, Action<string>? log)
+    {
         lock (Busy)
         {
             var run = new Run(paths, x, y, limit, log);

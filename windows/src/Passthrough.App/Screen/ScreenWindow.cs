@@ -118,6 +118,8 @@ internal sealed class ScreenWindow : Window, IScreenView
     private int _clipGeneration;
     private Stopwatch? _clipSince;
     private bool _clipHeld;
+    /// <summary>The buttons a clipboard sync line asks with (Send / Don't send, Stop), beside it.</summary>
+    private readonly StackPanel _clipActions = new() { Orientation = Orientation.Horizontal, Spacing = 6, VerticalAlignment = VerticalAlignment.Center };
 
     public ScreenWindow(ReachableComputer computer, IComputerIdentity identity, Func<Task<bool>> confirm, Passthrough.Core.Storage.ISettingsStore? settings = null)
     {
@@ -199,6 +201,8 @@ internal sealed class ScreenWindow : Window, IScreenView
         var left = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 12 };
         left.Children.Add(_subtitle);
         left.Children.Add(_toast);
+        left.Children.Add(_clipActions);
+        Microsoft.UI.Xaml.Automation.AutomationProperties.SetLiveSetting(_toast, Microsoft.UI.Xaml.Automation.Peers.AutomationLiveSetting.Polite);
         bar.Children.Add(left);
         var buttons = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 6 };
         buttons.Children.Add(_clipButton);
@@ -497,7 +501,7 @@ internal sealed class ScreenWindow : Window, IScreenView
             return;
         }
         _clipShell = null; // it let go of the stream
-        _clipViewer ??= new ClipSyncViewer(_name, (text, hold) => OnUi(() => ClipStatus(text, hold)), LogFile.Write);
+        _clipViewer ??= new ClipSyncViewer(_name, status => OnUi(() => ShowClipStatus(status)), LogFile.Write);
         _clipActive = true;
         _clipSince = Stopwatch.StartNew();
         ShowClipButtons();
@@ -550,7 +554,7 @@ internal sealed class ScreenWindow : Window, IScreenView
         _clipViewer?.Stop(forget);
         _clipActive = false;
         ShowClipButtons();
-        if (_clipHeld) ClipStatus(null, false);
+        if (_clipHeld) ShowClipStatus(null);
     }
 
     /// <summary>While sync runs, Ctrl+C and ⌘V do the work: the two buttons give way to it.</summary>
@@ -561,19 +565,40 @@ internal sealed class ScreenWindow : Window, IScreenView
         if (_copyButton is not null) _copyButton.Visibility = visibility;
     }
 
-    /// <summary>What sync is doing, beside the subtitle: a line that stays until replaced, or one that goes after a few seconds.</summary>
-    private void ClipStatus(string? text, bool hold)
+    /// <summary>
+    /// What sync is doing, beside the subtitle: a line that stays until replaced (with its buttons, when it asks
+    /// something), or one that goes after a few seconds.
+    /// </summary>
+    private void ShowClipStatus(ClipStatus? status)
     {
         if (_phase == Phase.Closed) return;
-        if (text is null)
+        _clipActions.Children.Clear();
+        if (status is null)
         {
             if (_clipHeld) { _toastId++; _toast.Text = ""; }
             _clipHeld = false;
             return;
         }
-        _clipHeld = hold;
-        if (hold) { _toastId++; _toast.Text = text; }
-        else Toast(text);
+        _clipHeld = status.Hold;
+        if (!status.Hold) { Toast(status.Text); return; }
+        _toastId++;
+        _toast.Text = status.Text;
+        foreach (var action in status.Actions)
+        {
+            var button = new Button { Content = action.Label, Padding = new Thickness(10, 2, 10, 2) };
+            AutomationName(button, action.Label);
+            button.Click += (_, _) =>
+            {
+                // Answered: the question goes at once; what happens next says itself.
+                _clipActions.Children.Clear();
+                _toastId++;
+                _toast.Text = "";
+                _clipHeld = false;
+                action.Run();
+                _typing.Focus(FocusState.Programmatic);
+            };
+            _clipActions.Children.Add(button);
+        }
     }
 
     private void OnDragOver(object sender, DragEventArgs e)
@@ -630,6 +655,9 @@ internal sealed class ScreenWindow : Window, IScreenView
 
     private async void Toast(string text)
     {
+        // A passing line replaces a held one, and its buttons with it.
+        _clipActions.Children.Clear();
+        _clipHeld = false;
         var id = ++_toastId;
         _toast.Text = text;
         await Task.Delay(TimeSpan.FromSeconds(4));

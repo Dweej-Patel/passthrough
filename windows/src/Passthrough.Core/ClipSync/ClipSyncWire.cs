@@ -60,7 +60,14 @@ public static class ClipSyncWire
     /// <summary>Most items in a clipboard transfer.</summary>
     public const int MaxItems = 10_000;
     /// <summary>Most items in a drop this side takes.</summary>
-    public const uint MaxDropItems = 200_000;
+    public const uint MaxDropItems = 50_000;
+    /// <summary>What each item of a drop counts against free space on top of its size (a folder or an empty file still takes room).</summary>
+    public const ulong DropItemOverhead = 4096;
+    /// <summary>
+    /// A copy of files larger than this (50 MB, counted in millions of bytes as sizes are shown) isn't sent until the
+    /// person says so; a copy that large coming in can be stopped.
+    /// </summary>
+    public const ulong AskAbove = 50_000_000;
     public const int MaxNameBytes = 1024;
     public const int MaxNamePartBytes = 255;
     /// <summary>Clipboard transfers only: text, RTF and HTML each; PNG; files and folders in all.</summary>
@@ -230,14 +237,24 @@ public static class ClipSyncWire
     /// <summary>The folder a name is in, or null at the top.</summary>
     public static string? Parent(string name) => name.LastIndexOf('/') is >= 0 and var slash ? name[..slash] : null;
 
-    /// <summary>Why a transfer's header can't be taken, or null. <paramref name="room"/>: bytes free where files go.</summary>
-    public static ClipDecline? Refusal(ClipOffer offer, ulong? room = null, uint maxDropItems = MaxDropItems)
+    /// <summary>What a transfer may take of the disk: its bytes, and for a drop something for each item too.</summary>
+    public static ulong Footprint(ClipOffer offer)
+    {
+        var overhead = offer.Kind == ClipKind.Drop ? offer.Count * DropItemOverhead : 0;
+        return offer.Total > ulong.MaxValue - overhead ? ulong.MaxValue : offer.Total + overhead;
+    }
+
+    /// <summary>
+    /// Why a transfer's header can't be taken, or null. <paramref name="room"/>: bytes free where files go; unknown
+    /// (null), a drop is refused, since it has no limit of its own.
+    /// </summary>
+    public static ClipDecline? Refusal(ClipOffer offer, ulong? room, uint maxDropItems = MaxDropItems)
     {
         var cap = offer.Kind == ClipKind.Clipboard ? MaxItems : maxDropItems;
         if (offer.Count == 0) return ClipDecline.BadOffer;
         if (offer.Count > cap) return ClipDecline.TooLarge;
         if (offer.Kind == ClipKind.Clipboard && offer.Total > MaxClipboardFiles + 2 * MaxClipboardText + MaxClipboardImage) return ClipDecline.TooLarge;
-        if (room is { } free && offer.Total > free) return ClipDecline.NoRoom;
+        if (room is { } free ? Footprint(offer) > free : offer.Kind == ClipKind.Drop) return ClipDecline.NoRoom;
         return null;
     }
 

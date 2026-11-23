@@ -26,8 +26,17 @@ public sealed class ClipSyncOptions
     /// <summary>A host takes its viewers' drops; a viewer takes none from its host (declined at the offer, 4).</summary>
     public bool AcceptDrops { get; init; }
 
-    /// <summary>Bytes free for received files (null: unknown, nothing is declined for room). Unset: the staging folder's drive, less 1 GiB.</summary>
+    /// <summary>Bytes free for received files (null: unknown, and then no drop is taken). Unset: the staging folder's drive, less 1 GiB.</summary>
     public Func<ulong?>? Room { get; init; }
+
+    /// <summary>
+    /// Opens a file to send. Unset: an ordinary open. A PC opens the file itself and never what a link put in its
+    /// place since it was listed (<c>FILE_FLAG_OPEN_REPARSE_POINT</c>, then a check that it is a plain file).
+    /// </summary>
+    public Func<string, FileStream>? OpenToSend { get; init; }
+
+    /// <summary>Told each received file once it is whole and closed (a PC marks it as from another computer, so Windows warns before running it).</summary>
+    public Action<string>? FileReceived { get; init; }
 
     /// <summary>One part of a received name as this file system can hold it (<see cref="ClipNames.WindowsPart"/> on a PC).</summary>
     public Func<string, string> LocalPart { get; init; } = ClipNames.WindowsPart;
@@ -241,7 +250,12 @@ public sealed class ClipSyncSession
         {
             if (item.Format == ClipFormat.File && item.Size > 0)
             {
-                try { t.File = new FileStream(item.Path!, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete, 1, FileOptions.Asynchronous | FileOptions.SequentialScan); }
+                try
+                {
+                    t.File = _options.OpenToSend is { } open
+                        ? open(item.Path!)
+                        : new FileStream(item.Path!, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete, 1, FileOptions.Asynchronous | FileOptions.SequentialScan);
+                }
                 catch (Exception e) when (e is IOException or UnauthorizedAccessException or ArgumentException or NotSupportedException) { return Abandon(t); }
             }
             t.Announced = true;
@@ -310,8 +324,19 @@ public sealed class ClipSyncSession
         public readonly HashSet<string> TopTaken = new(StringComparer.Ordinal);
     }
 
+    private readonly System.Collections.Concurrent.ConcurrentQueue<uint> _stops = new();
+
+    /// <summary>
+    /// The person here doesn't want a transfer the other side is sending (Stop on a large copy): it is declined (5)
+    /// and what came of it thrown away. Nothing happens if it already finished.
+    /// </summary>
+    public void StopIncoming(uint transfer) => _stops.Enqueue(transfer);
+
     private async Task HandleAsync(ClipMessage message)
     {
+        // Asked from another thread; acted on here, where the transfers are. One still coming always has another message due.
+        while (_stops.TryDequeue(out var stopped))
+            if (_incoming.TryGetValue(stopped, out var unwanted)) Decline(unwanted, ClipDecline.Failed);
         switch (message)
         {
             case ClipMessage.Offer { Value: var offer }:
@@ -343,6 +368,8 @@ public sealed class ClipSyncSession
                 if (!_incoming.TryGetValue(d.Transfer, out var done)) break;
                 if (CompleteCurrent(done) is { } incomplete) { Decline(done, incomplete); break; }
                 if (!done.Check.IsComplete) { Decline(done, ClipDecline.BadOffer); break; }
+                if (_options.FileReceived is { } received)
+                    foreach (var file in done.Items.Where(i => i.Format == ClipFormat.File && i.Path is not null)) received(file.Path!);
                 _incoming.Remove(d.Transfer);
                 Emit(new ClipEvent.Received(new ReceivedTransfer(d.Transfer, done.Offer.Kind, done.Offer.X, done.Offer.Y, done.Items, done.Folder)));
                 break;
@@ -400,7 +427,11 @@ public sealed class ClipSyncSession
     {
         var free = _options.Room is { } room ? room() : DriveRoom(_options.Staging);
         if (free is not { } bytes) return null;
-        var promised = _incoming.Values.Aggregate(0UL, (sum, t) => sum + (t.Offer.Total - Math.Min(t.Received, t.Offer.Total)));
+        var promised = _incoming.Values.Aggregate(0UL, (sum, t) =>
+        {
+            var left = ClipSyncWire.Footprint(t.Offer) - Math.Min(t.Received, t.Offer.Total);
+            return left > ulong.MaxValue - sum ? ulong.MaxValue : sum + left;
+        });
         return bytes > promised ? bytes - promised : 0;
     }
 

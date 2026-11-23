@@ -104,10 +104,17 @@ public class ClipSyncWireTests
         foreach (var o in C.GetProperty("offers").EnumerateArray())
         {
             var offer = new ClipOffer(1, (ClipKind)o.GetProperty("kind").GetByte(), 0, 0, o.GetProperty("count").GetUInt32(), o.GetProperty("total").GetUInt64());
-            Assert.Equal(Reason(o), ClipSyncWire.Refusal(offer));
+            Assert.Equal(Reason(o), ClipSyncWire.Refusal(offer, room: ulong.MaxValue));
         }
-        Assert.Equal(ClipDecline.NoRoom, ClipSyncWire.Refusal(new ClipOffer(1, ClipKind.Drop, 0, 0, 1, 11), room: 10));
-        Assert.Null(ClipSyncWire.Refusal(new ClipOffer(1, ClipKind.Drop, 0, 0, 1, 10), room: 10));
+        // A drop counts its bytes and 4096 for each item against the room; a copy counts its bytes.
+        Assert.Equal(ClipDecline.NoRoom, ClipSyncWire.Refusal(new ClipOffer(1, ClipKind.Drop, 0, 0, 2, 10), room: 10 + 2 * 4096 - 1));
+        Assert.Null(ClipSyncWire.Refusal(new ClipOffer(1, ClipKind.Drop, 0, 0, 2, 10), room: 10 + 2 * 4096));
+        Assert.Equal(ClipDecline.NoRoom, ClipSyncWire.Refusal(new ClipOffer(1, ClipKind.Clipboard, 0, 0, 2, 11), room: 10));
+        Assert.Null(ClipSyncWire.Refusal(new ClipOffer(1, ClipKind.Clipboard, 0, 0, 2, 10), room: 10));
+        // Room that can't be read: no drop is taken (it has no limit of its own); a copy still is (it has).
+        Assert.Equal(ClipDecline.NoRoom, ClipSyncWire.Refusal(new ClipOffer(1, ClipKind.Drop, 0, 0, 1, 1), room: null));
+        Assert.Null(ClipSyncWire.Refusal(new ClipOffer(1, ClipKind.Clipboard, 0, 0, 1, 1), room: null));
+        Assert.Equal(ulong.MaxValue, ClipSyncWire.Footprint(new ClipOffer(1, ClipKind.Drop, 0, 0, 2, ulong.MaxValue - 5)));
     }
 
     [Fact]

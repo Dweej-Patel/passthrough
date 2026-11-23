@@ -71,6 +71,15 @@ public sealed class ClipSyncHost : IDisposable
     private readonly Func<WinClipboard> _clipboard;
     private readonly Func<bool> _viewed;
     private readonly Action<string>? _log;
+
+    /// <summary>Fires, on any thread, when a computer starts or stops syncing (the flyout says who is).</summary>
+    public event Action? Changed;
+
+    /// <summary>
+    /// Something the person at this PC should see as it happens (a title and a sentence): a viewer is dropping files
+    /// here, or they went to Downloads.
+    /// </summary>
+    public event Action<string, string>? Notice;
     private readonly string _staging = Path.Combine(ClipStaging.Root, "host");
     private readonly Lock _lock = new();
     private readonly Dictionary<string, Entry> _sessions = new(StringComparer.Ordinal);
@@ -99,8 +108,8 @@ public sealed class ClipSyncHost : IDisposable
         _viewed = viewed ?? RemoteSession.IsRemote;
     }
 
-    /// <summary>The computers syncing with this clipboard now, by what they're called.</summary>
-    public IReadOnlyList<string> Syncing { get { lock (_lock) return [.. _sessions.Values.Select(e => e.Label)]; } }
+    /// <summary>Whether the device with this id is syncing with this clipboard now.</summary>
+    public bool IsSyncing(string id) { lock (_lock) return _sessions.ContainsKey(id); }
 
     /// <summary>
     /// The service asks for one device (<see cref="PipeSessionServer.ClipOpen"/>): an error's wire name, or null, after
@@ -138,7 +147,7 @@ public sealed class ClipSyncHost : IDisposable
             return;
         }
         Entry? entry = null;
-        var session = new ClipSyncSession(pipe, default, new ClipSyncOptions { Staging = _staging, AcceptDrops = true }, e =>
+        var session = new ClipSyncSession(pipe, default, ClipFileSystem.Options(_staging, acceptDrops: true), e =>
         {
             if (entry is { } mine) Handle(phone, mine, e);
         });
@@ -155,6 +164,7 @@ public sealed class ClipSyncHost : IDisposable
         // Switched off, or no longer viewed, while the pipe opened.
         if (!_enabled() || !_viewed()) session.Close();
         _log?.Invoke($"clipsync: {label} syncs the clipboard");
+        Changed?.Invoke();
         await session.RunAsync().ConfigureAwait(false);
         lock (_lock)
         {
@@ -166,6 +176,7 @@ public sealed class ClipSyncHost : IDisposable
             }
         }
         _log?.Invoke($"clipsync: {label}'s sync ended");
+        Changed?.Invoke();
     }
 
     /// <summary>Something was copied on this PC: it goes to every viewer. Too large can't be said on their clipboards; it's simply not sent.</summary>
@@ -234,8 +245,12 @@ public sealed class ClipSyncHost : IDisposable
             if (files.Count == 0 || !_enabled()) return;
             // Still the same window there as when the files were let go, and still a session someone is looking at.
             var same = noted.At is { } then && DropPerformer.At(noted.X, noted.Y) == then && _viewed();
+            var things = files.Count == 1 ? "1 item" : $"{files.Count} items";
+            // Someone at this PC sees its pointer move by itself: said as it happens.
+            if (same) Notice?.Invoke("Files dropped on this PC", $"{entry.Label} is dropping {things} here…");
             var outcome = same ? DropPerformer.Drop(files, noted.X, noted.Y, DropLimit, _log) : DropOutcome.NotTaken;
             if (!same) _log?.Invoke($"clipsync: what was at {entry.Label}'s drop point has changed; the files go to Downloads");
+            if (outcome != DropOutcome.Dropped) Notice?.Invoke("Files dropped on this PC", $"{entry.Label} dropped {things} into Downloads.");
             status = outcome switch
             {
                 DropOutcome.Dropped => ClipResult.Placed,

@@ -828,13 +828,13 @@
       },
       {
         "kind": 1,
-        "count": 200000,
+        "count": 50000,
         "total": 0,
         "decline": null
       },
       {
         "kind": 1,
-        "count": 200001,
+        "count": 50001,
         "total": 0,
         "decline": 1
       }

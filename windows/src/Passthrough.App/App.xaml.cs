@@ -114,6 +114,8 @@ public partial class App : Application
 
             // Remote access: phones' shells on this PC, through the background service (which faces the network and holds their keys).
             _remote = new RemoteAccess(settings, secrets, Path.Combine(AppFolder.Path, "ShellHistory"), Environment.MachineName, LogFile.Write);
+            // A viewer dropping files moves this PC's pointer by itself: whoever is at it is told as it happens.
+            _remote.ClipNotice += (title, text) => _flyout?.DispatcherQueue.TryEnqueue(() => _tray?.Notify(title, text));
             _session = new HostSession(
                 directory, secrets, settings, Environment.MachineName,
                 // The cable peer check: only a channel whose far end is Apple's device service or this user's adb carries a shell grant.
