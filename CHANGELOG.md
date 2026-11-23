@@ -493,6 +493,10 @@ these steps as written and check each one before building.
   `doctor` says when the tray app runs as administrator; the app logs why it
   doesn't link to the service then.
 
+### Added (Windows: a Mac's screen fitted to the PC's window)
+
+* **Fit to window** in a Mac's screen window on a PC: the Mac makes a display in the window's shape (as it does for a phone), so the picture fills the window and follows it when resized, half a second after the resizing stops. The Mac's display gets as many points as the window has, so text is the size the PC's is. Remembered per computer. If the Mac can't make the display (another view has one), the window says so and shows the Mac's own.
+
 ### Fixed (Windows: Your computers on a PC without Windows Hello)
 
 * **Sharing a Mac with a PC no longer needs Windows Hello set up.** A PC whose account had no Hello PIN didn't tell phones it could keep access to other computers, so *Share with another computer…* failed on the iPhone with "needs the latest Passthrough", and setting up a PIN only helped after Passthrough was restarted. Now every PC can keep it: behind Windows Hello when the PC has it, and otherwise behind the account's Windows password, which Windows' own prompt asks for before *Your computers* opens and before a screen window, at most once in five minutes. Nothing of the password is kept. The flyout now stays open while Windows asks. Without Hello, a program already running as you could read the stored access; with Hello it can't.

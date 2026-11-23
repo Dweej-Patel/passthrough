@@ -91,6 +91,7 @@ public partial class App : Application
 
             var settings = new JsonSettingsStore(PhysicalFileSystem.Instance, Path.Combine(AppFolder.Path, "settings.json"));
             if (settings.Notice is { } notice) LogFile.Write(notice);
+            _screenSettings = settings;
             RepairStartAtLogin();
             var secrets = new DpapiSecretStore(Path.Combine(AppFolder.Path, "secrets"));
             var runner = new ProcessRunner();
@@ -267,6 +268,9 @@ public partial class App : Application
     /// <summary>One screen window per computer; a second Screen click brings it forward.</summary>
     private readonly Dictionary<string, Screen.ScreenWindow> _screens = [];
 
+    /// <summary>Where a screen window keeps its choices (Fit to window, per computer).</summary>
+    private Passthrough.Core.Storage.ISettingsStore? _screenSettings;
+
     private async void ShowScreen(Passthrough.Core.Trust.ReachableComputer computer)
     {
         if (_remote is null || _shuttingDown) return;
@@ -278,7 +282,7 @@ public partial class App : Application
                 return;
             }
             if (_remote.Identity() is not { } identity) return;
-            var window = new Screen.ScreenWindow(computer, identity, _remote.ConfirmPresenceAsync);
+            var window = new Screen.ScreenWindow(computer, identity, _remote.ConfirmPresenceAsync, _screenSettings);
             _screens[computer.HostId] = window;
             window.Closed += (_, _) => _screens.Remove(computer.HostId);
             await window.StartAsync();

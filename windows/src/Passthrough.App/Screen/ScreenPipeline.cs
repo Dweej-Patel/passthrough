@@ -29,6 +29,8 @@ internal interface IScreenView
     void Cursor(double x, double y, bool visible);
     void CursorShape(int width, int height, int hotX, int hotY, byte[] png);
     void Viewers(IReadOnlyList<string> names);
+    /// <summary>What the Mac shows from now on: its own display, or one made in this window's shape.</summary>
+    void Fitted(ScreenFit fit);
     void MovedAway(string to);
     void Copied(ScreenCopyResult result);
     void StreamClosed(Exception? error);
@@ -137,7 +139,7 @@ internal sealed class ScreenPipeline : IScreenSink, IDisposable
 
     private volatile bool _dropUntilKeyframe;
 
-    public void Fitted(ScreenFit fit) { }
+    public void Fitted(ScreenFit fit) => Post(() => _view.Fitted(fit));
     public void Cursor(double x, double y, bool visible) => Post(() => _view.Cursor(x, y, visible));
     public void CursorShape(int width, int height, int hotX, int hotY, ReadOnlyMemory<byte> png)
     {
