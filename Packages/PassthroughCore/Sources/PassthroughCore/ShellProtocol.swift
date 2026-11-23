@@ -223,6 +223,28 @@ public enum IrohInfo {
 
     public static func isValidToken(_ token: String) -> Bool { token.utf8.count <= maxTokenLength }
 
+    /// n0's public relays, by region. An endpoint listens on one of them, its
+    /// home relay, picked by latency: a Mac that goes online another way
+    /// (through the phone, then by itself again) can move to another.
+    static let publicRelayRegions = ["use1", "usw1", "euc1", "aps1"]
+
+    /// The relays to look for a Mac on, the one it last named first. A phone
+    /// that is away hears of a move only by finding the Mac, so for a public
+    /// relay the other regions follow. A custom relay is the only place its
+    /// Mac can be.
+    public static func relayCandidates(_ relay: String?, custom: Bool) -> [String?] {
+        guard let relay, !custom, var url = URLComponents(string: relay), let host = url.host else { return [relay] }
+        let labels = host.split(separator: ".", omittingEmptySubsequences: false).map(String.init)
+        guard let first = labels.first, ["relay.n0.iroh.link", "relay.n0.iroh.link."].contains(labels.dropFirst().joined(separator: ".")),
+              let dash = first.firstIndex(of: "-"), publicRelayRegions.contains(String(first[..<dash])) else { return [relay] }
+        let others: [String] = publicRelayRegions.compactMap { region in
+            guard region != first[..<dash] else { return nil }
+            url.host = ([region + first[dash...]] + labels.dropFirst()).joined(separator: ".")
+            return url.string
+        }
+        return [relay] + others
+    }
+
     /// Whether the iroh details form a usable group: a valid id, and a relay and
     /// token that are valid when present. A relay or token without an id is not usable.
     public static func areValid(id: String?, relay: String?, token: String?) -> Bool {

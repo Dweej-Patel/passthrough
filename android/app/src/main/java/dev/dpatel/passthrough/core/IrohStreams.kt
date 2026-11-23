@@ -12,8 +12,11 @@ import computer.iroh.RelayMode
 import computer.iroh.presetMinimal
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.awaitCancellation
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
@@ -69,7 +72,12 @@ class IrohShellDialer : ShellIrohDialing {
         }
         try {
             val address = EndpointAddr(EndpointId.fromString(irohID), relayURL, addresses)
-            val connection = endpoint.connect(address, IrohShell.ALPN.toByteArray(Charsets.UTF_8))
+            // A dial that is cancelled (it lost a race of relays, or its attempt timed
+            // out) closes its endpoint: that ends iroh's connect within seconds, where
+            // it would otherwise run to iroh's own 30 s limit.
+            val connection = closingOnCancel({ release(endpoint) }) {
+                endpoint.connect(address, IrohShell.ALPN.toByteArray(Charsets.UTF_8))
+            }
             val stream = try {
                 connection.openBi()
             } catch (e: Throwable) {
@@ -100,6 +108,27 @@ class IrohShellDialer : ShellIrohDialing {
     }
 
     internal companion object {
+        /**
+         * Runs [block]; if the caller is cancelled while it runs, calls [onCancel]
+         * once (and still waits for [block], which [onCancel] is meant to end).
+         */
+        suspend fun <T> closingOnCancel(onCancel: () -> Unit, block: suspend () -> T): T = coroutineScope {
+            val finished = AtomicBoolean(false)
+            val watcher = launch(start = CoroutineStart.UNDISPATCHED) {
+                try {
+                    awaitCancellation()
+                } finally {
+                    if (finished.compareAndSet(false, true)) onCancel()
+                }
+            }
+            try {
+                block()
+            } finally {
+                finished.set(true)
+                watcher.cancel()
+            }
+        }
+
         /** Endpoint shutdowns and stream drains run here, off the caller's thread. */
         val cleanup = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 

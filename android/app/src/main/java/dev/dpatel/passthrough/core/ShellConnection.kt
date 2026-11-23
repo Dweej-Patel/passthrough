@@ -7,6 +7,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.awaitCancellation
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.cancelChildren
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.coroutineScope
@@ -562,6 +563,8 @@ object ShellClient {
     const val ATTEMPT_TIMEOUT_MS = 4000
     /** The same for iroh, which may first have to reach a relay and punch a hole. */
     const val IROH_ATTEMPT_TIMEOUT_MS = 10_000L
+    /** How long the relay the Mac last named has to itself before n0's other public relays are tried too. */
+    const val IROH_OTHER_RELAYS_DELAY_MS = 1_500L
     /** How long after one address the next is dialled. */
     const val STAGGER_MS = 250L
     /** iroh starts this long after the first address, so a local or Tailscale path that answers quickly is preferred. */
@@ -729,7 +732,7 @@ object ShellClient {
                 // iroh finds direct paths through the relay instead.
                 val relayToken = credential.relayToken.takeIf { credential.irohRelay != null }
                 val s = try {
-                    iroh.connect(irohID, credential.irohRelay, relayToken, emptyList())
+                    connectThroughRelays(iroh, irohID, credential, relayToken)
                 } catch (e: LinkageError) {
                     // The native library failed to load or link (ExceptionInInitializerError too):
                     // this candidate fails like any other, the app carries on.
@@ -748,6 +751,59 @@ object ShellClient {
             runCatching { stream?.close() }
             shutdown()
             throw e
+        }
+    }
+
+    /**
+     * Dials the relay the Mac last named and, for one of n0's public relays, the
+     * other regions after [IROH_OTHER_RELAYS_DELAY_MS] (the Mac may have moved
+     * while the phone was away). The first to open a stream carries on at once:
+     * the others are cancelled, not waited for (a dial to a relay the Mac isn't
+     * on would run to iroh's 30 s limit), and a second stream that got through
+     * is closed. When all fail, the named relay's error is the one thrown.
+     * Mirrors ShellClient.dialIroh in PassthroughCore.
+     */
+    private suspend fun connectThroughRelays(
+        iroh: ShellIrohDialing,
+        irohID: String,
+        credential: ShellCredential,
+        relayToken: String?,
+    ): ShellIrohStream {
+        val relays = IrohInfo.relayCandidates(credential.irohRelay, custom = relayToken != null)
+        if (relays.size == 1) return iroh.connect(irohID, relays[0], relayToken, emptyList())
+        val winner = CompletableDeferred<Pair<Int, ShellIrohStream>>()
+        val errors = arrayOfNulls<Throwable>(relays.size)
+        val failed = java.util.concurrent.atomic.AtomicInteger(0)
+        val race = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+        relays.forEachIndexed { index, relay ->
+            race.launch {
+                try {
+                    if (index > 0) delay(IROH_OTHER_RELAYS_DELAY_MS)
+                    val stream = iroh.connect(irohID, relay, relayToken, emptyList())
+                    if (!winner.complete(index to stream)) runCatching { stream.close() }
+                } catch (e: Throwable) {
+                    synchronized(errors) { errors[index] = e }
+                    if (failed.incrementAndGet() == relays.size) {
+                        winner.completeExceptionally(synchronized(errors) { errors[0] ?: errors.firstNotNullOf { it } })
+                    }
+                }
+            }
+        }
+        var returned = false
+        try {
+            val (index, stream) = winner.await()
+            returned = true
+            if (index != 0) {
+                ptLog(PtLog.Level.INFO, "shell: found ${ptPrivate(credential.macName)} on another relay than it last named " +
+                    "(${ptPrivate(relays[index])}, not ${ptPrivate(relays[0])})")
+            }
+            return stream
+        } finally {
+            race.cancel()
+            // Cancelled while a stream was being handed over: nobody takes it.
+            if (!returned && winner.isCompleted && !winner.isCancelled) {
+                runCatching { winner.getCompleted().second.close() }
+            }
         }
     }
 

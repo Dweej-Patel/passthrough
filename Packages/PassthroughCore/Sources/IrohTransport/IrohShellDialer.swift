@@ -35,7 +35,31 @@ public final class IrohShellDialer: ShellIrohDialing, @unchecked Sendable {
             await dialer.shutdown()
             throw IrohTransportError.endpointClosed
         }
-        return try await dialer.connect(to: irohID, relayURL: relayURL, addresses: addresses, alpn: IrohShell.alpn)
+        // iroh's connect doesn't stop when its task is cancelled, but it ends
+        // (within seconds) when its endpoint closes: a dial that is cancelled
+        // (it lost a race of relays, or its attempt timed out) or fails closes
+        // its endpoint and lets it go, instead of keeping it, and its relay
+        // connection, until `shutdown`.
+        do {
+            return try await withTaskCancellationHandler {
+                try await dialer.connect(to: irohID, relayURL: relayURL, addresses: addresses, alpn: IrohShell.alpn)
+            } onCancel: {
+                release(dialer)
+            }
+        } catch {
+            release(dialer)
+            throw error
+        }
+    }
+
+    /// Stops tracking `dialer` and closes its endpoint (once; later calls do nothing).
+    private func release(_ dialer: IrohDialer) {
+        let tracked: Bool = lock.withLock {
+            guard let index = dialers.firstIndex(where: { $0 === dialer }) else { return false }
+            dialers.remove(at: index)
+            return true
+        }
+        if tracked { Task { await dialer.shutdown() } }
     }
 
     public func path(of stream: any ByteStream) -> ShellPath {

@@ -929,6 +929,59 @@ class ShellConnectionTests {
         }
     }
 
+    /**
+     * A Mac found only on the relay [nowOn], through [inner]. A dial through any
+     * other relay fails after [othersHangMs] and ignores cancellation meanwhile,
+     * like a real iroh dial to a relay the Mac isn't on (iroh's 30 s limit). The
+     * Mac's relay answers after [answerAfterMs].
+     */
+    private inner class MovedRelayIroh(
+        private val inner: FakeIroh,
+        private val nowOn: String,
+        private val othersHangMs: Long,
+        private val answerAfterMs: Long = 0,
+    ) : ShellIrohDialing {
+        val tried = java.util.Collections.synchronizedList(ArrayList<String?>())
+
+        override suspend fun connect(irohID: String, relayURL: String?, relayToken: String?, addresses: List<String>): ShellIrohStream {
+            tried += relayURL
+            if (relayURL != nowOn) {
+                kotlinx.coroutines.withContext(kotlinx.coroutines.NonCancellable) { kotlinx.coroutines.delay(othersHangMs) }
+                throw IOException("not on this relay")
+            }
+            kotlinx.coroutines.withContext(kotlinx.coroutines.NonCancellable) { kotlinx.coroutines.delay(answerAfterMs) }
+            return inner.connect(irohID, relayURL, relayToken, addresses)
+        }
+
+        override fun shutdown() = inner.shutdown()
+    }
+
+    /** The Mac moved relays while the phone was away; the relay it last named hangs. The phone gets in at once on the new one. */
+    @Test fun irohFindsAMovedMacWhileTheNamedRelayHangs() = runBlocking {
+        val iroh = MovedRelayIroh(FakeIroh(ShellPath.RELAY, ::serveOnIroh), nowOn = "https://usw1-1.relay.n0.iroh.link./", othersHangMs = 30_000)
+        val cred = credential.copy(addresses = emptyList(), irohID = irohID, irohRelay = "https://use1-1.relay.n0.iroh.link./")
+        val started = System.nanoTime()
+        val connection = withTimeout(8_000) { ShellClient.connect(cred, null, scope, iroh, ShellConnectMode.AUTOMATIC) }
+        cleanups += { connection.close() }
+        val elapsed = (System.nanoTime() - started) / 1_000_000
+        assertTrue("reached well inside the 10 s attempt ($elapsed ms)", elapsed < 8_000)
+        assertEquals("the relay it named is tried first", "https://use1-1.relay.n0.iroh.link./", iroh.tried.first())
+        assertEquals(ShellPath.RELAY, events(connection).next<ShellEvent.Ready>().path)
+        connection.close()
+    }
+
+    /** The Mac is on the relay it named, which answers after the others' head start: the hung others don't hold it up. */
+    @Test fun irohSlowNamedRelayIsNotHeldUpByTheOthers() = runBlocking {
+        val named = "https://use1-1.relay.n0.iroh.link./"
+        val iroh = MovedRelayIroh(FakeIroh(ShellPath.RELAY, ::serveOnIroh), nowOn = named, othersHangMs = 30_000, answerAfterMs = 2_500)
+        val cred = credential.copy(addresses = emptyList(), irohID = irohID, irohRelay = named)
+        val connection = withTimeout(8_000) { ShellClient.connect(cred, null, scope, iroh, ShellConnectMode.AUTOMATIC) }
+        cleanups += { connection.close() }
+        assertEquals("the other regions were tried beside it", 4, iroh.tried.size)
+        assertEquals(ShellPath.RELAY, events(connection).next<ShellEvent.Ready>().path)
+        connection.close()
+    }
+
     @Test fun irohWinsWhenTcpSilent() = runBlocking {
         val (silent, held) = silentServer()
         val iroh = FakeIroh(ShellPath.RELAY, ::serveOnIroh)
