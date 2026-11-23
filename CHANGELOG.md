@@ -375,6 +375,11 @@ these steps as written and check each one before building.
 
 ### Fixed (iPhone and Mac, from the security and code review)
 
+* **The Mac app no longer quits at start with Remote shell on.** #80 watched
+  the endpoint's home relay with iroh-ffi's `watchHomeRelay` and
+  `watchNetworkChange`, which panic when called from Swift ("there is no
+  reactor running"), so the app exited as its iroh endpoint started. The
+  status refresh reads and logs the home relay instead, every 5 s.
 * **A Mac that stops answering through its relay recovers by itself.** After
   the Mac's way online changes (the tunnel through a phone going away), its
   iroh endpoint could stay deaf to its relay for hours while the app showed it

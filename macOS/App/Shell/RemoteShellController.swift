@@ -491,29 +491,11 @@ final class RemoteShellController: ObservableObject {
             listener.start()
             let id = host.endpointID, home = host.homeRelay
             ptLog(.info, "iroh: endpoint \(id.prefix(10)) started, home relay \(ptPrivate(home ?? "none yet"))")
-            // The home relay moves when the Mac goes online another way (the
-            // tunnel through a phone coming up or going down): phones dial
-            // the one they were last told, so keep that current.
-            let lastRelay = Locked(home)
-            host.watch(onHomeRelay: { [weak self] relay in
-                let before = lastRelay.exchange(relay)
-                guard relay != before else { return }
-                ptLog(relay == nil ? .warning : .info, "iroh: home relay is now \(relay.map { ptPrivate($0) } ?? "none: not reachable from anywhere") (was \(ptPrivate(before ?? "none")))")
-                Task { @MainActor [weak self] in
-                    guard let self, self.iroh === run else { return }
-                    // Without one, phones keep the last: it is where the Mac most likely returns.
-                    if let relay { self.updateReach { $0.homeRelay = relay } }
-                    self.irohStatus.homeRelay = relay
-                }
-            }, onNetworkChange: {
-                ptLog(.debug, "iroh: the network changed; home relay \(ptPrivate(lastRelay.get() ?? "none"))")
-            })
             Task { @MainActor [weak self] in
                 guard let self, self.iroh === run else { return }
-                // What the watcher has said since, if it ran first, not the relay at start.
-                let current = lastRelay.get()
-                self.updateReach { $0.endpointID = id; $0.homeRelay = current ?? home }
-                self.irohStatus = IrohStatus(state: .running, endpointID: id, homeRelay: current)
+                self.loggedHomeRelay = home   // logged with the start
+                self.updateReach { $0.endpointID = id; $0.homeRelay = home }
+                self.irohStatus = IrohStatus(state: .running, endpointID: id, homeRelay: home)
             }
         }
     }
@@ -611,6 +593,15 @@ final class RemoteShellController: ObservableObject {
         guard listener != nil else { return }
         updateReach { $0.addresses = addresses }
         guard let run, iroh === run, irohStatus.state == .running else { return }
+        // The home relay moves when the Mac goes online another way (the tunnel
+        // through a phone coming up or going down): phones dial the one they
+        // were last told, so keep that current. Read here, every refresh: iroh's
+        // relay watchers can't be used from Swift (iroh-ffi 1.1.0's
+        // watchHomeRelay and watchNetworkChange panic outside its runtime).
+        if home != loggedHomeRelay {
+            ptLog(home == nil ? .warning : .info, "iroh: home relay is now \(home.map { ptPrivate($0) } ?? "none: not reachable from anywhere") (was \(ptPrivate(loggedHomeRelay ?? "none")))")
+            loggedHomeRelay = home
+        }
         if let home { updateReach { $0.homeRelay = home } }
         var status = irohStatus
         if let home { status.homeRelay = home }
@@ -618,6 +609,9 @@ final class RemoteShellController: ObservableObject {
         if status != irohStatus { irohStatus = status }
         startReachCheck(run, home: home, phonesConnected: !paths.isEmpty)
     }
+
+    /// The home relay last logged (`refreshStatus` logs each change once).
+    private var loggedHomeRelay: String?
 
     // An endpoint can go deaf to its relay (after the Mac's way online
     // changed under it, say when the tunnel through a phone went away) and
