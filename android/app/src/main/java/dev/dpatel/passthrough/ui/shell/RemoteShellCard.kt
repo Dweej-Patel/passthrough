@@ -33,6 +33,7 @@ import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -44,15 +45,19 @@ import androidx.compose.ui.Modifier
 import androidx.compose.material.icons.filled.Warning
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.semantics.LiveRegionMode
 import androidx.compose.ui.semantics.Role
-import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.liveRegion
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import dev.dpatel.passthrough.core.HostWords
+import dev.dpatel.passthrough.core.Hosts
 import dev.dpatel.passthrough.core.ShellSessionInfo
+import dev.dpatel.passthrough.service.Runtime
 import dev.dpatel.passthrough.ui.LocalPT
 import dev.dpatel.passthrough.ui.PT
 import dev.dpatel.passthrough.ui.PTCard
@@ -62,18 +67,12 @@ import dev.dpatel.passthrough.ui.PTStatusDot
 import dev.dpatel.passthrough.ui.PTSteps
 import kotlinx.coroutines.delay
 
-/** What to do, in order, before a Mac has granted this phone the shell. */
-internal val SHELL_SETUP_STEPS = listOf(
-    "On your Mac, open Passthrough from the menu bar and turn on Remote shell.",
-    "Start the proxy here and plug this phone into the Mac (pair it first if needed). The Mac sends this phone a key.",
-    "That's it: your Mac's sessions show up here, over Wi-Fi, Tailscale or from anywhere.",
-)
-
 /**
- * The home screen's Remote shell card: the selected Mac's sessions, a New
- * button, and the way into the terminal and history. Before setup it lists
- * the steps; when something is wrong it says what to do next. Styled like
- * the Paired Macs card; copy matches the iPhone app.
+ * The home screen's Remote shell card: the selected computer's sessions, a New
+ * button (a split one when it offers several shells), and the way into the
+ * terminal and history. Before setup it lists the steps; when something is
+ * wrong it says what to do next. Styled like the Paired Macs card; copy
+ * matches the iPhone app, with the computer's own nouns.
  */
 @Composable
 fun RemoteShellCard(vm: ShellViewModel, onOpen: (String?) -> Unit, onHistory: () -> Unit) {
@@ -87,6 +86,12 @@ fun RemoteShellCard(vm: ShellViewModel, onOpen: (String?) -> Unit, onHistory: ()
     val lastError by vm.lastError.collectAsStateWithLifecycle()
     val path by vm.path.collectAsStateWithLifecycle()
     val fromAnywhere by vm.triedFromAnywhere.collectAsStateWithLifecycle()
+    val kind by vm.selectedKind.collectAsStateWithLifecycle()
+    val host by vm.hostFacts.collectAsStateWithLifecycle()
+    val preferred by vm.preferredShell.collectAsStateWithLifecycle()
+    val input by vm.pageInput.collectAsStateWithLifecycle()
+    val page = rememberHostPage(input)
+    val clock = rememberClock()
     // Ages are in minutes: refresh twice a minute.
     val nowMillis by produceState(System.currentTimeMillis()) {
         while (true) {
@@ -95,15 +100,27 @@ fun RemoteShellCard(vm: ShellViewModel, onOpen: (String?) -> Unit, onHistory: ()
         }
     }
     val macName = macs.firstOrNull { it.macID == selected }?.macName
+    // Nothing paired: no computer in particular.
+    val w = if (selected == null) HostWords.generic() else HostWords(kind, macName)
+    /** Why no shell can start there, in place of the list and New; null when one can. */
+    val shellNotice = if (reach == ShellReach.READY) HostCopy.shell(page.shell, w) else null
     PTCard {
         Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 PTSectionTitle("Remote shell", Modifier.weight(1f), icon = Icons.Filled.Terminal)
-                if (reach == ShellReach.READY || reach == ShellReach.CONNECTING) {
-                    ShellPillButton(onClick = { onOpen(null) }, enabled = reach == ShellReach.READY) {
-                        Icon(Icons.Filled.Add, null, modifier = Modifier.size(16.dp))
-                        Spacer(Modifier.size(4.dp))
-                        Text("New", style = PT.display(13.sp, FontWeight.Bold))
+                if ((reach == ShellReach.READY || reach == ShellReach.CONNECTING) && shellNotice == null) {
+                    val shells = host?.shells.orEmpty()
+                    if (Hosts.offersChoice(host)) {
+                        NewShellControl(shells, preferred, w.name, enabled = reach == ShellReach.READY) { id ->
+                            id?.let(vm::chooseShell)
+                            onOpen(null)
+                        }
+                    } else {
+                        ShellPillButton(onClick = { onOpen(null) }, enabled = reach == ShellReach.READY) {
+                            Icon(Icons.Filled.Add, null, modifier = Modifier.size(16.dp))
+                            Spacer(Modifier.size(4.dp))
+                            Text("New", style = PT.display(13.sp, FontWeight.Bold))
+                        }
                     }
                 }
             }
@@ -117,26 +134,34 @@ fun RemoteShellCard(vm: ShellViewModel, onOpen: (String?) -> Unit, onHistory: ()
                     verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp),
                 ) {
                     CircularProgressIndicator(Modifier.size(18.dp), color = PT.accentEnd, strokeWidth = 2.dp)
-                    Text("${if (redialing) "Reconnecting" else "Connecting"} to ${macName ?: "your Mac"}…", style = PT.display(15.sp, FontWeight.Normal), color = c.secondary)
+                    Text(HostCopy.connecting(w, macName, redialing), style = PT.display(15.sp, FontWeight.Normal), color = c.secondary,
+                        modifier = Modifier.weight(1f))
+                    if (page.canRetry) TextButton(onClick = { vm.connect() }) { Text("Try again", color = c.tintText) }
                 }
                 ShellReach.READY -> {
-                    if (sessions.isEmpty()) {
-                        Text("No sessions open on this Mac. Tap New to start one.", style = PT.display(15.sp, FontWeight.Normal), color = c.secondary)
+                    if (shellNotice != null) {
+                        Box(Modifier.semantics { liveRegion = LiveRegionMode.Polite }) { PTNotice(shellNotice, PT.warning, Icons.Filled.Warning) }
+                    } else if (sessions.isEmpty()) {
+                        Text(HostCopy.noSessions(w), style = PT.display(15.sp, FontWeight.Normal), color = c.secondary)
                     } else {
                         Column {
-                            sessions.forEach { SessionRow(vm, it, nowMillis, onOpen) }
+                            sessions.forEach { SessionRow(vm, it, nowMillis, ShellFormat.shellName(it, host), onOpen) }
                         }
                     }
-                    lastError?.message()?.let { PTNotice(it, PT.warning, Icons.Filled.Warning) }
+                    lastError?.message(w)?.let { PTNotice(it, PT.warning, Icons.Filled.Warning) }
                     HistoryLink(onHistory)
                 }
-                ShellReach.NO_ACCESS -> Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
-                    Text("Open your Mac's shell from this phone. To set it up:", style = PT.display(15.sp, FontWeight.Normal), color = c.secondary)
-                    PTSteps(SHELL_SETUP_STEPS)
+                ShellReach.NO_ACCESS -> if (page.state == HostPageState.REVOKED && w.isPC) {
+                    Text(HostCopy.revoked(w), style = PT.display(15.sp, FontWeight.Normal), color = c.secondary)
+                } else Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
+                    Text(HostCopy.setupIntro(w), style = PT.display(15.sp, FontWeight.Normal), color = c.secondary)
+                    PTSteps(HostCopy.setupSteps(w, paired = selected != null))
                 }
                 ShellReach.UNREACHABLE -> PTNotice(
-                    if (macName != null) "Can't reach this Mac" else "Can't reach your Mac", PT.warning, Icons.Filled.WifiOff,
-                    detail = reach.message(fromAnywhere)?.removePrefix("Can't reach your Mac. "),
+                    HostCopy.cantReachTitle(w, named = macName != null), PT.warning, Icons.Filled.WifiOff,
+                    // A PC that said why it left, or whose relay is silent, says so whole.
+                    detail = if (w.isPC && page.state != HostPageState.UNREACHABLE) hostDetail(page, w, input, selected, clock)
+                    else HostCopy.unreachableDetail(w, fromAnywhere, if (w.isPC) selected?.let { Runtime.settings.shellLastHeard()[it] }?.let(clock) else null),
                     action = "Try again", onAction = { vm.connect() },
                 )
                 ShellReach.NEEDS_PASSCODE -> PTNotice(
@@ -147,9 +172,9 @@ fun RemoteShellCard(vm: ShellViewModel, onOpen: (String?) -> Unit, onHistory: ()
                 )
                 ShellReach.KEY_UNAVAILABLE -> PTNotice(
                     "Access needs renewing", PT.warning, Icons.Filled.Key,
-                    detail = "This phone's Remote shell key can't be read. Start the proxy and plug into the Mac again to renew access.",
+                    detail = HostCopy.renewKey(w),
                 )
-                else -> Text(reach.message(fromAnywhere).orEmpty(), style = PT.display(15.sp, FontWeight.Normal), color = c.secondary)
+                else -> Text(reach.message(w, fromAnywhere).orEmpty(), style = PT.display(15.sp, FontWeight.Normal), color = c.secondary)
             }
         }
     }
@@ -179,7 +204,7 @@ private fun HistoryLink(onHistory: () -> Unit) {
 }
 
 @Composable
-private fun SessionRow(vm: ShellViewModel, session: ShellSessionInfo, nowMillis: Long, onOpen: (String?) -> Unit) {
+private fun SessionRow(vm: ShellViewModel, session: ShellSessionInfo, nowMillis: Long, shellName: String?, onOpen: (String?) -> Unit) {
     val c = LocalPT.current
     var menu by remember { mutableStateOf(false) }
     Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
@@ -190,7 +215,7 @@ private fun SessionRow(vm: ShellViewModel, session: ShellSessionInfo, nowMillis:
             PTStatusDot(if (session.running) PT.success else c.secondary.copy(alpha = 0.5f), session.running)
             Column(Modifier.weight(1f).padding(vertical = 6.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
                 Text(session.title, style = PT.display(15.sp, FontWeight.SemiBold), color = c.primary, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                Text(ShellFormat.status(session, nowMillis / 1000.0), style = PT.display(12.sp, FontWeight.Normal), color = c.secondary)
+                Text(ShellFormat.status(session, nowMillis / 1000.0, shellName), style = PT.display(12.sp, FontWeight.Normal), color = c.secondary)
             }
         }
         // A running session can be ended; a finished one the Mac keeps listing for a while can be removed here.

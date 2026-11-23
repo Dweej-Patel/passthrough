@@ -11,6 +11,8 @@ using Passthrough.Core.Protocol;
 using Passthrough.Core.Session;
 using Passthrough.Core.Storage;
 using Passthrough.Core.Transport;
+using Passthrough.Windows.Cable;
+using Passthrough.Windows.Remote;
 
 namespace Passthrough.App;
 
@@ -19,10 +21,14 @@ public partial class App : Application
 {
     /// <summary>How long Quit waits for the session to close its channel and stop the watchers before exiting anyway.</summary>
     private static readonly TimeSpan QuitLimit = TimeSpan.FromSeconds(3);
+    /// <summary>Longer than the 5 seconds the session manager gives the shells to end.</summary>
+    private static readonly TimeSpan RemoteQuitLimit = TimeSpan.FromSeconds(7);
 
     private Mutex? _singleInstance;
     private HostSession? _session;
+    private RemoteAccess? _remote;
     private TrayIcon? _tray;
+    private TaskbarKeeper? _taskbar;
     private FlyoutWindow? _flyout;
     private SettingsWindow? _settings;
     private bool _shuttingDown;
@@ -31,6 +37,7 @@ public partial class App : Application
 
     public App()
     {
+        NativeMethods.RestrictDllSearch();
         InitializeComponent();
         // Windows open, hide and close as the app needs; only Quit (or a failed start) ends the process.
         DispatcherShutdownMode = DispatcherShutdownMode.OnExplicitShutdown;
@@ -54,6 +61,18 @@ public partial class App : Application
 
     protected override async void OnLaunched(LaunchActivatedEventArgs args)
     {
+        // Started by a copy handing over to the installed one (after Turn on): it goes first, then this one runs.
+        var command = Environment.GetCommandLineArgs();
+        var handoff = Array.IndexOf(command, "--handoff");
+        if (handoff >= 0 && handoff + 1 < command.Length && int.TryParse(command[handoff + 1], out var earlier))
+        {
+            try
+            {
+                using var before = System.Diagnostics.Process.GetProcessById(earlier);
+                await before.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(15));
+            }
+            catch (Exception e) when (e is ArgumentException or InvalidOperationException or TimeoutException) { }
+        }
         // One copy per Windows user session; a second launch just exits.
         _singleInstance = new Mutex(initiallyOwned: true, @"Local\Passthrough.App", out var isFirst);
         if (!isFirst)
@@ -92,11 +111,15 @@ public partial class App : Application
             });
             directory.Error += LogFile.Error; // watcher failures (adb that won't start, a daemon that falls silent), once each
 
+            // Remote access: phones' shells on this PC, through the background service (which faces the network and holds their keys).
+            _remote = new RemoteAccess(settings, secrets, Path.Combine(AppFolder.Path, "ShellHistory"), Environment.MachineName, LogFile.Write);
             _session = new HostSession(
                 directory, secrets, settings, Environment.MachineName,
+                // The cable peer check: only a channel whose far end is Apple's device service or this user's adb carries a shell grant.
                 (device, identity) => new ControlClient(
-                    ct => device.Connect(ProtocolConstants.ControlPort, ct), identity, device.Kind.Label(), TimeProvider.System),
-                TimeProvider.System);
+                    ct => device.Connect(ProtocolConstants.ControlPort, ct), identity, device.Kind.Label(), TimeProvider.System,
+                    stream => CablePeerCheck.Check(stream, device.Kind)),
+                TimeProvider.System, _remote);
             _session.Error += LogFile.Error;
             _session.Log += LogFile.Write;
             _session.StateChanged += LogChanges;
@@ -104,10 +127,29 @@ public partial class App : Application
             var viewModel = new SessionViewModel(_session, settings, DispatcherQueue.GetForCurrentThread(),
                 settings.Get("androidEnabled") != "false", settings.Notice);
             // The icon first: if the flyout fails to build, the failure path below still has something to take down.
-            _tray = new TrayIcon(ToggleFlyout, ShowSettings, Quit);
-            _flyout = new FlyoutWindow(viewModel, ShowSettings, Quit);
+            _tray = new TrayIcon(ToggleFlyout, () => ShowSettings(null), RequestQuit, () => _ui?.TryEnqueue(() => _flyout?.OpenFromNotification()));
+            // A phone's view resizing this session can leave the taskbar under other windows; it is put back on top.
+            _taskbar = new TaskbarKeeper(LogFile.Write);
+            _flyout = new FlyoutWindow(viewModel, ShowSettings, RequestQuit);
+            var remote = _remote;
+            remote.NoticesChanged += () =>
+            {
+                var notices = remote.Notices;
+                viewModel.ShowNotices(notices);
+                _ui?.TryEnqueue(() => ShowWaiting(notices));
+            };
+            viewModel.AnswerNotice = remote.AnswerNoticeAsync;
+            viewModel.OpenComputers = async () => await remote.Reach.UnlockAsync() ? remote.Reach.Computers : null;
+            viewModel.NewShell = remote.OpenShellAsync;
+            viewModel.RemoveComputer = c => remote.Reach.RemoveAsync(c.HostId);
+            viewModel.OpenScreen = ShowScreen;
+            viewModel.Attach(remote);
+            _ui = DispatcherQueue.GetForCurrentThread();
+            // Raised after the elevated setup, on a pool thread: the UI's queue is the one captured here.
+            remote.HandOffWanted += launcher => _ui?.TryEnqueue(() => HandOff(launcher));
 
             await _session.StartAsync();
+            await _remote.StartIfEnabledAsync();
         }
         catch (Exception e)
         {
@@ -146,15 +188,124 @@ public partial class App : Application
 
     private void ToggleFlyout() => _flyout?.ToggleFromTray();
 
-    private void ShowSettings()
+    private readonly HashSet<string> _announced = [];
+
+    /// <summary>
+    /// The tray icon's dot for every notice waiting, and a Windows notification for each new one that asks for an
+    /// answer (Allow screen, Revoke, Remote Desktop open), once: the flyout alone was easy to miss.
+    /// </summary>
+    private void ShowWaiting(IReadOnlyList<Passthrough.Core.Pipe.PipeNotice> notices)
+    {
+        _tray?.ShowWaiting(notices.Count);
+        foreach (var notice in notices)
+        {
+            if (!_announced.Add(notice.Id)) continue;
+            if (notice.Kind is Passthrough.Core.Pipe.PipeNotice.Granted or Passthrough.Core.Pipe.PipeNotice.ComputerScreenPending
+                or Passthrough.Core.Pipe.PipeNotice.ComputerGranted or Passthrough.Core.Pipe.PipeNotice.Exposed)
+                _tray?.Notify(NoticeRow.ToastTitle(notice), notice.Text);
+        }
+    }
+
+    /// <summary>Opens Settings, on <paramref name="page"/> when given (<see cref="SettingsWindow.RemotePage"/> and the rest).</summary>
+    private void ShowSettings(string? page)
     {
         if (_session is null || _flyout is null || _shuttingDown) return;
         if (_settings is null)
         {
-            _settings = new SettingsWindow(_flyout.ViewModel);
+            _settings = new SettingsWindow(_flyout.ViewModel, _remote);
             _settings.Closed += (_, _) => _settings = null;
         }
+        if (page is not null) _settings.ShowPage(page);
         _settings.BringToFront();
+    }
+
+    private bool _askingToQuit;
+
+    /// <summary>
+    /// Quit from the tray or the flyout: asked first when it would end phones' shells or leave Remote access on (the
+    /// screen stays reachable), with the choice to turn Remote access off too. The hand-off after Turn on quits without asking.
+    /// </summary>
+    private async void RequestQuit()
+    {
+        if (_shuttingDown || _flyout is null) return;
+        if (_askingToQuit)
+        {
+            // The flyout hid when it lost focus, with the question still up in it.
+            _flyout.ShowQuestion();
+            return;
+        }
+        if (_flyout.ViewModel.QuitQuestion is not { } question)
+        {
+            Quit();
+            return;
+        }
+        _askingToQuit = true;
+        try
+        {
+            switch (await _flyout.AskQuitAsync(question, _flyout.ViewModel.RemoteEnabled))
+            {
+                case QuitChoice.Quit:
+                    Quit();
+                    break;
+                case QuitChoice.QuitAndTurnOff:
+                    // Not turned off (declined, or it failed): said, and quitting is asked again rather than done silently.
+                    if (await _flyout.ViewModel.TurnOffRemoteAsync() is { } said)
+                    {
+                        LogFile.Write($"quit: Remote access stays on ({said})");
+                        if (!await _flyout.AskQuitAnywayAsync(said)) break;
+                    }
+                    Quit();
+                    break;
+            }
+        }
+        catch (Exception e) { LogFile.Error(e); }
+        finally { _askingToQuit = false; }
+    }
+
+    private Microsoft.UI.Dispatching.DispatcherQueue? _ui;
+
+    /// <summary>One screen window per computer; a second Screen click brings it forward.</summary>
+    private readonly Dictionary<string, Screen.ScreenWindow> _screens = [];
+
+    private async void ShowScreen(Passthrough.Core.Trust.ReachableComputer computer)
+    {
+        if (_remote is null || _shuttingDown) return;
+        try
+        {
+            if (_screens.TryGetValue(computer.HostId, out var open))
+            {
+                open.BringToFront();
+                return;
+            }
+            if (_remote.Identity() is not { } identity) return;
+            var window = new Screen.ScreenWindow(computer, identity, _remote.ConfirmPresenceAsync);
+            _screens[computer.HostId] = window;
+            window.Closed += (_, _) => _screens.Remove(computer.HostId);
+            await window.StartAsync();
+        }
+        catch (Exception e) { LogFile.Error(e); }
+    }
+
+    /// <summary>
+    /// After Turn on: Start at login follows the installed copy, the installed copy starts (it waits for this one to
+    /// go), and this one quits. A copy that already is the installed one stays.
+    /// </summary>
+    private void HandOff(string launcher)
+    {
+        if (StartupRegistration.IsInstalledCopy()) return;
+        _ui?.TryEnqueue(() =>
+        {
+            try
+            {
+                if (StartupRegistration.IsEnabled()) StartupRegistration.SetEnabled(true);
+                var start = new System.Diagnostics.ProcessStartInfo(launcher) { UseShellExecute = false };
+                foreach (var a in new[] { "--launch", "--handoff", Environment.ProcessId.ToString(System.Globalization.CultureInfo.InvariantCulture) }) start.ArgumentList.Add(a);
+                using var _ = System.Diagnostics.Process.Start(start);
+                LogFile.Write("handed over to the installed copy of Passthrough");
+                Quit();
+            }
+            catch (Exception e) when (e is System.ComponentModel.Win32Exception or InvalidOperationException) { LogFile.Error(e); }
+        });
     }
 
     private async void Quit()
@@ -177,23 +328,35 @@ public partial class App : Application
         _shuttingDown = true;
         try
         {
-            if (_session is not null) await _session.DisposeAsync().AsTask().WaitAsync(QuitLimit);
+            try
+            {
+                if (_session is not null) await _session.DisposeAsync().AsTask().WaitAsync(QuitLimit);
+            }
+            catch (TimeoutException)
+            {
+                LogFile.Write($"the session did not stop within {QuitLimit.TotalSeconds:0} seconds; quitting anyway");
+            }
+            // Phones are dropped and every session ends (each transcript finished): nothing runs once Passthrough is gone.
+            // Run even when the cable session was slow, and given the time closing every shell may take.
+            if (_remote is not null) await Task.Run(_remote.Dispose).WaitAsync(RemoteQuitLimit);
         }
         catch (TimeoutException)
         {
-            LogFile.Write($"the session did not stop within {QuitLimit.TotalSeconds:0} seconds; quitting anyway");
+            LogFile.Write($"the shells did not all end within {RemoteQuitLimit.TotalSeconds:0} seconds; quitting anyway");
         }
         catch (Exception e)
         {
             LogFile.Error(e);
         }
         Try(() => _settings?.Close());
+        foreach (var screen in _screens.Values.ToList()) Try(screen.Close);
         Try(() =>
         {
             _flyout?.AllowClose();
             _flyout?.Close();
         });
         Try(() => _tray?.Dispose());
+        Try(() => _taskbar?.Dispose());
         Try(() => _singleInstance?.ReleaseMutex());
         _singleInstance?.Dispose();
         _singleInstance = null;

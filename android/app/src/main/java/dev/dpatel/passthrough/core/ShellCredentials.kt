@@ -22,15 +22,17 @@ data class ShellCredential(
     val irohRelay: String? = null,
     /** The relay's token, when the Mac's relay needs one. Never printed. */
     val relayToken: String? = null,
+    /** What kind of computer it is, as recorded ([PairedClient.hostKind]); null from a Mac that never said. */
+    val hostKind: String? = null,
 ) {
     override fun equals(other: Any?): Boolean = other is ShellCredential && macID == other.macID && macName == other.macName &&
         certSHA256 == other.certSHA256 && shellKey.contentEquals(other.shellKey) && phoneID == other.phoneID &&
         port == other.port && addresses == other.addresses &&
-        irohID == other.irohID && irohRelay == other.irohRelay && relayToken == other.relayToken
+        irohID == other.irohID && irohRelay == other.irohRelay && relayToken == other.relayToken && hostKind == other.hostKind
 
-    override fun hashCode(): Int = listOf(macID, macName, certSHA256, shellKey.contentHashCode(), phoneID, port, addresses, irohID, irohRelay, relayToken).hashCode()
+    override fun hashCode(): Int = listOf(macID, macName, certSHA256, shellKey.contentHashCode(), phoneID, port, addresses, irohID, irohRelay, relayToken, hostKind).hashCode()
 
-    override fun toString(): String = "ShellCredential(macID=$macID, macName=$macName, port=$port, addresses=$addresses, irohID=$irohID, irohRelay=$irohRelay, relayToken=${if (relayToken == null) "none" else "<redacted>"})"
+    override fun toString(): String = "ShellCredential(macID=$macID, macName=$macName, port=$port, addresses=$addresses, irohID=$irohID, irohRelay=$irohRelay, relayToken=${if (relayToken == null) "none" else "<redacted>"}, hostKind=$hostKind)"
 }
 
 /** A `_passthrough-sh._tcp` service seen on the local network; [host] is null until resolved. */
@@ -72,7 +74,7 @@ object ShellCredentials {
         val shellKey = key(client.id) ?: return@mapNotNull null
         ShellCredential(client.id, grant.macName, grant.certSHA256, shellKey, phoneID, grant.port,
             addresses(grant.addresses, manualAddress(client.id)),
-            grant.irohID, grant.irohRelay, if (grant.irohID == null) null else relayToken(client.id))
+            grant.irohID, grant.irohRelay, if (grant.irohID == null) null else relayToken(client.id), client.hostKind ?: grant.hostKind)
     }
 
     /**

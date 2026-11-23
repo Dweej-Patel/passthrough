@@ -99,6 +99,9 @@ public struct ControlEnvelope: Codable, Equatable, Sendable {
     /// shellGrant: names this grant (at most 64 UTF-8 bytes); the phone echoes
     /// it in `shellGranted` so the Mac knows which grant was stored.
     public var grantID: String?
+    /// hello, shellGrant: what the host is (`mac`, `windows`); absent from older Macs.
+    /// A phone keeps it only from a connection whose pairing is proved.
+    public var hostKind: String?
     /// The longest `grantID` (UTF-8 bytes) a phone echoes.
     public static let maxGrantIDLength = 64
 
@@ -170,8 +173,13 @@ public struct ProviderStats: Codable, Sendable, Equatable {
         mac.wireless ?? wirelessMacTags?.contains(WirelessLink.macTag(clientID: mac.id)) ?? false
     }
 
-    /// The Macs among the connected clients (`macs` also lists iPads).
-    public var connectedMacs: [ConnectedMac] { macs.filter { $0.kind != .ipad } }
+    /// The Macs among the connected clients (`macs` also lists iPads and PCs):
+    /// the ones online through this phone.
+    public var connectedMacs: [ConnectedMac] { macs.filter { $0.kind != .ipad && $0.hostKind != HostInfo.kindWindows } }
+    /// The PCs on the cable: paired, but they don't use this phone's internet.
+    public var connectedPCs: [ConnectedMac] { macs.filter { $0.kind != .ipad && $0.hostKind == HostInfo.kindWindows } }
+    /// Every computer connected, Mac or PC.
+    public var connectedComputers: [ConnectedMac] { macs.filter { $0.kind != .ipad } }
     /// The iPads using this phone's internet over its hotspot.
     public var connectedIPads: [ConnectedMac] { macs.filter { $0.kind == .ipad } }
 }

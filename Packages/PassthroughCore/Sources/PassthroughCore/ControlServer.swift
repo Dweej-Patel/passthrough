@@ -29,8 +29,10 @@ public struct ConnectedMac: Identifiable, Sendable, Equatable, Codable {
     public let wireless: Bool?
     /// A Mac or an iPad; nil for a Mac.
     public let kind: ClientKind?
-    public init(id: String, name: String, since: Date, wireless: Bool? = nil, kind: ClientKind? = nil) {
-        self.id = id; self.name = name; self.since = since; self.wireless = wireless; self.kind = kind
+    /// What kind of computer it said it is (`PairedClient.hostKind`); nil for a Mac that never said.
+    public let hostKind: String?
+    public init(id: String, name: String, since: Date, wireless: Bool? = nil, kind: ClientKind? = nil, hostKind: String? = nil) {
+        self.id = id; self.name = name; self.since = since; self.wireless = wireless; self.kind = kind; self.hostKind = hostKind
     }
 }
 
@@ -45,6 +47,8 @@ public final class ControlServer: @unchecked Sendable {
 
     /// A Mac or an iPad, as paired.
     func clientKind(_ id: String) -> ClientKind? { registry.clients.first { $0.id == id }?.kind }
+    /// What kind of computer it said it is, as recorded.
+    func hostKind(_ id: String) -> String? { registry.clients.first { $0.id == id }?.hostKind }
     private let counter: ByteCounter
     private let statusProvider: @Sendable () -> DeviceStatus
     private let socksPort: UInt16
@@ -151,8 +155,8 @@ public final class ControlServer: @unchecked Sendable {
             let version = message.protocolVersion ?? 0
             guard version == PassthroughProtocol.version else {
                 ptLog(.warning, version < PassthroughProtocol.version
-                      ? "A Mac with an older Passthrough tried to connect: update Passthrough on the Mac"
-                      : "A Mac with a newer Passthrough tried to connect: update Passthrough on this phone")
+                      ? "A computer with an older Passthrough tried to connect: update Passthrough on it"
+                      : "A computer with a newer Passthrough tried to connect: update Passthrough on this phone")
                 // Our version tells the Mac which side to update.
                 var e = Self.error(.unsupportedVersion)
                 e.protocolVersion = PassthroughProtocol.version
@@ -166,7 +170,9 @@ public final class ControlServer: @unchecked Sendable {
             }
             peer.via = message.via
             let phoneNonce = ControlAuth.nonce()
-            peer.hello = Hello(clientID: id, name: String((message.name ?? "Mac").prefix(64)), macNonce: macNonce, phoneNonce: phoneNonce)
+            // The kind is held until the connection proves its pairing, and only then recorded.
+            peer.hello = Hello(clientID: id, name: String((message.name ?? "Computer").prefix(64)), macNonce: macNonce, phoneNonce: phoneNonce,
+                               hostKind: Hosts.isRecordable(message.hostKind) ? message.hostKind : nil)
             var reply = welcome()
             reply.nonce = phoneNonce.base64EncodedString()
             // Proving first gives nothing away: the proof is bound to the
@@ -182,11 +188,12 @@ public final class ControlServer: @unchecked Sendable {
             guard peer.mac == nil else { return [] }
             guard let hello = peer.hello, let key = registry.pairingKey(clientID: hello.clientID),
                   ControlAuth.isValidMacProof(message.proof, key: key, clientID: hello.clientID, macNonce: hello.macNonce, phoneNonce: hello.phoneNonce) else {
-                ptLog(.warning, "A Mac could not prove its pairing; closing its control connection")
+                ptLog(.warning, "A computer could not prove its pairing; closing its control connection")
                 peer.reject()
                 return [Self.error(.notAuthenticated)]
             }
             registry.touch(clientID: hello.clientID)
+            registry.noteHostKind(clientID: hello.clientID, kind: hello.hostKind)
             peer.authenticate(id: hello.clientID, name: hello.name)
             // The phone's status goes only to a proven Mac: the first now, not at the next tick.
             return [statusMessage()]
@@ -196,6 +203,7 @@ public final class ControlServer: @unchecked Sendable {
             guard let code = message.code, message.clientID.map({ $0 == hello.clientID }) ?? true else { return [Self.error(.badCode)] }
             switch registry.pair(code: code, clientID: hello.clientID, name: hello.name) {
             case .success(let token):
+                registry.noteHostKind(clientID: hello.clientID, kind: hello.hostKind)
                 peer.authenticate(id: hello.clientID, name: hello.name)
                 var reply = ControlEnvelope(t: ControlEnvelope.paired)
                 reply.token = token
@@ -243,7 +251,8 @@ public final class ControlServer: @unchecked Sendable {
             }
             let grant = ShellGrant(certSHA256: cert.lowercased(), port: port, addresses: Array((message.addresses ?? []).prefix(IrohInfo.maxAddresses)),
                                    macName: String((message.macName ?? mac.name).prefix(64)),
-                                   irohID: iroh.id, irohRelay: iroh.relay)
+                                   irohID: iroh.id, irohRelay: iroh.relay,
+                                   hostKind: Hosts.isRecordable(message.hostKind) ? message.hostKind : nil)
             // The key is only ever kept sealed to the app's key. Before the app has made
             // one, no answer: the Mac keeps the key unrecorded and grants again later
             // (with backoff, and on every new cable connection).
@@ -259,6 +268,7 @@ public final class ControlServer: @unchecked Sendable {
             reply.phoneID = registry.phoneID
             // Echo the grant's name so the Mac records the key this answer is for.
             reply.grantID = message.grantID.flatMap { $0.isEmpty || $0.utf8.count > ControlEnvelope.maxGrantIDLength ? nil : $0 }
+            registry.noteHostKind(clientID: mac.id, kind: grant.hostKind)
             ptLog(.info, "Granted \(mac.name) a shell")
             return [reply]
         case ControlEnvelope.ping:
@@ -325,6 +335,8 @@ private struct Hello {
     let name: String
     let macNonce: Data
     let phoneNonce: Data
+    /// `hostKind`, if it named one this build knows; recorded only once the pairing is proved.
+    let hostKind: String?
 }
 
 private final class Peer: @unchecked Sendable {
@@ -379,7 +391,7 @@ private final class Peer: @unchecked Sendable {
     func authenticate(id: String, name: String) {
         if mac == nil {
             mac = ConnectedMac(id: id, name: name, since: Date(), wireless: via.map { $0 == "wireless" },
-                               kind: server.clientKind(id))
+                               kind: server.clientKind(id), hostKind: server.hostKind(id))
             ptLog(.info, "\(name) connected")
             server.clientsChanged()
         }

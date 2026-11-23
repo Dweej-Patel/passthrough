@@ -3,9 +3,10 @@
 What the Mac and a phone (iPhone or Android) say to each other, and an iPad
 and the iPhone it gets its internet from ([iPad](#ipad)). The Swift
 implementation is in `Packages/PassthroughCore`, the Kotlin one in
-`android/app/src/main/java/dev/dpatel/passthrough/core`. Both test suites read
+`android/app/src/main/java/dev/dpatel/passthrough/core`, the C# one (the
+Windows host) in `windows/src/Passthrough.Core`. All three test suites read
 [`fixtures.json`](fixtures.json); change a message, a port or a pairing rule
-there first, then make both suites pass.
+there first, then make all three pass.
 
 ## Transport
 
@@ -38,7 +39,7 @@ absent (never `null`). Unknown fields are ignored. Protocol version 2.
 | `error` | phone | `reason`, `protocolVersion`? | `bad_code`, `expired`, `locked` (too many wrong codes on this connection, which the phone then closes), `code_withdrawn` (too many wrong codes against this code: pairing needs a new one), `not_authenticated` or `unsupported_version` (which carries the phone's `protocolVersion`, absent from version 1 phones). Earlier phones sent `locked` for a 30 s lockout; a Mac that doesn't know a reason reads it as `bad_code`. |
 | `ping` / `pong` | Mac / phone | none | Heartbeat every 5 s; the Mac gives up after 20 s of silence. |
 | `status` | phone | device facts, `activeConnections`, `rxBytes`, `txBytes`, `timestamp` | To authenticated Macs only: right after `auth` or `paired`, then once a second. The Mac ignores it before. |
-| `shellGrant` | Mac | `shellKey`, `certSHA256`, `shellPort`, `addresses`, `macName`, `irohID`?, `irohRelay`?, `relayToken`?, `grantID`? | Over the cable, on every paired connection while Remote shell is on: gives the phone access to the Mac's remote shell (below). `shellKey` is 32 random bytes, base64; `addresses` are where to dial the Mac. Each grant is a fresh key; the Mac also accepts the key the phone last proved until the phone first proves the new one, since a phone adopts a grant only once its app is unlocked. The optional `irohID` (the Mac's iroh endpoint id: 64 lowercase hex), `irohRelay` (its home relay: an `https` URL, at most 256 characters) and `relayToken` (at most 512 characters; kept in the phone's secret store, never in the grant record) let the phone dial the Mac over iroh (below). If the iroh fields are not valid as a group (a valid `irohID` is required; lengths count UTF-8 bytes), the phone drops all three and still stores the rest of the grant. The optional `grantID` (at most 64 UTF-8 bytes) names this grant for the answer. The Mac keeps one grant per phone in flight; one unanswered within 15 s counts as lost. The Mac then grants again after a wait counted from the end of those 15 s: 15, 30, 60 and 120 s for consecutive lost grants, then every 10 minutes. The next control channel, a new pairing, a change in what grants carry, or an answer starts the waits over. |
+| `shellGrant` | Mac | `shellKey`, `certSHA256`, `shellPort`, `addresses`, `macName`, `irohID`?, `irohRelay`?, `relayToken`?, `grantID`?, `hostKind`? | Over the cable, on every paired connection while Remote shell is on: gives the phone access to the Mac's remote shell (below). `shellKey` is 32 random bytes, base64; `addresses` are where to dial the Mac. Each grant is a fresh key; the Mac also accepts the key the phone last proved until the phone first proves the new one, since a phone adopts a grant only once its app is unlocked. The optional `irohID` (the Mac's iroh endpoint id: 64 lowercase hex), `irohRelay` (its home relay: an `https` URL, at most 256 characters) and `relayToken` (at most 512 characters; kept in the phone's secret store, never in the grant record) let the phone dial the Mac over iroh (below). If the iroh fields are not valid as a group (a valid `irohID` is required; lengths count UTF-8 bytes), the phone drops all three and still stores the rest of the grant. The optional `grantID` (at most 64 UTF-8 bytes) names this grant for the answer. The Mac keeps one grant per phone in flight; one unanswered within 15 s counts as lost. The Mac then grants again after a wait counted from the end of those 15 s: 15, 30, 60 and 120 s for consecutive lost grants, then every 10 minutes. The next control channel, a new pairing, a change in what grants carry, or an answer starts the waits over. The optional `hostKind` (`mac` or `windows`; absent from older Macs, which are Macs) says what the host is, so a phone shows a newly granted PC as a PC before it first connects; any other value is dropped. A host may also send `hostKind` in `hello`; a phone keeps it only once the connection is authenticated. |
 | `shellGranted` | phone | `phoneID`, `grantID`? | The phone stored the grant, its key sealed to the phone app's sealing key (`ShellKeySeal`; the vector is in fixtures.json). A phone whose app has not published a sealing key yet stores nothing and does not answer, so the grant expires and the Mac grants again as above. Echoes the grant's `grantID` when it had a valid one (1 to 64 UTF-8 bytes), so the Mac records the key of the grant answered and ignores a late answer to an earlier one. An answer without `grantID` (from phones that predate it) counts for the grant in flight. |
 | `goodbye` | phone | none | The phone's user turned Passthrough off, and the phone stops right after. Sent to authenticated clients only (Macs and iPads), just before the phone stops: the iPhone's extension stopping at the user's request, or the app's foreground host stopping. A link that only drops sends nothing, and is held to resume as usual. An iPad shows at once that Passthrough was turned off on the iPhone; the Mac logs it. Clients ignore it before `auth`. |
 
@@ -363,8 +364,10 @@ Binary fields (`data`, `nonce`, `mac`) are base64.
    the connection attempt arrives, before the QUIC handshake, so the QUIC
    handshake, `hello` and proof must all fit in it. Over TLS there is no
    `hello`.
-3. `{"t":"ready"}` followed by `sessions` from the Mac, or
-   `{"t":"error","reason":"not_authorized"}` and the connection closes.
+3. `{"t":"ready"}`, then `macInfo`, `host`, `macState` and `sessions` (each only when the host has one to send; a screen pass gets `ready` alone), or
+   `{"t":"error","reason":"not_authorized"}` and the connection closes. Nothing but
+   `challenge`, `ready` and that error is ever sent before `ready`: phones end the connection on
+   any other message, and read any other error as access lost.
 
 Nothing the phone sends is acted on before a valid proof. The Mac closes a
 connection whose `hello` or proof line exceeds 4096 bytes (a hard limit: a
@@ -483,8 +486,13 @@ opened is told `not_sharing` that way, so its own shell runs that command.
 | `screenPassSaved` | Mac | none | The Mac kept the pass. |
 | `screenRevoke` | phone | `phoneID` | Take back a pass this phone was granted (`phoneID`, the viewer's) and couldn't hand over. Answered `screenRevoked`, or `error` `bad_request` when it isn't one of this phone's passes. |
 | `screenRevoked` | Mac | none | The pass is gone. |
+| `host` | host | `host` | What the host is (*The host*, below): after `macInfo`; a PC sends it again whenever it changes. Never sent to a screen pass. |
+| `goingAway` | host | `reason` | The host is about to go away: `sleeping`, `turned_off` (Remote access) or `shutting_down`. Not sent for an update or a plain stop. A client shows "went to sleep" only after this. |
+| `rdp` | phone | none | See and control the screen through the host's Remote Desktop (*Remote Desktop relay*, below). |
+| `rdpReady` | host | `certSHA256` | Reply to `rdp`; every later byte, both ways, is Remote Desktop's. `certSHA256` is the SHA-256 of the certificate Remote Desktop will present, 64 lowercase hex; the viewer accepts only that one. |
+| `screenEnded` | host | `reason` | Sent on a device's other live connections when one of its views of the screen ended for a reason the view itself can't carry: `switched_off` (its Screen switch went off), `stopped` (from the host) or `taken` (someone signed in at the host). |
 | `ping` / `pong` | either | none | Liveness; each side answers `ping` with `pong`. A phone pings after 5 s without hearing from the Mac and gives the connection up after 15 s of silence and then dials again. The iPhone also gives it up 2 s after a ping it sent because the system said the connection's path failed (the cable it used unplugged, Wi-Fi lost) and nothing came back; Android closes the sockets of a network it lost by itself. |
-| `error` | Mac | `reason`, `session`?, `ref`? | `not_authorized`, `too_many_sessions` (8 at once), `no_such_session`, `bad_request`, `screen_not_allowed`, `screen_unavailable`, `screen_video_unavailable`, `too_many_screens`, `not_allowed` (the owner hasn't let this phone change Keep awake and the VPN), `vpn_not_set_up`, `screen_only` (a screen pass asked for something else) or `pass_not_saved`. `ref` when it refuses an `open`. |
+| `error` | Mac | `reason`, `session`?, `ref`? | `not_authorized`, `too_many_sessions` (8 at once), `no_such_session`, `bad_request`, `screen_not_allowed`, `screen_unavailable`, `screen_video_unavailable`, `too_many_screens`, `not_allowed` (the owner hasn't let this phone change Keep awake and the VPN), `vpn_not_set_up`, `screen_only` (a screen pass asked for something else), `pass_not_saved`, `signed_out` (no shell can start: *A Windows PC as host*), `rdp_unavailable` (with `detail`, in `host.rdp`'s words), `try_later` (with `retryAfter`, seconds), `too_many_computers` (a host lets in at most 8 computers a phone, 16 in all for one owner) or `pass_conflict` (a hand-over would replace a computer's access to a host with different details). `ref` when it refuses an `open`. An optional `message` is a sentence the host wrote, which a client shows only when it has none of its own. New reasons are only ever sent after `ready`; a client that doesn't know one reads it as `bad_request`. |
 
 The Mac keeps 1 MiB of scrollback per session.
 
@@ -542,6 +550,57 @@ that stays until dismissed whenever a phone turns its VPN off. A Mac that
 predates these messages answers them `bad_request` and sends no `macState`,
 so a phone offers neither until it has heard one.
 
+### The host
+
+`host` carries one object, `host`, with every field optional:
+
+| Field | Meaning |
+|-------|---------|
+| `kind` | `mac` or `windows`. A `host` without it is ignored; a client keeps a kind it doesn't know and treats it as neither. |
+| `os` | The operating system and version, to show (at most 64 characters). |
+| `signedIn` | The account that granted this device has a session on the host (locked counts). |
+| `app` | Passthrough is running in that session, so shells can start. |
+| `console` | Who is at the host's screen: `active`, `locked`, `signedOut` or `otherUser`; absent when unknown. |
+| `idleSeconds` | With `console` `active`: seconds since its keyboard or mouse was used. Under 120 means someone is using it. |
+| `shells` | The shells `open` may name: `id` (1 to 80 characters: a letter or digit, then letters, digits, `:`, `.`, `_`, `-`), `name`, and `default` on at most one. At most 32. A Mac names its login shell, id `login`. |
+| `screens` | How the screen can be seen: any of `video` (*Screen video*), `rfb` (*Screen*), `rdp` (*Remote Desktop relay*). A client asks only for what is listed. |
+| `rdp` | `ready`, or why the relay can't be used: `off`, `edition`, `account`, `service`, `exposed`, `policy`. |
+| `access` | What this device may do here: `shell`, `screen`, `share` (hand access on to another computer). |
+| `lock` | This device may send `lock`. |
+| `idKey` | The host's identity public key for computers (*Computers*), lowercase hex. |
+| `user` | The name its Windows sign-in takes; sent only to a device whose `access.screen` is true. |
+| `sleepAfter` | Seconds on mains until the host sleeps; 0 for never. |
+| `display` | The host's own monitor, so a viewer can leave it as it is: `width` and `height` in pixels (1 to 16384), `scale` in percent (100 to 500). A PC reads it while the account's session is on the PC's own screen. A viewer that keeps the session at this scale changes no DPI when the person goes back to the PC. |
+
+A host sends a `host` line of at most 16384 bytes. Clients drop the parts that
+are out of range rather than the whole message: an over-long `os`, an unknown
+`console`, a negative number, a shell with a bad id or name or a repeated id, a
+second `default` (`HostInfo.cleaned`; the cases are in fixtures.json,
+`shell.host`). Text fields are one line counted in UTF-16 units, with no
+control, format (bidi, zero-width) or separator characters. A field of the wrong
+JSON type still fails the whole line on the phones. A Mac sends `host` once per
+connection and no `lock`: on a Mac, Lock follows `macState.control`. A host
+that sends no `host` is a Mac from before it, which has one shell and the
+screen by `video` or `rfb`.
+
+### A Windows PC as host
+
+`open` may name a shell from `host.shells` (`shell`); without one the host
+starts the default. An id it doesn't list is `bad_request`. Each session
+says which shell it runs (`shell` in `sessions`). When no shell can start
+(the granting account isn't signed in, or Passthrough isn't running in its
+session) `open`, `attach`, `history`, `transcript` and `lock` are answered
+`signed_out`, and `host` says which (`signedIn`, `app`, `console`). If
+Passthrough stops in that session, attached sessions get `detached`, then an
+empty `sessions`, then a `host`.
+
+A PC answers what only a Mac serves (fixtures.json, `shell.pcAnswers`):
+`setAwake` and `setVPN` with `not_allowed`; `events` with an empty
+`eventList`; `push` with `pushState` off; `screenVideo` and `screen` with
+`screen_not_allowed` until it streams its own screen (so an older iPhone app
+never asks for a Mac login); `screenGrant`, `screenPass` and `screenRevoke`
+with `bad_request`. Its `macState` carries `battery`, `charging` and
+`locked`, with `control` false; Lock is offered from `host.lock`.
 ### Screen
 
 A phone the owner has also given screen access (a per-phone setting on the
@@ -675,7 +734,7 @@ Phone → Mac:
   only the newest capture (older ones are dropped before encoding), so
   little queues anywhere and the picture stays current on a slow path. The
   window is as many frames as fit in the shortest round trip of the last
-  10 s (frame sent to ack), 2 to 16; the bitrate falls when acks lag behind
+  10 s (frame sent to ack), 2 to 24; the bitrate falls when acks lag behind
   that trip (a queue building on the way), more the worse the lag, and
   creeps back up while they don't. Keyframes, slow anyway, don't count. A
   frame the phone can't show (one before the keyframe it is waiting for) is
@@ -778,6 +837,37 @@ framebuffer wider or taller than 16384 or of more than 50 million pixels
 name over 64 KiB, and Zlib or ZRLE data that inflates past what its
 rectangle can hold.
 
+### Remote Desktop relay
+
+A host that lists `rdp` in `host.screens` relays its own Remote Desktop
+(Windows' RDP service, on loopback) the way a Mac relays Screen Sharing
+(*Screen*). The device sends `rdp` on an authorized connection; the host
+checks, in order, and answers the first that applies: `screen_only` (a
+screen pass: never relayed, since its sign-in would let a pass try the
+account's password), `screen_not_allowed` (this device's Screen switch is
+off), `too_many_screens`, `rdp_unavailable` with `detail` (the relay can't be
+used: the same words as `host.rdp`), or `try_later` with `retryAfter`.
+
+Otherwise it connects to Remote Desktop on `127.0.0.1` at the port Windows is
+set to, checks the far end of that connection is Windows' own Remote Desktop
+service, and replies `rdpReady` with `certSHA256`, the hash of the certificate
+that service presents. From the byte after that line the connection carries
+Remote Desktop unchanged in both directions; the device sends nothing after
+`rdp` until then, and a line that arrives meanwhile closes the connection.
+The viewer runs Remote Desktop's own TLS and Network Level Authentication
+over it and accepts only the certificate named in `certSHA256`: there is no
+trust on first use and no prompt when Windows re-makes its certificate, and a
+stand-in for Remote Desktop gets no credential.
+
+The relay can't see a sign-in fail, so it limits what it can see: at most 4
+quick `rdp` opens per device's grant in 10 minutes (fewer when Windows locks
+an account out sooner) and 12 in all per host; an open that lasted over 30 s
+doesn't count. Past that the answer is `try_later`. When a view ends for a
+reason the relay can't carry (its Screen switch went off, it was stopped from
+the host, someone signed in there), the host tells the device's other
+connections with `screenEnded`, and answers `rdp` `try_later` for 30 s after
+a Stop.
+
 ### Screen passes
 
 A phone with shell access to two Macs can let one see the other's screen.
@@ -814,6 +904,31 @@ is ignored. The Mac shows a notice when a phone grants a pass. The owner sees
 each pass in the Mac's settings and can remove it like a phone. The viewing
 Mac asks for Touch ID or its password before each window it opens.
 
+### Computers
+
+A phone with shell access to a host may also give one of its other
+computers access there: the shell, the screen, or both. A screen pass
+(above) only ever sees the screen; a computer's access can be more. A host
+lets a phone do this only while its owner has allowed that phone to share
+(`host.access.share`), and it gives the screen only to a phone that may see
+the screen itself.
+
+| `t` | From | Fields | Notes |
+|---|---|---|---|
+| `computerGrant` | phone | `name`, `viewer`, `scopes`, `idKey`, `kind`? | `viewer` is the computer's own id as the phone knows it, `scopes` what it may do (`shell`, `screen`), `idKey` its identity public key (65-byte point, base64), `kind` `mac` or `windows`. |
+| `computerGranted` | host | `phoneID`, `key`, `scopes`, `pending`? | The new id (`computer.` and a UUID, minted only by the host) and its key (base64). `pending`: scopes waiting for the host's owner (`screen` on a PC, which asks its owner first). Refused with `too_many_computers` (8 a phone, 16 in all for one owner). A grant for the same `viewer` from the same phone replaces the earlier one: at once if that one was never used, otherwise when the new id first proves its key, so a hand-over that fails leaves the computer the access it had. |
+| `computerPass` | phone | `pass` | The credential for the computer to keep, as `screenPass`'s, under the new id. Answered `computerPassSaved`, or `error` (`pass_not_saved`, `pass_conflict`: it would replace access the computer already has to that host with different certificate or iroh details). |
+| `computerRevoke` | phone | `phoneID` | Takes back any computer this phone gave access to, at any time, with an earlier grant it is still replacing; its connections and the sessions it opened end. Answered `computerRevoked`, or `bad_request` for an id this phone didn't grant. |
+| `listComputers` | phone | | The computers this phone gave access to. Answered `computerList`, which the host sends again, unasked, whenever that list changes (a grant, a revoke, the owner allowing a screen, the computer connecting or leaving), but only on a connection that asked once, so older phones never see it. |
+| `computerList` | host | `computers` | At most 16 entries, oldest grant first, only this phone's: `phoneID`, `viewer`? (computerGrant's `viewer`), `name` (cleaned as a label), `kind`?, `scopes` (what it may do now; empty while the phone that gave it can't share it), `pending`?, `connected` (it has a live connection now), `grantedAt` (Unix seconds). |
+
+A computer granted this way also signs each proof with its identity key,
+bound to this host (the certificate's SHA-256 on TLS, the endpoint id on
+iroh), so a copied credential opens nothing. It may use what its scopes say
+and nothing else: no Keep awake or VPN, no history, no lock, no onward grant
+(`not_allowed`), and `listComputers` from a computer is `not_allowed` too.
+Removing the phone that gave it removes it.
+
 ### Address policy
 
 The Mac closes a connection from any peer outside these ranges before the TLS
@@ -822,14 +937,17 @@ handshake completes: 10/8, 172.16/12, 192.168/16, 169.254/16, 127/8,
 (Tailscale). 100.64/10 is also carrier-grade NAT space, so a peer from it, or
 from `fd7a:115c:a1e0::/48`, is let in only while one of the Mac's own tunnel
 interfaces (a point-to-point `utun`, as Tailscale, NetBird and Headscale set
-up) has an address in that range of the same family, and only when the
+up; on a Windows PC, an adapter of virtual or tunnel type with no hardware and
+no connector, which is what Wintun and WireGuard adapters report, never
+Ethernet, Wi-Fi, WWAN or a Hyper-V or WSL switch) has an address in that range of the same family, and only when the
 connection arrived on such an address; the same range on Wi-Fi or Ethernet is
 the carrier's network and does not count. A connection from such a peer whose
 arrival address is not known is refused. Hosts may carry a `%zone` suffix, which is ignored. A global
 IPv6 peer (`2000::/3`) is also let in when it shares a /64 with one of the
 Mac's own global addresses, so an IPv6-only LAN works; any other global
-address is refused. Only the Mac listens, so this check has no Kotlin
-counterpart and no fixtures.
+address is refused. Only computers listen, so this check has no Kotlin
+counterpart; the Windows rule for what counts as a tunnel interface comes with
+its listener.
 `addresses` in a `shellGrant` omit loopback and link-local, list Tailscale
 addresses last, and never include anything outside those ranges
 (`ShellAddressPolicy`).

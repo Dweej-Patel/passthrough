@@ -22,6 +22,8 @@ docs/screenshots/
 # Vendored tun2socks SOURCE (has its own .git); fetch with scripts/build-hev.sh.
 # The prebuilt Vendor/HevSocks5Tunnel/ (lib + headers) IS committed.
 Vendor/hev-socks5-tunnel/
+# Remote Desktop engine SOURCE and build trees; fetch and build with scripts/build-freerdp.sh.
+Vendor/freerdp-src/
 Vendor/vpn-engines-src/
 build-ios/
 build-device/

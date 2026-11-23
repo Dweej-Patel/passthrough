@@ -27,6 +27,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.ChevronRight
 import androidx.compose.material.icons.filled.Coffee
+import androidx.compose.material.icons.filled.DesktopWindows
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Laptop
 import androidx.compose.material.icons.filled.Lock
@@ -59,9 +60,11 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.semantics.LiveRegionMode
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.heading
+import androidx.compose.ui.semantics.liveRegion
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.font.FontFamily
@@ -87,7 +90,18 @@ import dev.dpatel.passthrough.ui.PTCircleIconButton
 import dev.dpatel.passthrough.ui.PTSteps
 import dev.dpatel.passthrough.ui.openDeveloperOptions
 import dev.dpatel.passthrough.ui.tabInsets
+import dev.dpatel.passthrough.core.HostKind
+import dev.dpatel.passthrough.core.HostWords
+import dev.dpatel.passthrough.core.Hosts
+import dev.dpatel.passthrough.ui.shell.HostCopy
+import dev.dpatel.passthrough.ui.shell.HostPage
+import dev.dpatel.passthrough.ui.shell.HostPageInput
+import dev.dpatel.passthrough.ui.shell.HostPageState
+import dev.dpatel.passthrough.ui.shell.NewShellControl
 import dev.dpatel.passthrough.ui.shell.ShellFormat
+import dev.dpatel.passthrough.ui.shell.hostDetail
+import dev.dpatel.passthrough.ui.shell.rememberClock
+import dev.dpatel.passthrough.ui.shell.rememberHostPage
 import dev.dpatel.passthrough.ui.shell.ShellReach
 import dev.dpatel.passthrough.ui.shell.ShellViewModel
 
@@ -129,11 +143,20 @@ fun MacScreen(
     val redialing by shell.redialing.collectAsStateWithLifecycle()
     val demoPaired by shell.demoPaired.collectAsStateWithLifecycle()
     val otherNeedsYou by shell.otherMacNeedsYou.collectAsStateWithLifecycle()
+    val kind by shell.selectedKind.collectAsStateWithLifecycle()
+    val host by shell.hostFacts.collectAsStateWithLifecycle()
+    val preferred by shell.preferredShell.collectAsStateWithLifecycle()
+    val input by shell.pageInput.collectAsStateWithLifecycle()
+    val page = rememberHostPage(input)
+    val clock = rememberClock()
 
     val isPaired = paired.isNotEmpty() || macs.isNotEmpty()
     val macID = selected ?: paired.firstOrNull()?.id
     val macName = macs.firstOrNull { it.macID == selected }?.macName
-        ?: (paired.firstOrNull { it.id == selected } ?: paired.firstOrNull())?.name ?: "Your Mac"
+        ?: (paired.firstOrNull { it.id == selected } ?: paired.firstOrNull())?.name ?: HostWords(kind, null).Your
+    val w = HostWords(kind, macName)
+    // A Mac's page has its switches; any other computer's has only what it offers (no internet, Keep awake or VPN).
+    val macPage = kind == HostKind.MAC
     val online = macID != null && stats.macs.any { it.id == macID }
     val running = sessions.filter { it.running }
 
@@ -188,12 +211,43 @@ fun MacScreen(
         }
 
         if (!isPaired) SetupCard(onPair = pair)
+        else if (!macPage) HostStatusCard(page, w, input, macID, clock, path = path, online = online, state = state, onRetry = shell::connect)
         else StatusCard(reach = reach, path = path, online = online, state = state, redialing = redialing, onRetry = shell::connect)
 
-        PTCard(padding = 6.dp) {
+        if (isPaired && !macPage) {
+            val lock = MacSwitches.lock(state, reach != ShellReach.READY, macName, pending, controlError, lastTapped)
+                ?.let { it.copy(status = HostCopy.lockStatus(it.on, MacControl.Lock in pending, w)) }
+            val screenText = HostCopy.screen(page.screen, w)
+            val note = if (page.state == HostPageState.PAIRED_NO_ACCESS) HostCopy.reachBlockNoAccess(w) else null
+            if (lock != null || screenText != null || note != null) {
+                PTCard(padding = 6.dp) {
+                    lock?.let { model ->
+                        LockRow(macName, model, hint = "Its shells keep running", onLock = {
+                            lastTapped = MacSwitch.LOCK
+                            shell.control(MacControl.Lock)
+                        }) { f -> fix(f) { shell.control(MacControl.Lock) } }
+                    }
+                    screenText?.let {
+                        if (lock != null) HorizontalDivider(Modifier.padding(start = 62.dp), color = c.cardBorder)
+                        ScreenRow(it)
+                    }
+                    note?.let { Note(SwitchNote(it, warning = false), Modifier.padding(start = 12.dp, end = 12.dp, top = 10.dp, bottom = 10.dp)) { } }
+                }
+            }
+            if (page.state == HostPageState.PAIRED_NO_ACCESS) {
+                PTCard(padding = 16.dp) {
+                    Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
+                        Text("Set up ${w.name}", style = PT.display(20.sp), color = c.primary)
+                        PTSteps(HostCopy.setupSteps(w, paired = true))
+                    }
+                }
+            }
+        }
+
+        if (macPage) PTCard(padding = 6.dp) {
             SwitchRow("Internet through this phone", Icons.Filled.Wifi, internet, onToggle = { onPower() }) { fix(it, onPower) }
             HorizontalDivider(Modifier.padding(start = 62.dp), color = c.cardBorder)
-            SwitchRow("Keep Mac awake", Icons.Filled.Coffee, awake, onToggle = { on ->
+            SwitchRow("Keep Mac awake", Icons.Filled.Coffee, awake, onToggle = { on -> // mac-only
                 lastTapped = MacSwitch.AWAKE
                 if (on) shell.control(MacControl.Awake(true))
                 else if (running.isNotEmpty()) confirmSleep = true
@@ -215,7 +269,19 @@ fun MacScreen(
             block?.let { Note(it, Modifier.padding(start = 12.dp, end = 12.dp, bottom = 10.dp)) { f -> fix(f, shell::connect) } }
         }
 
-        if (reach == ShellReach.READY) ShellsPreview(sessions, macName, onOpenTerminal, onShells)
+        if (reach == ShellReach.READY) {
+            ShellsPreview(
+                sessions, macName, onOpenTerminal, onShells,
+                notice = HostCopy.shell(page.shell, w),
+                newShell = if (Hosts.offersChoice(host)) ({
+                    NewShellControl(host?.shells.orEmpty(), preferred, macName, enabled = true) { id ->
+                        id?.let(shell::chooseShell)
+                        onOpenTerminal(null)
+                    }
+                }) else null,
+                shellName = { ShellFormat.shellName(it, host) },
+            )
+        }
 
         ThisPhoneRow(vm, onThisPhone)
     }
@@ -229,7 +295,7 @@ fun MacScreen(
     if (confirmSleep) {
         AlertDialog(
             onDismissRequest = { confirmSleep = false },
-            title = { Text("Let $macName sleep?") },
+            title = { Text("Let $macName sleep?") }, // mac-only
             text = { Text(if (running.size == 1) "1 running shell pauses until it wakes." else "${running.size} running shells pause until it wakes.") },
             confirmButton = {
                 TextButton(onClick = {
@@ -309,7 +375,7 @@ private fun SwitchRow(
  * unlocking from here; that takes the Mac's password.
  */
 @Composable
-private fun LockRow(macName: String, model: SwitchModel, onLock: () -> Unit, onFix: (SwitchFix) -> Unit) {
+private fun LockRow(macName: String, model: SwitchModel, hint: String? = null, onLock: () -> Unit, onFix: (SwitchFix) -> Unit) {
     val c = LocalPT.current
     val locked = model.on
     val fill by animateColorAsState(if (locked) c.tint else c.fill, tween(250), label = "fill")
@@ -335,7 +401,7 @@ private fun LockRow(macName: String, model: SwitchModel, onLock: () -> Unit, onF
             if (!locked) {
                 OutlinedButton(
                     onClick = onLock, enabled = model.enabled,
-                    modifier = Modifier.heightIn(min = 48.dp).semantics { contentDescription = "Lock $macName's screen" },
+                    modifier = Modifier.heightIn(min = 48.dp).semantics { contentDescription = "Lock $macName's screen" + (hint?.let { ". $it" } ?: "") },
                 ) { Text("Lock", style = PT.display(14.sp, FontWeight.SemiBold), color = if (model.enabled) c.tintText else c.secondary) }
             }
         }
@@ -373,16 +439,16 @@ private fun SetupCard(onPair: () -> Unit) {
                     Icon(Icons.Filled.Laptop, null, tint = c.secondary, modifier = Modifier.size(30.dp))
                 }
                 Column(verticalArrangement = Arrangement.spacedBy(3.dp)) {
-                    Text("Set up your Mac", style = PT.display(20.sp), color = c.primary)
+                    Text("Add a computer", style = PT.display(20.sp), color = c.primary)
                     Text("Pair once over USB.", style = PT.display(15.sp, FontWeight.Normal), color = c.secondary)
                 }
             }
             PTSteps(listOf(
-                "Plug this phone into your Mac with a USB cable.",
-                "Open Passthrough in the Mac's menu bar.",
-                "Tap Pair your Mac and type the code on the Mac.",
+                "Plug this phone into your Mac or PC with a USB cable.",
+                "Open Passthrough on the computer.",
+                "Tap Pair a Mac or PC and type the code there.",
             ))
-            PrimaryButton("Pair your Mac", onPair)
+            PrimaryButton("Pair a Mac or PC", onPair)
         }
     }
 }
@@ -437,7 +503,7 @@ private fun StatusCard(
                 if (state?.awakeStopped == MacStates.STOPPED_BATTERY) {
                     Text("It most likely went to sleep", style = PT.display(14.sp, FontWeight.SemiBold), color = c.attentionText)
                     Text(
-                        "Its battery reached your ${MacFormat.percent(state.batteryFloor ?: 0.2)} limit, so Keep Mac awake let it sleep. Plug it in and it wakes for the next connection.",
+                        "Its battery reached your ${MacFormat.percent(state.batteryFloor ?: 0.2)} limit, so Keep Mac awake let it sleep. Plug it in and it wakes for the next connection.", // mac-only
                         style = PT.display(14.sp, FontWeight.Normal), color = c.primary,
                     )
                 } else {
@@ -469,7 +535,7 @@ private fun ThisPhoneRow(vm: AppViewModel, onClick: () -> Unit) {
         Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
             Text("This phone", style = PT.display(16.sp, FontWeight.SemiBold), color = c.primary)
             Text(
-                "$name · " + (if (paired.size == 1) "1 Mac paired" else "${paired.size} Macs paired") +
+                "$name · " + (if (paired.size == 1) "1 computer paired" else "${paired.size} computers paired") +
                     " · ${ByteFormat.bytes(usage.monthTotal)} this month",
                 style = PT.display(13.sp, FontWeight.Normal), color = c.secondary, maxLines = 2, overflow = TextOverflow.Ellipsis,
             )
@@ -520,18 +586,33 @@ private fun NeedsYouCard(session: ShellSessionInfo, onOpen: () -> Unit) {
 }
 
 @Composable
-private fun ShellsPreview(sessions: List<ShellSessionInfo>, macName: String, onOpen: (String?) -> Unit, onShells: () -> Unit) {
+private fun ShellsPreview(
+    sessions: List<ShellSessionInfo>, macName: String, onOpen: (String?) -> Unit, onShells: () -> Unit,
+    /** Why no shell can start there: shown in place of the list and New shell. */
+    notice: String? = null,
+    /** The split New shell, when the computer offers several shells; null for the plain button. */
+    newShell: (@Composable () -> Unit)? = null,
+    shellName: (ShellSessionInfo) -> String? = { null },
+) {
     val c = LocalPT.current
     val now = System.currentTimeMillis() / 1000.0
     PTCard(padding = 14.dp) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Text("Shells", style = PT.display(17.sp), color = c.primary, modifier = Modifier.weight(1f))
-            if (sessions.isNotEmpty()) TextButton(onClick = onShells) { Text("See all", color = c.tintText) }
+            if (sessions.isNotEmpty() && notice == null) TextButton(onClick = onShells) { Text("See all", color = c.tintText) }
         }
-        if (sessions.isEmpty()) {
-            Text("Nothing running. Start a shell to run commands on $macName.", style = PT.display(14.sp, FontWeight.Normal), color = c.secondary)
+        if (notice != null) {
+            Row(
+                Modifier.semantics { liveRegion = LiveRegionMode.Polite }.padding(vertical = 4.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.Top,
+            ) {
+                Icon(Icons.Filled.Info, null, tint = c.secondary, modifier = Modifier.padding(top = 2.dp).size(16.dp))
+                Text(notice, style = PT.display(14.sp, FontWeight.Normal), color = c.primary)
+            }
+        } else if (sessions.isEmpty()) {
+            Text(HostCopy.nothingRunning(macName), style = PT.display(14.sp, FontWeight.Normal), color = c.secondary)
             Spacer(Modifier.height(10.dp))
-            PrimaryButton("New shell", { onOpen(null) }, Icons.Filled.Add)
+            newShell?.invoke() ?: PrimaryButton("New shell", { onOpen(null) }, Icons.Filled.Add)
         } else {
             sessions.sortedWith(compareByDescending<ShellSessionInfo> { it.running }.thenByDescending { it.lastOutputAt }).take(3).forEach { s ->
                 Row(
@@ -541,16 +622,93 @@ private fun ShellsPreview(sessions: List<ShellSessionInfo>, macName: String, onO
                     Box(Modifier.size(8.dp).background(if (s.isAsking) PT.attention else if (s.running) c.tint else c.tertiary, CircleShape))
                     Column(Modifier.weight(1f)) {
                         Text(s.title, style = PT.display(15.sp, FontWeight.SemiBold), color = c.primary, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                        Text(ShellFormat.status(s, now), style = PT.display(12.sp, FontWeight.Normal), color = c.secondary, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        Text(ShellFormat.status(s, now, shellName(s)), style = PT.display(12.sp, FontWeight.Normal), color = c.secondary, maxLines = 1, overflow = TextOverflow.Ellipsis)
                     }
                     Icon(Icons.Filled.ChevronRight, null, tint = c.tertiary)
                 }
             }
-            TextButton(onClick = { onOpen(null) }) {
-                Icon(Icons.Filled.Add, null, tint = c.tintText, modifier = Modifier.size(18.dp))
-                Text(" New shell", color = c.tintText, style = PT.display(15.sp, FontWeight.SemiBold))
+            if (newShell != null) {
+                Box(Modifier.padding(top = 6.dp)) { newShell() }
+            } else {
+                TextButton(onClick = { onOpen(null) }) {
+                    Icon(Icons.Filled.Add, null, tint = c.tintText, modifier = Modifier.size(18.dp))
+                    Text(" New shell", color = c.tintText, style = PT.display(15.sp, FontWeight.SemiBold))
+                }
             }
         }
+    }
+}
+
+/** A PC's screen, which this app can't show yet: dimmed, saying why. */
+@Composable
+private fun ScreenRow(sentence: String) {
+    val c = LocalPT.current
+    Row(
+        Modifier.fillMaxWidth().heightIn(min = 64.dp).semantics(mergeDescendants = true) {}.padding(horizontal = 12.dp, vertical = 10.dp),
+        verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(14.dp),
+    ) {
+        Box(Modifier.size(36.dp).background(c.fill, CircleShape), contentAlignment = Alignment.Center) {
+            Icon(Icons.Filled.DesktopWindows, null, modifier = Modifier.size(18.dp), tint = c.primary.copy(alpha = 0.45f))
+        }
+        Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+            Text("Screen", style = PT.display(16.sp, FontWeight.SemiBold), color = c.primary.copy(alpha = 0.55f))
+            Text(sentence, style = PT.display(13.sp, FontWeight.Normal), color = c.secondary)
+        }
+    }
+}
+
+/**
+ * A PC's (or any computer not a Mac's) status: how it's reached, its battery, and, when it
+ * can't be reached, why as far as this phone knows, with Try again. Words from [HostCopy].
+ */
+@Composable
+private fun HostStatusCard(
+    page: HostPage, w: HostWords, input: HostPageInput, macID: String?, clock: (Long) -> String,
+    path: ShellPath?, online: Boolean, state: MacState?, onRetry: () -> Unit,
+) {
+    val c = LocalPT.current
+    val ready = page.state == HostPageState.CONNECTED
+    val title = HostCopy.title(page.state, online)
+    val detail = when (page.state) {
+        HostPageState.CONNECTED -> when (path) {
+            ShellPath.DIRECT -> "From anywhere, directly"
+            ShellPath.RELAY -> "From anywhere, through a relay"
+            ShellPath.LOCAL -> "On this network"
+            else -> null
+        }
+        HostPageState.PAIRED_NO_ACCESS -> if (online) "Plugged in over USB" else "Not plugged in"
+        else -> null
+    }
+    val away = hostDetail(page, w, input, macID, clock)?.takeIf { page.state != HostPageState.PAIRED_NO_ACCESS }
+    val warn = page.canRetry && page.state != HostPageState.CONNECTING && page.state != HostPageState.RECONNECTING
+    val border by animateColorAsState(if (warn) PT.attention.copy(alpha = 0.45f) else c.cardBorder, tween(300), label = "border")
+    Column(
+        Modifier.fillMaxWidth().background(c.card, RoundedCornerShape(24.dp)).border(1.dp, border, RoundedCornerShape(24.dp)).padding(16.dp),
+        verticalArrangement = Arrangement.spacedBy(14.dp),
+    ) {
+        Row(Modifier.semantics(mergeDescendants = true) {}, verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(16.dp)) {
+            Box(Modifier.size(56.dp).background(if (ready) c.cardOn else c.fill, RoundedCornerShape(16.dp)), contentAlignment = Alignment.Center) {
+                Icon(Icons.Filled.DesktopWindows, null, tint = if (ready) c.tintText else c.secondary, modifier = Modifier.size(30.dp))
+            }
+            Column(verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                Text(title, style = PT.display(20.sp), color = c.primary)
+                detail?.let { Text(it, style = PT.display(15.sp, FontWeight.Normal), color = c.secondary) }
+            }
+        }
+        val battery = state?.battery
+        if (ready && battery != null) {
+            Text(
+                if (state.charging == true) "${MacFormat.percent(battery)}, charging" else "${MacFormat.percent(battery)} on battery",
+                style = PT.display(13.sp, FontWeight.Normal), color = c.secondary,
+            )
+        }
+        away?.let {
+            Text(
+                it, style = PT.display(14.sp, FontWeight.Normal), color = c.primary,
+                modifier = Modifier.fillMaxWidth().background(PT.attention.copy(alpha = 0.1f), RoundedCornerShape(16.dp)).padding(12.dp),
+            )
+        }
+        if (page.canRetry) PrimaryButton("Try again", onRetry, Icons.Filled.Refresh)
     }
 }
 

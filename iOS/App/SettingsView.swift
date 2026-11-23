@@ -70,7 +70,7 @@ struct SettingsView: View {
                     LabeledContent("Control port") {
                         TextField("", value: $model.controlPort, format: .number.grouping(.never)).keyboardType(.numberPad).multilineTextAlignment(.trailing)
                     }
-                    Button("Forget all paired Macs", role: .destructive) { confirmForgetAll = true }
+                    Button("Forget all paired computers", role: .destructive) { confirmForgetAll = true }
                         .disabled(model.pairedClients.isEmpty)
                 } header: {
                     Text("Advanced")
@@ -111,10 +111,10 @@ struct SettingsView: View {
             .navigationTitle("Settings")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } } }
-            .confirmationDialog("Forget all paired Macs?", isPresented: $confirmForgetAll, titleVisibility: .visible) {
+            .confirmationDialog("Forget all paired computers?", isPresented: $confirmForgetAll, titleVisibility: .visible) {
                 Button("Forget All", role: .destructive) { model.revokeAll() }
             } message: {
-                Text("Every Mac loses access, including Remote shell, until you pair it again.")
+                Text("Every computer loses access, its shells included, until you pair it again.")
             }
         }
     }
@@ -129,13 +129,14 @@ private struct RemoteShellSettings: View {
         // Macs that granted the shell; the shell's own list covers a grant it read before the registry caught up.
         let granting = model.pairedClients.filter { $0.shell != nil }.map { (id: $0.id, name: $0.shell?.macName ?? $0.name) }
         let shellMacs = granting.isEmpty ? shell.macs.map { (id: $0.macID, name: $0.macName) } : granting
+        let words = shellMacs.isEmpty ? setupWords : listWords(shellMacs.map(\.id))
         Section {
             if shellMacs.isEmpty {
-                ShellSetupSteps(paired: !model.pairedClients.isEmpty)
+                ShellSetupSteps(paired: !model.pairedClients.isEmpty, words: setupWords)
                     .padding(.vertical, 6)
             } else {
                 LabeledContent("Status") {
-                    ShellStatusLabel(reach: shell.reach)
+                    ShellStatusLabel(reach: shell.reach, kind: shell.selectedKind)
                 }
                 LabeledContent("Allowed by", value: ListFormatter.localizedString(byJoining: shellMacs.map(\.name)))
             }
@@ -143,9 +144,9 @@ private struct RemoteShellSettings: View {
             Text("Remote shell")
         } footer: {
             if shellMacs.isEmpty {
-                Text("Open your Mac's shell from this \(ThisDevice.name). Every session is recorded on the Mac.")
+                Text("Open \(words.your)'s shell from this \(ThisDevice.name). Every session is recorded on \(words.the).")
             } else {
-                Text("Every session is recorded on your Mac. To take access away, turn Remote shell off on the Mac, or forget the Mac on this \(ThisDevice.name).")
+                Text(Self.recordedFooter(words))
             }
         }
         if !shellMacs.isEmpty {
@@ -154,23 +155,45 @@ private struct RemoteShellSettings: View {
             } header: {
                 Text("Connect from")
             }
-            NotificationSettings(shell: shell)
+            NotificationSettings(shell: shell, words: words)
             Section {
                 ForEach(shellMacs, id: \.id) { mac in
-                    ManualShellAddressRow(shell: shell, macID: mac.id, macName: mac.name)
+                    ManualShellAddressRow(shell: shell, macID: mac.id, macName: mac.name, symbol: listWords([mac.id]).symbol)
                 }
             } header: {
-                Text("Mac address (optional)")
+                Text("\(words.Noun) address (optional)")
             } footer: {
-                Text("Only needed when this \(ThisDevice.name) can't find your Mac by itself, for example over Tailscale. Enter its Tailscale name or IP address. Leave blank to use the addresses your Mac shares.")
+                Text("Only needed when this \(ThisDevice.name) can't find \(words.your) by itself, for example over Tailscale. Enter its Tailscale name or IP address. Leave blank to use the addresses \(words.your) shares.")
             }
         }
+    }
+
+    /// The setup steps' nouns: the selected computer's, or both kinds' with none paired.
+    private var setupWords: HostWords {
+        model.pairedClients.isEmpty ? .generic(device: ThisDevice.name) : shell.words
+    }
+
+    /// The nouns for these computers together: their kind when they share one ("your Mac", "your PC"),
+    /// else the neutral "computer". A Mac's sentences then read as they always have.
+    private func listWords(_ ids: [String]) -> HostWords {
+        let kinds = Set(ids.map { shell.kind(of: $0) })
+        return HostWords(kind: kinds.count == 1 ? kinds.first : nil, name: nil, device: ThisDevice.name)
+    }
+
+    /// Where sessions are recorded and how access is taken away; with Macs and PCs both, each one's switch.
+    static func recordedFooter(_ w: HostWords) -> String {
+        guard w.kind != nil else {
+            return "Every session is recorded on the computer it ran on. To take access away, turn off Remote shell on a Mac or Remote access on a PC, or forget the computer on this \(w.device)."
+        }
+        return "Every session is recorded on \(w.your). To take access away, turn \(w.feature) off on \(w.the), or forget \(w.the) on this \(w.device)."
     }
 }
 
 /// Notices from Macs when a shell needs you or finishes (`PushRegistrar`).
 private struct NotificationSettings: View {
     @ObservedObject var shell: ShellModel
+    /// The nouns for the computers that send them.
+    let words: HostWords
     @ObservedObject private var push = PushRegistrar.shared
     @State private var asking = false
 
@@ -185,19 +208,21 @@ private struct NotificationSettings: View {
                 Label("Notifications are off for Passthrough in the iPhone's Settings.", systemImage: "bell.slash")
                     .font(.footnote).foregroundStyle(.secondary)
             } else if push.enabled, shell.macSendsNotices == false {
-                Label("\(macName) can't send them: its Passthrough has no usable push key. See Settings › Remote Shell on the Mac, and PASSTHROUGH_PUSH_KEY_FILE in Config/Signing.xcconfig. The widget and Live Activity still show when a shell needs you.",
+                Label(shell.selectedKind == .mac
+                      ? "\(macName) can't send them: its Passthrough has no usable push key. See Settings › Remote Shell on the Mac, and PASSTHROUGH_PUSH_KEY_FILE in Config/Signing.xcconfig. The widget and Live Activity still show when a shell needs you."
+                      : "\(macName) can't send them: its Passthrough has no usable push key. The widget and Live Activity still show when a shell needs you.",
                       systemImage: "exclamationmark.triangle")
                     .font(.footnote).foregroundStyle(.secondary)
             }
         } header: {
             Text("Notifications")
         } footer: {
-            Text("When Claude Code or another program asks you something, or finishes a long task while you aren't looking. Your Mac sends them through Apple's push service, sealed so only this \(ThisDevice.name) can read them. Each Mac starts sending once the app has connected to it.")
+            Text("When Claude Code or another program asks you something, or finishes a long task while you aren't looking. \(words.Your) sends them through Apple's push service, sealed so only this \(ThisDevice.name) can read them. Each \(words.noun) starts sending once the app has connected to it.")
         }
     }
 
     private var macName: String {
-        shell.macs.first { $0.macID == shell.selectedMacID }?.macName ?? "Your Mac"
+        shell.macs.first { $0.macID == shell.selectedMacID }?.macName ?? shell.words.name
     }
 }
 
@@ -264,11 +289,13 @@ private struct ManualShellAddressRow: View {
     let shell: ShellModel
     let macID: String
     let macName: String
+    /// The computer's glyph: a laptop for a Mac, a PC's own for a PC.
+    let symbol: String
     @State private var text = ""
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
-            Label(macName, systemImage: "laptopcomputer")
+            Label(macName, systemImage: symbol)
                 .font(.subheadline.weight(.semibold))
             TextField("Tailscale name or IP address", text: $text)
                 .keyboardType(.URL)

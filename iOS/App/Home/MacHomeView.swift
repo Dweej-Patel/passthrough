@@ -24,6 +24,8 @@ struct MacHomeView: View {
     @State private var showPhonePairing = false
     /// Letting another Mac see this one's screen.
     @State private var showShareScreen = false
+    /// Letting another computer use this one (`ShareComputerSheet`).
+    @State private var showShareComputer = false
     @ObservedObject private var links = PendingLinks.shared
 
     /// The Mac on screen: the shell's selection, else the first paired Mac.
@@ -31,6 +33,8 @@ struct MacHomeView: View {
     private var macName: String { shell.selectedMacName }
     private var onlineThroughPhone: Bool { macID.map(model.connectedMacIDs.contains) ?? false }
     private var paired: Bool { !model.pairedClients.isEmpty }
+    /// A Mac's page has Keep awake, the VPN, the cable's internet and screen passes; a PC's has none of them.
+    private var isMac: Bool { shell.selectedKind == .mac }
 
     var body: some View {
         NavigationStack {
@@ -61,8 +65,8 @@ struct MacHomeView: View {
                         Button { showSwitcher = true } label: {
                             MacAvatar(macID: macID ?? "", name: macName, badge: shell.otherMacNeedsYou)
                         }
-                        .accessibilityLabel("Your Macs")
-                        .accessibilityValue(shell.otherMacNeedsYou ? "\(macName), another Mac needs you" : macName)
+                        .accessibilityLabel("Your computers")
+                        .accessibilityValue(shell.otherMacNeedsYou ? "\(macName), another computer needs you" : macName)
                     } else {
                         Button { showSettings = true } label: { Image(systemName: "gearshape") }
                             .accessibilityLabel("Settings")
@@ -80,6 +84,9 @@ struct MacHomeView: View {
         }
         .sheet(isPresented: $showShareScreen) {
             if let mac = shell.selectedMac { ShareScreenSheet(shell: shell, shared: mac) }
+        }
+        .sheet(isPresented: $showShareComputer) {
+            if let mac = shell.selectedMac { ShareComputerSheet(shell: shell, shared: mac) }
         }
         .sheet(isPresented: $showPhonePairing) {
             if let hotspot = model.hotspot { PairWithPhoneSheet(hotspot: hotspot) }
@@ -115,7 +122,7 @@ struct MacHomeView: View {
             hero
             if shell.reach == .ready { needsYou }
             switches
-            if shell.reach == .noAccess, !model.pairedClients.isEmpty { setupCard }
+            if shell.reach == .noAccess, !model.pairedClients.isEmpty, !shell.accessRefused { setupCard }
             if shell.reach == .ready { shells }
             Color.clear.frame(height: 0).id("end")
         }
@@ -140,7 +147,10 @@ struct MacHomeView: View {
             if paired {
                 GridRow {
                     switchesCard(wide: true).environment(\.surfaceFill, .top)
-                    ScreenCard(macName: macName, enabled: shell.reach == .ready) { router.showScreen = true }
+                    ScreenCard(macName: macName, enabled: shell.canOpenScreen, detail: screenCardDetail,
+                               symbol: isMac ? ScreenCard.macSymbol : shell.words.symbol) {
+                        router.openScreen(shell)
+                    }
                         .environment(\.surfaceFill, .center)
                 }
             } else if let note = links.note {
@@ -159,10 +169,16 @@ struct MacHomeView: View {
                         .gridCellColumns(2)
                 }
             }
-            if shell.reach == .noAccess, paired { GridRow { setupCard.gridCellColumns(2) } }
+            if shell.reach == .noAccess, paired, !shell.accessRefused { GridRow { setupCard.gridCellColumns(2) } }
             if shell.reach == .ready { GridRow { shells.gridCellColumns(2) } }
             GridRow { Color.clear.frame(height: 0).id("end").gridCellColumns(2) }
         }
+    }
+
+    /// The iPad Screen card's line: a Mac's as always; a PC's from its page, never the Mac's sentence.
+    private var screenCardDetail: String {
+        guard !isMac else { return ScreenCard.macDetail }
+        return PCScreen.copy(shell.page.screen, shell.words) ?? PCScreen.copy(.notInThisVersion, shell.words) ?? ""
     }
 
     private func runAfterSwitcher() {
@@ -227,11 +243,27 @@ struct MacHomeView: View {
                 if !wide {
                     if let hotspot = model.hotspot {
                         HotspotRow(hotspot: hotspot) { showPhonePairing = true }
-                    } else {
+                    } else if !paired || isMac {
+                        // A PC doesn't use this phone's internet: its page has no Internet row.
                         internetRow
                     }
                 }
-                if paired {
+                if paired, !isMac {
+                    // A PC: its screen lock (when it lets this device lock it) and its Screen row.
+                    if shell.hostFacts?.lock == true {
+                        if !wide, model.hotspot != nil { Divider().padding(.leading, 58) }
+                        lockRow
+                    }
+                    if !wide, shell.page.screen != .noRow {
+                        if shell.hostFacts?.lock == true || model.hotspot != nil { Divider().padding(.leading, 58) }
+                        screenRow
+                    }
+                    if canShare {
+                        Divider().padding(.leading, 58)
+                        shareRow
+                    }
+                    if let reason = reachBlock { SwitchNote(problem: reason).padding(.horizontal, 10).padding(.vertical, 10) }
+                } else if paired {
                     if !wide { Divider().padding(.leading, 58) }
                     awakeRow
                     Divider().padding(.leading, 58)
@@ -245,9 +277,9 @@ struct MacHomeView: View {
                         Divider().padding(.leading, 58)
                         screenRow
                     }
-                    if canShareScreen {
+                    if canShare {
                         Divider().padding(.leading, 58)
-                        shareScreenRow
+                        shareRow
                     }
                     if let reason = reachBlock { SwitchNote(problem: reason).padding(.horizontal, 10).padding(.bottom, 10) }
                 }
@@ -441,12 +473,14 @@ struct MacHomeView: View {
     // MARK: Screen
 
     private var screenRow: some View {
-        Button { router.showScreen = true } label: {
+        Button { router.openScreen(shell) } label: {
             HStack(spacing: 12) {
                 SwitchIcon(symbol: "display", on: false, warning: false)
                 VStack(alignment: .leading, spacing: 2) {
                     Text("Screen").font(.body.weight(.semibold))
-                    Text("See and control the Mac's screen").font(.subheadline).foregroundStyle(.secondary)
+                    Text(PCScreen.copy(shell.page.screen, shell.words) ?? "")
+                        .font(.subheadline).foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
                 Spacer(minLength: 8)
                 Image(systemName: "chevron.right").font(.subheadline.weight(.semibold)).foregroundStyle(.tertiary)
@@ -456,31 +490,92 @@ struct MacHomeView: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .disabled(shell.reach != .ready)
-        .opacity(shell.reach == .ready ? 1 : 0.55)
-        .accessibilityHint("Opens the Mac's screen")
+        .disabled(!shell.canOpenScreen)
+        .opacity(shell.canOpenScreen ? 1 : 0.55)
+        .accessibilityHint(shell.canOpenScreen ? "Opens \(shell.words.the)'s screen" : "")
     }
 
-    /// Another of this phone's Macs could be let see this one's screen.
-    private var canShareScreen: Bool { shell.selectedMac != nil && shell.macs.count >= 2 }
+    // MARK: Share
 
-    private var shareScreenRow: some View {
-        Button { showShareScreen = true } label: {
+    /// What the one Share row opens, by what the computer on screen lets this phone share.
+    private enum ShareRoute {
+        /// It said this phone may share it (`host.access.share`): `ShareComputerSheet`.
+        case computers
+        /// A Mac that didn't, with another Mac here: its screen as a pass (`ShareScreenSheet`), as before computers could be shared.
+        case screenPass
+        /// Nothing can be shared from here: the row stays, disabled, with where to turn sharing on.
+        case off
+    }
+
+    /// The row shows with another computer to share this one with, once this phone has its credential.
+    private var canShare: Bool { shell.selectedMac != nil && shell.macs.count >= 2 }
+
+    private var shareRoute: ShareRoute {
+        if shell.hostFacts?.access?.share == true { return .computers }
+        // A pass needs this phone's own screen access there: a Mac that said no would refuse it.
+        if isMac, shell.hostFacts?.access?.screen != false,
+           shell.macs.filter({ shell.kind(of: $0.macID) == .mac }).count >= 2 { return .screenPass }
+        return .off
+    }
+
+    private var shareRow: some View {
+        let route = shareRoute
+        return Button {
+            switch route {
+            case .computers: showShareComputer = true
+            case .screenPass: showShareScreen = true
+            case .off: break
+            }
+        } label: {
             HStack(spacing: 12) {
-                SwitchIcon(symbol: "rectangle.on.rectangle", on: false, warning: false)
+                SwitchIcon(symbol: "person.2.badge.key", on: false, warning: false)
                 VStack(alignment: .leading, spacing: 2) {
-                    Text("Share screen with a Mac").font(.body.weight(.semibold))
-                    Text("Let your other Mac see and control this one").font(.subheadline).foregroundStyle(.secondary)
+                    Text("Share with another computer\u{2026}").font(.body.weight(.semibold))
+                    Text(shareCaption(route)).font(.subheadline).foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
                 Spacer(minLength: 8)
-                Image(systemName: "chevron.right").font(.subheadline.weight(.semibold)).foregroundStyle(.tertiary)
+                if route != .off {
+                    Image(systemName: "chevron.right").font(.subheadline.weight(.semibold)).foregroundStyle(.tertiary)
+                }
             }
             .padding(10)
             .frame(minHeight: 60)
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .accessibilityHint("Gives another of your Macs a pass to this Mac's screen")
+        .disabled(route == .off)
+        .opacity(route == .off ? 0.55 : 1)
+        .accessibilityHint(shareHint(route))
+    }
+
+    private func shareCaption(_ route: ShareRoute) -> String {
+        switch route {
+        case .computers: sharedWithCaption ?? "Let another of your computers use this one"
+        case .screenPass: HostCopy.shareScreenOnly(shell.words)
+        case .off: HostCopy.shareOff(shell.words)
+        }
+    }
+
+    private func shareHint(_ route: ShareRoute) -> String {
+        switch route {
+        case .computers: "Gives another of your computers its own access to this one"
+        case .screenPass: "Gives another of your Macs a pass to this Mac's screen"
+        case .off: ""
+        }
+    }
+
+    /// Who this phone last knew has access, from its own memory (`SharedComputers`, brought in line with
+    /// the host's list whenever the sheet opens): drawing the page never needs a connection of its own.
+    private var sharedWithCaption: String? {
+        guard let mac = shell.selectedMacID else { return nil }
+        let known = SharedComputers.entries(shared: mac).compactMap { id, entry in
+            shell.macs.first { $0.macID == id }.map { (id: id, name: $0.macName, entry: entry) }
+        }.sorted { $0.entry.at > $1.entry.at }
+        guard let first = known.first else { return nil }
+        if known.count > 1 { return "\(first.name) and \(known.count - 1 == 1 ? "1 other" : "\(known.count - 1) others") have access" }
+        let screen = ShareOffer.showsScreen(of: shell.selectedKind, on: shell.kind(of: first.id))
+        return "\(first.name) has " + (first.entry.shell ? (screen ? "shell and screen" : "the shell") : "the screen")
     }
 
     // MARK: Screen lock
@@ -500,7 +595,7 @@ struct MacHomeView: View {
                     Text("Screen lock").font(.body.weight(.semibold))
                     HStack(alignment: .firstTextBaseline, spacing: 6) {
                         if pending { ProgressView().controlSize(.mini) }
-                        Text(pending ? "Locking\u{2026}" : locked ? "Locked \u{2014} everything keeps running" : "Unlocked")
+                        Text(pending ? "Locking\u{2026}" : locked ? (isMac ? "Locked \u{2014} everything keeps running" : "Locked \u{2014} its shells keep running") : "Unlocked")
                             .font(.subheadline).foregroundStyle(.secondary)
                             .contentTransition(.opacity)
                     }
@@ -516,9 +611,10 @@ struct MacHomeView: View {
                     .buttonStyle(.bordered)
                     .buttonBorderShape(.capsule)
                     .tint(PTColor.tint)
+                    .frame(minHeight: 44)
                     .disabled(sharedBlock || pending)
                     .accessibilityLabel("Lock \(macName)'s screen")
-                    .accessibilityHint("The Mac stays awake and its shells keep running")
+                    .accessibilityHint(isMac ? "The Mac stays awake and its shells keep running" : "Its shells keep running")
                 }
             }
             .padding(10)
@@ -554,9 +650,12 @@ struct MacHomeView: View {
         case .ready: return nil
         case .connecting: return .init("Connecting to \(macName)\u{2026} These switches work once it's reachable.")
         case .unreachable:
-            return .init("Can't reach \(macName) right now, so these can't change. They show how it was when it was last heard from.", warning: true)
+            // The hero above already says it can't be reached, and when it was last heard.
+            return .init("These can't change until \(macName) is reachable again; they show its last known state.", warning: true)
         case .noAccess:
-            return .init("To change these from this \(ThisDevice.name), set up Remote shell on the Mac. The steps are below.")
+            // Revoked: the hero says so, and there are no steps below.
+            if shell.accessRefused, !isMac { return nil }
+            return .init(HostCopy.reachBlockNoAccess(shell.words))
         case .locked, .needsPasscode, .keyUnavailable:
             return .init(shell.reachMessage ?? "Unlock Passthrough to change these.", warning: true)
         }
@@ -564,7 +663,8 @@ struct MacHomeView: View {
 
     /// Why Keep awake and the VPN can't change from here though the Mac is reachable.
     private var controlBlock: SwitchProblem? {
-        guard shell.reach == .ready else { return nil }
+        // A PC's page has no Keep awake or VPN, and its Lock doesn't depend on `control`.
+        guard isMac, shell.reach == .ready else { return nil }
         guard let state else {
             return .init("Update Passthrough on \(macName) to change Keep awake and the VPN from here.")
         }
@@ -589,13 +689,22 @@ struct MacHomeView: View {
                             .frame(minHeight: 44)
                     }
                 }
-                if shell.visibleSessions.isEmpty {
+                if let why = HostCopy.shell(shell.page.shell, shell.words) {
+                    // No shell can start there: why, in place of the list and New shell.
+                    Label {
+                        Text(why).fixedSize(horizontal: false, vertical: true)
+                    } icon: {
+                        Image(systemName: "person.crop.circle.badge.exclamationmark").foregroundStyle(PTColor.attention)
+                    }
+                    .font(.subheadline)
+                    .padding(.bottom, 6)
+                    .onAppear { UIAccessibility.post(notification: .announcement, argument: why) }
+                } else if shell.visibleSessions.isEmpty {
                     Text("Nothing running. Start a shell to run commands on \(macName).")
                         .font(.subheadline).foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
                         .padding(.bottom, 6)
-                    Button { router.terminal = .new } label: { Label("New shell", systemImage: "plus") }
-                        .buttonStyle(PTProminentButtonStyle())
+                    newShell(.prominent)
                 } else {
                     TimelineView(.periodic(from: .now, by: 30)) { context in
                         VStack(spacing: 0) {
@@ -604,17 +713,15 @@ struct MacHomeView: View {
                             }
                         }
                     }
-                    Button { router.terminal = .new } label: {
-                        Label("New shell", systemImage: "plus")
-                            .font(.subheadline.weight(.semibold))
-                            .foregroundStyle(PTColor.tintText)
-                            .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
-                            .contentShape(Rectangle())
-                    }
-                    .buttonStyle(.plain)
+                    newShell(.inline)
                 }
             }
         }
+    }
+
+    private func newShell(_ style: NewShellControl.Style) -> some View {
+        NewShellControl(shells: shell.shells(for: shell.selectedMacID), preferred: shell.preferredShell(for: shell.selectedMacID),
+                        hostName: macName, style: style) { router.terminal = .new(shell: $0) }
     }
 
     /// Running sessions first, most recent output first; at most three.
@@ -628,7 +735,7 @@ struct MacHomeView: View {
                 Circle().fill(session.running ? PTColor.tint : Color.secondary.opacity(0.4)).frame(width: 8, height: 8)
                 VStack(alignment: .leading, spacing: 2) {
                     Text(session.title).font(.subheadline.weight(.semibold)).lineLimit(1)
-                    Text(RemoteShellCard.status(session, now: now)).font(.caption).foregroundStyle(.secondary)
+                    Text(RemoteShellCard.status(session, now: now, kind: shell.selectedKind)).font(.caption).foregroundStyle(.secondary)
                 }
                 Spacer(minLength: 0)
                 Image(systemName: "chevron.right").font(.caption.weight(.semibold)).foregroundStyle(.tertiary)
@@ -649,7 +756,7 @@ struct MacHomeView: View {
                 Text("Open its shell and see its screen from this \(ThisDevice.name), even away from home.")
                     .font(.subheadline).foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
-                ShellSetupSteps(paired: true)
+                ShellSetupSteps(paired: true, words: shell.words)
             }
             .frame(maxWidth: .infinity, alignment: .leading)
         }
@@ -778,7 +885,14 @@ struct SwitchIcon: View {
 struct ScreenCard: View {
     let macName: String
     let enabled: Bool
+    /// Under the title: what it does, or why it can't.
+    var detail: String = ScreenCard.macDetail
+    /// What's drawn on the card: a MacBook for a Mac, the host's own glyph for a PC.
+    var symbol: String = ScreenCard.macSymbol
     let open: () -> Void
+
+    static let macDetail = "See and control the Mac. Touch, a trackpad and a keyboard all work."
+    static let macSymbol = "macbook"
 
     var body: some View {
         PTSurface(padding: 14) {
@@ -788,7 +902,7 @@ struct ScreenCard: View {
                         RoundedRectangle(cornerRadius: 14, style: .continuous)
                             .fill(LinearGradient(colors: [Color(red: 0.07, green: 0.23, blue: 0.2), Color(red: 0.05, green: 0.11, blue: 0.16)],
                                                  startPoint: .topLeading, endPoint: .bottomTrailing))
-                        Image(systemName: "macbook")
+                        Image(systemName: symbol)
                             .font(.system(size: 54, weight: .light))
                             .foregroundStyle(PTColor.tint.opacity(0.8))
                     }
@@ -800,7 +914,7 @@ struct ScreenCard: View {
                 .accessibilityLabel("Control \(macName)'s screen")
                 VStack(alignment: .leading, spacing: 8) {
                     Text("Screen").font(.body.weight(.semibold))
-                    Text("See and control the Mac. Touch, a trackpad and a keyboard all work.")
+                    Text(detail)
                         .font(.subheadline).foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
                     Button(action: open) { Label("Control", systemImage: "cursorarrow") }

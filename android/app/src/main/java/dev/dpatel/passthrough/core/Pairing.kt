@@ -58,6 +58,8 @@ data class ShellGrant(
     /** The Mac's iroh endpoint id and home relay, when it offers the shell over iroh. The relay's token is kept in the secret store. */
     val irohID: String? = null,
     val irohRelay: String? = null,
+    /** What the host is, as its grant said (`mac`, `windows`); absent from Macs that predate it, which are Macs. */
+    val hostKind: String? = null,
 )
 
 /** A Mac that has been granted access to this phone's proxy. Times are epoch millis. */
@@ -70,6 +72,11 @@ data class PairedClient(
     val lastSeen: Long? = null,
     /** How to reach this Mac's shell listener, once it granted a shell key over the cable. */
     val shell: ShellGrant? = null,
+    /**
+     * What kind of computer it said it is (`mac`, `windows`), from its proved `hello`, its grant
+     * or a live `host`; absent from Macs that predate it, which are Macs ([Hosts.kind]).
+     */
+    val hostKind: String? = null,
 )
 
 /**
@@ -129,11 +136,30 @@ class PairingRegistry(
             val list = loadClients()
             if (list.none { it.id == clientID } || !secrets.write(PENDING_SHELL + clientID, sealed) ||
                 !storeRelayToken(clientID, relayToken)) return@synchronized false
-            save(list.map { if (it.id == clientID) it.copy(shell = grant) else it })
+            save(list.map { if (it.id == clientID) it.copy(shell = grant, hostKind = grant.hostKind ?: it.hostKind) else it })
             true
         }
         if (stored) onChange?.invoke()
         return stored
+    }
+
+    /**
+     * Records what kind of computer [clientID] says it is (`mac` or `windows`; anything else is
+     * ignored). Only ever called with what an authenticated peer said: the control channel after
+     * `auth` or `paired`, or a shell connection after `ready`. False, and nothing saved, for an
+     * unknown id or an unchanged kind.
+     */
+    fun noteHostKind(clientID: String, kind: String): Boolean {
+        if (HostKind.fromWire(kind) == null) return false
+        val changed = synchronized(lock) {
+            val list = loadClients()
+            val client = list.firstOrNull { it.id == clientID } ?: return@synchronized false
+            if (client.hostKind == kind) return@synchronized false
+            save(list.map { if (it.id == clientID) it.copy(hostKind = kind) else it })
+            true
+        }
+        if (changed) onChange?.invoke()
+        return changed
     }
 
     /**
@@ -240,7 +266,7 @@ class PairingRegistry(
             this.code = null
             PairResult.Success(token)
         }
-        if (result is PairResult.Success) ptLog(PtLog.Level.INFO, "Paired Mac $name")
+        if (result is PairResult.Success) ptLog(PtLog.Level.INFO, "Paired $name")
         onChange?.invoke()
         return result
     }

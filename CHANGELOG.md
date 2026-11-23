@@ -8,6 +8,65 @@ the **Before you rebuild** notes first. The Mac and phone apps update together.
 
 ### Before you rebuild
 
+* **Windows: Remote access now runs as a background service, and needs a
+  self-contained build.** Build with `scripts/build-windows.ps1` and run
+  `Passthrough.exe` from `windows/artifacts/Passthrough`. Turning Remote
+  access on (or *Finish setup*, if you used it before) asks Windows for an
+  administrator once: it installs the service into `C:\Program
+  Files\Passthrough`, and from then on Start at login and the Start menu run
+  the installed copy. The service has an identity of its own, so **plug each
+  phone in once** afterwards; until then phones can't reach the PC's shell.
+  Your phones' access, your relay and its token move into the service; this
+  account's copies are deleted.
+* **Windows: phones on the same network or Tailscale reach the PC directly**
+  (Windows 11 and Server 2022; Windows 10 has no TLS 1.3 server, so phones use
+  the built-in connection there). The service listens on TCP 7893, TLS 1.3
+  only, with a key that can't leave the PC, and names itself on the network as
+  the PC's host name. The firewall rule lets in the local subnet and the
+  private and Tailscale ranges only.
+* **Windows: the PC's screen, through Remote Desktop.** The Mac shows it in
+  a window once a phone shares the PC with it. On the iPhone and iPad it is
+  still behind a developer switch (docs/GUIDE.md, *A PC's screen*). Settings ▸ Remote access ▸ *Screen* sets it up
+  behind one administrator prompt. If Remote Desktop was off, Passthrough turns
+  it on blocked from the network (its own firewall rules, which a block makes
+  win over any allow rule), with Network Level Authentication required. If you
+  already use Remote Desktop open on your network, it is left exactly as it is,
+  and Settings offers to close it to the network. Each phone gets a *Screen*
+  box, off at first. The service relays only to Windows' own Remote Desktop
+  (it checks who answers on the port), tells the phone which certificate to
+  expect, refuses any connection that doesn't use Network Level
+  Authentication, and caps quick sign-in attempts below Windows' own lockout.
+  Removing Passthrough puts back every Remote Desktop setting it changed and
+  nothing else.
+* **Windows: Stay awake on mains power**, and phones are told when the PC
+  goes to sleep, shuts down or has Remote access turned off. A connected phone
+  keeps the idle timer off for as long as it is connected and a minute after.
+* **Windows: after `--update`, restart the tray app.** Quit Passthrough from
+  the tray and open it from the Start menu. The service updates at once; the
+  tray app runs the new build only once it is started again. Several fixes run
+  inside the tray app: the taskbar, the hand-off after Turn on, quitting.
+* **Windows: build from a folder only you can write to, on a PC with other
+  accounts.** Setup copies the build folder into Program Files behind your
+  administrator prompt, and it doesn't yet check who else can change that
+  folder. `D:\` and other second drives let every account change files by
+  default (windows/README.md, SECURITY.md).
+
+* **Update the Mac, the phones and the PC together.** Sharing a computer
+  (`computerGrant`, `computerPass`, `listComputers`) and the PC's screen need
+  this build on every side; there are no compatibility shims. Install the Mac
+  app as a Release build (docs/GUIDE.md › Setup): the Release helper refuses a
+  Debug app.
+* **Saved Windows logins: type the PC's password once more**, on the iPhone
+  and on the Mac. A saved login is now kept with the PC's keys (the certificate
+  and iroh id its shell connection proves) and used only while they are the same;
+  logins saved before this aren't used.
+* **A PC's screen needs the Remote Desktop engine, built by hand.** It isn't
+  committed yet. Run `brew install cmake ninja`, then
+  `bash scripts/build-freerdp.sh`, before you open the project in Xcode; it
+  writes `Vendor/FreeRDP/FreeRDP.xcframework`. Without it the Mac and iPhone
+  apps build and work as before, and the PC's screen is left out (the Mac's PC
+  Screen window says it isn't in this build).
+
 * **Phone notifications now take their push key from the build, not from
   Settings.** The *Team ID*, *Key ID* and *Choose .p8* fields in
   *Settings › Remote Shell › Notifications* are gone. To keep notifications:
@@ -77,6 +136,103 @@ these steps as written and check each one before building.
 
 ### Added
 
+* **The Mac's menu-bar panel, in two tabs.**
+  - Above the tabs, always: the header, shells waiting on a question, and anyone viewing this Mac's screen (with **Stop**).
+  - *This Mac*: pairing, the three switches and Details (the flow map, speeds, top apps), as before.
+  - *Remote · N*:
+    - *Who can reach this Mac*, one row that opens Settings ▸ Remote Shell;
+    - *On this Mac now*, which was *From your phone*: each session says who opened it (*From \<phone or computer\>*), with **Open here** or **Stop Showing Here**, and **End Session…** in the row's menu;
+    - *Your computers*: other Macs' screen passes and PCs in one list, each with its state.
+  - The panel remembers the last tab. A phone waiting for its pairing code brings *This Mac* forward.
+* **The Mac lists the computers it let in, and the ones it can reach.** Settings ▸ Remote Shell:
+  - *Computers with access* (new): each computer a phone gave access to this Mac, which phone shared it and when, and what it may do and has open. **Stop** ends what it has open now; **Revoke…** takes its access away, whichever phone shared it. The notice for a new computer points here. Other Macs' screen passes are listed here too (*Mac · screen pass*, with **Remove…**), in place of *Macs that can see this screen*.
+  - *Computers this Mac can reach* replaces *Other Macs' screens*. It lists PCs and other Macs' screen passes, with **View**, **Forget Saved Sign-In** and **Remove…**. **Remove…** also clears an older copy of a computer that blocks sharing it again.
+* **iPhone and iPad: one Share row, and a computer switcher on Shells and Activity.**
+  - **Share with another computer…** replaces *Share screen with a Mac* and *Share with another computer*. Where the host doesn't let this phone share, the row stays, greyed out, with the switch to turn on. A Mac with sharing off still offers its screen to your other Macs, as the screen pass did before.
+  - The sheet offers each computer only what it can open: a PC the shell, and the screen only from a Mac; a Mac another Mac's screen as a screen pass, or a PC's screen. A Mac isn't offered shells.
+  - With two or more computers, the *Shells* and *Activity* titles are a computer switcher.
+  - A PC is called a PC everywhere, and its Activity tab says it doesn't record activity yet.
+* **One command for each job on the Mac, iPhone and Android.** `./passthrough mac|iphone|android doctor | deps | build | install | update | remove` (and `rollback` on the Mac).
+  - `doctor` changes nothing; `--dry-run` shows what any command would do.
+  - Before it replaces the Mac app, `install` and `update` refuse (unless `--force`) a Debug build, a lost push key, a Mac online through the phone right now, or phones' shells still running. The app it replaced is kept for `rollback`.
+  - `remove` takes the helper, the microphone driver and the login item with it; `--purge` also deletes settings and history.
+* **Windows: one command for each job.** `scripts/windows.ps1 doctor | deps | build | install | update | reinstall | off | remove`.
+  - `update` restarts the tray app by itself.
+  - `doctor` changes nothing.
+  - `-WhatIf` shows what a command would do.
+  - It refuses to build or install from a folder another account on the PC can change, unless `-Force`. It builds into `%LOCALAPPDATA%\PassthroughBuild` (windows/README.md).
+* **Windows: the tray and Settings, reorganised around what you use.**
+  - The flyout's header follows Remote access, not the cable: off, reachable, needs a look (and why), or who is on the PC now.
+  - Notices and anyone viewing the screen (with **Stop**) sit above two tabs, which the flyout remembers:
+    - *This PC*: the phones on the cable and Stay awake;
+    - *Remote · N*: who can reach the PC, who is on it now (each with **Stop**) and Your computers.
+  - Settings has four pages: General, Remote access, Computers with access and Advanced.
+    - Each phone has one row: Screen, Share, Stop, Revoke… and Forget…. Before, a phone was listed once for its pairing and again for its access.
+    - Computers with access get **Allow screen** and **Revoke…**.
+  - The first Turn on can set up the screen in the same administrator prompt.
+  - Quit asks first when phones have shells open or Remote access is on.
+  - Notices:
+    - a granted phone's notice offers **Not now** in place of **OK**;
+    - Revoke from a notice asks first;
+    - the Remote Desktop notice opens Settings;
+    - Windows notifications say what happened.
+  - Esc closes the flyout, and buttons name their phone or computer for Narrator.
+
+* **A host tells a phone which computers it gave access to there**
+  (`listComputers` / `computerList`, protocol/README.md *Computers*), and tells
+  it again whenever that changes: what each may do now, what waits for the
+  host's owner, and whether it is connected. A phone can take any of them back
+  at any time. The PC and the Mac answer it (each lists only the computers the
+  asking phone shared), and the iPhone's Share sheet shows the list with
+  **Remove Access**. An older host doesn't answer, and the sheet goes by what the
+  phone remembers sharing.
+* **Share with another computer** (iPhone and iPad). Open a computer, tap
+  *Share with another computer…*, pick *Screen only* or *Shell and screen*,
+  pick the computer that should use it and confirm with Face ID. That computer
+  then uses it from anywhere, without the phone. Shown only where the host
+  allows this phone to share: on a Mac, *Settings › Remote Shell › Phones with
+  access › May share access with other computers* (new, off at first); on a
+  PC, its *Share* tick. A Mac grants at once and leaves a notice with
+  *Revoke*. A PC gives the shell at once and holds the screen until its owner
+  clicks *Allow screen* on the PC's notice or in *Computers with access*. The
+  access lasts while the sharing phone keeps its own. Take it back from the
+  phone's Share sheet, or on the host in *Computers with access*. Not on
+  Android.
+* **A PC's screen on the Mac.** A Mac given a PC's screen lists it under
+  *Your computers* in the menu-bar panel; *View …'s screen* opens a *PC
+  Screen* window after Touch ID, then asks for the Windows account's password
+  (not the PIN), which *Remember on this Mac* keeps behind Touch ID. It asks
+  first when someone is using the PC, sizes the PC's desktop to the window,
+  reconnects by itself up to three times after a drop, and has a *Windows* menu
+  in the menu bar (Ctrl+Alt+Del, Start, Task View, Alt+Tab, Show Desktop,
+  Close Window, *Send Clipboard*, *Copy from PC*, *Forget Saved Sign-In*).
+  The Remote Desktop engine runs in a sandboxed helper inside the app
+  (`macOS/ScreenEngine`), never in the app; it needs Remote shell on on the
+  Mac.
+* **A PC's screen on the iPhone and iPad, behind a developer switch.** Not in
+  normal builds yet: a DEBUG build with the engine built in, launched with
+  `-PTWindowsScreen YES`. It signs in with the Windows password (remembered
+  behind Face ID if you choose), with a Windows menu, the Windows key and
+  Windows' three-finger swipes, and the desktop takes the device's shape.
+* **The iPhone and iPad app knows a PC from a Mac.** A paired PC shows as a
+  PC: its own words, only the rows a PC has (no Internet, Keep awake or VPN),
+  its Lock when it allows it, its own setup steps, why its
+  shell can't start (nobody signed in, someone else signed in, Passthrough
+  not open there, Shell off for this phone), and why it can't be reached
+  when it said so (asleep, Remote access turned off, shut down). New shell
+  becomes a split control when the computer lists several shells, and
+  remembers the last one per computer. A PC's Screen row is dimmed: its
+  screen comes in a later version, and the app never offers it the Mac's
+  Screen Sharing login. The switcher is *Your computers*; "New session" is
+  "New shell" everywhere. A Mac reads as before. Nothing to do when you
+  rebuild.
+* **Android knows a PC.** A paired Windows PC shows as a PC: its own words, only
+  the rows a PC has (no Internet, Keep awake or VPN; Lock, and a dimmed Screen
+  row saying Android can't show it), why a shell can't start (nobody signed in,
+  Passthrough closed there, Shell off for this phone), why it went away (asleep,
+  Remote access turned off, shut down), its own setup steps, and a split New
+  shell that picks among its shells and remembers the last one. The switcher is
+  *Your computers*. A Mac reads as before. Nothing to do when you rebuild.
 * **A Windows tray app (first stage).** `windows/` holds a C# port of the host
   side: a tray flyout that lists the phones on the cable, pairs an iPhone or an
   Android phone with the six-digit code and shows its live status. An iPad is
@@ -96,9 +252,9 @@ these steps as written and check each one before building.
   [windows/README.md](windows/README.md).
 
 * **One Mac can see and control another's screen.** On the iPhone, open a
-  Mac and tap *Share screen with a Mac*, pick your other Mac and confirm with
-  Face ID. That Mac gets a screen-only pass and opens the screen from
-  Passthrough's menu (*Other Macs*), on the local network or from anywhere
+  Mac and tap *Share with another computer…*, pick your other Mac and confirm
+  with Face ID. That Mac gets a screen-only pass and opens the screen from
+  Passthrough's menu (*Remote* ▸ *Your computers*), on the local network or from anywhere
   over iroh, without the phone, after Touch ID or the password on that Mac.
   Controlling the screen means typing into any app on it, Terminal included,
   but the pass can't open Passthrough's shells, hide the shared Mac's
@@ -191,8 +347,272 @@ these steps as written and check each one before building.
   closes or the app leaves the screen. While it is on, any app on the Mac
   that may use a microphone can hear it.
 
+### Fixed (Windows, from the security and code review)
+
+* Opening a shell on another computer from the tray put that computer's name
+  on Windows Terminal's command line, where a `;` starts another command: a
+  computer named that way could run a program on the PC. The name now reaches
+  only the terminal's title, set from inside it.
+* Removing Passthrough could leave Remote Desktop on and open to the network
+  when Windows' own Remote Desktop rule was already on before setup.
+* A view of the screen that was just starting could outlive Screen being
+  turned off or Stop. A computer a phone revoked kept its shells running.
+* A refused Remote Desktop attempt could write the end of the Windows account
+  name to the service's log.
+* An account removed from Remote access kept its tray app's link to the
+  service until it restarted.
+* The service and its libraries look up Windows' system libraries in System32
+  only.
+* After Turn on, the copy you started didn't hand over to the installed one.
+* A shell that failed to start left its console process and handles behind.
+  Closing a shell could, in rare timing, hang every shell.
+* Quitting could skip ending phones' shells. Stopping the service could crash
+  it.
+* The taskbar is kept on top after a Remote Desktop resize, but no longer over
+  a full-screen video or game.
+* The notice for a computer given only the screen no longer says it was given
+  the shell.
+
+### Fixed (iPhone and Mac, from the security and code review)
+
+* **Connections from anywhere can go direct again instead of staying on the
+  relay.** The phone (and a Mac opening a PC's screen) dialled with the
+  computer's relay but without its QUIC port, which turned off iroh's address
+  discovery: on cellular, with no port mapping, the phone never learned its
+  public address, so hole punching had nothing to aim at. Measured: before,
+  the phone on cellular offered only 192.0.0.x and its IPv6 addresses and
+  stayed on the relay with both the Mac and the PC.
+  Android had the same gap and has the same fix.
+
+* **A PC's screen on the iPhone stays on.** The developer switch
+  (`-PTWindowsScreen YES`, what `./passthrough iphone install --pc-screen`
+  passes) is saved, so the app keeps a PC's screen after it's closed and
+  opened from the home screen; `--no-pc-screen` turns it off. With the switch
+  off, a PC's Screen row says so instead of "isn't in this version yet".
+
+* **Saved Windows logins follow the PC, not just its id.** A login saved on
+  the iPhone or the Mac is used only while the PC's credential has the same
+  certificate and iroh id, so a host that later claimed the same id with its
+  own keys is never signed in to with it. Forgetting a computer on the
+  iPhone deletes its saved logins; on the Mac, the logins for computers a
+  revoked phone handed over go with them.
+* **The Mac's clipboard is written only when you ask.** After Copy from PC,
+  the PC's answer is taken within 3 seconds and only while the copy waits; a
+  PC that held its answer back could otherwise replace the Mac's clipboard
+  later. A paste offer is no longer withdrawn once you've copied something
+  on the PC itself (that emptied the PC's clipboard).
+* **The Mac's PC Screen window ends a session for the right reason.** Someone
+  signing in at the PC now says so instead of reconnecting and taking the
+  console back from them; a wrong password goes back to the sign-in form at
+  once and isn't sent again. Locked, disabled or expired accounts aren't
+  re-sent, reconnecting makes three tries (1, 4 and 10 seconds) that a
+  network still coming back doesn't cut short, and moving the window to a
+  display with another scale asks Windows for the right size.
+* Hardening: a host's `retryAfter` is capped (a huge one crashed the app), a
+  PC desktop past 16384 pixels a side or 50 million pixels isn't drawn on the
+  iPhone, a Remote Desktop request answered with a screen hand-over is
+  refused, and a shared computer's name loses control and format characters.
+* **Sharing a computer again never breaks the access it has.** On a Mac or a
+  PC, the earlier grant keeps working until the computer first uses the new
+  one, so a hand-over that fails leaves it what it had; revoking takes both.
+  A PC Screen window that is open takes up the new access when its PC is
+  shared again (only with the same certificate and iroh id). On the iPhone,
+  a computer that drops after the access was sent keeps it, and the phone
+  says to share again if the host isn't under *Your computers* there.
+* **Who is viewing the Mac's screen is plain.** A computer reads
+  *(a computer)* and a Mac with a pass *(a Mac with a pass)*, each with its
+  own icon, so neither can pass for one of your phones. Computers' names are
+  stored without control, bidi or zero-width characters, and the phone's
+  *connected now* counts a computer on either path (local and Tailscale, or
+  the built-in connection).
+* **The Mac's Stop, End and Quit say what they do.**
+  - The panel's session **Stop** is **Stop Showing Here**; **End Session…**
+    (it asks first) is in the row's **⋯** menu.
+  - The power button and ⌘Q ask first while phones' or computers' shells run
+    or someone is viewing the screen. Logging out, shutting down and the
+    install script don't ask.
+  - *Who can reach this Mac* says *Remote shell is on* (it said Remote
+    access), and the *Remote* tab has an amber dot while Remote shell isn't
+    running. *Your computers* says how to add one when it has none.
+  - Settings ▸ Remote Shell: screen passes are listed under *Computers with
+    access* (*Mac · screen pass*); *Macs that can see this screen* is gone.
+    Each phone in *Phones with access* has **Stop…**, which ends what it has
+    open and keeps its access.
+  - The PC Screen window says *Turn on Remote Shell on this Mac first*
+    before asking for Touch ID, and *Screen is off for this Mac* also names
+    the PC's Settings (*Computers with access*).
+* **iPhone: copy that names real controls.**
+  - The Share sheet's button is **Remove Access**: it takes the access away
+    on the host, unlike **Remove…** on a Mac or PC, which only forgets a copy
+    there.
+  - Sharing a PC with your PCs starts on *Shell and screen*, the only choice
+    they can take.
+  - A host that doesn't let this phone open shells no longer says to turn on
+    a switch that doesn't exist: it says to plug the phone in with Remote
+    shell (Mac) or Remote access (PC) on. Setup steps name the switch you see
+    on each host.
+  - An unreachable computer's card says each thing once, and the Lock button
+    is at least 44 pt tall.
+
+### Fixed (Windows, from the second review)
+
+* One Windows account's phones could use up the 16 computers a PC lets in, for
+  every account; the limit now counts one account's own. A phone already kept
+  by an account an administrator turned off can't be taken by another, and a
+  phone's id now reaches only its own account's tray app.
+* Stop in the tray keeps that device's screen closed for 30 seconds, as Stop on
+  a view already did.
+* Settings showed a computer's screen as allowed while the phone that shared it
+  had Screen off; it now says the screen is held back, and why.
+* A phone waiting for its pairing code was hidden behind the Remote tab: the
+  flyout now brings This PC forward, and the tab reads *This PC · Pair*.
+* Quit and turn off Remote access quit anyway when the administrator prompt
+  was declined; it now says so and asks again. After a restart the tab bar
+  could show This PC over the Remote panel.
+* *Use this phone* is hidden: it promised internet through the phone, which
+  the PC doesn't do yet.
+* `scripts/windows.ps1`: the build-folder check also counts permissions
+  inherited into what the build creates and the owner of each folder, and runs
+  again just before the administrator prompt. It needs PowerShell 7 (`pwsh`),
+  refuses an `-Output` folder that holds other files (the build deletes it),
+  builds before a clean reinstall removes anything, keeps your own changes to
+  the lock files, and refuses `install` and `update` from a standard account
+  (turn Remote access on from the tray app's Settings instead).
+* `scripts/windows.ps1` run from a PowerShell that is itself elevated restarted
+  the tray app as administrator, where it hosts no shells: phones connected but
+  couldn't open one. It now starts the tray app as you, through Explorer, and
+  `doctor` says when the tray app runs as administrator; the app logs why it
+  doesn't link to the service then.
+
+### Fixed (Windows: a PC's screen through a relay)
+
+* A PC's screen seen through a relay could fall many seconds behind (23 s
+  measured) after a drag or a scroll: a relay queues what it can't deliver
+  instead of dropping it, so nothing told the PC to slow down. The service now
+  holds back what it sends to the viewer while the relay's round trip is above
+  0.6 s (never more than 1.5 s at a time, and never the viewer's input). Each
+  view's log lines say its path, and every 5 s the round trip, loss, how long
+  writes waited and how long they were held back.
+* For finding out why a phone stays on a relay: with a file named
+  `iroh-diagnostics` in `%ProgramData%\Passthrough` (only an administrator can
+  put it there) the service, from its next start, logs each iroh connection's
+  paths with their addresses, its own addresses and its hole-punching counters,
+  and writes iroh's own events to `logs\iroh-trace.log`. Without the file the
+  log names no addresses, as before. Delete the file after the test.
+
+### Changed (Windows, from the second review)
+
+* The flyout's header has **Turn on…** or **Fix…** when Remote access needs it,
+  and says *This PC's screen is in use* while someone views it. Settings' page
+  for the computers let in here is *Computers with access*; *Your computers*
+  is what this PC reaches. *Stay awake on mains power*. **Open the log folder**
+  in Settings' error box and on Advanced.
+
 ### Changed
 
+* **CI builds and tests the Windows app.** A Windows job runs the Windows Core
+  tests and builds the tray app, and the macOS job runs the same Core tests
+  beside `swift test`, so they stay free of Windows APIs. The .NET SDK is
+  pinned by `global.json` at the repo root (10.0.100 or a later 10.0 feature
+  band), every package comes from nuget.org only (`windows/nuget.config`), and
+  each Windows project's package versions and content hashes are pinned in its
+  `packages.lock.json`, restored in locked mode. To change a package, see
+  [windows/README.md](windows/README.md#build). Nothing changes in the apps.
+* **The Windows Core reads the remote shell protocol.** A C# port of the shell
+  envelope, its constants, the key proof and the iroh checks, tested against
+  `protocol/fixtures.json`'s `shell` section like the Swift and Kotlin suites.
+  The fixtures gain the list of error reasons and the `replaying`, `lock` and
+  `viewing` lines. Nothing on the wire changes and the PC hosts no shell yet.
+* **A host says what it is.** After `ready` the Mac now sends `host`: that
+  it is a Mac, its macOS version, its one shell (your login shell), how its
+  screen can be seen and what this phone may do. The protocol also gains what
+  a Windows PC will need: a choice of shell in `open` (and each session says
+  its shell), `signed_out`, `goingAway`, a Remote Desktop relay (`rdp`,
+  `rdpReady` with the certificate to accept, `rdp_unavailable`, `try_later`,
+  `screenEnded`), and `hostKind` on the grant over the cable, which the
+  phones keep. Phones and the Mac read all of it; nothing you can see changes
+  yet, and older phones and Macs ignore it (see
+  [protocol/README.md](protocol/README.md#the-host)). Update phones and the
+  Mac in any order.
+* Windows: the PC can now send a shell grant over the cable and hear the
+  phone's answer, but only on a channel whose pairing the phone has proved and
+  whose far end a check has found to be Apple's or adb's own service. No check
+  exists yet, so no grant goes out. The PC's `hello` now says it is a PC. The
+  log filter also removes shell keys (as JSON escapes them too), secret JSON
+  fields (the pairing code among them), `Bearer` headers, and any secret registered with it (the relay token, from the stage that loads one).
+* Windows: the rules for when a phone is granted a shell key, granted again or
+  left alone (one grant in flight per phone, re-granted only when what grants
+  carry changes, a growing wait for a phone that doesn't answer, nothing for a
+  revoked phone until it reconnects) are ported from the Mac with its tests.
+  Nothing uses them yet.
+* **Windows: every phone on the cable has its own channel, and an iPad pairs.**
+  The PC now keeps a control channel open to each attached device, not only
+  the phone in use, so two phones on two cables both pair and both show live
+  status, and an iPad pairs with its code like a phone. *Use this phone* only
+  marks which phone the PC will go online through; it no longer closes the
+  other phone's channel, and it is never offered for an iPad (for now it is
+  hidden, until the PC can go online through a phone). *Try again* works on
+  any row that failed.
+* Windows: each paired phone whose cable connection checks out is offered a
+  shell key while Remote access has something to hand out, and the key is kept
+  once the phone confirms it; an unanswered grant is tried again with the Mac's
+  waits. Forgetting a pairing takes its shell access with it. Remote access
+  doesn't exist yet, so nothing is granted.
+* Windows: which peers may reach the shell (private, Tailscale and the PC's own
+  IPv6 networks; Tailscale's range only through a tunnel) and how many
+  connections may wait to prove a key (16 in all, 2 per address or network, 4
+  kept for addresses that proved one lately) are ported from the Mac with its
+  tests. Nothing listens yet.
+* Windows: the terminal logic a session needs is ported from the Mac with its
+  tests: the scrollback a late attach is replayed (with the modes a full-screen
+  program turned on before it), the "needs you" question heuristic, program
+  status (OSC 7501, which Claude Code speaks), and telling a terminal's own
+  answers from typing. Nothing runs a shell yet.
+* Windows: session recording is ported from the Mac with its tests: asciicast
+  transcripts with resize events, read from the end within 8 MiB, capped at
+  64 MiB with a marker, pruned by age and by a 2 GiB folder cap, never touching
+  a session still recording. Session ids that Windows would read as a device
+  name or a path are refused.
+* Windows: the session manager is ported from the Mac with its tests, over a
+  pseudo-terminal seam ConPTY will fill: sessions that outlive their phone, a
+  replay on attach with takeover by generation, the eight-session cap, titles
+  from the first echoed command, "needs you" questions, Claude Code status, and
+  revoking a phone ending what it opened. Shells come only from the PC's own
+  catalog. Still nothing starts a real shell.
+* Windows: real shells. Passthrough.Windows runs a session's shell in Microsoft's
+  bundled ConPTY (never the inbox one, which breaks Claude Code's status), in a
+  kill-on-close job so ending it ends everything it started, with the account's
+  own environment. The shell catalog lists PowerShell 7, Windows PowerShell,
+  Command Prompt, each WSL distribution and Git Bash from fixed paths and the
+  registry, never PATH. The pseudoconsole's own start-up modes never reach a
+  phone. New Windows-only tests run real sessions, in CI too.
+* Windows: Passthrough's own iroh endpoint, a small Rust library over iroh 1.0.2
+  (the version the phones and the Mac use) with a C ABI the app calls: a stable
+  id from a stored key, accepting and dialling shell connections, address
+  validation with retries, direct or relayed paths, and clean closes. Handles
+  can't be forged into memory, a panic never crosses into the app, and every
+  wait ends when its object is closed. Not yet listening for phones.
+* Windows: the remote shell protocol, ported from the Mac with its tests: the
+  phones allowed a shell (kept in the secret store; taking access away holds
+  even when the store can't be written), the key proof with its handshake
+  limits, and each phone's connection: open (with the chosen shell), attach and
+  take over, typing, resizes, history and transcripts, lock, and what a PC
+  answers to what only a Mac does. A phone that stops reading is dropped at
+  8 MiB.
+* Windows: Remote access. Turn it on in Settings ▸ Remote access, plug a paired
+  phone in once, and it can open PowerShell, Command Prompt, WSL or Git Bash on
+  this PC from anywhere (over iroh, directly or through a relay) while
+  Passthrough is open. Settings lists the phones with access, with Stop (end
+  their shells) and Revoke. Grants go only over a cable whose far end is Apple's
+  device service or your own adb; Passthrough refuses to host shells when it
+  runs as administrator. Not yet: the phones' PC wording (they still say Mac),
+  the PC's own listener on the network, and the screen.
+* Windows: Settings ▸ Remote access also has Keep shell history (1 week, 30
+  days, 1 year or Forever; 30 days at first, 2 GB at most), Delete shell
+  history, your own relay with its token, and Reset this PC's identity (a new
+  address; every phone loses its access until plugged in again). The history
+  folder opens only for your Windows account, and a relay token never reaches
+  the log.
 * Remote shell: coming back to a session no longer plays it back from the
   top. The phone holds the Mac's replay until it is complete and draws it in
   one go, keeping what was on screen meanwhile, and says "Loading session…"

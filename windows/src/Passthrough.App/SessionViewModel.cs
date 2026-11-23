@@ -14,7 +14,7 @@ namespace Passthrough.App;
 /// hints, stored pairings) are Core's <see cref="PhoneRowModel"/>, <see cref="RowList"/>, <see cref="WatcherHints"/>
 /// and <see cref="PairedPhone"/>.
 /// </summary>
-public sealed class SessionViewModel : ObservableBase
+public sealed partial class SessionViewModel : ObservableBase
 {
     private readonly HostSession _session;
     private readonly ISettingsStore _settings;
@@ -45,6 +45,77 @@ public sealed class SessionViewModel : ObservableBase
 
     public ObservableCollection<PhoneRow> Rows { get; } = new();
 
+    /// <summary>Remote access's notices (the screen was used, a phone was given access…), each until answered.</summary>
+    public ObservableCollection<NoticeRow> Notices { get; } = new();
+
+    /// <summary>The other computers this PC can reach, once opened with Windows Hello.</summary>
+    public ObservableCollection<ComputerRow> Computers { get; } = new();
+
+    private bool _computersShown;
+
+    /// <summary>"Your computers" shows a Show button until the list has been opened (one Hello confirmation).</summary>
+    public Visibility ShowComputersVisibility => _computersShown ? Visibility.Collapsed : Visibility.Visible;
+    public Visibility ComputersVisibility => _computersShown && Computers.Count > 0 ? Visibility.Visible : Visibility.Collapsed;
+
+    /// <summary>Opens the kept computers (Windows Hello); null when none can be kept here.</summary>
+    public Func<Task<IReadOnlyList<Passthrough.Core.Trust.ReachableComputer>?>>? OpenComputers { get; set; }
+
+    /// <summary>A new shell on a computer, in a terminal.</summary>
+    public Func<Passthrough.Core.Trust.ReachableComputer, Task>? NewShell { get; set; }
+
+    /// <summary>A Mac's screen in a window of its own (Windows Hello again for it).</summary>
+    public Action<Passthrough.Core.Trust.ReachableComputer>? OpenScreen { get; set; }
+
+    private string _computersNote = "";
+
+    /// <summary>Why the list is empty, or why it didn't open; empty when the list shows.</summary>
+    public string ComputersNote => _computersNote;
+    public Visibility ComputersNoteVisibility => _computersNote.Length > 0 ? Visibility.Visible : Visibility.Collapsed;
+
+    public async Task ShowComputersAsync()
+    {
+        if (OpenComputers is not { } open) return;
+        if (await open() is not { } list)
+        {
+            SetComputersNote("Windows didn't confirm it's you. Your computers open after Windows Hello (a PIN is enough); set it up in Settings ▸ Accounts ▸ Sign-in options if it isn't.");
+            return;
+        }
+        _computersShown = true;
+        Computers.Clear();
+        foreach (var c in list) Computers.Add(new ComputerRow(c));
+        SetComputersNote(Computers.Count == 0 ? "No computer was shared with this PC yet. On your phone, open your Mac and tap Share with another computer." : "");
+        Raise(nameof(ShowComputersVisibility));
+        Raise(nameof(ComputersVisibility));
+    }
+
+    private void SetComputersNote(string note)
+    {
+        _computersNote = note;
+        Raise(nameof(ComputersNote));
+        Raise(nameof(ComputersNoteVisibility));
+    }
+
+    /// <summary>Forgets this PC's copy of a computer (true: it is gone).</summary>
+    public Func<Passthrough.Core.Trust.ReachableComputer, Task<bool>>? RemoveComputer { get; set; }
+
+    public async Task RemoveComputerAsync(ComputerRow row)
+    {
+        if (RemoveComputer is not { } remove || !await remove(row.Computer)) return;
+        Computers.Remove(row);
+        if (Computers.Count == 0) SetComputersNote("This PC can't reach any of your computers now. A phone can share one with it again.");
+        Raise(nameof(ComputersVisibility));
+    }
+
+    /// <summary>Answers a notice (OK, or its action first).</summary>
+    public Func<Passthrough.Core.Pipe.PipeNotice, bool, Task>? AnswerNotice { get; set; }
+
+    /// <summary>Replaces the notices (on the UI thread).</summary>
+    public void ShowNotices(IReadOnlyList<Passthrough.Core.Pipe.PipeNotice> notices) => _ui.TryEnqueue(() =>
+    {
+        Notices.Clear();
+        foreach (var notice in notices) Notices.Add(new NoticeRow(notice));
+    });
+
     /// <summary>Raised on the UI thread when an attached phone's pairing or saved name changed, so Settings can list the stored pairings again.</summary>
     public event Action? PairingsChanged;
 
@@ -54,14 +125,9 @@ public sealed class SessionViewModel : ObservableBase
         private set { _androidEnabled = value; Raise(nameof(AndroidEnabled)); }
     }
 
-    /// <summary>The two lines at the top of the flyout and their picture, by Core's <see cref="FlyoutHeader"/>.</summary>
-    public string HeaderTitle => _header.Title;
-    public string HeaderSubtitle => _header.Subtitle;
-    public string HeaderGlyph => Glyphs.For(_header.Kind);
-    public Visibility HeaderOnVisibility => _header.Connected ? Visibility.Visible : Visibility.Collapsed;
-    public Visibility HeaderIdleVisibility => _header.Connected ? Visibility.Collapsed : Visibility.Visible;
 
     public Visibility RowsVisibility => Rows.Count == 0 ? Visibility.Collapsed : Visibility.Visible;
+    public Visibility NoRowsVisibility => Rows.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
 
     /// <summary>What the user should do (install or open Apple Devices, allow USB debugging…), one per line.</summary>
     public string Hints
@@ -101,15 +167,14 @@ public sealed class SessionViewModel : ObservableBase
         _state = state;
         RowList.Reconcile(Rows, state.Phones, r => r.Id, e => new PhoneRow(e), (r, e) => r.Update(e));
         Raise(nameof(RowsVisibility));
+        Raise(nameof(NoRowsVisibility));
+        ShowWaitingPhone();
         var header = FlyoutHeader.For(state);
         if (header != _header)
         {
             _header = header;
-            Raise(nameof(HeaderTitle));
-            Raise(nameof(HeaderSubtitle));
-            Raise(nameof(HeaderGlyph));
-            Raise(nameof(HeaderOnVisibility));
-            Raise(nameof(HeaderIdleVisibility));
+            RaiseHeader();
+
         }
         ShowHints();
 

@@ -1,6 +1,9 @@
 package dev.dpatel.passthrough.ui.shell
 
-import dev.dpatel.passthrough.core.RemoteShell
+import dev.dpatel.passthrough.core.HostInfo
+import dev.dpatel.passthrough.core.HostKind
+import dev.dpatel.passthrough.core.HostWords
+import dev.dpatel.passthrough.core.Hosts
 import dev.dpatel.passthrough.core.ShellError
 import dev.dpatel.passthrough.core.ShellHistoryEntry
 import dev.dpatel.passthrough.core.ShellKeyStatus
@@ -11,24 +14,37 @@ import dev.dpatel.passthrough.core.ShellSessionInfo
 /** Plain-Kotlin pieces of the shell UI (no Android types), so they can be unit tested. */
 
 /** Where Remote shell stands, with the copy the card shows. Mirrors ShellModel.Reach on iOS. */
-enum class ShellReach(val message: String?) {
+enum class ShellReach {
     /** Android 9 or older: no TLS 1.3. */
-    UNSUPPORTED("Remote shell needs Android 10 or later."),
+    UNSUPPORTED,
     /** No Mac has granted this phone the shell (or the Mac refused the key). */
-    NO_ACCESS("Turn on Remote shell in Passthrough on your Mac, then connect this phone with the cable once."),
+    NO_ACCESS,
     /** Keys exist but can't be read until the app is unlocked. */
-    LOCKED(ShellKeyStatus.LOCKED.message),
+    LOCKED,
     /** The device has no secure lock screen, so the vault can't hold the keys. */
-    NEEDS_PASSCODE(ShellKeyStatus.NEEDS_PASSCODE.message),
+    NEEDS_PASSCODE,
     /** A key stays unreadable even right after a fresh unlock, or the vault lost it. */
-    KEY_UNAVAILABLE(ShellKeyStatus.KEY_UNAVAILABLE.message),
-    CONNECTING(null),
-    UNREACHABLE("Can't reach your Mac. Use the same Wi-Fi, or turn on Tailscale on both devices."),
-    READY(null);
+    KEY_UNAVAILABLE,
+    CONNECTING,
+    UNREACHABLE,
+    READY;
 
-    /** What to tell the user; [fromAnywhere] when this connect also tried the built-in path (iroh). */
-    fun message(fromAnywhere: Boolean): String? =
-        if (this == UNREACHABLE && fromAnywhere) "Can't reach your Mac. Check that Remote shell is on and the Mac is awake." else message
+    /** What to tell the user about a Mac (or a computer that never said otherwise). */
+    val message: String? get() = message(MAC_WORDS, fromAnywhere = false)
+
+    /** As [message]; [fromAnywhere] when this connect also tried the built-in path (iroh). */
+    fun message(fromAnywhere: Boolean): String? = message(MAC_WORDS, fromAnywhere)
+
+    /** What to tell the user about the computer [w] names; [lastHeard], formatted, for a PC's "can't reach". */
+    fun message(w: HostWords, fromAnywhere: Boolean, lastHeard: String? = null): String? = when (this) {
+        UNSUPPORTED -> "Remote shell needs Android 10 or later."
+        NO_ACCESS -> HostCopy.noAccess(w)
+        LOCKED -> ShellKeyStatus.LOCKED.message
+        NEEDS_PASSCODE -> ShellKeyStatus.NEEDS_PASSCODE.message
+        KEY_UNAVAILABLE -> HostCopy.keyUnavailable(w)
+        CONNECTING, READY -> null
+        UNREACHABLE -> HostCopy.unreachable(w, fromAnywhere, lastHeard)
+    }
 
     companion object {
         /**
@@ -49,6 +65,8 @@ enum class ShellReach(val message: String?) {
             !deviceSecure -> if (granting) NEEDS_PASSCODE else NO_ACCESS
             else -> null
         }
+
+        private val MAC_WORDS = HostWords(HostKind.MAC, null)
     }
 }
 
@@ -71,9 +89,9 @@ data class ShellKeyFacts(
         else ShellReach.withoutCredential(mac in granting, mac in locked, mac in lost)
 }
 
-/** Copy for a refusal worth telling the user about; null for ones the UI handles quietly. */
-fun ShellError.message(): String? = when (this) {
-    ShellError.TOO_MANY_SESSIONS -> "Your Mac already has ${RemoteShell.MAX_SESSIONS} sessions open. End one to start another."
+/** Copy for a refusal worth telling the user about; null for ones the UI handles quietly (a shell refusal is the page's to say). */
+fun ShellError.message(w: HostWords = HostWords(HostKind.MAC, null)): String? = when (this) {
+    ShellError.TOO_MANY_SESSIONS -> HostCopy.tooManySessions(w)
     else -> null
 }
 
@@ -134,12 +152,24 @@ data class ShellEndedSessions(
 }
 
 object ShellFormat {
-    /** "running · 4m" (since it started) or "exited 0 · 1h" (since its last output). Times in Unix seconds. */
-    fun status(session: ShellSessionInfo, nowSeconds: Double): String {
-        if (session.running) session.waiting?.let { return "needs you · $it" }
-        if (session.running) return "running · " + age(nowSeconds - session.startedAt)
+    /**
+     * "running · 4m" (since it started) or "exited 0 · 1h" (since its last output), after the
+     * name of the shell it runs when the host offers more than one ("Ubuntu · running · 4m").
+     * Times in Unix seconds.
+     */
+    fun status(session: ShellSessionInfo, nowSeconds: Double, shellName: String? = null): String {
+        val prefix = shellName?.let { "$it · " }.orEmpty()
+        if (session.running) session.waiting?.let { return prefix + "needs you · $it" }
+        if (session.running) return prefix + "running · " + age(nowSeconds - session.startedAt)
         val exited = session.exitStatus?.let { "exited $it" } ?: "exited"
-        return exited + " · " + age(nowSeconds - session.lastOutputAt)
+        return prefix + exited + " · " + age(nowSeconds - session.lastOutputAt)
+    }
+
+    /** The name of the shell [session] runs, when [host] offers a choice (more than one) and lists it. */
+    fun shellName(session: ShellSessionInfo, host: HostInfo?): String? {
+        if (!Hosts.offersChoice(host)) return null
+        val id = session.shell ?: return null
+        return host?.shells?.firstOrNull { it.id == id }?.name
     }
 
     fun age(seconds: Double): String {

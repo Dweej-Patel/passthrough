@@ -1,5 +1,6 @@
-# Mirrors the checklist in CONTRIBUTING.md: core tests, both Apple apps build,
-# Android tests + lint + build.
+# Mirrors the checklist in CONTRIBUTING.md: core tests (Swift, and the Windows
+# Core suite beside them), both Apple apps build, Android tests + lint + build,
+# Windows tests + app build.
 name: CI
 
 on:
@@ -22,7 +23,7 @@ env:
 
 jobs:
   core-tests:
-    name: PassthroughCore tests
+    name: PassthroughCore and Windows Core tests
     runs-on: macos-15
     timeout-minutes: 20
     steps:
@@ -34,6 +35,15 @@ jobs:
       - name: swift test
         working-directory: Packages/PassthroughCore
         run: swift test
+      # The Windows Core suite has no Windows dependency; running it here as well keeps it
+      # portable and is where tests against the Swift implementation will run.
+      - uses: actions/setup-dotnet@26b0ec14cb23fa6904739307f278c14f94c95bf1 # v5.4.0
+        with:
+          global-json-file: global.json
+      - name: dotnet test (Windows Core, portable)
+        run: |
+          dotnet restore windows/tests/Passthrough.Core.Tests --locked-mode
+          dotnet test windows/tests/Passthrough.Core.Tests -c Release --no-restore
 
   apple-builds:
     name: Mac and iOS apps build
@@ -68,6 +78,35 @@ jobs:
           -configuration Debug -destination 'generic/platform=iOS'
           -derivedDataPath build/dd-ios -onlyUsePackageVersionsFromResolvedFile
           CODE_SIGNING_ALLOWED=NO build
+
+  windows:
+    name: Windows tests and app build
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-dotnet@26b0ec14cb23fa6904739307f278c14f94c95bf1 # v5.4.0
+        with:
+          global-json-file: global.json
+      - name: Build the iroh bridge (toolchain and crates pinned by rust-toolchain.toml and Cargo.lock)
+        working-directory: windows/native/iroh-bridge
+        run: cargo build --release --locked
+      - name: Restore (locked to packages.lock.json)
+        run: dotnet restore windows/Passthrough.Windows.sln --locked-mode
+      - name: dotnet test
+        run: dotnet test windows/tests/Passthrough.Core.Tests -c Release --no-restore
+      - name: Real ConPTY sessions
+        run: dotnet test windows/tests/Passthrough.Windows.Tests -c Release --no-restore --blame-hang-timeout 120s
+      - name: Build the app
+        run: dotnet build windows/src/Passthrough.App -c Release --no-restore
+      - name: Build the self-contained layout (app, service, files.json)
+        shell: pwsh
+        run: ./scripts/build-windows.ps1
+      - name: Install, off, on, update and remove the service (the runner is elevated)
+        shell: pwsh
+        run: ./windows/tests/install-round-trip.ps1 -Build windows/artifacts/Passthrough
 
   android:
     name: Android tests, lint and build

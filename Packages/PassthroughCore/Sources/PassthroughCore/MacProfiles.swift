@@ -106,7 +106,14 @@ public enum MacProfiles {
         return .connecting
     }
 
-    public static func statusText(_ status: MacStatus, now: Date) -> String {
+    /// The row's status line. `showKind` (when the paired computers aren't all Macs) starts it with
+    /// the kind: "PC · Connected".
+    public static func statusText(_ status: MacStatus, now: Date, kind: HostKind = .mac, showKind: Bool = false) -> String {
+        let text = plainStatusText(status, now: now, kind: kind)
+        return showKind ? HostWords(kind: kind, name: nil, device: "").Noun + " · " + text : text
+    }
+
+    private static func plainStatusText(_ status: MacStatus, now: Date, kind: HostKind) -> String {
         switch status {
         case .connected(let shells):
             switch shells {
@@ -119,7 +126,7 @@ public enum MacProfiles {
             let formatter = RelativeDateTimeFormatter()
             formatter.dateTimeStyle = .named
             return "Last heard \(formatter.localizedString(for: date, relativeTo: now))"
-        case .noShell: return "Paired, no Remote shell"
+        case .noShell: return HostCopy.pairedNoShell(kind)
         case .connecting: return "Connecting…"
         }
     }

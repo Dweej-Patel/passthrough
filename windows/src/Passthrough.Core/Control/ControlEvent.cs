@@ -24,6 +24,12 @@ public abstract record ControlEvent
     /// <summary>The phone's live status (authenticated channels only).</summary>
     public sealed record StatusUpdate(DeviceStatus Status, long Rx, long Tx, int Active) : ControlEvent;
 
+    /// <summary>
+    /// The phone stored a shell grant (authenticated channels only). <paramref name="GrantId"/> echoes the grant's
+    /// id when the phone sent one back; an answer without it (from phones that predate it) counts for the grant in flight.
+    /// </summary>
+    public sealed record ShellGranted(string PhoneId, string? GrantId) : ControlEvent;
+
     /// <summary>The phone's user turned Passthrough off; the phone stops right after.</summary>
     public sealed record Goodbye : ControlEvent;
 

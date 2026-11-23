@@ -245,8 +245,8 @@ final class AppModel: ObservableObject {
         if let pairingCode, pairingCode.expiry <= Date() { self.pairingCode = nil }
         if pairingCode != nil, registry.codeWasWithdrawn { pairingCode = nil; pairingCodeWithdrawn = true }
         guard state == .running, let fresh = await activeHost.stats() else { return }
-        // A Mac that just paired connects: the code is spent. (An iPad linking says nothing about it.)
-        if stats.connectedMacs.count < fresh.connectedMacs.count, pairingCode != nil { pairingCode = nil }
+        // A computer that just paired connects: the code is spent. (An iPad linking says nothing about it.)
+        if stats.connectedComputers.count < fresh.connectedComputers.count, pairingCode != nil { pairingCode = nil }
         stats = fresh
         meter.record(ByteCounter.Snapshot(rx: fresh.rx, tx: fresh.tx, active: fresh.active, totalConnections: fresh.totalConnections))
         if let last = lastUsageSnapshot {
@@ -293,7 +293,7 @@ final class AppModel: ObservableObject {
     func addIPad(_ invitation: IPadEnrollment.Invitation) async -> Result<Void, IPadEnrollment.EnrollmentError> {
         guard let new = registry.prepareClient(id: invitation.clientID, name: invitation.name, kind: .ipad,
                                                certificateSHA256: invitation.certSHA256, linkKey: WirelessLink.randomBytes(32)) else {
-            return .failure(.refused("that code names a device already paired as a Mac"))
+            return .failure(.refused("that code names a device already paired as a computer"))
         }
         let registry = self.registry
         var result: Result<Void, IPadEnrollment.EnrollmentError> = await withCheckedContinuation { continuation in

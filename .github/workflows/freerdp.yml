@@ -1,0 +1,71 @@
+# Builds the Remote Desktop engine (Vendor/FreeRDP/FreeRDP.xcframework) from its
+# pinned sources with scripts/build-freerdp.sh on a clean Mac, uploads it, and
+# then builds the package and the iPhone app with it in place, so the shim and
+# the Remote Desktop backend compile against the real engine. Run by hand
+# (Actions > Remote Desktop engine > Run workflow); the artifact is what a
+# rebuild PR commits under Vendor/FreeRDP.
+name: Remote Desktop engine
+
+on:
+  workflow_dispatch:
+  # Also on a PR that changes the engine, its script, its shim or this workflow, so a change is built before it merges.
+  pull_request:
+    branches: [main, dev]
+    paths:
+      - scripts/build-freerdp.sh
+      - Vendor/FreeRDP/**
+      - .github/workflows/freerdp.yml
+
+permissions:
+  contents: read
+
+env:
+  XCODE_APP: /Applications/Xcode_26.3.app
+
+jobs:
+  build:
+    name: Build FreeRDP.xcframework
+    runs-on: macos-15
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Select Xcode
+        run: sudo xcode-select -s "$XCODE_APP"
+      - name: Tools
+        run: |
+          brew install ninja
+          cmake --version
+      - name: scripts/build-freerdp.sh
+        run: bash scripts/build-freerdp.sh
+      - name: Logs of a failed build
+        if: failure()
+        run: |
+          for f in Vendor/freerdp-src/build/*/*.log; do
+            echo "::group::$f"; tail -n 80 "$f"; echo "::endgroup::"
+          done
+      - name: Upload the engine
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: FreeRDP-xcframework
+          path: |
+            Vendor/FreeRDP/FreeRDP.xcframework
+            Vendor/FreeRDP/SOURCES.lock
+            Vendor/FreeRDP/SIZE.md
+            Vendor/FreeRDP/exports-*.txt
+          if-no-files-found: error
+      - name: swift test with the engine (macOS slice)
+        working-directory: Packages/PassthroughCore
+        run: swift test --filter RemoteDesktopTests
+      - name: Install Metal Toolchain
+        run: xcodebuild -downloadComponent MetalToolchain
+      - name: Build Passthrough (iOS) with the engine
+        run: |
+          brew install xcodegen
+          cp Config/Signing.xcconfig.example Config/Signing.xcconfig
+          xcodegen generate
+          xcodebuild -project Passthrough.xcodeproj -scheme Passthrough \
+            -configuration Debug -destination 'generic/platform=iOS' \
+            -derivedDataPath build/dd-ios -onlyUsePackageVersionsFromResolvedFile \
+            CODE_SIGNING_ALLOWED=NO build

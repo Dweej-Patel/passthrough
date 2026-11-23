@@ -11,6 +11,13 @@ final class ShellRouter: ObservableObject {
     @Published var showHistory = false
     @Published var showScreen = false
 
+    /// The one way into the screen, from a row or card: only when the selected
+    /// computer's screen can be shown here (never a PC's in this version).
+    func openScreen(_ shell: ShellModel) {
+        guard shell.canOpenScreen else { return }
+        showScreen = true
+    }
+
     /// True when something was showing (its dismissal is then still under way).
     @discardableResult
     func dismissAll() -> Bool {
@@ -133,7 +140,7 @@ struct RootView: View {
     private var tabs: some View {
         TabView(selection: $tab) {
             MacHomeView(shell: model.shell, tab: $tab, showPairing: $showPairing, showSettings: $showSettings)
-                .tabItem { Label("Mac", systemImage: "laptopcomputer") }
+                .tabItem { Label(tabWords.Noun, systemImage: tabWords.symbol) }
                 .badge(asking)
                 .tag(RootTab.mac)
             ShellsTab(shell: model.shell)
@@ -237,6 +244,11 @@ extension RootView {
 
     private var asking: Int { model.shell.visibleSessions.filter(\.isAsking).count }
 
+    /// The first tab is named for the selected computer: "Mac", "PC"; "Computer" with none paired.
+    private var tabWords: HostWords {
+        model.pairedClients.isEmpty ? .generic(device: ThisDevice.name) : model.shell.words
+    }
+
     private func seen(reachable: Bool) -> MacActivityController.Seen {
         let shell = model.shell
         return .init(macID: shell.selectedMacID, macName: shell.selectedMacName, reachable: reachable,
@@ -268,6 +280,11 @@ extension RootView {
             links.done()
         case .keepAwake, .vpnOn:
             tab = .mac
+            // Keep awake and the VPN are a Mac's: never sent to a PC.
+            guard shell.selectedKind == .mac else {
+                links.note = "Keep awake and the VPN are a Mac's. Choose a Mac under Your computers, then try again."
+                return links.done()
+            }
             guard shell.reach == .ready, let state = shell.macState else { return }   // waits for the Mac
             links.done()
             guard state.control == true else {
@@ -365,11 +382,12 @@ struct ShellsTab: View {
             }
             .background(PTColor.background)
             .navigationTitle("Shells")
+            .computerTitleMenu(shell)
             .toolbar {
                 if shell.reach == .ready {
                     ToolbarItem(placement: .topBarTrailing) {
-                        Button { router.terminal = .new } label: { Image(systemName: "plus") }
-                            .accessibilityLabel("New session")
+                        NewShellControl(shells: shell.shells(for: shell.selectedMacID), preferred: shell.preferredShell(for: shell.selectedMacID),
+                                        hostName: shell.selectedMacName, style: .toolbar) { router.terminal = .new(shell: $0) }
                     }
                 }
             }

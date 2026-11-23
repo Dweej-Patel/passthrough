@@ -75,6 +75,8 @@ data class ControlEnvelope(
     var relayToken: String? = null,
     /** shellGrant: names this grant (at most 64 UTF-8 bytes); the phone echoes it in shellGranted. */
     var grantID: String? = null,
+    /** hello, shellGrant: what the host is (`mac`, `windows`); absent from older Macs. Kept only from a proved pairing. */
+    var hostKind: String? = null,
 ) {
     fun encodeLine(): ByteArray = (json.encodeToString(serializer(), this) + "\n").toByteArray(Charsets.UTF_8)
 
@@ -127,4 +129,13 @@ data class DeviceStatus(
 )
 
 /** A connected Mac as seen by the phone. */
-data class ConnectedMac(val id: String, val name: String, val since: Long)
+data class ConnectedMac(
+    val id: String,
+    val name: String,
+    val since: Long,
+    /** What kind of computer it is, as recorded for its pairing (`mac`, `windows`); null from a Mac that never said. */
+    val kind: String? = null,
+) {
+    /** A Mac (or one that never said otherwise): the computers that use this phone's internet. */
+    val isMac: Boolean get() = kind == null || kind == HostInfo.KIND_MAC
+}

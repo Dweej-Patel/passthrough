@@ -23,17 +23,17 @@ final class ShellModel: ObservableObject {
         case unreachable
         case ready
 
-        /// What to tell the user; `fromAnywhere` when this connect also tried iroh.
+        /// What to tell the user about a Mac; `fromAnywhere` when this connect also tried iroh.
+        /// The page for any kind uses `ShellModel.reachMessage`, which knows the computer.
         func message(fromAnywhere: Bool) -> String? {
+            let w = HostWords(kind: .mac, name: nil, device: ThisDevice.name)
             switch self {
-            case .needsPasscode: "Set a device passcode to use Remote shell."
-            case .locked: "Unlock Passthrough to use Remote shell."
-            case .keyUnavailable: "Couldn't read the Remote shell key. Plug into the Mac again to renew access."
-            case .noAccess: "Turn on Remote shell in Passthrough on your Mac, then connect this \(ThisDevice.name) with the cable once."
-            case .unreachable: fromAnywhere
-                ? "Can't reach your Mac. Check that Remote shell is on and the Mac is awake."
-                : "Can't reach your Mac. Use the same Wi-Fi, or turn on Tailscale on both devices."
-            case .connecting, .ready: nil
+            case .needsPasscode: return HostCopy.needsPasscode(w)
+            case .locked: return HostCopy.locked(w)
+            case .keyUnavailable: return HostCopy.keyUnavailable(w)
+            case .noAccess: return HostCopy.noAccess(w)
+            case .unreachable: return HostCopy.unreachable(w, fromAnywhere: fromAnywhere)
+            case .connecting, .ready: return nil
             }
         }
     }
@@ -48,6 +48,8 @@ final class ShellModel: ObservableObject {
         didSet {
             // Unreachable, no access, locked…: nobody is waiting for that new session any more.
             if reach != .connecting && reach != .ready { openWhenReady = false }
+            // For Try again beside a connect that runs long.
+            if reach != .connecting { connectingSince = nil } else if oldValue != .connecting { connectingSince = Date() }
             // Remember when each Mac last answered, for "last heard" while it can't be reached.
             guard reach == .ready || oldValue == .ready, let mac = clientMacID else { return }
             Self.noteHeard(mac)
@@ -73,6 +75,20 @@ final class ShellModel: ObservableObject {
     @Published private(set) var ended = ShellEndedSessions()
     /// The last thing the Mac refused (too many sessions, no such session…).
     @Published private(set) var lastError: ShellError?
+    /// What each computer last said about itself (`host`), kept across launches in the app's own defaults.
+    @Published private(set) var factsByMac: [String: HostInfo]
+    /// The last `screenEnded` this connection heard: which computer, why, and when.
+    private(set) var screenEnded: (macID: String, reason: String, at: Date)?
+    /// Why each computer last said it was leaving (`goingAway`); dropped at its next `ready`.
+    @Published private(set) var farewells: [String: HostFarewell]
+    /// The shell last chosen per computer (a `HostShell.id`).
+    private(set) var lastShell: [String: String]
+    /// The selected computer refused this phone's key (`not_authorized`) while it held one.
+    @Published private(set) var accessRefused = false
+    /// How the last `open` was refused, when it says a shell can't start there (`signed_out`, `not_allowed`).
+    @Published private(set) var shellRefusal: ShellError?
+    /// When `reach` entered `.connecting`.
+    @Published private(set) var connectingSince: Date?
     /// The session another connection took over while this phone showed it;
     /// cleared when this phone attaches or opens a session again.
     @Published private(set) var detachedSession: String?
@@ -131,6 +147,9 @@ final class ShellModel: ObservableObject {
     private static let tabMemoryKey = "shell.tabMemory"
     private static let lastMacKey = "shell.lastMac"
     private static let hiddenSessionsKey = "shell.hiddenSessions"
+    private static let hostFactsKey = "shell.hostFacts"
+    private static let farewellsKey = "shell.farewells"
+    private static let lastShellKey = "shell.lastShell"
     /// When each Mac was last selected (seconds since 1970), for which Macs to watch.
     private static let lastSelectedKey = "shell.lastSelectedAt"
 
@@ -175,6 +194,8 @@ final class ShellModel: ObservableObject {
     /// opened on `.ready`. Dropped once the Mac can't be reached, or for
     /// another Mac or a tab chosen meanwhile.
     private var openWhenReady = false
+    /// The shell that session asked for (nil: the host's default).
+    private var openShellWhenReady: String?
     /// That open was sent instead of re-attaching `activeSession`: until
     /// it's answered nothing is attached, and if it's refused the active tab
     /// is re-attached.
@@ -198,6 +219,12 @@ final class ShellModel: ObservableObject {
             .flatMap { try? JSONDecoder().decode(MacTabMemory.self, from: $0) } ?? MacTabMemory()
         hiddenSessions = UserDefaults.standard.data(forKey: Self.hiddenSessionsKey)
             .flatMap { try? JSONDecoder().decode(ShellHiddenSessions.self, from: $0) } ?? ShellHiddenSessions()
+        // Kept cleaned (`HostInfo.cleaned`), so what comes back is what was shown.
+        factsByMac = (UserDefaults.standard.data(forKey: Self.hostFactsKey)
+            .flatMap { try? JSONDecoder().decode([String: HostInfo].self, from: $0) } ?? [:]).compactMapValues { $0.cleaned() }
+        farewells = UserDefaults.standard.data(forKey: Self.farewellsKey)
+            .flatMap { try? JSONDecoder().decode([String: HostFarewell].self, from: $0) } ?? [:]
+        lastShell = UserDefaults.standard.dictionary(forKey: Self.lastShellKey) as? [String: String] ?? [:]
         // Sockets don't survive suspension; leave cleanly, and `refresh` on return reconnects.
         observers.append(NotificationCenter.default.addObserver(forName: UIApplication.didEnterBackgroundNotification, object: nil, queue: .main) { [weak self] _ in
             MainActor.assumeIsolated {
@@ -305,15 +332,119 @@ final class ShellModel: ObservableObject {
         a.shellKey == b.shellKey && a.certSHA256 == b.certSHA256 && a.phoneID == b.phoneID && a.port == b.port
     }
 
-    /// What `.unreachable` says for the selected Mac.
-    var reachMessage: String? { reach.message(fromAnywhere: clientTriesIroh) }
+    /// What the page says about reaching the selected computer, in its words.
+    var reachMessage: String? {
+        // A Mac reads exactly as it always has.
+        if selectedKind == .mac { return reach.message(fromAnywhere: clientTriesIroh) }
+        let w = words
+        switch reach {
+        case .connecting, .ready: return nil
+        case .unreachable:
+            return HostCopy.state(page.state, w, fromAnywhere: clientTriesIroh,
+                                  lastHeard: lastHeard?.formatted(date: .omitted, time: .shortened),
+                                  at: { $0.formatted(date: .omitted, time: .shortened) },
+                                  sleepsAfter: hostFacts?.sleepAfter.flatMap(Self.sleepsAfter))
+        case .noAccess: return accessRefused ? HostCopy.revoked(w) : HostCopy.noAccess(w)
+        case .locked: return HostCopy.locked(w)
+        case .needsPasscode: return HostCopy.needsPasscode(w)
+        case .keyUnavailable: return HostCopy.keyUnavailable(w)
+        }
+    }
+
+    /// What to check while it can't be reached, for a page that already says so and when it was last heard.
+    var unreachableAdvice: String? { HostCopy.unreachableAdvice(words, fromAnywhere: clientTriesIroh) }
+
+    /// "30 minutes" for a `sleepAfter` in seconds; nil for never.
+    private static func sleepsAfter(_ seconds: Int) -> String? {
+        guard seconds > 0 else { return nil }
+        let formatter = DateComponentsFormatter()
+        formatter.unitsStyle = .full
+        formatter.allowedUnits = seconds >= 3600 ? [.hour, .minute] : [.minute]
+        return formatter.string(from: TimeInterval(seconds))
+    }
+
+    // MARK: What kind of computer
+
+    /// What the selected computer last said about itself.
+    var hostFacts: HostInfo? { selectedMacID.flatMap { factsByMac[$0] } }
+    /// Why the selected computer said it was leaving, if it did since it last answered.
+    var farewell: HostFarewell? { selectedMacID.flatMap { farewells[$0] } }
+
+    /// What kind of computer `id` is: what it last said, else what it said when paired or granted, else a Mac.
+    func kind(of id: String?) -> HostKind {
+        guard let id else { return .mac }
+        return Hosts.kind(live: factsByMac[id], stored: paired.first { $0.id == id }?.hostKind ?? macs.first { $0.macID == id }?.hostKind)
+    }
+
+    var selectedKind: HostKind { kind(of: selectedMacID) }
+    /// The selected computer's nouns.
+    var words: HostWords { HostWords(kind: selectedKind, name: selectedMacName, device: ThisDevice.name) }
+    /// Some paired computer isn't a Mac: lists then say which each is.
+    var mixedKinds: Bool { paired.contains { kind(of: $0.id) != .mac } }
+
+    /// The shells `id` offers, as it last said.
+    func shells(for id: String?) -> [HostShell] { id.flatMap { factsByMac[$0]?.shells } ?? [] }
+
+    /// The shell New shell opens on `id`: the last one chosen there if it still lists it, else its default.
+    func preferredShell(for id: String?) -> HostShell? {
+        guard let id, let facts = factsByMac[id] else { return nil }
+        return facts.shells?.first { $0.id == lastShell[id] } ?? facts.defaultShell
+    }
+
+    /// The selected computer's page: state, shell, Screen row, Try again.
+    var page: HostPage {
+        let hostReach: HostReach
+        switch reach {
+        case .noAccess: hostReach = .noAccess
+        case .locked: hostReach = .locked
+        case .needsPasscode: hostReach = .needsPasscode
+        case .keyUnavailable: hostReach = .keyUnavailable
+        case .connecting: hostReach = .connecting(redialing: isRedialing)
+        case .unreachable: hostReach = .unreachable
+        case .ready: hostReach = .ready(path)
+        }
+        return HostPage.make(HostPageInput(kind: selectedKind, reach: hostReach, accessRefused: accessRefused, host: hostFacts,
+                                           farewell: farewell, connectingSince: connectingSince, triedFromAnywhere: clientTriesIroh,
+                                           shellRefusal: shellRefusal, viewerScreens: viewerScreens))
+    }
+
+    /// The screens this app shows for the selected computer: a PC's Remote Desktop only behind the developer switch.
+    private var viewerScreens: Set<String> {
+        selectedKind == .windows && PCScreen.isOn ? [HostInfo.screenRDP] : ScreenBackends.supported(for: selectedKind)
+    }
+
+    /// The one way into the screen: the selected computer is reachable and this app can show its screen.
+    /// For a PC only behind the developer switch (`PCScreen`), and then never by the Mac's Screen Sharing path.
+    var canOpenScreen: Bool {
+        reach == .ready && (selectedKind == .mac || (selectedKind == .windows && PCScreen.isOn)) && page.screen == .available
+    }
+
+    private func saveHostFacts() {
+        UserDefaults.standard.set(try? JSONEncoder().encode(factsByMac), forKey: Self.hostFactsKey)
+    }
+
+    private func saveFarewells() {
+        UserDefaults.standard.set(try? JSONEncoder().encode(farewells), forKey: Self.farewellsKey)
+    }
+
+    /// Forgets what's kept about what a computer is: for `id`, or for all but `keeping`.
+    private func forgetHostFacts(_ id: String? = nil, keeping: Set<String>? = nil) {
+        let keep: (String) -> Bool = { key in keeping.map { $0.contains(key) } ?? (key != id) }
+        if factsByMac.keys.contains(where: { !keep($0) }) { factsByMac = factsByMac.filter { keep($0.key) }; saveHostFacts() }
+        if farewells.keys.contains(where: { !keep($0) }) { farewells = farewells.filter { keep($0.key) }; saveFarewells() }
+        if lastShell.keys.contains(where: { !keep($0) }) {
+            lastShell = lastShell.filter { keep($0.key) }
+            UserDefaults.standard.set(lastShell, forKey: Self.lastShellKey)
+        }
+    }
 
     /// The selected Mac's shell grant, if it has one.
     var selectedMac: ShellCredential? { macs.first { $0.macID == selectedMacID } }
 
     /// The Mac on screen: the selected Mac (with or without the shell), else the first paired one.
     var selectedMacName: String {
-        selectedMac?.macName ?? (paired.first { $0.id == selectedMacID } ?? paired.first)?.name ?? "Your Mac"
+        selectedMac?.macName ?? (paired.first { $0.id == selectedMacID } ?? paired.first)?.name
+            ?? HostWords(kind: selectedKind, name: nil, device: ThisDevice.name).Your
     }
 
     /// The selected Mac's shell can be reached off its own network (iroh).
@@ -414,6 +545,8 @@ final class ShellModel: ObservableObject {
     /// The phone forgot this Mac: drop its key, address, tabs and any connection to it.
     func forget(macID: String) {
         ShellKeyVault.delete(macID: macID, context: lock?.isUnlocked == true ? lock?.context : nil)
+        // Its screen logins too: a computer paired later under the same id is never signed in with them.
+        ScreenLoginStore.deleteAll(hostID: macID)
         UserDefaults.standard.removeObject(forKey: Self.manualAddressPrefix + macID)
         granted[macID] = nil
         if clientMacID == macID { dropConnection(); resetSessions() }
@@ -443,6 +576,7 @@ final class ShellModel: ObservableObject {
         hiddenSessions.forget(macID)
         saveHiddenSessions()
         endedByMac[macID] = nil
+        forgetHostFacts(macID)
         if UserDefaults.standard.string(forKey: Self.lastMacKey) == macID {
             UserDefaults.standard.removeObject(forKey: Self.lastMacKey)
         }
@@ -450,7 +584,9 @@ final class ShellModel: ObservableObject {
 
     func forgetAll() {
         ShellKeyVault.deleteAll()
-        for id in macs.map(\.macID) + granted.keys {
+        let known = macs.map(\.macID) + Array(granted.keys)
+        for id in Set(known + paired.map(\.id)) { ScreenLoginStore.deleteAll(hostID: id) }
+        for id in known {
             UserDefaults.standard.removeObject(forKey: Self.manualAddressPrefix + id)
         }
         granted = [:]
@@ -462,6 +598,7 @@ final class ShellModel: ObservableObject {
         UserDefaults.standard.removeObject(forKey: Self.lastMacKey)
         hiddenSessions = ShellHiddenSessions()
         UserDefaults.standard.removeObject(forKey: Self.hiddenSessionsKey)
+        forgetHostFacts(keeping: [])
     }
 
     // MARK: Connection
@@ -526,17 +663,27 @@ final class ShellModel: ObservableObject {
         return (client, dialer)
     }
 
-    func newSession(cols: Int, rows: Int) {
+    /// Opens a session on the selected computer. `shell`: one of the shells it listed
+    /// (anything else is dropped, so the host's default opens); remembered as its last choice.
+    func newSession(cols: Int, rows: Int, shell: String? = nil) {
+        let target = clientMacID ?? selectedMacID
+        let listed = shells(for: target)
+        let chosen = shell.flatMap { id in listed.contains(where: { $0.id == id }) ? id : nil }
+        if let chosen, let target {
+            lastShell[target] = chosen
+            UserDefaults.standard.set(lastShell, forKey: Self.lastShellKey)
+        }
         #if DEBUG
         if Self.demoState != nil { return demoOpen() }
         #endif
         size = (cols, rows)
         lastError = nil
+        shellRefusal = nil
         guard reach == .ready, let client else {
-            if reach == .connecting { openWhenReady = true }
+            if reach == .connecting { openWhenReady = true; openShellWhenReady = chosen }
             return
         }
-        client.open(cols: cols, rows: rows)
+        client.open(cols: cols, rows: rows, shell: chosen)
     }
 
     func attach(_ id: String, cols: Int, rows: Int) {
@@ -729,12 +876,17 @@ final class ShellModel: ObservableObject {
             // No `list`: the Mac sends `sessions` right after `ready`.
             // An ended session's log is already on screen; it has nothing more to send.
             let active = activeSession.flatMap { ended.isEnded($0) ? nil : $0 }
+            if let mac = clientMacID {
+                accessRefused = false
+                if farewells[mac] != nil { farewells[mac] = nil; saveFarewells() }
+            }
             if openWhenReady {
                 // Not the active tab first: it would take the keystrokes
                 // meant for the new one until the Mac answers.
                 openWhenReady = false
                 reattachIfRefused = active != nil
-                client?.open(cols: size.cols, rows: size.rows)
+                client?.open(cols: size.cols, rows: size.rows, shell: openShellWhenReady)
+                openShellWhenReady = nil
             } else if let active, viewing {
                 // Only while a terminal is on screen: attaching takes the
                 // session over and the Mac sizes it to this phone, so doing
@@ -790,6 +942,7 @@ final class ShellModel: ObservableObject {
                 attach(active, cols: size.cols, rows: size.rows)
             }
             lastError = error
+            if error == .signedOut || error == .notAllowed { shellRefusal = error }
         case let .output(session, data):
             output.send((session, data))
         case let .replaying(session):
@@ -824,9 +977,10 @@ final class ShellModel: ObservableObject {
             controlError = error
         case let .failed(error, session):
             lastError = error
-            if error == .notAuthorized { reach = .noAccess }
+            if error == .notAuthorized { accessRefused = true; reach = .noAccess }
             // Only a failure naming the requested session ends that request.
-            if error == .noSuchSession || error == .badRequest, let session, session == pendingTranscript?.id { finishTranscript(nil) }
+            // `signedOut`: a PC whose shells can't run answers `transcript` with it (older apps read it as `badRequest`).
+            if error == .noSuchSession || error == .badRequest || error == .signedOut, let session, session == pendingTranscript?.id { finishTranscript(nil) }
         case let .disconnected(error):
             let dropped = reach == .ready
             client = nil
@@ -845,12 +999,28 @@ final class ShellModel: ObservableObject {
                 redialsMade = nil
                 reach = .unreachable
             }
-        case let .screen(stream, _):
+        case let .screen(stream, _), let .rdp(stream, _, _):
             // The screen has its own client (`ScreenModel`); this one never asks.
             stream.cancel()
-        case .screenGranted, .screenPassSaved, .screenRevoked:
-            // Screen passes have their own clients (`ScreenShareModel`); this one never asks.
+        case .rdpRefused:
             break
+        case let .screenEnded(reason):
+            // Why a PC's screen view ended, for the view whose relay just closed (`ScreenModel`).
+            guard let mac = clientMacID else { return }
+            screenEnded = (mac, reason, Date())
+        case .screenGranted, .screenPassSaved, .screenRevoked, .computerGranted, .computerPassSaved, .computerRevoked, .computerList:
+            // Screen passes and computers' access have their own clients (`ScreenShareModel`, `ComputerShareModel`); this one never asks.
+            break
+        case let .host(info):
+            guard let mac = clientMacID else { return }
+            if factsByMac[mac] != info { factsByMac[mac] = info; saveHostFacts() }
+            registry?.noteHostKind(clientID: mac, kind: info.kind)
+            // It says shells can start again: the last refusal no longer holds.
+            if info.signedIn != false, info.app != false, info.access?.shell != false { shellRefusal = nil }
+        case let .goingAway(reason):
+            guard let mac = clientMacID else { return }
+            farewells[mac] = HostFarewell(reason: reason, at: Date())
+            saveFarewells()
         }
     }
 
@@ -903,6 +1073,7 @@ final class ShellModel: ObservableObject {
     private func switchSessions(to macID: String) {
         keepEnded()
         resetSessions()
+        accessRefused = false
         ended = endedByMac[macID] ?? ShellEndedSessions()
         let tabs = tabMemory.tabs(for: macID)
         holdingTabMemory = true
@@ -951,6 +1122,7 @@ final class ShellModel: ObservableObject {
         hidden.keepOnly(paired)
         if hidden != hiddenSessions { hiddenSessions = hidden; saveHiddenSessions() }
         endedByMac = endedByMac.filter { paired.contains($0.key) }
+        forgetHostFacts(keeping: paired)
         let defaults = UserDefaults.standard
         if let last = defaults.string(forKey: Self.lastMacKey), !paired.contains(last) { defaults.removeObject(forKey: Self.lastMacKey) }
         let heard = Self.lastHeardStore
@@ -970,6 +1142,8 @@ final class ShellModel: ObservableObject {
         holdingTabMemory = true
         defer { holdingTabMemory = false }
         openWhenReady = false
+        openShellWhenReady = nil
+        shellRefusal = nil
         macState = nil
         timeline = nil
         timelineLoading = false
@@ -1064,25 +1238,12 @@ final class ShellModel: ObservableObject {
 }
 
 extension ShellError {
-    /// Copy for a refusal worth telling the user about; nil for ones the UI
-    /// shows another way (a refused key is `Reach.noAccess`).
-    var message: String? {
-        switch self {
-        case .tooManySessions: "Your Mac already has \(RemoteShell.maxSessions) sessions open. End one to start another."
-        case .noSuchSession: "That session is no longer open on your Mac."
-        case .badRequest: "Your Mac couldn't do that. Try again."
-        case .screenNotAllowed: "This \(ThisDevice.name) isn't allowed to see your Mac's screen. Turn on Screen for it in Passthrough's Remote Shell settings on your Mac."
-        // Asked for only after the Mac said it can't stream its screen itself.
-        case .screenUnavailable: "Your Mac can't show its screen yet. In Passthrough's Remote Shell settings on your Mac, allow Screen Recording and Accessibility, or turn on Screen Sharing."
-        case .screenVideoUnavailable: "Your Mac can't stream its screen itself yet. In Passthrough's Remote Shell settings on your Mac, allow Screen Recording and Accessibility."
-        case .tooManyScreens: "Your Mac is already showing its screen as often as it allows (\(RemoteShell.maxScreenViewsPerPhone) views per phone, \(RemoteShell.maxScreenViews) in all). Close one to open another."
-        case .notAllowed: "Your Mac doesn't let this \(ThisDevice.name) change Keep awake and the VPN. Turn on Awake & VPN for it in Passthrough's Remote Shell settings on your Mac."
-        case .vpnNotSetUp: "Your Mac has no VPN set up yet. Add one in Passthrough's VPN settings on the Mac."
-        case .screenOnly: "That Mac only lets this device see its screen."
-        case .passNotSaved: "Your Mac couldn't save the screen pass. Try again."
-        case .notAuthorized: nil
-        }
-    }
+    /// Copy for a refusal worth telling the user about, worded for a Mac; nil for
+    /// ones the UI shows another way (a refused key is `Reach.noAccess`).
+    var message: String? { message(for: HostWords(kind: .mac, name: nil, device: ThisDevice.name)) }
+
+    /// The same, in the words of the computer that refused.
+    func message(for w: HostWords) -> String? { HostCopy.error(self, w) }
 }
 
 #if DEBUG
@@ -1090,17 +1251,46 @@ extension ShellError {
 
 /// Sample sessions and output for looking at the shell screens without a Mac:
 /// launch a Debug build with `-PTDemoShell ready` (or `empty`, `connecting`,
-/// `unreachable`, `keyUnavailable`). Compiled out of Release; without the
-/// argument nothing here runs. No network, no Keychain.
+/// `unreachable`, `keyUnavailable`). The demo PC, "Office-PC", is chosen in the
+/// switcher, or selected by the PC's own states: `pcSignedOut`, `pcOtherUser`,
+/// `pcAppClosed`, `pcShellOff`, `pcAsleep`, `pcTurnedOff`, `pcRevoked`, `pcNoAccess`,
+/// `pcHome`. Compiled out of Release; without the argument nothing here runs.
+/// No network, no Keychain.
 extension ShellModel {
     static var demoState: String? { UserDefaults.standard.string(forKey: "PTDemoShell") }
 
-    /// The demo's paired Macs: two with the shell, and one paired for internet only.
-    static let demoPaired = [
+    /// The demo's paired computers: two Macs with the shell, one paired for internet only, and a PC.
+    static let demoPaired: [PairedClient] = [
         PairedClient(id: "demo-mac", name: "MacBook Pro", tokenHash: "", pairedAt: .now),
         PairedClient(id: "demo-mac-2", name: "Home Studio", tokenHash: "", pairedAt: .now),
         PairedClient(id: "demo-mac-3", name: "Office iMac", tokenHash: "", pairedAt: .now),
+        {
+            var pc = PairedClient(id: ShellModel.demoPCID, name: "Office-PC", tokenHash: "", pairedAt: .now)
+            pc.hostKind = HostInfo.kindWindows
+            return pc
+        }(),
     ]
+
+    static let demoPCID = "demo-pc"
+
+    /// What the demo PC says about itself in each of its states.
+    fileprivate static func demoPCFacts(_ state: String) -> HostInfo {
+        var info = HostInfo(kind: HostInfo.kindWindows, os: "Windows 11 Pro", signedIn: true, app: true, console: "locked", idleSeconds: 840,
+                            shells: [HostShell(id: "pwsh", name: "PowerShell", default: true), HostShell(id: "powershell", name: "Windows PowerShell"),
+                                     HostShell(id: "cmd", name: "Command Prompt"), HostShell(id: "wsl:Ubuntu", name: "Ubuntu"),
+                                     HostShell(id: "gitbash", name: "Git Bash")],
+                            screens: [HostInfo.screenRDP], rdp: "ready", access: HostAccess(shell: true, screen: true, share: false),
+                            lock: true, sleepAfter: 1800)
+        switch state {
+        case "pcSignedOut": info.signedIn = false; info.app = false; info.console = "signedOut"
+        case "pcOtherUser": info.signedIn = false; info.app = false; info.console = "otherUser"
+        case "pcAppClosed": info.app = false
+        case "pcShellOff": info.access = HostAccess(shell: false, screen: true, share: false)
+        case "pcHome": info.screens = []; info.rdp = "edition"
+        default: break
+        }
+        return info
+    }
 
     fileprivate static let demoOutput: Data = {
         let esc = "\u{1b}["
@@ -1153,10 +1343,14 @@ extension ShellModel {
                             phoneID: "demo", port: 0, addresses: []),
             ShellCredential(macID: "demo-mac-2", macName: "Home Studio", certSHA256: "", shellKey: Data(),
                             phoneID: "demo", port: 0, addresses: []),
+            ShellCredential(macID: Self.demoPCID, macName: "Office-PC", certSHA256: "", shellKey: Data(),
+                            phoneID: "demo", port: 0, addresses: [], hostKind: HostInfo.kindWindows),
         ]
         paired = Self.demoPaired
         selectedMacID = MacProfiles.selection(current: selectedMacID, lastUsed: UserDefaults.standard.string(forKey: Self.lastMacKey),
                                               paired: paired.map(\.id), withShell: macs.map(\.macID))
+        // The PC's own states show the PC.
+        if state.hasPrefix("pc"), clientMacID == nil { selectedMacID = Self.demoPCID }
         applyingRefresh = false
         guard let mac = selectedMacID else { return }
         // The internet-only demo Mac: the same idle state as a real one.
@@ -1168,6 +1362,7 @@ extension ShellModel {
             switchSessions(to: mac)
             clientMacID = mac
         }
+        if mac == Self.demoPCID { return applyDemoPC(state, now: now) }
         switch state {
         case "connecting": reach = .connecting
         case "unreachable": reach = .unreachable
@@ -1195,6 +1390,36 @@ extension ShellModel {
                 ShellHistoryEntry(id: "demo-4", title: "ssh build-box", phoneLabel: "iPhone", startedAt: now - 260_000, bytes: 3_000),
             ]
             historyLoaded = true
+        }
+        applyDemoWatch()
+    }
+
+    /// The demo PC in `state` (in memory only: nothing it says is stored).
+    private func applyDemoPC(_ state: String, now: Double) {
+        factsByMac[Self.demoPCID] = Self.demoPCFacts(state)
+        farewells[Self.demoPCID] = nil
+        let left = Date().addingTimeInterval(-600)
+        switch state {
+        case "connecting": reach = .connecting
+        case "unreachable": reach = .unreachable
+        case "pcAsleep":
+            reach = .unreachable
+            farewells[Self.demoPCID] = HostFarewell(reason: GoingAwayReason.sleeping.rawValue, at: left)
+        case "pcTurnedOff":
+            reach = .unreachable
+            farewells[Self.demoPCID] = HostFarewell(reason: GoingAwayReason.turnedOff.rawValue, at: left)
+        case "pcRevoked":
+            accessRefused = true
+            reach = .noAccess
+        case "pcNoAccess": reach = .noAccess
+        default:
+            reach = .ready
+            path = .local
+        }
+        if reach == .ready, sessions.isEmpty, factsByMac[Self.demoPCID]?.app != false, factsByMac[Self.demoPCID]?.access?.shell != false {
+            sessions = Self.demoSessions[Self.demoPCID]
+                ?? [ShellSessionInfo(id: "pc-1", title: "PowerShell \u{2014} C:\\Users\\me\\dev", startedAt: now - 900, lastOutputAt: now - 30, running: true)]
+            ended.apply(sessions)
         }
         applyDemoWatch()
     }
@@ -1248,7 +1473,8 @@ extension ShellModel {
 
     fileprivate func demoOpen() {
         let id = "\(selectedMacID ?? "demo")-new-\(sessions.count + 1)"
-        sessions.append(ShellSessionInfo(id: id, title: "zsh — ~", startedAt: Date().timeIntervalSince1970,
+        let title = selectedKind == .mac ? "zsh — ~" : (preferredShell(for: selectedMacID)?.name ?? "PowerShell")
+        sessions.append(ShellSessionInfo(id: id, title: title, startedAt: Date().timeIntervalSince1970,
                                          lastOutputAt: Date().timeIntervalSince1970, running: true))
         if let mac = selectedMacID { Self.demoSessions[mac] = sessions }
         if !openTabs.contains(id) { openTabs.append(id) }

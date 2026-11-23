@@ -46,6 +46,10 @@ public final class IrohShellDialer: ShellIrohDialing, @unchecked Sendable {
         }
     }
 
+    public func pathReport(of stream: any ByteStream) -> String? {
+        (stream as? IrohByteStream)?.pathReport
+    }
+
     public func shutdown() {
         let closing: [IrohDialer] = lock.withLock {
             epoch += 1

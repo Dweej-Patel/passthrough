@@ -1,5 +1,8 @@
+using System.Text;
 using System.Threading.Channels;
+using Passthrough.Core.Cable;
 using Passthrough.Core.Protocol;
+using Passthrough.Core.Shell.Access;
 
 namespace Passthrough.Core.Control;
 
@@ -17,13 +20,22 @@ namespace Passthrough.Core.Control;
 /// last event, after which <see cref="Events"/> completes; <see cref="DisposeAsync"/> ends it with
 /// <c>Disconnected(null)</c>. Nothing is thrown from the background reader.
 /// </para>
+/// <para>
+/// <paramref name="inspect"/> is the cable peer check: it is shown the opened stream before anything is sent and
+/// says who holds its far end (<see cref="PeerVerdict"/>). Only a <see cref="PeerVerdict.Genuine"/> channel may carry
+/// a shell grant; without a check, none does.
+/// </para>
 /// </summary>
 public sealed class ControlClient(
     Func<CancellationToken, Task<Stream>> open,
     ControlIdentity identity,
     string deviceKind,
-    TimeProvider time) : IAsyncDisposable
+    TimeProvider time,
+    Func<Stream, PeerVerdict>? inspect = null) : IAsyncDisposable
 {
+    /// <summary>What this host says it is in <c>hello</c> and its grants.</summary>
+    public const string HostKind = "windows";
+
     private readonly Channel<ControlEvent> _events = Channel.CreateUnbounded<ControlEvent>();
     private readonly Channel<ControlEnvelope> _outgoing = Channel.CreateUnbounded<ControlEnvelope>(new UnboundedChannelOptions { SingleReader = true });
     private readonly CancellationTokenSource _stop = new();
@@ -52,8 +64,16 @@ public sealed class ControlClient(
     private bool _pairing;
     /// <summary>A code entered before the phone's welcome; sent once it arrives.</summary>
     private string? _pendingCode;
+    /// <summary>The cable peer check's verdict on this channel's stream, decided before <c>hello</c>.</summary>
+    private PeerVerdict _peer = PeerVerdict.Unknown;
 
     public ChannelReader<ControlEvent> Events => _events.Reader;
+
+    /// <summary>Who holds the far end of this channel, as the cable peer check found it (<see cref="PeerVerdict.Unknown"/> before the stream opens).</summary>
+    public PeerVerdict Peer
+    {
+        get { lock (_gate) return _peer; }
+    }
 
     /// <summary>
     /// Opens the stream and says hello; the rest runs in the background and is reported through <see cref="Events"/>.
@@ -111,11 +131,20 @@ public sealed class ControlClient(
             return;
         }
 
+        // Judged on the stream itself, before anything goes out on it, so the verdict is about the connection used.
+        var verdict = PeerVerdict.Unknown;
+        if (inspect is not null)
+        {
+            try { verdict = inspect(stream); }
+            catch (Exception) { verdict = PeerVerdict.Unknown; } // a check that fails grants nothing
+        }
+
         var channel = new LineChannel(stream);
         lock (_gate)
         {
             if (!_closed)
             {
+                _peer = verdict;
                 StartChannel(channel);
                 return;
             }
@@ -134,6 +163,7 @@ public sealed class ControlClient(
             Name = identity.Name,
             Nonce = Convert.ToBase64String(_macNonce),
             Via = "usb",
+            HostKind = HostKind,
         });
         // Silence counts from here; pings wait for the handshake to settle.
         _heartbeat = time.CreateTimer(_ => Beat(), null, ProtocolConstants.PingInterval, ProtocolConstants.PingInterval);
@@ -154,6 +184,38 @@ public sealed class ControlClient(
             else SendPair(code);
         }
         return Task.FromResult(true);
+    }
+
+    /// <summary>
+    /// Hands the phone a shell key and how to reach this PC (<c>shellGrant</c>). False, with nothing sent, unless the
+    /// phone has proved the pairing on this channel and the cable peer check said <see cref="PeerVerdict.Genuine"/>,
+    /// the key is 32 bytes and <paramref name="grantId"/> is 1 to 64 UTF-8 bytes. The phone answers
+    /// <see cref="ControlEvent.ShellGranted"/> once it has stored the key, or not at all.
+    /// </summary>
+    public bool GrantShell(ReadOnlySpan<byte> shellKey, GrantContents contents, string grantId)
+    {
+        if (shellKey.Length != 32) return false;
+        var idBytes = Encoding.UTF8.GetByteCount(grantId);
+        if (idBytes is < 1 or > ControlEnvelope.MaxGrantIdLength) return false;
+        var key = Convert.ToBase64String(shellKey);
+        lock (_gate)
+        {
+            if (_closed || !_authenticated || _peer != PeerVerdict.Genuine) return false;
+            Send(new ControlEnvelope(ControlEnvelope.ShellGrant)
+            {
+                ShellKey = key,
+                CertSHA256 = contents.CertSHA256,
+                ShellPort = contents.Port,
+                Addresses = [.. contents.Addresses],
+                MacName = contents.HostName,
+                IrohID = contents.IrohId,
+                IrohRelay = contents.IrohRelay,
+                RelayToken = contents.RelayToken,
+                GrantID = grantId,
+                HostKind = HostKind,
+            });
+            return true;
+        }
     }
 
     /// <summary>
@@ -235,7 +297,8 @@ public sealed class ControlClient(
     {
         if (_closed) return;
         // Only answers count as the phone being there: anything else could be sent forever without listening.
-        if (m.T is ControlEnvelope.Welcome or ControlEnvelope.Pong or ControlEnvelope.Status or ControlEnvelope.Paired or ControlEnvelope.Error)
+        if (m.T is ControlEnvelope.Welcome or ControlEnvelope.Pong or ControlEnvelope.Status or ControlEnvelope.Paired or ControlEnvelope.Error
+            or ControlEnvelope.ShellGranted)
             _lastHeard = time.GetTimestamp();
         switch (m.T)
         {
@@ -280,6 +343,13 @@ public sealed class ControlClient(
                 break;
             case ControlEnvelope.Goodbye:
                 if (_authenticated) Emit(new ControlEvent.Goodbye());
+                break;
+            case ControlEnvelope.ShellGranted:
+                // Before the proofs it is anyone's word; an id the phones never send could forge a log line or a
+                // settings key, so it is ignored.
+                if (!_authenticated || !IsPhoneId(m.PhoneID)) return;
+                var grantId = m.GrantID is { Length: > 0 } g && Encoding.UTF8.GetByteCount(g) <= ControlEnvelope.MaxGrantIdLength ? g : null;
+                Emit(new ControlEvent.ShellGranted(m.PhoneID!, grantId));
                 break;
             case ControlEnvelope.Status:
                 if (!_authenticated) return;
@@ -326,6 +396,10 @@ public sealed class ControlClient(
             SendPair(code);
         }
     }
+
+    /// <summary>What both phone apps send as their id: 1 to 64 letters, digits, <c>.</c>, <c>_</c> or <c>-</c>.</summary>
+    internal static bool IsPhoneId(string? id) =>
+        id is { Length: >= 1 and <= 64 } && id.All(c => c is >= '0' and <= '9' or >= 'A' and <= 'Z' or >= 'a' and <= 'z' or '.' or '_' or '-');
 
     private void SendPair(string code)
     {

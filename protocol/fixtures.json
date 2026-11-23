@@ -1,5 +1,5 @@
 {
-  "_comment": "Shared by the Swift tests (Packages/PassthroughCore) and the Kotlin tests (android/). Change it and both suites must agree. See protocol/README.md.",
+  "_comment": "Shared by the Swift tests (Packages/PassthroughCore), the Kotlin tests (android/) and the C# tests (windows/). Change it and all three suites must agree. See protocol/README.md.",
   "protocolVersion": 2,
   "ports": {
     "socks": 7890,
@@ -107,6 +107,12 @@
     },
     {
       "line": "{\"t\":\"shellGranted\",\"phoneID\":\"p-7c1e9a40\",\"grantID\":\"5B0E2C4A-7F31-4D8E-9A62-1C3B5D7E9F04\"}"
+    },
+    {
+      "line": "{\"t\":\"hello\",\"protocolVersion\":2,\"clientID\":\"6D3A9E21-0B7C-4F58-A1D4-93E2C7B50F18\",\"name\":\"Office-PC\",\"nonce\":\"QEFCQ0RFRkdISUpLTE1OT1BRUlNUVVZXWFlaW1xdXl8=\",\"via\":\"usb\",\"hostKind\":\"windows\"}"
+    },
+    {
+      "line": "{\"t\":\"shellGrant\",\"shellKey\":\"AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=\",\"certSHA256\":\"0000000000000000000000000000000000000000000000000000000000000000\",\"shellPort\":7893,\"addresses\":[],\"macName\":\"Office-PC\",\"irohID\":\"3f2a9c5e7b1d4a60c8e2f9b4d7a1035e6c8b2d4f9a1e3c5b7d0f2a4c6e8b1d3f\",\"grantID\":\"9C4E1A70-2B5D-4F83-8E16-7A0B3C5D9E21\",\"hostKind\":\"windows\"}"
     }
   ],
   "rates": [
@@ -407,6 +413,238 @@
       },
       {
         "line": "{\"t\":\"error\",\"reason\":\"no_such_session\"}"
+      },
+      {
+        "line": "{\"t\":\"replaying\",\"session\":\"3F2B8C1A-7D4E-4A55-9C0B-1E6F2A9D8B34\"}"
+      },
+      {
+        "line": "{\"t\":\"lock\"}"
+      },
+      {
+        "line": "{\"t\":\"viewing\",\"on\":true}"
+      },
+      {
+        "line": "{\"t\":\"host\",\"host\":{\"kind\":\"mac\",\"os\":\"macOS 15.4\",\"shells\":[{\"id\":\"login\",\"name\":\"zsh\",\"default\":true}],\"screens\":[\"video\",\"rfb\"],\"access\":{\"shell\":true,\"screen\":true}}}"
+      },
+      {
+        "line": "{\"t\":\"host\",\"host\":{\"kind\":\"windows\",\"os\":\"Windows 11 Pro 24H2\",\"signedIn\":true,\"app\":true,\"console\":\"active\",\"idleSeconds\":40,\"shells\":[{\"id\":\"pwsh\",\"name\":\"PowerShell\",\"default\":true},{\"id\":\"powershell\",\"name\":\"Windows PowerShell\"},{\"id\":\"cmd\",\"name\":\"Command Prompt\"},{\"id\":\"wsl:Ubuntu\",\"name\":\"Ubuntu\"},{\"id\":\"gitbash\",\"name\":\"Git Bash\"}],\"screens\":[\"rdp\"],\"rdp\":\"ready\",\"access\":{\"shell\":true,\"screen\":true,\"share\":false},\"lock\":true,\"user\":\"name@outlook.com\",\"sleepAfter\":0,\"display\":{\"width\":5120,\"height\":1440,\"scale\":100}}}"
+      },
+      {
+        "line": "{\"t\":\"host\",\"host\":{\"kind\":\"windows\",\"os\":\"Windows 11 Pro 24H2\",\"signedIn\":false,\"app\":false,\"console\":\"signedOut\",\"screens\":[\"rdp\"],\"rdp\":\"ready\",\"access\":{\"shell\":true,\"screen\":false},\"lock\":false}}"
+      },
+      {
+        "line": "{\"t\":\"goingAway\",\"reason\":\"sleeping\"}"
+      },
+      {
+        "line": "{\"t\":\"open\",\"cols\":80,\"rows\":24,\"ref\":3,\"shell\":\"wsl:Ubuntu\"}"
+      },
+      {
+        "line": "{\"t\":\"sessions\",\"sessions\":[{\"id\":\"3F2B8C1A-7D4E-4A55-9C0B-1E6F2A9D8B34\",\"title\":\"pwsh\",\"startedAt\":1758062400.5,\"lastOutputAt\":1758062461.25,\"running\":true,\"shell\":\"pwsh\"}]}"
+      },
+      {
+        "line": "{\"t\":\"error\",\"reason\":\"signed_out\",\"ref\":3}"
+      },
+      {
+        "line": "{\"t\":\"rdp\"}"
+      },
+      {
+        "line": "{\"t\":\"rdpReady\",\"certSHA256\":\"1b17262529eca2d60123456789abcdef0123456789abcdef0123456789abcdef\"}"
+      },
+      {
+        "line": "{\"t\":\"error\",\"reason\":\"rdp_unavailable\",\"detail\":\"exposed\",\"message\":\"Remote Desktop on this PC is open to the network, so Passthrough won't relay to it.\"}"
+      },
+      {
+        "line": "{\"t\":\"error\",\"reason\":\"try_later\",\"retryAfter\":540}"
+      },
+      {
+        "line": "{\"t\":\"screenEnded\",\"reason\":\"switched_off\"}"
+      },
+      {
+        "line": "{\"t\":\"error\",\"reason\":\"too_many_screens\"}"
+      },
+      {
+        "line": "{\"t\":\"computerGrant\",\"name\":\"MacBook\",\"viewer\":\"5d1e0c2a-7b3f-4e8a-9c61-2f0b8d4a7e13\",\"scopes\":[\"shell\",\"screen\"],\"idKey\":\"BGsX0fLhLEJH+Lzm5WOkQPJ3A32BLeszoPShOUXYmMKWT+NC4v4af5uO5+tKfA+eFivOM1drMV7Oy7ZAaDe/UfU=\",\"kind\":\"mac\"}"
+      },
+      {
+        "line": "{\"t\":\"computerGranted\",\"phoneID\":\"computer.9b2f6c1e-4d7a-4f0b-8e35-6a1c2d9e7f40\",\"key\":\"AQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyA=\",\"scopes\":[\"shell\",\"screen\"],\"pending\":[\"screen\"]}"
+      },
+      {
+        "line": "{\"t\":\"computerPassSaved\"}"
+      },
+      {
+        "line": "{\"t\":\"computerRevoke\",\"phoneID\":\"computer.9b2f6c1e-4d7a-4f0b-8e35-6a1c2d9e7f40\"}"
+      },
+      {
+        "line": "{\"t\":\"computerRevoked\"}"
+      },
+      {
+        "line": "{\"t\":\"listComputers\"}"
+      },
+      {
+        "line": "{\"t\":\"computerList\",\"computers\":[{\"phoneID\":\"computer.9b2f6c1e-4d7a-4f0b-8e35-6a1c2d9e7f40\",\"viewer\":\"5d1e0c2a-7b3f-4e8a-9c61-2f0b8d4a7e13\",\"name\":\"MacBook\",\"kind\":\"mac\",\"scopes\":[\"shell\"],\"pending\":[\"screen\"],\"connected\":true,\"grantedAt\":1763790000},{\"phoneID\":\"computer.0c4e8a2b-1f3d-4b6a-9e7c-5d2f1a8b3c60\",\"name\":\"Studio\",\"scopes\":[],\"connected\":false,\"grantedAt\":1763793600}]}"
+      },
+      {
+        "line": "{\"t\":\"computerList\",\"computers\":[]}"
+      }
+    ],
+    "errors": ["not_authorized", "too_many_sessions", "no_such_session", "bad_request", "screen_not_allowed", "screen_unavailable", "screen_video_unavailable", "too_many_screens", "not_allowed", "vpn_not_set_up", "screen_only", "pass_not_saved", "signed_out", "rdp_unavailable", "try_later", "too_many_computers", "pass_conflict"],
+    "host": {
+      "kinds": [
+        "mac",
+        "windows"
+      ],
+      "consoleStates": [
+        "active",
+        "locked",
+        "signedOut",
+        "otherUser"
+      ],
+      "screens": [
+        "video",
+        "rfb",
+        "rdp"
+      ],
+      "rdpStates": [
+        "ready",
+        "off",
+        "edition",
+        "account",
+        "service",
+        "exposed",
+        "policy"
+      ],
+      "goingAwayReasons": [
+        "sleeping",
+        "turned_off",
+        "shutting_down"
+      ],
+      "screenEndedReasons": [
+        "switched_off",
+        "stopped",
+        "taken"
+      ],
+      "inUseIdleSeconds": 120,
+      "maxShells": 32,
+      "maxLineBytes": 16384,
+      "rdpOpensPerGrant": 4,
+      "rdpOpensInAll": 12,
+      "rdpWindowSeconds": 600,
+      "rdpLongOpenSeconds": 30,
+      "shellIDs": [
+        {
+          "id": "pwsh",
+          "valid": true
+        },
+        {
+          "id": "wsl:Ubuntu",
+          "valid": true
+        },
+        {
+          "id": "wsl:Ubuntu-22.04",
+          "valid": true
+        },
+        {
+          "id": "login",
+          "valid": true
+        },
+        {
+          "id": "",
+          "valid": false
+        },
+        {
+          "id": "-x",
+          "valid": false
+        },
+        {
+          "id": "a b",
+          "valid": false
+        },
+        {
+          "id": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+          "valid": false
+        },
+        {
+          "id": "Ubuntu\n",
+          "valid": false
+        }
+      ],
+      "_comment": "A host sends `host` after `ready` and `macInfo`. cleaned(): nil without kind; os over 64 characters, an unknown console, a negative idleSeconds or sleepAfter, and a display whose width or height is outside 1 to 16384 or whose scale is outside 100 to 500, are dropped; shells with an invalid id or name, or a repeated id, are dropped, at most 32, only the first default kept.",
+      "cleaning": {
+        "in": {
+          "kind": "windows",
+          "os": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+          "console": "dancing",
+          "idleSeconds": -1,
+          "display": {
+            "width": 0,
+            "height": 1440,
+            "scale": 100
+          },
+          "shells": [
+            {
+              "id": "pwsh",
+              "name": "PowerShell",
+              "default": true
+            },
+            {
+              "id": "cmd",
+              "name": "Command Prompt",
+              "default": true
+            },
+            {
+              "id": "bad id",
+              "name": "Bad"
+            },
+            {
+              "id": "pwsh",
+              "name": "Again"
+            }
+          ]
+        },
+        "out": {
+          "kind": "windows",
+          "shells": [
+            {
+              "id": "pwsh",
+              "name": "PowerShell",
+              "default": true
+            },
+            {
+              "id": "cmd",
+              "name": "Command Prompt"
+            }
+          ]
+        }
+      }
+    },
+    "pcAnswers": [
+      {
+        "request": "{\"t\":\"setAwake\",\"on\":true}",
+        "answer": "{\"t\":\"error\",\"reason\":\"not_allowed\"}"
+      },
+      {
+        "request": "{\"t\":\"setVPN\",\"on\":false}",
+        "answer": "{\"t\":\"error\",\"reason\":\"not_allowed\"}"
+      },
+      {
+        "request": "{\"t\":\"events\",\"since\":1758060000}",
+        "answer": "{\"t\":\"eventList\",\"since\":1758060000,\"events\":[],\"battery\":[]}"
+      },
+      {
+        "request": "{\"t\":\"push\",\"on\":false}",
+        "answer": "{\"t\":\"pushState\",\"on\":false}"
+      },
+      {
+        "request": "{\"t\":\"screenVideo\"}",
+        "answer": "{\"t\":\"error\",\"reason\":\"screen_not_allowed\"}"
+      },
+      {
+        "request": "{\"t\":\"screen\"}",
+        "answer": "{\"t\":\"error\",\"reason\":\"screen_not_allowed\"}"
+      },
+      {
+        "request": "{\"t\":\"screenGrant\",\"name\":\"MacBook\",\"viewer\":\"x\"}",
+        "answer": "{\"t\":\"error\",\"reason\":\"bad_request\"}"
       }
     ],
     "addresses": [

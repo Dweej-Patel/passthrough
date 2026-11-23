@@ -35,6 +35,7 @@ import dev.dpatel.passthrough.service.Runtime
 import dev.dpatel.passthrough.ui.AppViewModel
 import dev.dpatel.passthrough.ui.MainTab
 import dev.dpatel.passthrough.ui.MainTabs
+import dev.dpatel.passthrough.ui.computerTabTitle
 import dev.dpatel.passthrough.ui.PairSheet
 import dev.dpatel.passthrough.ui.PassthroughTheme
 import dev.dpatel.passthrough.ui.PhoneScreen
@@ -145,6 +146,7 @@ class MainActivity : FragmentActivity() {
                 Screen.PHONE -> PhoneScreen(
                     vm, onPower = onPower, onPair = { showPairing = true }, onSettings = { openSettings(Screen.PHONE) },
                     onDone = { screen = Screen.HOME }, scroll = phoneScroll,
+                    backLabel = computerTabTitle(shell.selectedKind.value, vm.pairedClients.value.isNotEmpty() || shell.demoPaired.value.isNotEmpty()),
                 )
                 Screen.TERMINAL -> TerminalScreen(
                     shell, terminalIntent,

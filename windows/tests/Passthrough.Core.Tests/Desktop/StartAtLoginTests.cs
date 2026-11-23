@@ -31,3 +31,28 @@ public class StartAtLoginTests
         Assert.Null(StartAtLogin.Repair("\"C:\\old\\Passthrough.exe\"", null));                     // path unknown
     }
 }
+
+public sealed class StartAtLoginInstalledTests
+{
+    private const string Launcher = @"C:\Program Files\Passthrough\Passthrough.Service.exe";
+    private const string Installed = @"C:\Program Files\Passthrough\2026.11.21-1a2b3c4d\Passthrough.exe";
+    private const string Elsewhere = @"D:\src\Passthrough.exe";
+
+    [Fact]
+    public void InstalledTheEntryIsTheLauncher()
+    {
+        Assert.Equal($"\"{Launcher}\" --launch", StartAtLogin.EnabledValue(Installed, Launcher));
+        Assert.True(StartAtLogin.IsEnabled($"\"{Launcher}\" --launch", Installed, Launcher));
+        // The installed copy moves an old entry to the launcher, so updates never leave it pointing at nothing.
+        Assert.Equal($"\"{Launcher}\" --launch", StartAtLogin.Repair($"\"{Installed}\"", Installed, Launcher, isInstalledCopy: true));
+        Assert.Null(StartAtLogin.Repair($"\"{Launcher}\" --launch", Installed, Launcher, isInstalledCopy: true));
+    }
+
+    [Fact]
+    public void ABuildRunFromElsewhereNeverTakesTheEntry()
+    {
+        Assert.Null(StartAtLogin.Repair($"\"{Launcher}\" --launch", Elsewhere, Launcher, isInstalledCopy: false));
+        Assert.Null(StartAtLogin.Repair($"\"{Installed}\"", Elsewhere, Launcher, isInstalledCopy: false));
+        Assert.Null(StartAtLogin.Repair(null, Installed, Launcher, isInstalledCopy: true)); // off stays off
+    }
+}

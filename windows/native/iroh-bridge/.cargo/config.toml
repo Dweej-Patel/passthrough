@@ -1,0 +1,4 @@
+# The C runtime linked in statically (B-3): passthrough_iroh.dll needs no VC++ redistributable, and there is no
+# vcruntime DLL for anyone to plant beside the app.
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]

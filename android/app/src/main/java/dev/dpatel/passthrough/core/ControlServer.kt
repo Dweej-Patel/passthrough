@@ -111,8 +111,8 @@ class ControlServer(
         if (peer.hello != null) return emptyList()
         val version = m.protocolVersion ?: 0
         if (version != PassthroughProtocol.VERSION) {
-            ptLog(PtLog.Level.WARNING, if (version < PassthroughProtocol.VERSION) "A Mac with an older Passthrough tried to connect: update Passthrough on the Mac"
-                else "A Mac with a newer Passthrough tried to connect: update Passthrough on this phone")
+            ptLog(PtLog.Level.WARNING, if (version < PassthroughProtocol.VERSION) "A computer with an older Passthrough tried to connect: update Passthrough on it"
+                else "A computer with a newer Passthrough tried to connect: update Passthrough on this phone")
             peer.reject()
             // Our version tells the Mac which side to update.
             return listOf(ControlEnvelope(ControlEnvelope.ERROR, reason = PairingFailure.UNSUPPORTED_VERSION.wire, protocolVersion = PassthroughProtocol.VERSION))
@@ -124,7 +124,9 @@ class ControlServer(
             return listOf(error(PairingFailure.NOT_AUTHENTICATED))
         }
         val phoneNonce = ControlAuth.nonce()
-        peer.hello = Hello(id, (m.name ?: "Mac").take(64), macNonce, phoneNonce)
+        // The kind is held with the hello and kept only once the peer proves its pairing.
+        val kind = m.hostKind?.takeIf { HostKind.fromWire(it) != null }
+        peer.hello = Hello(id, (m.name ?: "Computer").take(64), macNonce, phoneNonce, kind)
         val reply = welcome().apply { nonce = Base64.getEncoder().encodeToString(phoneNonce) }
         // Proving first gives nothing away: the proof is bound to the Mac's
         // fresh nonce and only says something to whoever holds K.
@@ -139,11 +141,12 @@ class ControlServer(
         val hello = peer.hello
         val key = hello?.let { registry.pairingKey(it.clientID) }
         if (hello == null || key == null || !ControlAuth.isValidMacProof(m.proof, key, hello.clientID, hello.macNonce, hello.phoneNonce)) {
-            ptLog(PtLog.Level.WARNING, "A Mac could not prove its pairing; closing its control connection")
+            ptLog(PtLog.Level.WARNING, "A computer could not prove its pairing; closing its control connection")
             peer.reject()
             return listOf(error(PairingFailure.NOT_AUTHENTICATED))
         }
         registry.touch(hello.clientID)
+        hello.hostKind?.let { registry.noteHostKind(hello.clientID, it) }
         peer.authenticate(hello.clientID, hello.name)
         // The phone's status goes only to a proven Mac: the first now, not at the next tick.
         return listOf(statusMessage())
@@ -156,6 +159,7 @@ class ControlServer(
         if (code == null || (m.clientID != null && m.clientID != hello.clientID)) return listOf(error(PairingFailure.BAD_CODE))
         return when (val r = registry.pair(code, hello.clientID, hello.name)) {
             is PairingRegistry.PairResult.Success -> {
+                hello.hostKind?.let { registry.noteHostKind(hello.clientID, it) }
                 peer.authenticate(hello.clientID, hello.name)
                 listOf(
                     ControlEnvelope(ControlEnvelope.PAIRED, token = r.token, deviceName = statusProvider().deviceName, socksPort = socksPort),
@@ -203,7 +207,7 @@ class ControlServer(
         val irohRelay = m.irohRelay.takeIf { irohOk }
         val relayToken = m.relayToken.takeIf { irohOk }
         val grant = ShellGrant(cert.lowercase(Locale.ROOT), port, (m.addresses ?: emptyList()).take(IrohInfo.MAX_ADDRESSES), (m.macName ?: mac.name).take(64),
-            irohID, irohRelay)
+            irohID, irohRelay, m.hostKind?.takeIf { HostKind.fromWire(it) != null })
         // The key is only ever kept sealed to the app's key. Before the app has made one, no
         // answer: the Mac keeps the key unrecorded and grants again later (with backoff, and on
         // every new cable connection).
@@ -239,8 +243,8 @@ class ControlServer(
         )
     }
 
-    /** What a Mac's hello said, and the nonce this connection's proofs use. */
-    private class Hello(val clientID: String, val name: String, val macNonce: ByteArray, val phoneNonce: ByteArray)
+    /** What a computer's hello said (its [hostKind] not yet trusted), and the nonce this connection's proofs use. */
+    private class Hello(val clientID: String, val name: String, val macNonce: ByteArray, val phoneNonce: ByteArray, val hostKind: String?)
 
     private inner class Peer(private val socket: Socket) {
         private val cancelled = AtomicBoolean(false)
@@ -282,7 +286,8 @@ class ControlServer(
 
         fun authenticate(id: String, name: String) {
             if (mac == null) {
-                mac = ConnectedMac(id, name, System.currentTimeMillis())
+                val kind = registry.clients.firstOrNull { it.id == id }?.let { it.hostKind ?: it.shell?.hostKind }
+                mac = ConnectedMac(id, name, System.currentTimeMillis(), kind)
                 ptLog(PtLog.Level.INFO, "$name connected over USB")
                 onClientsChanged?.invoke(connectedMacs)
             }

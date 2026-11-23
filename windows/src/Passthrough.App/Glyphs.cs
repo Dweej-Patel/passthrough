@@ -8,6 +8,10 @@ internal static class Glyphs
     public const string Phone = "";
     public const string Tablet = "";
 
+    /// <summary>Another computer with access: a laptop for a Mac, a PC for the rest.</summary>
+    public const string Laptop = "";
+    public const string Desktop = "";
+
     /// <summary>A tablet for an iPad, a phone for the rest and for "no phone".</summary>
     public static string For(PhoneKind? kind) => kind == PhoneKind.IPad ? Tablet : Phone;
 }

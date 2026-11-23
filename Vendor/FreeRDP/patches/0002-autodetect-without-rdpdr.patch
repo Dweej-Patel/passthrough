@@ -1,0 +1,22 @@
+Passthrough: network auto-detect without device redirection.
+
+At 3.33.1, freerdp_client_load_addins turns DeviceRedirection on (so it asks for
+rdpdr) whenever NetworkAutoDetect is on. Auto-detect (bandwidth and round-trip
+measurement, MS-RDPBCGR 2.2.14) runs on the main channel and needs no rdpdr,
+which this build leaves out; with it forced on, PreConnect fails. Without it,
+Windows can measure the link and fit its H.264 to a slow one (a relay).
+
+--- a/client/common/cmdline.c	2026-11-10 03:23:35
++++ b/client/common/cmdline.c	2026-11-22 17:11:49
+@@ -6512,8 +6512,9 @@
+ 			return FALSE;
+ 	}
+ 
+-	if (freerdp_settings_get_bool(settings, FreeRDP_NetworkAutoDetect) ||
+-	    freerdp_settings_get_bool(settings, FreeRDP_SupportHeartbeatPdu) ||
++	/* Passthrough: network auto-detect runs on the main channel and needs no device redirection, which this
++	 * build doesn't compile in; only the heartbeat and multitransport still ask for it. */
++	if (freerdp_settings_get_bool(settings, FreeRDP_SupportHeartbeatPdu) ||
+ 	    freerdp_settings_get_bool(settings, FreeRDP_SupportMultitransport))
+ 	{
+ 		if (!freerdp_settings_set_bool(settings, FreeRDP_DeviceRedirection, TRUE))

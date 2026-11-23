@@ -30,8 +30,8 @@ public class FlyoutHeaderTests
     [Fact]
     public void PhonesButNoneInUse_CountsThem()
     {
-        Assert.Equal(new FlyoutHeader("No phone in use", "1 attached", null, false), For(Entry(IPad, PhoneState.RemoteOnlyLater, active: false)));
-        Assert.Equal("2 attached", For(Entry(IPad, PhoneState.RemoteOnlyLater, active: false), Entry(IPad, PhoneState.RemoteOnlyLater, active: false)).Subtitle);
+        Assert.Equal(new FlyoutHeader("No phone in use", "1 attached", null, false), For(Entry(IPad, PhoneState.NotPaired, active: false)));
+        Assert.Equal("2 attached", For(Entry(IPad, PhoneState.NotPaired, active: false), Entry(IPad, PhoneState.NotPaired, active: false)).Subtitle);
     }
 
     [Fact]

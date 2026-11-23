@@ -65,7 +65,7 @@ class ShellTerminalView(context: Context, readOnly: Boolean, private val transcr
     /** Output being fed is a replay: see the class comment. */
     var replaying = false
     /** The Mac this terminal shows, for "Copied from …" when a program there copies. */
-    var macName: () -> String = { "your Mac" }
+    var macName: () -> String = { "your computer" }
 
     var ctrlLatched = false
         private set

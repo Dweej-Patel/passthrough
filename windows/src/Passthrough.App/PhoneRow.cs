@@ -59,7 +59,8 @@ public sealed class PhoneRow : ObservableBase
     public Visibility MessageVisibility => Show(_model.ShowMessage);
     public Visibility PairVisibility => Show(_model.ShowPair);
     public Visibility RetryVisibility => Show(_model.ShowRetry);
-    public Visibility UseVisibility => Show(_model.ShowUse);
+    // Hidden until the PC goes online through a phone: choosing one does nothing else yet (GUIDE.md: "Not yet").
+    public Visibility UseVisibility => Visibility.Collapsed;
     public Visibility ForgetVisibility => Show(_model.ShowForget);
 
     public string Code
@@ -88,6 +89,12 @@ public sealed class PhoneRow : ObservableBase
     }
 
     public Visibility CodeProblemVisibility => Show(_codeProblem.Length > 0);
+
+    /// <summary>What Narrator says for each button, naming the phone ("Pair iPhone").</summary>
+    public string PairName => $"Pair {Title}";
+    public string RetryName => $"Try {Title} again";
+    public string UseName => $"Use {Title}";
+    public string CodeName => $"Six-digit code shown on {Title}";
 
     public void Update(PhoneEntry entry)
     {

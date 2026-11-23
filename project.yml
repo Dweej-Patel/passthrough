@@ -54,6 +54,10 @@ targets:
         product: IrohTransport
       - package: PassthroughCore
         product: ScreenClient
+      # Remote Desktop to a PC. App only: never link it into an extension. Carries the
+      # engine (Vendor/FreeRDP/FreeRDP.xcframework) only when the package found it there.
+      - package: PassthroughCore
+        product: RemoteDesktop
       - package: SwiftTerm
         product: SwiftTerm
       - target: PassthroughTunnel
@@ -242,6 +246,8 @@ targets:
       - package: PassthroughCore
         product: ScreenClient
       - package: PassthroughCore
+        product: ScreenEngine
+      - package: PassthroughCore
         product: IrohTransport
       - package: SwiftTerm
         product: SwiftTerm
@@ -251,6 +257,12 @@ targets:
         codeSign: true
         copy:
           destination: executables
+      # A PC's Remote Desktop engine, in a sandboxed process of its own (Contents/XPCServices). The app
+      # itself never links the engine: it depends on ScreenEngine (the interface), not RemoteDesktop.
+      - target: PassthroughScreenEngine
+        embed: true
+        link: false
+        codeSign: true
       # What a terminal window runs to show one of the app's sessions.
       - target: PassthroughTerm
         embed: true
@@ -387,6 +399,51 @@ targets:
         Release:
           CODE_SIGN_INJECT_BASE_ENTITLEMENTS: NO
 
+  # The engine helper for a PC's screen: an XPC service inside the Mac app, sandboxed with no
+  # entitlement but the sandbox itself (no network, no files, no keychain), one process per
+  # window. It runs FreeRDP on bytes the app hands it over a socket pair, and shares the
+  # picture back as an IOSurface. Without Vendor/FreeRDP/FreeRDP.xcframework it builds and
+  # refuses every session.
+  PassthroughScreenEngine:
+    type: xpc-service
+    platform: macOS
+    sources:
+      - path: macOS/ScreenEngine
+        excludes: ["Info.plist", "*.entitlements"]
+    dependencies:
+      - package: PassthroughCore
+        product: PassthroughCore
+      - package: PassthroughCore
+        product: ScreenClient
+      - package: PassthroughCore
+        product: ScreenEngine
+      - package: PassthroughCore
+        product: RemoteDesktop
+    info:
+      path: macOS/ScreenEngine/Info.plist
+      properties:
+        CFBundleDisplayName: Passthrough Screen Engine
+        LSMinimumSystemVersion: "14.5"
+        XPCService:
+          ServiceType: Application
+          RunLoopType: dispatch_main
+          # One process per connection: one window's PC can't reach another's session or login.
+          _MultipleInstances: true
+    entitlements:
+      path: macOS/ScreenEngine/ScreenEngine.entitlements
+      properties:
+        com.apple.security.app-sandbox: true
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: $(PASSTHROUGH_ID).mac.screen-engine
+        PRODUCT_NAME: PassthroughScreenEngine
+        ENABLE_HARDENED_RUNTIME: YES
+        ARCHS: arm64
+        EXCLUDED_ARCHS: x86_64
+      configs:
+        Release:
+          CODE_SIGN_INJECT_BASE_ENTITLEMENTS: NO
+
   # Runs inside a terminal window on the Mac and shows a session of the app's
   # in it, so paired phones see the same terminal (LocalTerminalClient). The
   # source is the package's, which builds and tests it too.
@@ -426,6 +483,10 @@ targets:
         PRODUCT_BUNDLE_IDENTIFIER: $(PASSTHROUGH_ID).microphone
         PRODUCT_NAME: PassthroughMicrophone
         WRAPPER_EXTENSION: driver
+        # The driver's own version (its CFBundleVersion): what the app compares with the installed driver's to decide
+        # whether to offer an update. Raise it when macOS/Microphone/PassthroughMicrophone.c changes
+        # (MicrophoneDriverVersionTests fails until it is).
+        PASSTHROUGH_MICROPHONE_VERSION: "1"
         INFOPLIST_FILE: macOS/Microphone/Info.plist
         GENERATE_INFOPLIST_FILE: NO
         ENABLE_HARDENED_RUNTIME: YES

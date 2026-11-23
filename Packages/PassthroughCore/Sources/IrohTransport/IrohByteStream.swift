@@ -77,6 +77,25 @@ public final class IrohByteStream: ByteStream, @unchecked Sendable {
     /// The peer's IP address when the selected path is direct, else nil.
     public var remoteIP: String? { IrohPaths.remoteIP(connection.paths()) }
 
+    /// The dialler's endpoint, for `pathReport` (nil on the accepting side).
+    var dialerEndpoint: Endpoint?
+
+    /// For the log: each path ("*" selected) with its RTT, then this side's direct
+    /// addresses and the endpoint's hole-punch counters when it's the dialler.
+    public var pathReport: String {
+        var parts = [IrohPaths.describe(connection.paths())]
+        if let endpoint = dialerEndpoint {
+            parts.append("mine: " + (endpoint.addr().directAddresses().sorted().joined(separator: " ").nonEmpty ?? "none"))
+            let counters = endpoint.stats().filter { key, value in
+                value.value > 0 && (key.contains("holepunch") || key.contains("nat") || key.contains("path") || key.contains("qad"))
+            }
+            if !counters.isEmpty {
+                parts.append(counters.keys.sorted().map { "\($0)=\(counters[$0]!.value)" }.joined(separator: " "))
+            }
+        }
+        return parts.joined(separator: "; ")
+    }
+
     public func receive(maximumLength: Int, completion: @escaping @Sendable (Data?, Bool, Error?) -> Void) {
         let queue = self.queue
         lock.lock()
@@ -189,6 +208,15 @@ enum IrohPaths {
         return .unknown
     }
 
+    /// "relay https://… 120 ms*, ip 1.2.3.4:5 40 ms" ("*": selected).
+    static func describe(_ paths: [PathSnapshot]) -> String {
+        guard !paths.isEmpty else { return "no paths" }
+        return paths.map { path in
+            let kind = path.isRelay ? "relay" : path.isIp ? "ip" : "other"
+            return "\(kind) \(path.remoteAddr) \(path.rttMs) ms\(path.isSelected ? "*" : "")"
+        }.joined(separator: ", ")
+    }
+
     static func remoteIP(_ paths: [PathSnapshot]) -> String? {
         guard let path = selected(paths), path.isIp, !path.isRelay else { return nil }
         return host(ofSocketAddress: path.remoteAddr)
@@ -213,4 +241,8 @@ enum IrohPaths {
         guard let colon = address.lastIndex(of: ":") else { return nil }
         return String(address[..<colon])
     }
+}
+
+private extension String {
+    var nonEmpty: String? { isEmpty ? nil : self }
 }

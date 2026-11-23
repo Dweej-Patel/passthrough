@@ -54,7 +54,7 @@ import kotlin.math.max
 import kotlin.math.min
 
 data class FlowMapState(
-    val macName: String = "Mac",
+    val macName: String = "Mac", // mac-only: the internet's path
     val phoneName: String = "Phone",
     /** A Mac is being served over USB. */
     val linkUp: Boolean = false,

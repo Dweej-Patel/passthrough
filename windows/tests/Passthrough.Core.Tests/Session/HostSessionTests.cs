@@ -1,5 +1,7 @@
 using System.Collections.Concurrent;
+using Passthrough.Core.Cable;
 using Passthrough.Core.Control;
+using Passthrough.Core.Shell.Access;
 using Passthrough.Core.Protocol;
 using Passthrough.Core.Session;
 using Passthrough.Core.Storage;
@@ -28,11 +30,15 @@ public class HostSessionTests
         public readonly ConcurrentQueue<string> Log = new();
         public readonly HostSession Session;
 
-        public Harness(ISettingsStore? settings = null, ISecretStore? secrets = null)
+        private readonly PeerVerdict _verdict;
+
+        public Harness(ISettingsStore? settings = null, ISecretStore? secrets = null, IAccessAdmin? access = null,
+            PeerVerdict verdict = PeerVerdict.Unknown)
         {
             Settings = settings ?? new MemorySettingsStore();
             Secrets = secrets ?? new MemorySecretStore();
-            Session = new HostSession(new DeviceDirectory([Usb, Adb]), Secrets, Settings, "TEST-PC", Factory, Time);
+            _verdict = verdict;
+            Session = new HostSession(new DeviceDirectory([Usb, Adb]), Secrets, Settings, "TEST-PC", Factory, Time, access);
             Session.StateChanged += History.Enqueue;
             Session.Error += Errors.Enqueue;
             Session.Log += Log.Enqueue;
@@ -40,7 +46,8 @@ public class HostSessionTests
 
         private ControlClient Factory(PhoneDevice device, ControlIdentity identity)
         {
-            var client = new ControlClient(ct => device.Connect(ProtocolConstants.ControlPort, ct), identity, device.Kind.Label(), Time);
+            var client = new ControlClient(ct => device.Connect(ProtocolConstants.ControlPort, ct), identity, device.Kind.Label(), Time,
+                _verdict == PeerVerdict.Unknown ? null : _ => _verdict);
             Clients.Enqueue((device, identity, client));
             return client;
         }
@@ -130,9 +137,8 @@ public class HostSessionTests
     private static PhoneDevice IPhone(FakePhone phone) =>
         new("usbmux:3", PhoneKind.IPhone, "00008110…", "token.iphone.00008110-AAAA", WatchTransport.UsbMux, Connect(phone));
 
-    private static PhoneDevice IPad() =>
-        new("usbmux:4", PhoneKind.IPad, "00008027…", "token.ipad.00008027-BBBB", WatchTransport.UsbMux,
-            (_, _) => throw new InvalidOperationException("an iPad is never connected"));
+    private static PhoneDevice IPad(FakePhone phone) =>
+        new("usbmux:4", PhoneKind.IPad, "00008027…", "token.ipad.00008027-BBBB", WatchTransport.UsbMux, Connect(phone));
 
     private static Func<int, CancellationToken, Task<Stream>> Connect(FakePhone phone) => (port, ct) =>
         port == ProtocolConstants.ControlPort ? phone.Open(ct) : throw new InvalidOperationException($"port {port}");
@@ -150,36 +156,51 @@ public class HostSessionTests
     }
 
     [Fact]
-    public async Task ActivePhone_PrefersRoutingPhone_KeepsCurrent()
+    public async Task EveryDeviceGetsAChannel_TheActiveMarkerPrefersARoutingPhoneAndStays()
     {
+        await using var iPadPhone = new FakePhone();
         await using var androidPhone = new FakePhone();
         await using var iPhonePhone = new FakePhone();
         await using var h = new Harness();
         await h.Session.StartAsync();
-        var iPad = IPad();
+        var iPad = IPad(iPadPhone);
         var android = Android(androidPhone);
         var iPhone = IPhone(iPhonePhone);
 
         h.Usb.Attach(iPad);
-        var s = await h.WaitState(s => Entry(s, iPad) is not null);
-        Assert.Equal(PhoneState.RemoteOnlyLater, Entry(s, iPad)!.State);
-        Assert.Equal("Pairs once Remote shell is available.", Entry(s, iPad)!.Message);
-        Assert.False(Entry(s, iPad)!.IsActive);
+        var s = await h.WaitState(s => Entry(s, iPad) is { State: PhoneState.NotPaired });
+        Assert.False(Entry(s, iPad)!.IsActive); // an iPad carries no internet: never the active one
 
         h.Adb.Attach(android);
         s = await h.WaitState(s => Entry(s, android) is { IsActive: true, State: PhoneState.NotPaired });
 
         h.Usb.Attach(iPhone);
-        s = await h.WaitState(s => Entry(s, iPhone) is not null);
+        s = await h.WaitState(s => Entry(s, iPhone) is { State: PhoneState.NotPaired });
         Assert.Equal([iPad, android, iPhone], s.Phones.Select(p => p.Device));
-        Assert.True(Entry(s, android)!.IsActive);
+        Assert.True(Entry(s, android)!.IsActive); // the marker stays where it was
         Assert.Equal(new PhoneEntry(iPhone, PhoneState.NotPaired, false, null, 0, 0, 0, null, false, Entry(s, iPhone)!.Attachment), Entry(s, iPhone));
-        Assert.Equal(PhoneState.RemoteOnlyLater, Entry(s, iPad)!.State);
-        Assert.Equal([android], h.Clients.Select(c => c.Device));
+        Assert.Equal([iPad, android, iPhone], h.Clients.Select(c => c.Device));
     }
 
     [Fact]
-    public async Task MakeActive_SwitchesChannel()
+    public async Task IPad_PairsLikeAPhone()
+    {
+        await using var iPadPhone = new FakePhone { IssuedToken = PhoneToken, DeviceName = "Dee's iPad" };
+        await using var h = new Harness();
+        await h.Session.StartAsync();
+        var iPad = IPad(iPadPhone);
+        h.Usb.Attach(iPad);
+        await h.WaitState(s => Entry(s, iPad) is { State: PhoneState.NotPaired });
+
+        Assert.True(await h.Submit(iPad, iPadPhone.Code));
+        var s = await h.WaitState(s => Entry(s, iPad) is { State: PhoneState.Paired, Status: not null });
+        Assert.Equal("Dee's iPad", Entry(s, iPad)!.Status!.DeviceName);
+        Assert.Equal(PhoneToken, h.Secrets.Get("token.ipad.00008027-BBBB"));
+        Assert.False(Entry(s, iPad)!.IsActive);
+    }
+
+    [Fact]
+    public async Task MakeActive_MovesTheMarker_BothKeepTheirChannels()
     {
         await using var androidPhone = new FakePhone();
         await using var iPhonePhone = new FakePhone();
@@ -189,15 +210,14 @@ public class HostSessionTests
         var iPhone = IPhone(iPhonePhone);
         h.Adb.Attach(android);
         h.Usb.Attach(iPhone);
-        await h.WaitState(s => Entry(s, android) is { IsActive: true, State: PhoneState.NotPaired } && Entry(s, iPhone) is not null);
+        await h.WaitState(s => Entry(s, android) is { IsActive: true, State: PhoneState.NotPaired } && Entry(s, iPhone) is { State: PhoneState.NotPaired });
 
         await h.Session.MakeActiveAsync(iPhone.Id);
 
-        Assert.True(h.Client(0).Client.Events.Completion.IsCompleted);
-        await androidPhone.WaitClosedAsync();
         var s = await h.WaitState(s => Entry(s, iPhone) is { IsActive: true, State: PhoneState.NotPaired });
+        Assert.False(h.Client(0).Client.Events.Completion.IsCompleted); // the Android phone's channel stays open
         Assert.Equal(new PhoneEntry(android, PhoneState.NotPaired, false, null, 0, 0, 0, null, false, Entry(s, android)!.Attachment), Entry(s, android));
-        Assert.Equal([android, iPhone], h.Clients.Select(c => c.Device));
+        Assert.Equal([android, iPhone], h.Clients.Select(c => c.Device)); // no channel was opened for the move
     }
 
     [Fact]
@@ -412,18 +432,19 @@ public class HostSessionTests
         var iPhone = IPhone(iPhonePhone);
         h.Adb.Attach(android);
         h.Usb.Attach(iPhone);
-        var s = await h.WaitState(s => Entry(s, android) is { IsActive: true, State: PhoneState.NotPaired } && Entry(s, iPhone) is not null);
-        var typedFor = Entry(s, android)!; // the user types into the Android row...
-        await h.Session.MakeActiveAsync(iPhone.Id); // ...as the iPhone becomes active
-        s = await h.WaitState(s => Entry(s, iPhone) is { IsActive: true, State: PhoneState.NotPaired });
+        var s = await h.WaitState(s => Entry(s, android) is { IsActive: true, State: PhoneState.NotPaired } && Entry(s, iPhone) is { State: PhoneState.NotPaired });
+        var androidRow = Entry(s, android)!;
 
-        Assert.False(await h.Session.SubmitCodeAsync(typedFor.Device.Id, typedFor.Attachment, iPhonePhone.Code));
-        Assert.False(await h.Session.SubmitCodeAsync(iPhone.Id, typedFor.Attachment, iPhonePhone.Code)); // another attachment's number
-
-        await h.Session.MakeActiveAsync(android.Id); // nothing went to either phone
-        await h.WaitState(s => Entry(s, android) is { IsActive: true, State: PhoneState.NotPaired });
+        // A row's attachment number names that row only: it never sends a code to another device.
+        Assert.False(await h.Session.SubmitCodeAsync(iPhone.Id, androidRow.Attachment, iPhonePhone.Code));
+        await h.WaitState(s => Entry(s, iPhone) is { State: PhoneState.NotPaired });
         Assert.DoesNotContain(iPhonePhone.Received, m => m.T == ControlEnvelope.Pair);
-        Assert.DoesNotContain(androidPhone.Received, m => m.T == ControlEnvelope.Pair);
+
+        // Any attached device takes its own code, active or not.
+        await h.Session.MakeActiveAsync(iPhone.Id);
+        Assert.True(await h.Session.SubmitCodeAsync(android.Id, androidRow.Attachment, androidPhone.Code));
+        await h.WaitState(s => Entry(s, android) is { State: PhoneState.Paired, IsActive: false });
+        Assert.DoesNotContain(iPhonePhone.Received, m => m.T == ControlEnvelope.Pair);
     }
 
     [Fact]
@@ -679,7 +700,8 @@ public class HostSessionTests
         await h.Session.ForgetAsync(android.Id);
 
         Assert.Null(h.Secrets.Get(AndroidSlot));
-        Assert.True(h.Client(0).Client.Events.Completion.IsCompleted);
+        // The channel closes as the access is taken away, which is asynchronous: wait for it rather than race it.
+        await h.Client(0).Client.Events.Completion.WaitAsync(TimeSpan.FromSeconds(10));
         // A fresh channel, with no token: the phone counts as unpaired and may pair again.
         var s = await h.WaitState(s => Entry(s, android) is { State: PhoneState.NotPaired } && h.Clients.Count == 2);
         Assert.Null(h.Client(1).Identity.Token);
@@ -877,7 +899,7 @@ public class HostSessionTests
     }
 
     [Fact]
-    public async Task Retry_PhoneNotActive_MakesItActive()
+    public async Task Retry_PhoneNotActive_ReopensOnlyItsChannel()
     {
         await using var androidPhone = new FakePhone();
         await using var iPhonePhone = new FakePhone();
@@ -891,8 +913,9 @@ public class HostSessionTests
 
         await h.Session.RetryAsync(iPhone.Id);
 
-        await h.WaitState(s => Entry(s, iPhone) is { IsActive: true, State: PhoneState.NotPaired } && Entry(s, android) is { IsActive: false });
-        Assert.Equal([android, iPhone], h.Clients.Select(c => c.Device));
+        await h.WaitState(s => Entry(s, iPhone) is { IsActive: false, State: PhoneState.NotPaired } && Entry(s, android) is { IsActive: true });
+        Assert.Equal([android, iPhone, iPhone], h.Clients.Select(c => c.Device)); // a fresh channel for the iPhone alone
+        Assert.False(h.Client(0).Client.Events.Completion.IsCompleted);
     }
 
     [Fact]
@@ -999,8 +1022,9 @@ public class HostSessionTests
             h.Adb.Attach(android);
             h.Usb.Attach(iPhone);
 
-            var s = await h.WaitState(s => Entry(s, android) is { IsActive: true, State: PhoneState.NotPaired } && Entry(s, iPhone) is not null);
-            Assert.Equal(PhoneState.NotPaired, Entry(s, iPhone)!.State);
+            var s = await h.WaitState(s => Entry(s, android) is { IsActive: true, State: PhoneState.NotPaired } && Entry(s, iPhone) is { State: PhoneState.Failed });
+            // Its own channel could not read its slot: that row fails (with Try again), the Android phone is unaffected.
+            Assert.Equal("Couldn't read this PC's saved pairings or settings. Try again.", Entry(s, iPhone)!.Message);
             Assert.NotEmpty(h.Errors);
 
             // Later calls still run and complete.
@@ -1015,7 +1039,7 @@ public class HostSessionTests
     }
 
     [Fact]
-    public async Task PairedPhone_ItsNameIsSaved_AndNamesItOnceItIsNoLongerActive()
+    public async Task PairedPhone_ItsNameIsSaved_AndItKeepsItsStatusWhenNoLongerActive()
     {
         await using var androidPhone = new FakePhone { IssuedToken = PhoneToken, DeviceName = "Dee's Pixel" };
         await using var iPhonePhone = new FakePhone();
@@ -1034,7 +1058,8 @@ public class HostSessionTests
         await h.WaitState(s => Entry(s, iPhone) is not null);
         await h.Session.MakeActiveAsync(iPhone.Id);
         var s = await h.WaitState(s => Entry(s, android) is { IsActive: false });
-        Assert.Equal((PhoneState.Paired, (DeviceStatus?)null, "Dee's Pixel"), (Entry(s, android)!.State, Entry(s, android)!.Status, Entry(s, android)!.SavedName));
+        Assert.Equal((PhoneState.Paired, "Dee's Pixel"), (Entry(s, android)!.State, Entry(s, android)!.SavedName));
+        Assert.Equal("Dee's Pixel", Entry(s, android)!.Status!.DeviceName); // its channel stays: its status stays live
     }
 
     [Fact]
@@ -1087,5 +1112,154 @@ public class HostSessionTests
         Assert.Null(h.Secrets.Get(plus.PairingSlot));
         Assert.Equal(otherToken, h.Secrets.Get(plain.PairingSlot));
         await h.WaitState(s => Entry(s, plus) is { HasPairing: false } && Entry(s, plain) is { State: PhoneState.Paired, HasPairing: true });
+    }
+
+    /// <summary>Shell access held in memory, as a test sees it: what grants carry, the keys confirmed, the slots revoked.</summary>
+    private sealed class FakeAccessAdmin : IAccessAdmin
+    {
+        public volatile GrantContents? Contents = new() { CertSHA256 = GrantContents.NoListenerPin, HostName = "TEST-PC", IrohId = new string('a', 64) };
+        public readonly ConcurrentQueue<(string PhoneId, string Label, string Slot, byte[] Key)> Added = new();
+        public readonly ConcurrentQueue<string> Revoked = new();
+        public volatile bool AddFails;
+
+        public Task<GrantContents?> GrantContentsAsync() => Task.FromResult(Contents);
+
+        public Task<bool> AddKeyAsync(string phoneId, string label, string pairingSlot, ReadOnlyMemory<byte> key)
+        {
+            if (AddFails) return Task.FromResult(false);
+            Added.Enqueue((phoneId, label, pairingSlot, key.ToArray()));
+            return Task.FromResult(true);
+        }
+
+        public Task RevokeSlotAsync(string pairingSlot)
+        {
+            Revoked.Enqueue(pairingSlot);
+            return Task.CompletedTask;
+        }
+
+        public event Action? Changed;
+
+        public void Change(GrantContents? contents)
+        {
+            Contents = contents;
+            Changed?.Invoke();
+        }
+    }
+
+    private static int Grants(FakePhone phone) => phone.Received.Count(m => m.T == ControlEnvelope.ShellGrant);
+
+    [Fact]
+    public async Task Grant_GoesToAPairedGenuinePhone_AndItsKeyIsKeptOnceConfirmed()
+    {
+        await using var phone = new FakePhone { Token = PhoneToken, DeviceName = "Dee's Pixel" };
+        var access = new FakeAccessAdmin();
+        var secrets = new MemorySecretStore();
+        secrets.Set(AndroidSlot, PhoneToken);
+        await using var h = new Harness(secrets: secrets, access: access, verdict: PeerVerdict.Genuine);
+        await h.Session.StartAsync();
+        h.Adb.Attach(Android(phone));
+
+        await WaitFor(() => !access.Added.IsEmpty);
+        var (phoneId, _, slot, key) = access.Added.Single();
+        Assert.Equal(("p-7c1e9a40", AndroidSlot), (phoneId, slot));
+        var grant = phone.Received.Single(m => m.T == ControlEnvelope.ShellGrant);
+        Assert.Equal(Convert.ToBase64String(key), grant.ShellKey);
+        Assert.Equal("windows", grant.HostKind);
+
+        await h.Settle();
+        Assert.Equal(1, Grants(phone)); // the same contents are not granted again on this channel
+    }
+
+    [Theory]
+    [InlineData(PeerVerdict.Unknown)]
+    [InlineData(PeerVerdict.NotGenuine)]
+    public async Task Grant_NeverGoesWithoutAGenuinePeer(PeerVerdict verdict)
+    {
+        await using var phone = new FakePhone { Token = PhoneToken };
+        var access = new FakeAccessAdmin();
+        var secrets = new MemorySecretStore();
+        secrets.Set(AndroidSlot, PhoneToken);
+        await using var h = new Harness(secrets: secrets, access: access, verdict: verdict);
+        await h.Session.StartAsync();
+        var android = Android(phone);
+        h.Adb.Attach(android);
+        await h.WaitState(s => Entry(s, android) is { State: PhoneState.Paired, Status: not null });
+        await h.Settle();
+        Assert.Equal(0, Grants(phone));
+        Assert.Empty(access.Added);
+    }
+
+    [Fact]
+    public async Task Grant_NoneWhileRemoteAccessHasNothing_ThenOnceItChanges()
+    {
+        await using var phone = new FakePhone { Token = PhoneToken };
+        var access = new FakeAccessAdmin { Contents = null };
+        var secrets = new MemorySecretStore();
+        secrets.Set(AndroidSlot, PhoneToken);
+        await using var h = new Harness(secrets: secrets, access: access, verdict: PeerVerdict.Genuine);
+        await h.Session.StartAsync();
+        var android = Android(phone);
+        h.Adb.Attach(android);
+        await h.WaitState(s => Entry(s, android) is { State: PhoneState.Paired, Status: not null });
+        await h.Settle();
+        Assert.Equal(0, Grants(phone));
+
+        access.Change(new GrantContents { CertSHA256 = GrantContents.NoListenerPin, HostName = "TEST-PC" });
+        await WaitFor(() => !access.Added.IsEmpty);
+        Assert.Equal(1, Grants(phone));
+    }
+
+    [Fact]
+    public async Task Grant_UnansweredIsTriedAgainAfterTheWait()
+    {
+        await using var phone = new FakePhone { Token = PhoneToken, GrantAnswer = FakePhone.GrantAnswerMode.None };
+        var access = new FakeAccessAdmin();
+        var secrets = new MemorySecretStore();
+        secrets.Set(AndroidSlot, PhoneToken);
+        await using var h = new Harness(secrets: secrets, access: access, verdict: PeerVerdict.Genuine);
+        await h.Session.StartAsync();
+        h.Adb.Attach(Android(phone));
+        await WaitFor(() => Grants(phone) == 1);
+
+        await WaitFor(() => h.Time.DueIn().Contains(ShellGrantLedger.AnswerTimeout));
+        h.Time.Advance(ShellGrantLedger.AnswerTimeout);
+        var retry = ShellGrantLedger.RetryDelays[0] + TimeSpan.FromMilliseconds(500);
+        await WaitFor(() => h.Time.DueIn().Contains(retry));
+        Assert.Contains(h.Log, l => l.Contains("did not confirm its shell key"));
+        h.Time.Advance(retry);
+        await WaitFor(() => Grants(phone) == 2);
+        Assert.Empty(access.Added);
+    }
+
+    [Fact]
+    public async Task Forget_RevokesTheSlotsShellAccess()
+    {
+        await using var phone = new FakePhone { Token = PhoneToken };
+        var access = new FakeAccessAdmin();
+        var secrets = new MemorySecretStore();
+        secrets.Set(AndroidSlot, PhoneToken);
+        await using var h = new Harness(secrets: secrets, access: access, verdict: PeerVerdict.Genuine);
+        await h.Session.StartAsync();
+        h.Adb.Attach(Android(phone));
+        await WaitFor(() => !access.Added.IsEmpty);
+
+        await h.Session.ForgetSlotAsync(AndroidSlot);
+        Assert.Equal([AndroidSlot], access.Revoked);
+        Assert.Null(secrets.Get(AndroidSlot));
+    }
+
+    [Fact]
+    public async Task Grant_AKeyThatCannotBeKept_SaysSo()
+    {
+        await using var phone = new FakePhone { Token = PhoneToken };
+        var access = new FakeAccessAdmin { AddFails = true };
+        var secrets = new MemorySecretStore();
+        secrets.Set(AndroidSlot, PhoneToken);
+        await using var h = new Harness(secrets: secrets, access: access, verdict: PeerVerdict.Genuine);
+        await h.Session.StartAsync();
+        var android = Android(phone);
+        h.Adb.Attach(android);
+        var s = await h.WaitState(s => Entry(s, android) is { Message: not null } e && e.Message.Contains("Couldn't save shell access"));
+        Assert.Equal("Couldn't save shell access for this Android phone. Plug it in again to retry.", Entry(s, android)!.Message);
     }
 }

@@ -8,6 +8,14 @@ Third-party components distributed with this repository keep their own licences:
   linked into the Mac's root helper, and HevSocks5Tunnel.xcframework (iOS device
   and simulator), linked into the iOS tunnel extension, which uses it on iPad for
   Internet through iPhone. See Vendor/HevSocks5Tunnel/LICENSES.md.
+* Vendor/FreeRDP — FreeRDP 3.33.1 and its WinPR (Apache-2.0), OpenSSL 3.5.9 (Apache-2.0).
+  Built by scripts/build-freerdp.sh from checksum-pinned release archives (versions and
+  SHA-256 recorded in Vendor/FreeRDP/SOURCES.lock), with Vendor/FreeRDP/patches applied,
+  into FreeRDP.xcframework (iOS device, simulator and Apple Silicon macOS), one static
+  library per slice with Passthrough's shim. Only when present, it is linked into the
+  iPhone and iPad app and into the Mac app's sandboxed Remote Desktop helper
+  (PassthroughScreenEngine.xpc, inside Passthrough.app), never into the Mac app itself or
+  an extension, to show a PC's screen through Remote Desktop. See Vendor/FreeRDP/LICENSES.md.
 * Vendor/VPNEngines/bin/wireguard-go — MIT. See Vendor/VPNEngines/licenses/WIREGUARD-GO-LICENSE.
 * Vendor/VPNEngines/bin/openvpn — GPL-2.0 with the OpenSSL linking exception.
   See Vendor/VPNEngines/licenses/OPENVPN-COPYING. Source is fetched and rebuilt by
@@ -24,6 +32,18 @@ Third-party components distributed with this repository keep their own licences:
   libiroh_ffi.so for arm64-v8a and armeabi-v7a (plus x86_64 in debug builds), and brings JNA 5.15.0
   (https://github.com/java-native-access/jna) — LGPL-2.1 OR Apache-2.0, used here under
   Apache-2.0 (android/licenses/APACHE-2.0.txt).
+* Microsoft.Windows.Console.ConPTY (https://github.com/microsoft/terminal), 1.25.261109001 — MIT.
+  Fetched from nuget.org (pinned in windows/src/Passthrough.Windows/packages.lock.json); its
+  conpty.dll and x64\OpenConsole.exe, signed by Microsoft, ship beside the Windows app.
+* iroh (https://github.com/n0-computer/iroh), 1.0.2 — MIT OR Apache-2.0 (used here under MIT), with
+  its Rust dependencies (MIT and/or Apache-2.0 licensed crates; versions pinned in
+  windows/native/iroh-bridge/Cargo.lock). Built from source into passthrough_iroh.dll by
+  windows/native/build-iroh-bridge.ps1 (and CI), which ships beside the Windows app.
+* Microsoft.WindowsAppSDK (https://github.com/microsoft/windowsappsdk), 1.8.251106002 — Microsoft Software License Terms for the Windows App SDK (a redistributable runtime, not open source; the terms are in the package's license.txt, with its NOTICE.txt). Fetched from nuget.org (pinned in windows/src/Passthrough.App/packages.lock.json); its runtime DLLs and resources ship beside the Windows app (WinUI 3, unpackaged).
+* H.NotifyIcon.WinUI (https://github.com/HavenDV/H.NotifyIcon), 2.2.0 — MIT. The Windows tray icon.
+* System.Security.Cryptography.ProtectedData (https://dot.net), 10.0.0 — MIT. DPAPI for the Windows app's and service's stores.
+* .NET 10 runtime (https://github.com/dotnet/runtime) — MIT, with its own third-party notices (THIRD-PARTY-NOTICES.TXT in the runtime). Included in the self-contained Windows build that scripts/build-windows.ps1 makes.
+
 * android/app/src/main/res/font/nunito.ttf — Nunito, SIL Open Font License 1.1.
   See android/licenses/NUNITO-OFL.txt.
 * Termux terminal-view and terminal-emulator (https://github.com/termux/termux-app),

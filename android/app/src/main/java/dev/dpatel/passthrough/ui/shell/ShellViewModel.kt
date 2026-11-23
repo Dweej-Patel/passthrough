@@ -5,6 +5,11 @@ import android.os.SystemClock
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import dev.dpatel.passthrough.BuildConfig
+import dev.dpatel.passthrough.core.HostFarewell
+import dev.dpatel.passthrough.core.HostInfo
+import dev.dpatel.passthrough.core.HostKind
+import dev.dpatel.passthrough.core.HostShell
+import dev.dpatel.passthrough.core.Hosts
 import dev.dpatel.passthrough.core.IrohInfo
 import dev.dpatel.passthrough.core.IrohShellDialer
 import dev.dpatel.passthrough.core.MacControl
@@ -13,6 +18,7 @@ import dev.dpatel.passthrough.core.MacStates
 import dev.dpatel.passthrough.core.MacTimeline
 import dev.dpatel.passthrough.core.PairedClient
 import dev.dpatel.passthrough.core.PtLog
+import dev.dpatel.passthrough.core.RelayCheck
 import dev.dpatel.passthrough.core.ShellClient
 import dev.dpatel.passthrough.core.ShellConnectError
 import dev.dpatel.passthrough.core.ShellConnectMode
@@ -27,6 +33,7 @@ import dev.dpatel.passthrough.core.ShellPath
 import dev.dpatel.passthrough.core.ShellReplay
 import dev.dpatel.passthrough.core.ShellReplayChunk
 import dev.dpatel.passthrough.core.ShellSessionInfo
+import dev.dpatel.passthrough.core.TlsRelayCheck
 import dev.dpatel.passthrough.core.ptLog
 import dev.dpatel.passthrough.service.Runtime
 import dev.dpatel.passthrough.service.ShellDiscovery
@@ -150,6 +157,12 @@ class ShellViewModel(app: Application) : AndroidViewModel(app) {
     val redialing: StateFlow<Boolean> = _redialing.asStateFlow()
     /** "Connect using": this device's choice. */
     val connectMode: StateFlow<ShellConnectMode> = Runtime.settings.shellConnectMode
+    /** The last `host` each computer sent (live connection or watch), by ID; kept across launches. */
+    private val _hostFacts = MutableStateFlow(Runtime.settings.shellHostFacts())
+    /** Why each computer last said it was leaving, until it answers again. */
+    private val _farewells = MutableStateFlow(Runtime.settings.shellFarewells())
+    /** The shell last chosen on each computer ([HostShell.id]). */
+    private val _lastShell = MutableStateFlow(Runtime.settings.shellLastShell())
 
     /** The other paired Macs' sessions and state, while the app is in the foreground and unlocked. */
     private val watcher = MacWatcher(
@@ -159,6 +172,8 @@ class ShellViewModel(app: Application) : AndroidViewModel(app) {
         recency = { MacProfiles.recency(Runtime.settings.shellLastHeard(), Runtime.settings.shellLastSelectedAt()) },
         storedLastHeard = { Runtime.settings.shellLastHeard()[it] },
         noteHeard = ::noteHeard,
+        noteHost = { id, info -> noteHost(id, info) },
+        noteGoingAway = { id, reason -> noteFarewell(id, reason) },
     )
     /** What each watched Mac (never the selected one) last said, by Mac ID. */
     val watchedMacs: StateFlow<Map<String, MacWatcher.Seen>> = watcher.seen
@@ -212,6 +227,8 @@ class ShellViewModel(app: Application) : AndroidViewModel(app) {
      * once the Mac can't be reached, or for another Mac or a tab chosen meanwhile.
      */
     private var openWhenReady = false
+    /** The shell that new session is to run ([openWhenReady]); null for the host's default. */
+    private var openShell: String? = null
     /**
      * The active session wasn't (re-)attached because a new one was opening (on Ready, or a
      * terminal rebuilt meanwhile): re-attach it if that open is refused.
@@ -231,6 +248,81 @@ class ShellViewModel(app: Application) : AndroidViewModel(app) {
     private val _demoPaired = MutableStateFlow<List<PairedClient>>(emptyList())
     /** Debug demo only: the demo Macs standing in for paired ones in the switcher (empty in normal use). */
     val demoPaired: StateFlow<List<PairedClient>> = _demoPaired.asStateFlow()
+
+    // What each computer says it is (a PC or a Mac), and why it can't be used right now.
+
+    /** The selected computer's `host`: live once it sends one, else the last stored; null from a computer that never sent one. */
+    val hostFacts: StateFlow<HostInfo?> = combine(_hostFacts, _selectedMacID) { facts, id -> id?.let(facts::get) }
+        .stateIn(viewModelScope, SharingStarted.Eagerly, null)
+    /** The selected computer's last going-away, shown while it can't be reached. */
+    val farewell: StateFlow<HostFarewell?> = combine(_farewells, _selectedMacID) { farewells, id -> id?.let(farewells::get) }
+        .stateIn(viewModelScope, SharingStarted.Eagerly, null)
+    /** What kind of computer the selected one is (null: a kind this build doesn't know). See [Hosts.kind]. */
+    val selectedKind: StateFlow<HostKind?> = combine(_hostFacts, _selectedMacID, Runtime.pairedClients, _demoPaired) { facts, id, paired, demo ->
+        // No selection: a Mac (today's default). A kind this build doesn't know stays null: neutral words, only shells.
+        if (id == null) HostKind.MAC else Hosts.kind(facts[id], storedKind(id, paired + demo))
+    }.stateIn(viewModelScope, SharingStarted.Eagerly, HostKind.MAC)
+    /** The shell the selected computer's New shell opens, when it offers a choice; null otherwise. */
+    val preferredShell: StateFlow<HostShell?> = combine(hostFacts, _lastShell, _selectedMacID) { host, last, id ->
+        if (Hosts.offersChoice(host)) Hosts.preferredShell(host, id?.let(last::get)) else null
+    }.stateIn(viewModelScope, SharingStarted.Eagerly, null)
+    /** The selected computer refused this phone's key (`not_authorized`): its access was taken away. */
+    private val _accessRefused = MutableStateFlow(false)
+    /** When [reach] last became connecting (Unix millis); null while it isn't. */
+    private val _connectingSince = MutableStateFlow<Long?>(null)
+    /** Whether the selected computer's relay answered, after a connect from anywhere failed. */
+    private val _relayHealth = MutableStateFlow(RelayHealth.UNKNOWN)
+    /** The last `open` was refused because no shell can start there (`signed_out`, `not_allowed`); cleared by a `host` that says otherwise. */
+    private val _shellRefusal = MutableStateFlow<ShellError?>(null)
+    private val relayCheck: RelayCheck = TlsRelayCheck()
+    private var relayJob: Job? = null
+
+    init {
+        // How long this connect has run, for Try again beside it. (Here, after the fields it sets.)
+        viewModelScope.launch {
+            _reach.collect {
+                if (it != ShellReach.CONNECTING) _connectingSince.value = null
+                else if (_connectingSince.value == null) _connectingSince.value = System.currentTimeMillis()
+            }
+        }
+    }
+
+    /** What the page for the selected computer is built from ([HostPage.make]), but the time. */
+    val pageInput: StateFlow<HostPageInput> = combine(
+        combine(_reach, _redialing, _accessRefused, hostFacts, farewell) { reach, redialing, refused, host, farewell ->
+            HostPageInput(HostKind.MAC, reach, redialing, refused, host, farewell)
+        },
+        combine(selectedKind, _connectingSince, _triedFromAnywhere, _relayHealth, _shellRefusal) { kind, since, tried, relay, refusal ->
+            HostPageInput(kind, ShellReach.NO_ACCESS, connectingSinceMillis = since, triedFromAnywhere = tried, relay = relay, shellRefusal = refusal)
+        },
+    ) { a, b ->
+        a.copy(kind = b.kind, connectingSinceMillis = b.connectingSinceMillis, triedFromAnywhere = b.triedFromAnywhere,
+            relay = b.relay, shellRefusal = b.shellRefusal, viewerScreens = ScreenBackends.supported(b.kind))
+    }.stateIn(viewModelScope, SharingStarted.Eagerly, HostPageInput(HostKind.MAC, ShellReach.NO_ACCESS))
+
+    /** What kind of computer [macID] is, for words and rows ([Hosts.kind]). */
+    fun kind(macID: String): HostKind? = Hosts.kind(_hostFacts.value[macID], storedKind(macID, Runtime.pairedClients.value + _demoPaired.value))
+
+    private fun storedKind(macID: String, paired: List<PairedClient>): String? =
+        paired.firstOrNull { it.id == macID }?.let { it.hostKind ?: it.shell?.hostKind }
+            ?: _macs.value.firstOrNull { it.macID == macID }?.hostKind
+
+    /** What [macID] last said about itself, from the live connection or a watch. */
+    fun factsOf(macID: String): HostInfo? = _hostFacts.value[macID]
+
+    /** Remembers [shellID] as the one the selected computer's New shell opens (the menu's choice). */
+    fun chooseShell(shellID: String) {
+        val mac = _selectedMacID.value ?: return
+        val host = _hostFacts.value[mac] ?: return
+        if (host.shells.orEmpty().none { it.id == shellID }) return
+        rememberShell(mac, shellID)
+    }
+
+    private fun rememberShell(macID: String, shellID: String) {
+        if (_lastShell.value[macID] == shellID) return
+        _lastShell.value += macID to shellID
+        if (demo == null) Runtime.settings.setShellLastShell(_lastShell.value)
+    }
 
     private class PendingTranscript(val id: String, val result: CompletableDeferred<List<ShellReplayChunk>?>) {
         val replay = ShellReplay.Collector()
@@ -265,7 +357,10 @@ class ShellViewModel(app: Application) : AndroidViewModel(app) {
         if (!BuildConfig.DEBUG) return
         demo = state
         _demoPaired.value = if (ShellDemo.reach(state) == ShellReach.NO_ACCESS) emptyList()
-        else ShellDemo.macs.map { PairedClient(it.macID, it.macName, "", 0) }
+        else ShellDemo.macs.map { PairedClient(it.macID, it.macName, "", 0, hostKind = it.hostKind) }
+        // Shown, never stored (noteHost and noteFarewell keep nothing in the demo).
+        _hostFacts.value = mapOf(ShellDemo.PC to ShellDemo.pcHost(state))
+        _farewells.value = ShellDemo.pcFarewell(state)?.let { mapOf(ShellDemo.PC to HostFarewell(it, System.currentTimeMillis() - 20 * 60_000)) }.orEmpty()
         refresh()
     }
 
@@ -454,14 +549,15 @@ class ShellViewModel(app: Application) : AndroidViewModel(app) {
     fun status(macID: String): MacStatus {
         if (macID != _selectedMacID.value) return otherStatus(macID, _macs.value, watcher.seen.value)
         return MacProfiles.status(_visibleSessions.value, reachable = _reach.value == ShellReach.READY,
-            lastHeardMillis = Runtime.settings.shellLastHeard()[macID], hasShell = _macs.value.any { it.macID == macID })
+            lastHeardMillis = Runtime.settings.shellLastHeard()[macID], hasShell = _macs.value.any { it.macID == macID },
+            host = _hostFacts.value[macID])
     }
 
     private fun otherStatus(macID: String, macs: List<ShellCredential>, seen: Map<String, MacWatcher.Seen>): MacStatus {
         val watched = seen[macID]
         return MacProfiles.status(watched?.sessions, reachable = watched?.reachable ?: false,
             lastHeardMillis = watched?.lastHeardMillis ?: Runtime.settings.shellLastHeard()[macID],
-            hasShell = macs.any { it.macID == macID })
+            hasShell = macs.any { it.macID == macID }, host = _hostFacts.value[macID])
     }
 
     /**
@@ -511,6 +607,10 @@ class ShellViewModel(app: Application) : AndroidViewModel(app) {
         val gen = ++generation
         clientMacID = credential.macID
         _lastError.value = null
+        // Said again by this connection if still so.
+        _accessRefused.value = false
+        _shellRefusal.value = null
+        _relayHealth.value = RelayHealth.UNKNOWN
         _reach.value = ShellReach.CONNECTING
         val discovered = ShellCredentials.discovered(discovery.services.value, credential.macName, _macs.value.size)?.endpoint
         dialedDiscovered = discovered
@@ -537,6 +637,8 @@ class ShellViewModel(app: Application) : AndroidViewModel(app) {
                 if (gen == generation) {
                     stopRedialing()
                     _lastError.value = e.reason
+                    // Refused while this phone held a key: the computer took the access away.
+                    if (e.reason == ShellError.NOT_AUTHORIZED) _accessRefused.value = true
                     _reach.value = if (e.reason == ShellError.NOT_AUTHORIZED) ShellReach.NO_ACCESS else ShellReach.UNREACHABLE
                 }
                 return@launch
@@ -557,9 +659,18 @@ class ShellViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    fun newSession(cols: Int, rows: Int) {
+    /**
+     * Opens a new session on the selected computer. [shell]: which of its shells, by default the
+     * one its New shell offers ([preferredShell]); sent only if the computer lists it and offers
+     * a choice, so a computer with one shell (or none listed) gets the same `open` as always.
+     */
+    fun newSession(cols: Int, rows: Int, shell: String? = preferredShell.value?.id) {
         size = cols to rows
         _lastError.value = null
+        val mac = _selectedMacID.value
+        val host = mac?.let { _hostFacts.value[it] }
+        val named = shell?.takeIf { id -> Hosts.offersChoice(host) && host?.shells.orEmpty().any { it.id == id } }
+        if (mac != null && named != null) rememberShell(mac, named)
         if (demo != null) {
             val mac = _selectedMacID.value ?: return
             val prefix = ShellDemo.newPrefix(mac)
@@ -572,10 +683,13 @@ class ShellViewModel(app: Application) : AndroidViewModel(app) {
         }
         val conn = connection
         if (conn == null || _reach.value != ShellReach.READY) {
-            if (_reach.value == ShellReach.CONNECTING) openWhenReady = true
+            if (_reach.value == ShellReach.CONNECTING) {
+                openWhenReady = true
+                openShell = named
+            }
             return
         }
-        conn.open(cols, rows)
+        conn.open(cols, rows, named)
     }
 
     /**
@@ -733,7 +847,9 @@ class ShellViewModel(app: Application) : AndroidViewModel(app) {
         when (event) {
             is ShellEvent.Ready -> {
                 stopRedialing()
-                if (demo == null) clientMacID?.let { noteHeard(it, System.currentTimeMillis()) }
+                if (demo == null) clientMacID?.let { noteHeard(it, System.currentTimeMillis()); noteFarewell(it, null) }
+                _accessRefused.value = false
+                _relayHealth.value = RelayHealth.UNKNOWN
                 _reach.value = ShellReach.READY
                 _path.value = event.path
                 connection?.let { conn -> controls.readied(SystemClock.elapsedRealtime()).forEach { send(conn, it) } }
@@ -746,7 +862,8 @@ class ShellViewModel(app: Application) : AndroidViewModel(app) {
                     // until the Mac answers.
                     openWhenReady = false
                     reattachIfRefused = active != null
-                    connection?.open(size.first, size.second)
+                    connection?.open(size.first, size.second, openShell)
+                    openShell = null
                 } else if (active != null) {
                     reattachIfRefused = false
                     listeners.toList().forEach { it.streamStarting(active, true) }
@@ -754,6 +871,14 @@ class ShellViewModel(app: Application) : AndroidViewModel(app) {
                 }
             }
             is ShellEvent.MacInfo -> apply(event)
+            is ShellEvent.Host -> clientMacID?.let { id ->
+                noteHost(id, event.info)
+                // A host that says shells can start again outdates a refusal.
+                val refusal = _shellRefusal.value
+                if (refusal == ShellError.SIGNED_OUT && event.info.signedIn != false && event.info.app != false) _shellRefusal.value = null
+                if (refusal == ShellError.NOT_ALLOWED && event.info.access?.shell != false) _shellRefusal.value = null
+            }
+            is ShellEvent.GoingAway -> clientMacID?.let { noteFarewell(it, event.reason) }
             is ShellEvent.MacStateChanged -> {
                 _macState.value = event.state
                 controls.stateArrived(event.state)
@@ -786,6 +911,7 @@ class ShellViewModel(app: Application) : AndroidViewModel(app) {
                 shownActive = event.session
                 _detachedSession.value = null
                 _lastError.value = null
+                _shellRefusal.value = null
                 connection?.list()
             }
             is ShellEvent.OpenedDetached -> {
@@ -823,6 +949,12 @@ class ShellViewModel(app: Application) : AndroidViewModel(app) {
                     reattachIfRefused = false
                     _activeSession.value?.let { attach(it, size.first, size.second) }
                 }
+                // An `open` refused because no shell can start there (nobody signed in, Shell off for
+                // this phone): the page says why in place of New shell.
+                if (event.ref != null && (event.error == ShellError.SIGNED_OUT || event.error == ShellError.NOT_ALLOWED)) {
+                    _shellRefusal.value = event.error
+                    return
+                }
                 if (event.error == ShellError.NOT_ALLOWED || event.error == ShellError.VPN_NOT_SET_UP) {
                     controls.refused(event.error)
                     publishControls()
@@ -834,9 +966,13 @@ class ShellViewModel(app: Application) : AndroidViewModel(app) {
                     return
                 }
                 _lastError.value = event.error
-                if (event.error == ShellError.NOT_AUTHORIZED) _reach.value = ShellReach.NO_ACCESS
+                if (event.error == ShellError.NOT_AUTHORIZED) {
+                    _accessRefused.value = true
+                    _reach.value = ShellReach.NO_ACCESS
+                }
                 // Only a failure naming the requested session ends that request.
-                if ((event.error == ShellError.NO_SUCH_SESSION || event.error == ShellError.BAD_REQUEST) &&
+                // SIGNED_OUT: a PC whose shells can't run answers `transcript` with it (older apps read it as BAD_REQUEST).
+                if ((event.error == ShellError.NO_SUCH_SESSION || event.error == ShellError.BAD_REQUEST || event.error == ShellError.SIGNED_OUT) &&
                     event.session != null && event.session == pendingTranscript?.id) finishTranscript(null)
             }
             is ShellEvent.Disconnected -> {
@@ -869,6 +1005,7 @@ class ShellViewModel(app: Application) : AndroidViewModel(app) {
         if (made == null || made >= REDIAL_DELAYS_MS.size || !foreground) {
             stopRedialing()
             _reach.value = ShellReach.UNREACHABLE
+            checkRelay()
             return
         }
         redialsMade = made + 1
@@ -888,6 +1025,45 @@ class ShellViewModel(app: Application) : AndroidViewModel(app) {
         redialJob = null
         redialsMade = null
         _redialing.value = false
+    }
+
+    /**
+     * After a connect from anywhere failed: whether the computer's own relay answers, once, so
+     * the page can say the relay is the trouble. Skipped for the default relays (the computer
+     * names none), and dropped by the next connect.
+     */
+    private fun checkRelay() {
+        relayJob?.cancel()
+        relayJob = null
+        val relay = current()?.irohRelay ?: return
+        if (!_triedFromAnywhere.value || demo != null) return
+        val gen = generation
+        relayJob = viewModelScope.launch {
+            val answers = relayCheck.answers(relay)
+            if (gen == generation && _reach.value == ShellReach.UNREACHABLE) _relayHealth.value = if (answers) RelayHealth.ANSWERING else RelayHealth.SILENT
+        }
+    }
+
+    /** Keeps what [macID] said about itself (live or watched), and the kind it named with its pairing. */
+    private fun noteHost(macID: String, info: HostInfo) {
+        if (demo != null) return
+        if (_hostFacts.value[macID] != info) {
+            _hostFacts.value += macID to info
+            Runtime.settings.setShellHostFacts(_hostFacts.value)
+        }
+        val kind = info.kind?.takeIf { HostKind.fromWire(it) != null } ?: return
+        val stored = Runtime.pairedClients.value.firstOrNull { it.id == macID }?.hostKind
+        if (stored != kind) viewModelScope.launch(Dispatchers.IO) { Runtime.registry.noteHostKind(macID, kind) }
+    }
+
+    /** Keeps why [macID] said it was leaving; [reason] null: it answered again, so that's over. */
+    private fun noteFarewell(macID: String, reason: String?) {
+        if (demo != null) return
+        val farewells = _farewells.value
+        val next = if (reason == null) farewells - macID else farewells + (macID to HostFarewell(reason, System.currentTimeMillis()))
+        if (next == farewells) return
+        _farewells.value = next
+        Runtime.settings.setShellFarewells(next)
     }
 
     /**
@@ -957,6 +1133,7 @@ class ShellViewModel(app: Application) : AndroidViewModel(app) {
         resetSessions()
         clientMacID = null
         _lastError.value = null
+        _accessRefused.value = false
         _reach.value = reach
     }
 
@@ -1023,6 +1200,19 @@ class ShellViewModel(app: Application) : AndroidViewModel(app) {
         if (heard.keys.any { it !in paired }) Runtime.settings.setShellLastHeard(heard.filterKeys { it in paired })
         val selectedAt = Runtime.settings.shellLastSelectedAt()
         if (selectedAt.keys.any { it !in paired }) Runtime.settings.setShellLastSelectedAt(selectedAt.filterKeys { it in paired })
+        // What a forgotten computer said about itself goes with it (its account name among it).
+        if (_hostFacts.value.keys.any { it !in paired }) {
+            _hostFacts.value = _hostFacts.value.filterKeys { it in paired }
+            Runtime.settings.setShellHostFacts(_hostFacts.value)
+        }
+        if (_farewells.value.keys.any { it !in paired }) {
+            _farewells.value = _farewells.value.filterKeys { it in paired }
+            Runtime.settings.setShellFarewells(_farewells.value)
+        }
+        if (_lastShell.value.keys.any { it !in paired }) {
+            _lastShell.value = _lastShell.value.filterKeys { it in paired }
+            Runtime.settings.setShellLastShell(_lastShell.value)
+        }
     }
 
     /** Clears everything the connected Mac said, tabs included (its tabs stay in [tabMemory]). */
@@ -1037,6 +1227,8 @@ class ShellViewModel(app: Application) : AndroidViewModel(app) {
 
     private fun resetSessionState() {
         openWhenReady = false
+        openShell = null
+        _shellRefusal.value = null
         _macState.value = null
         controls.reset()
         publishControls()
@@ -1092,7 +1284,7 @@ class ShellViewModel(app: Application) : AndroidViewModel(app) {
         handle(ShellEvent.Ready(ShellDemo.path))
         handle(ShellEvent.Sessions(ShellDemo.sessions(mac, _openTabs.value.filter { it.startsWith(ShellDemo.newPrefix(mac)) })))
         handle(ShellEvent.History(ShellDemo.history()))
-        if (_macState.value == null) handle(ShellEvent.MacStateChanged(ShellDemo.macState))
+        if (_macState.value == null) handle(ShellEvent.MacStateChanged(if (mac == ShellDemo.PC) ShellDemo.pcState else ShellDemo.macState))
     }
 
     private fun demoAttach(id: String) {

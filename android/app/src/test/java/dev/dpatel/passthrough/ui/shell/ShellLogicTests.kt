@@ -1,5 +1,7 @@
 package dev.dpatel.passthrough.ui.shell
 
+import dev.dpatel.passthrough.core.HostInfo
+import dev.dpatel.passthrough.core.HostShell
 import dev.dpatel.passthrough.core.ShellError
 import dev.dpatel.passthrough.core.ShellHistoryEntry
 import dev.dpatel.passthrough.core.ShellPath
@@ -209,5 +211,17 @@ class ShellLogicTests {
         assertEquals("Session closed — read-only", ShellEndedSessions.banner(null))
         assertNull(ShellEndedSessions().banner("a"))
         assertEquals("Session ended (exit 2) — read-only", ShellEndedSessions().ended("a", 2).banner("a"))
+    }
+
+    /** Phones know a PC: a session row names its shell when the host offers more than one. */
+    @Test fun statusNamesTheShell() {
+        val s = ShellSessionInfo("a", "zsh", startedAt = 1000.0, lastOutputAt = 1100.0, running = true, shell = "wsl:Ubuntu")
+        assertEquals("Ubuntu · running · 4m", ShellFormat.status(s, 1240.0, "Ubuntu"))
+        assertEquals("running · 4m", ShellFormat.status(s, 1240.0))
+        val pc = HostInfo(kind = "windows", shells = listOf(HostShell("pwsh", "PowerShell"), HostShell("wsl:Ubuntu", "Ubuntu")))
+        assertEquals("Ubuntu", ShellFormat.shellName(s, pc))
+        assertNull("one shell: no name", ShellFormat.shellName(s, pc.copy(shells = pc.shells!!.drop(1))))
+        assertNull("not listed", ShellFormat.shellName(s.copy(shell = "cmd"), pc))
+        assertNull(ShellFormat.shellName(s.copy(shell = null), pc))
     }
 }

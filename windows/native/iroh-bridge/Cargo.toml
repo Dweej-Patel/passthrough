@@ -1,0 +1,25 @@
+[package]
+name = "passthrough-iroh-bridge"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.91"
+license = "MIT"
+publish = false
+description = "Passthrough's iroh endpoint for Windows, as a C ABI the .NET host calls"
+
+[lib]
+name = "passthrough_iroh"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+# The version iroh-ffi 1.1.0 locks, which the Mac, iPhone and Android apps link: one wire protocol everywhere.
+iroh = "=1.0.2"
+tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "macros"] }
+tokio-util = "0.7"
+# Only for `pt_iroh_trace_start`: iroh's own events to a file, when an administrator asks for diagnostics.
+tracing-subscriber = { version = "0.3", default-features = false, features = ["std", "fmt", "env-filter"] }
+
+[profile.release]
+lto = true
+codegen-units = 1
+panic = "unwind"

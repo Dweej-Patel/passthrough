@@ -1,0 +1,20 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- passthrough-term.exe (stage 8 a5): a console that shows another computer's shell. The tray app holds the
+       connection and bridges it over a pipe only this account can open; this exe is the console end. -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0-windows10.0.19041.0</TargetFramework>
+    <RootNamespace>Passthrough.Term</RootNamespace>
+    <AssemblyName>passthrough-term</AssemblyName>
+    <Platforms>x64</Platforms>
+    <PlatformTarget>x64</PlatformTarget>
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <PublishSingleFile>true</PublishSingleFile>
+    <SelfContained>true</SelfContained>
+    <ApplicationIcon>..\Passthrough.App\Assets\app.ico</ApplicationIcon>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\Passthrough.Core\Passthrough.Core.csproj" />
+  </ItemGroup>
+</Project>
