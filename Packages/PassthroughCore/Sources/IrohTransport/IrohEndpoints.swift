@@ -18,10 +18,18 @@ public struct IrohRelayConfig: Codable, Equatable, Sendable {
         self.token = token
     }
 
+    /// The QUIC port iroh relays answer address discovery (QAD) on, n0's and
+    /// `iroh-relay`'s default. Without it a custom map has no QAD: an endpoint
+    /// behind a NAT with no port mapping (a phone on cellular) never learns its
+    /// public address, so hole punching has nothing to aim at and every
+    /// connection stays on the relay. A relay that doesn't run QUIC just
+    /// leaves the probe unanswered.
+    static let quicPort: UInt16 = 7842
+
     func relayMode() throws -> RelayMode {
         guard let url else { return RelayMode.defaultMode() }
         let map = RelayMap.empty()
-        try map.insert(config: RelayConfig(url: url, authToken: token))
+        try map.insert(config: RelayConfig(url: url, quicPort: Self.quicPort, authToken: token))
         return RelayMode.custom(map: map)
     }
 }

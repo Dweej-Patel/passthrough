@@ -375,6 +375,14 @@ these steps as written and check each one before building.
 
 ### Fixed (iPhone and Mac, from the security and code review)
 
+* **Connections from anywhere can go direct again instead of staying on the
+  relay.** The phone (and a Mac opening a PC's screen) dialled with the
+  computer's relay but without its QUIC port, which turned off iroh's address
+  discovery: on cellular, with no port mapping, the phone never learned its
+  public address, so hole punching had nothing to aim at. Measured: before,
+  the phone on cellular offered only 192.0.0.x and its IPv6 addresses and
+  stayed on the relay with both the Mac and the PC.
+
 * **A PC's screen on the iPhone stays on.** The developer switch
   (`-PTWindowsScreen YES`, what `./passthrough iphone install --pc-screen`
   passes) is saved, so the app keeps a PC's screen after it's closed and
