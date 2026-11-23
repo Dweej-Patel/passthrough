@@ -490,7 +490,7 @@ final class RemoteShellController: ObservableObject {
             }
             listener.start()
             let id = host.endpointID, home = host.homeRelay
-            ptLog(.info, "iroh: endpoint \(id.prefix(10)) started, home relay \(home ?? "none yet")")
+            ptLog(.info, "iroh: endpoint \(id.prefix(10)) started, home relay \(ptPrivate(home ?? "none yet"))")
             // The home relay moves when the Mac goes online another way (the
             // tunnel through a phone coming up or going down): phones dial
             // the one they were last told, so keep that current.
@@ -498,7 +498,7 @@ final class RemoteShellController: ObservableObject {
             host.watch(onHomeRelay: { [weak self] relay in
                 let before = lastRelay.exchange(relay)
                 guard relay != before else { return }
-                ptLog(relay == nil ? .warning : .info, "iroh: home relay is now \(relay ?? "none: not reachable from anywhere") (was \(before ?? "none"))")
+                ptLog(relay == nil ? .warning : .info, "iroh: home relay is now \(relay.map { ptPrivate($0) } ?? "none: not reachable from anywhere") (was \(ptPrivate(before ?? "none")))")
                 Task { @MainActor [weak self] in
                     guard let self, self.iroh === run else { return }
                     // Without one, phones keep the last: it is where the Mac most likely returns.
@@ -506,12 +506,14 @@ final class RemoteShellController: ObservableObject {
                     self.irohStatus.homeRelay = relay
                 }
             }, onNetworkChange: {
-                ptLog(.debug, "iroh: the network changed; home relay \(lastRelay.get() ?? "none")")
+                ptLog(.debug, "iroh: the network changed; home relay \(ptPrivate(lastRelay.get() ?? "none"))")
             })
             Task { @MainActor [weak self] in
                 guard let self, self.iroh === run else { return }
-                self.updateReach { $0.endpointID = id; $0.homeRelay = home }
-                self.irohStatus = IrohStatus(state: .running, endpointID: id, homeRelay: home)
+                // What the watcher has said since, if it ran first, not the relay at start.
+                let current = lastRelay.get()
+                self.updateReach { $0.endpointID = id; $0.homeRelay = current ?? home }
+                self.irohStatus = IrohStatus(state: .running, endpointID: id, homeRelay: current)
             }
         }
     }
@@ -614,7 +616,7 @@ final class RemoteShellController: ObservableObject {
         if let home { status.homeRelay = home }
         status.paths = paths
         if status != irohStatus { irohStatus = status }
-        await checkReach(run, home: home, phonesConnected: !paths.isEmpty)
+        startReachCheck(run, home: home, phonesConnected: !paths.isEmpty)
     }
 
     // An endpoint can go deaf to its relay (after the Mac's way online
@@ -623,31 +625,56 @@ final class RemoteShellController: ObservableObject {
     // reach it, and nothing here shows it. So once a minute the Mac asks its
     // own endpoint through the relay, as a phone would, and starts a new one
     // when it doesn't answer twice running. Not while a phone is connected
-    // over it (it works), and at most every five minutes (the Mac may simply
-    // be offline).
+    // over it (it works). After a restart that didn't help (the Mac may be
+    // offline, or on a network that blocks the relay) the next waits twice
+    // as long, from five minutes up to an hour; an answer resets that.
+    // The check runs beside the status refresh, never inside it: a deaf
+    // endpoint takes the full timeout to say so.
     private var reachTicks = 0
     private var reachFailures = 0
+    private var reachCheckRunning = false
     private var lastReachRestart = Date.distantPast
+    private var reachRestartGap = RemoteShellController.reachRestartMinGap
     private static let reachCheckEvery = 12   // status refreshes: one minute
+    private static let reachRestartMinGap: TimeInterval = 300
+    private static let reachRestartMaxGap: TimeInterval = 3600
 
-    private func checkReach(_ run: IrohRun, home: String?, phonesConnected: Bool) async {
+    private func startReachCheck(_ run: IrohRun, home: String?, phonesConnected: Bool) {
         reachTicks += 1
-        guard reachTicks >= Self.reachCheckEvery else { return }
+        guard reachTicks >= Self.reachCheckEvery, !reachCheckRunning else { return }
         reachTicks = 0
         guard !phonesConnected, let home, let id = run.host?.endpointID else { reachFailures = 0; return }
         let token = relay.url == nil ? nil : relay.token
-        if await IrohDialer.answers(id: id, relayURL: home, token: token) {
-            if reachFailures > 0 { ptLog(.info, "iroh: reachable through \(home) again") }
+        reachCheckRunning = true
+        Task { @MainActor [weak self] in
+            let answered = await IrohDialer.answers(id: id, relayURL: home, token: token)
+            guard let self else { return }
+            self.reachCheckRunning = false
+            self.reachCheckEnded(run, home: home, answered: answered)
+        }
+    }
+
+    private func reachCheckEnded(_ run: IrohRun, home: String, answered: Bool) {
+        guard iroh === run else { return }
+        if answered {
+            if reachFailures > 0 { ptLog(.info, "iroh: reachable through \(ptPrivate(home)) again") }
             reachFailures = 0
+            reachRestartGap = Self.reachRestartMinGap   // it works: the next trouble starts the wait over
+            lastReachRestart = .distantPast
             return
         }
-        guard iroh === run else { return }
         reachFailures += 1
-        ptLog(.warning, "iroh: this Mac does not answer through its relay \(home) (\(reachFailures) in a row)")
-        guard reachFailures >= 2, Date().timeIntervalSince(lastReachRestart) > 300 else { return }
+        ptLog(.warning, "iroh: this Mac does not answer through its relay \(ptPrivate(home)) (\(reachFailures) in a row)")
+        // A phone that got in while the check ran shows the endpoint works: it is kept.
+        guard reachFailures >= 2, irohStatus.paths.isEmpty,
+              Date().timeIntervalSince(lastReachRestart) > reachRestartGap else { return }
+        if lastReachRestart != .distantPast {
+            reachRestartGap = min(reachRestartGap * 2, Self.reachRestartMaxGap)   // the last one didn't help
+        }
         reachFailures = 0
+        reachTicks = 0
         lastReachRestart = Date()
-        ptLog(.warning, "iroh: starting a new endpoint: the old one stopped answering through its relay")
+        ptLog(.warning, "iroh: starting a new endpoint: the old one stopped answering through its relay (next restart no sooner than \(Int(reachRestartGap / 60)) min)")
         restartIroh()
     }
 

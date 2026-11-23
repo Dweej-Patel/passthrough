@@ -1,5 +1,6 @@
 import Foundation
 import IrohLib
+import PassthroughCore
 
 public enum IrohShell {
     /// The remote shell's ALPN on iroh connections.
@@ -261,22 +262,23 @@ public final class IrohDialer: @unchecked Sendable {
     /// its relay while still naming it as its home.
     public static func answers(id: String, relayURL: String, token: String? = nil, timeout: TimeInterval = 10) async -> Bool {
         guard let dialer = try? await IrohDialer(relay: IrohRelayConfig(url: relayURL, token: token)) else { return false }
-        let answered = await withTaskGroup(of: Bool.self) { group -> Bool in
-            group.addTask {
+        // The first of the handshake and the timeout decides, and nothing
+        // waits for the other: iroh's connect ignores cancellation and would
+        // otherwise hold this to its own 30 s limit. Closing the endpoint
+        // below ends a handshake still in flight.
+        let answered = await Race.first([
+            { @Sendable in
                 guard let peer = try? EndpointId.fromString(s: id),
                       let connection = try? await dialer.endpoint.connect(
                         addr: EndpointAddr(id: peer, relayUrl: relayURL, addresses: []), alpn: Data(IrohShell.alpn.utf8)) else { return false }
                 try? connection.close(errorCode: 0, reason: Data())
                 return true
-            }
-            group.addTask {
+            },
+            { @Sendable in
                 try? await Task.sleep(nanoseconds: UInt64(timeout * 1e9))
                 return false
-            }
-            let first = await group.next() ?? false
-            group.cancelAll()
-            return first
-        }
+            },
+        ])
         Task { await dialer.shutdown() }
         return answered
     }

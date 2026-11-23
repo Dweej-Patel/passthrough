@@ -375,6 +375,15 @@ these steps as written and check each one before building.
 
 ### Fixed (iPhone and Mac, from the security and code review)
 
+* **A Mac that stops answering through its relay recovers by itself.** After
+  the Mac's way online changes (the tunnel through a phone going away), its
+  iroh endpoint could stay deaf to its relay for hours while the app showed it
+  online. The Mac now checks once a minute that it answers through its own
+  relay, as a phone would, and starts a new endpoint after two misses (not
+  while a phone is connected over it; at most every five minutes, waiting
+  longer after each restart that didn't help, up to an hour). Phones also try
+  n0's other public relays when the one the Mac last named doesn't answer, and
+  take the first that does at once. Logs name relays privately.
 * **Connections from anywhere can go direct again instead of staying on the
   relay.** The phone (and a Mac opening a PC's screen) dialled with the
   computer's relay but without its QUIC port, which turned off iroh's address

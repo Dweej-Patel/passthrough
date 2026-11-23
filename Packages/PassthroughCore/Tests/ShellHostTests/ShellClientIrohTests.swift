@@ -188,7 +188,6 @@ final class ShellClientIrohTests: XCTestCase {
         XCTAssertTrue(only.disconnectError is FailingIroh.Failure)
     }
 
-    /// A Mac that sends `macInfo` after `ready` has it surfaced before the session list.
     /// The Mac moved to another public relay while the phone was away (it
     /// went online another way): the relay it last named has nothing, the
     /// other regions are tried beside it, and the phone still gets in.
@@ -210,6 +209,43 @@ final class ShellClientIrohTests: XCTestCase {
         XCTAssertFalse(probe.disconnected)
     }
 
+    /// As against real relays: the relay the Mac last named hangs (iroh runs
+    /// a dial there to its 30 s limit, cancelled or not). The relay it moved
+    /// to answers, and the phone gets in on it at once, well inside the
+    /// attempt's 10 s, instead of waiting for the hung dial.
+    func testAMovedMacIsReachedWhileTheNamedRelayHangs() async throws {
+        startIrohListener()
+        let iroh = MovedRelayIroh(LoopbackIroh(host), nowOn: "https://usw1-1.relay.n0.iroh.link./", othersHang: 30)
+        let probe = Probe()
+        var moved = credential(addresses: [], irohID: host.endpointID, port: 1)
+        moved.irohRelay = "https://use1-1.relay.n0.iroh.link./"
+        let client = ShellClient(credential: moved, queue: DispatchQueue(label: "probe"), iroh: iroh) { probe.record($0) }
+        addTeardownBlock { client.disconnect() }
+        let started = Date()
+        client.connect()
+        await probe.wait("ready over iroh", timeout: 8) { probe.readyPath != nil }
+        XCTAssertLessThan(Date().timeIntervalSince(started), 8)
+        XCTAssertFalse(probe.disconnected)
+    }
+
+    /// The Mac is on the relay it named, but that relay answers after the
+    /// others' head start (a slow link): the others, which hang, don't hold
+    /// up the answer. Before `Race` this connection failed at the 10 s timeout.
+    func testASlowNamedRelayIsNotHeldUpByTheOthers() async throws {
+        startIrohListener()
+        let named = "https://use1-1.relay.n0.iroh.link./"
+        let iroh = MovedRelayIroh(LoopbackIroh(host), nowOn: named, othersHang: 30, answerAfter: 2.5)
+        let probe = Probe()
+        var slow = credential(addresses: [], irohID: host.endpointID, port: 1)
+        slow.irohRelay = named
+        let client = ShellClient(credential: slow, queue: DispatchQueue(label: "probe"), iroh: iroh) { probe.record($0) }
+        addTeardownBlock { client.disconnect() }
+        client.connect()
+        await probe.wait("ready over iroh", timeout: 8) { probe.readyPath != nil }
+        XCTAssertEqual(iroh.tried.count, 4, "the other regions were tried beside it")
+        XCTAssertFalse(probe.disconnected)
+    }
+
     func testRelayCandidates() {
         XCTAssertEqual(IrohInfo.relayCandidates("https://use1-1.relay.n0.iroh.link./", custom: false),
                        ["https://use1-1.relay.n0.iroh.link./", "https://usw1-1.relay.n0.iroh.link./",
@@ -222,6 +258,7 @@ final class ShellClientIrohTests: XCTestCase {
         XCTAssertEqual(IrohInfo.relayCandidates(nil, custom: false), [nil])
     }
 
+    /// A Mac that sends `macInfo` after `ready` has it surfaced before the session list.
     func testMacInfoEvent() async throws {
         let identity = try (try? makeTestIdentity()) ?? makeTestIdentity()
         var info = ShellEnvelope(t: ShellEnvelope.macInfo)
@@ -325,12 +362,29 @@ private final class MovedRelayIroh: ShellIrohDialing, @unchecked Sendable {
     /// The relays dialed so far, in order (several are dialed at once).
     var tried: [String?] { lock.withLock { _tried } }
 
-    init(_ inner: LoopbackIroh, nowOn: String) { self.inner = inner; self.nowOn = nowOn }
+    /// How long a dial through another relay takes to fail. Real iroh runs
+    /// such a dial to its 30 s limit and ignores cancellation; so does this.
+    private let othersHang: TimeInterval
+    /// How long the relay the Mac is on takes to answer.
+    private let answerAfter: TimeInterval
+
+    init(_ inner: LoopbackIroh, nowOn: String, othersHang: TimeInterval = 0, answerAfter: TimeInterval = 0) {
+        self.inner = inner; self.nowOn = nowOn; self.othersHang = othersHang; self.answerAfter = answerAfter
+    }
 
     func connect(irohID: String, relayURL: String?, relayToken: String?, addresses: [String]) async throws -> any ByteStream {
         lock.withLock { _tried.append(relayURL) }
-        guard relayURL == nowOn else { throw NotHere() }
+        guard relayURL == nowOn else {
+            await Self.uncancellableWait(othersHang)
+            throw NotHere()
+        }
+        await Self.uncancellableWait(answerAfter)
         return try await inner.connect(irohID: irohID, relayURL: relayURL, relayToken: relayToken, addresses: addresses)
+    }
+
+    private static func uncancellableWait(_ seconds: TimeInterval) async {
+        guard seconds > 0 else { return }
+        await withCheckedContinuation { done in DispatchQueue.global().asyncAfter(deadline: .now() + seconds) { done.resume() } }
     }
 
     func path(of stream: any ByteStream) -> ShellPath { inner.path(of: stream) }
