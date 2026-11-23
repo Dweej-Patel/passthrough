@@ -68,10 +68,10 @@ struct RemoteScreenWindow: View {
         .toolbar {
             ToolbarItemGroup(placement: .primaryAction) {
                 Toggle(isOn: $model.clipSyncOn) { Label("Sync Clipboard", systemImage: "arrow.left.arrow.right.square") }
-                    .help(model.clipSyncOn
+                    .help(model.clipActive
                           ? "Copies here and on \(model.macName) go to the other, and files dropped on the window land there. Click to stop."
                           : "Sync the clipboard with \(model.macName) and drop files on it")
-                if !model.clipSyncOn {
+                if !model.clipActive {
                     Button { model.sendClipboard() } label: { Label("Send Clipboard", systemImage: "doc.on.clipboard") }
                         .help("Put this Mac's clipboard text on \(model.macName)'s clipboard")
                         .disabled(model.phase != .live)
@@ -215,6 +215,8 @@ final class RemoteScreenModel: ObservableObject {
         didSet {
             guard clipSyncOn != oldValue else { return }
             UserDefaults.standard.set(clipSyncOn, forKey: Self.clipSyncKey)
+            clipTries = 0
+            clipOffered = false
             if clipSyncOn { startClipSync() } else { stopClipSync() }
         }
     }
@@ -224,8 +226,15 @@ final class RemoteScreenModel: ObservableObject {
     private var clipClient: ShellClient?
     private var clipDialer: IrohShellDialer?
     private var clipViewer: ClipSyncViewer?
-    /// Tries since the view went live, so a host that keeps refusing isn't asked forever.
+    /// Tries in a row that didn't get through, so a host that keeps refusing isn't asked forever.
     private var clipTries = 0
+    /// The client asking for sync now: events from any other are ignored.
+    private var clipToken: UUID?
+    /// Sync is running: drops are taken, and the Copy and Send buttons give way to it.
+    @Published private(set) var clipActive = false
+    /// This window already sent its clipboard as it was when sync started.
+    private var clipOffered = false
+    private var clipStatusClear: DispatchWorkItem?
     private var browser: NWBrowser?
     private var generation = 0
     private var path: ShellPath?
@@ -454,7 +463,7 @@ final class RemoteScreenModel: ObservableObject {
 
     // MARK: Clipboard sync
 
-    var acceptsDrops: Bool { clipViewer?.isActive == true }
+    var acceptsDrops: Bool { clipActive }
 
     func drop(_ urls: [URL], x: Double, y: Double) {
         clipViewer?.drop(urls, x: UInt16(min(max(x, 0), 1) * 65535), y: UInt16(min(max(y, 0), 1) * 65535))
@@ -462,31 +471,47 @@ final class RemoteScreenModel: ObservableObject {
 
     /// Asks the other Mac for clipboard sync on a connection of its own, once the view is live.
     private func startClipSync() {
-        guard clipSyncOn, phase == .live, clipClient == nil, clipViewer?.isActive != true, let pass else { return }
+        guard clipSyncOn, phase == .live, clipClient == nil, clipViewer == nil, let pass else { return }
         clipTries += 1
         let gen = generation
+        // Events from a client this model has since let go of (it disconnects with a late
+        // `.disconnected`) are ignored: they mustn't end or retry the current one.
+        let token = UUID()
+        clipToken = token
         let credential = pass.credential
         let dialer = credential.irohID.map(IrohInfo.isValidID) == true ? IrohShellDialer() : nil
         clipDialer = dialer
         let client = ShellClient(credential: credential, queue: .main, iroh: dialer, mode: .automatic) { [weak self] event in
-            MainActor.assumeIsolated { self?.handleClip(event, generation: gen) }
+            MainActor.assumeIsolated { self?.handleClip(event, generation: gen, token: token) }
         }
         clipClient = client
         client.connect(discovered: discovered)
     }
 
     private func stopClipSync() {
+        clipToken = nil
         clipClient?.disconnect()
         clipClient = nil
         clipViewer?.stop()
         clipViewer = nil
+        clipActive = false
         clipDialer?.shutdown()
         clipDialer = nil
+        clipStatusClear?.cancel()
         clipStatus = nil
     }
 
-    private func handleClip(_ event: ShellClient.Event, generation gen: Int) {
-        guard gen == generation else {
+    /// Lets go of the client asking for sync (its later events are ignored).
+    private func dropClipClient() {
+        clipToken = nil
+        clipClient?.disconnect()
+        clipClient = nil
+        clipDialer?.shutdown()
+        clipDialer = nil
+    }
+
+    private func handleClip(_ event: ShellClient.Event, generation gen: Int, token: UUID) {
+        guard gen == generation, token == clipToken else {
             if case let .clipSync(stream, _) = event { stream.cancel() }
             return
         }
@@ -494,27 +519,29 @@ final class RemoteScreenModel: ObservableObject {
         case .ready:
             clipClient?.requestClipSync()
         case let .clipSync(stream, initialBytes):
+            clipToken = nil
             clipClient = nil   // it let go of the stream; the dialer stays up for it
-            let viewer = ClipSyncViewer(hostName: macName) { [weak self] in self?.clipStatus = $0 }
+            clipTries = 0      // the cap counts tries in a row that didn't get through
+            let viewer = ClipSyncViewer(hostName: macName) { [weak self] in self?.showClipStatus($0, timed: false) }
             clipViewer = viewer
-            viewer.start(stream: stream, initialBytes: initialBytes) { [weak self] in
-                self?.clipEnded(generation: gen)
+            clipActive = true
+            // This Mac's clipboard goes over once per window (and when sync is turned back on), not on every reconnect:
+            // it would replace what was copied on the other Mac meanwhile.
+            viewer.start(stream: stream, initialBytes: initialBytes, offerCurrent: !clipOffered) { [weak self, weak viewer] in
+                guard let self, let viewer, self.clipViewer === viewer else { return }
+                self.clipEnded(generation: gen)
             }
+            clipOffered = true
         case let .clipSyncRefused(reason):
-            clipClient?.disconnect()
-            clipClient = nil
-            clipDialer?.shutdown()
-            clipDialer = nil
+            dropClipClient()
             switch reason {
             // The view's start hadn't reached it yet: ask again shortly.
             case .noScreenView: retryClipSync(after: 1.5, generation: gen)
-            case .clipSyncOff: clipStatus = "\(macName) has clipboard sync turned off."
-            default: clipStatus = "\(macName) can't sync the clipboard (update Passthrough there)."
+            case .clipSyncOff: showClipStatus("\(macName) has clipboard sync turned off.")
+            default: showClipStatus("\(macName) can't sync the clipboard (update Passthrough there).")
             }
         case .failed(_, _), .disconnected:
-            clipClient = nil
-            clipDialer?.shutdown()
-            clipDialer = nil
+            dropClipClient()
             retryClipSync(after: 3, generation: gen)
         default:
             break
@@ -524,17 +551,30 @@ final class RemoteScreenModel: ObservableObject {
     private func clipEnded(generation gen: Int) {
         guard gen == generation else { return }
         clipViewer = nil
+        clipActive = false
         clipDialer?.shutdown()
         clipDialer = nil
         retryClipSync(after: 3, generation: gen)
     }
 
     private func retryClipSync(after delay: TimeInterval, generation gen: Int) {
-        guard clipTries < 5 else { return }
+        guard clipTries < 5 else {
+            return showClipStatus("Clipboard sync with \(macName) stopped. Turn Sync Clipboard off and on to try again.")
+        }
         DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
             guard let self, gen == self.generation else { return }
             self.startClipSync()
         }
+    }
+
+    /// A line at the bottom of the window; `timed` ones go after a few seconds.
+    private func showClipStatus(_ text: String?, timed: Bool = true) {
+        clipStatusClear?.cancel()
+        clipStatus = text
+        guard timed, text != nil else { return }
+        let clear = DispatchWorkItem { [weak self] in self?.clipStatus = nil }
+        clipStatusClear = clear
+        DispatchQueue.main.asyncAfter(deadline: .now() + 5, execute: clear)
     }
 }
 

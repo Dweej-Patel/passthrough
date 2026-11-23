@@ -19,6 +19,10 @@ public final class ClipSyncHost {
     private var watch: UUID?
     /// Clipboard folders kept, newest last, so pasting a recent copy still finds its files.
     private var clipboardFolders: [URL] = []
+    /// Dropped files kept, newest last: an app that took them by reference (an upload) may still be reading them.
+    /// The rest go at the next launch.
+    private var dropFolders: [URL] = []
+    static let dropsKept = 5
     /// Read on the listener's queue.
     private let state = Locked(State())
 
@@ -34,10 +38,9 @@ public final class ClipSyncHost {
 
     public init(dropPoint: @escaping @Sendable (String, UInt16, UInt16) -> CGPoint?) {
         self.dropPoint = dropPoint
-        let caches = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first ?? FileManager.default.temporaryDirectory
-        staging = caches.appendingPathComponent("Passthrough/Received/host", isDirectory: true)
-        // What earlier runs received is of no use now.
-        try? FileManager.default.removeItem(at: staging)
+        // Made with the app's shell controller, before any screen window: what earlier runs received goes.
+        ClipSyncStaging.clearAtLaunch()
+        staging = ClipSyncStaging.root.appendingPathComponent("host", isDirectory: true)
         UserDefaults.standard.register(defaults: [Self.enabledKey: true])
         setEnabled(UserDefaults.standard.bool(forKey: Self.enabledKey))
     }
@@ -188,9 +191,9 @@ public final class ClipSyncHost {
         let files = transfer.topLevel
         let folder = transfer.folder
         func cleanUp() {
-            // Late enough for whatever took them to have copied them.
             guard let folder else { return }
-            DispatchQueue.main.asyncAfter(deadline: .now() + 120) { try? FileManager.default.removeItem(at: folder) }
+            dropFolders.append(folder)
+            while dropFolders.count > Self.dropsKept { try? FileManager.default.removeItem(at: dropFolders.removeFirst()) }
         }
         guard !files.isEmpty else {
             session.result(transfer.transfer, .failed)
