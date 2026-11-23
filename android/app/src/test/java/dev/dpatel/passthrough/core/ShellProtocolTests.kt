@@ -14,6 +14,20 @@ import org.junit.Test
 import java.util.Base64
 
 class ShellProtocolTests {
+    /** Mirrors ShellClientIrohTests.testRelayCandidates in PassthroughCore. */
+    @Test fun relayCandidates() {
+        assertEquals(listOf("https://use1-1.relay.n0.iroh.link./", "https://usw1-1.relay.n0.iroh.link./",
+            "https://euc1-1.relay.n0.iroh.link./", "https://aps1-1.relay.n0.iroh.link./"),
+            IrohInfo.relayCandidates("https://use1-1.relay.n0.iroh.link./", custom = false))
+        assertEquals(4, IrohInfo.relayCandidates("https://euc1-1.relay.n0.iroh.link", custom = false).size)
+        // A relay of the user's own, or one with a token, is the only place its Mac can be.
+        assertEquals(listOf("https://relay.example.com/"), IrohInfo.relayCandidates("https://relay.example.com/", custom = false))
+        assertEquals(listOf("https://use1-1.relay.n0.iroh.link./"), IrohInfo.relayCandidates("https://use1-1.relay.n0.iroh.link./", custom = true))
+        assertEquals(1, IrohInfo.relayCandidates("https://use1-1.relay.n0.iroh.link.evil.example/", custom = false).size)
+        assertEquals(1, IrohInfo.relayCandidates("https://use1-1.relay.n0.iroh.link@evil.example/", custom = false).size)
+        assertEquals(listOf<String?>(null), IrohInfo.relayCandidates(null, custom = false))
+    }
+
     private val shell get() = Fixtures.root["shell"]!!.jsonObject
     private fun b64(s: String) = Base64.getDecoder().decode(s)
 

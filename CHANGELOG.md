@@ -381,8 +381,8 @@ these steps as written and check each one before building.
   online. The Mac now checks once a minute that it answers through its own
   relay, as a phone would, and starts a new endpoint after two misses (not
   while a phone is connected over it; at most every five minutes, waiting
-  longer after each restart that didn't help, up to an hour). Phones also try
-  n0's other public relays when the one the Mac last named doesn't answer, and
+  longer after each restart that didn't help, up to an hour). Phones (iPhone,
+  iPad and Android) also try n0's other public relays when the one the Mac last named doesn't answer, and
   take the first that does at once. Logs name relays privately.
 * **Connections from anywhere can go direct again instead of staying on the
   relay.** The phone (and a Mac opening a PC's screen) dialled with the

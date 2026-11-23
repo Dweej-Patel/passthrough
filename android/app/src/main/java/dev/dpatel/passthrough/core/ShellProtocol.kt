@@ -183,6 +183,37 @@ object IrohInfo {
 
     fun isValidToken(token: String): Boolean = token.toByteArray(Charsets.UTF_8).size <= MAX_TOKEN_LENGTH
 
+    /**
+     * n0's public relays, by region. An endpoint listens on one of them, its home
+     * relay, picked by latency: a Mac that goes online another way (through the
+     * phone, then by itself again) can move to another.
+     */
+    val PUBLIC_RELAY_REGIONS = listOf("use1", "usw1", "euc1", "aps1")
+
+    /**
+     * The relays to look for a Mac on, the one it last named first. A phone that is
+     * away hears of a move only by finding the Mac, so for a public relay the other
+     * regions follow. A custom relay is the only place its Mac can be. Mirrors
+     * IrohInfo.relayCandidates in PassthroughCore.
+     */
+    fun relayCandidates(relay: String?, custom: Boolean): List<String?> {
+        if (relay == null || custom) return listOf(relay)
+        val uri = runCatching { java.net.URI(relay) }.getOrNull() ?: return listOf(relay)
+        val host = uri.host ?: return listOf(relay)
+        val labels = host.split(".")
+        val rest = labels.drop(1).joinToString(".")
+        val first = labels.first()
+        val dash = first.indexOf('-')
+        if (rest != "relay.n0.iroh.link" && rest != "relay.n0.iroh.link.") return listOf(relay)
+        if (dash < 0 || first.substring(0, dash) !in PUBLIC_RELAY_REGIONS) return listOf(relay)
+        val region = first.substring(0, dash)
+        val others = PUBLIC_RELAY_REGIONS.filter { it != region }.mapNotNull { other ->
+            val otherHost = (listOf(other + first.substring(dash)) + labels.drop(1)).joinToString(".")
+            runCatching { java.net.URI(uri.scheme, uri.userInfo, otherHost, uri.port, uri.path, uri.query, uri.fragment).toString() }.getOrNull()
+        }
+        return listOf(relay) + others
+    }
+
     /** Whether the iroh details form a usable group: a valid id, and a relay and token that are valid when present. */
     fun areValid(id: String?, relay: String?, token: String?): Boolean =
         id != null && isValidID(id) && (relay?.let(::isValidRelay) ?: true) && (token?.let(::isValidToken) ?: true)
