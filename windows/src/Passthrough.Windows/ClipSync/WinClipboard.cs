@@ -183,7 +183,7 @@ public sealed class WinClipboard
         if (raw.Excluded) return new ClipSnapshot.Nothing();
         if (raw.Files is { Count: > 0 } files)
         {
-            var (payload, failed) = ClipFiles.Collect(files, ClipSyncWire.MaxClipboardFiles, ClipSyncWire.MaxItems, cancel);
+            var (payload, failed) = ClipFiles.Collect(files, ClipSyncWire.MaxClipboardFiles, ClipSyncWire.MaxItems, cancel, ClipFileSystem.FinalPath);
             if (failed == ClipFiles.Failure.TooLarge) return new ClipSnapshot.TooLarge(Files: true);
             return payload is { Items.Count: > 0 } ? new ClipSnapshot.Contents(payload) : new ClipSnapshot.Nothing();
         }

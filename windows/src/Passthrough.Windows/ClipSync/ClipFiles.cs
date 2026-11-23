@@ -15,13 +15,47 @@ public static class ClipFileSystem
         AcceptDrops = acceptDrops,
         OpenToSend = OpenToSend,
         FileReceived = MarkFromAnotherComputer,
+        Canonical = FinalPath,
     };
+
+    /// <summary>
+    /// Where a file or folder truly is: every link and junction on the way followed, as Windows names the result
+    /// (<c>GetFinalPathNameByHandle</c>). The path as given when Windows won't say.
+    /// </summary>
+    public static string FinalPath(string path)
+    {
+        const uint shareAll = 0x7, openExisting = 3, backupSemantics = 0x02000000;
+        using var handle = CreateFile(Path.GetFullPath(path), 0, shareAll, IntPtr.Zero, openExisting, backupSemantics, IntPtr.Zero);
+        return handle.IsInvalid ? path : FinalPath(handle) ?? path;
+    }
+
+    private static string? FinalPath(SafeFileHandle handle)
+    {
+        var buffer = new char[1024];
+        var length = GetFinalPathNameByHandle(handle, buffer, (uint)buffer.Length, 0);
+        if (length >= buffer.Length)
+        {
+            buffer = new char[length + 1];
+            length = GetFinalPathNameByHandle(handle, buffer, (uint)buffer.Length, 0);
+        }
+        if (length == 0 || length >= buffer.Length) return null;
+        var final = new string(buffer, 0, (int)length);
+        // "\\?\C:\x" is "C:\x"; "\\?\UNC\server\share\x" is "\\server\share\x".
+        if (final.StartsWith(@"\\?\UNC\", StringComparison.OrdinalIgnoreCase)) return @"\\" + final[8..];
+        return final.StartsWith(@"\\?\", StringComparison.Ordinal) ? final[4..] : final;
+    }
+
+    /// <summary>Whether the file a handle opened is the one at <paramref name="listed"/>, the real path it was listed under. Unknown counts as yes.</summary>
+    private static bool IsWhereListed(SafeFileHandle handle, string listed) =>
+        FinalPath(handle) is not { } final || string.Equals(final, listed, StringComparison.OrdinalIgnoreCase);
 
     /// <summary>
     /// Opens a copied or dropped file to send: the file itself, never what a symbolic link or junction put in its place
     /// since it was listed (nothing outside what was copied is read). A folder, a link or a junction is refused. A
     /// file that is another kind of reparse point (one a cloud-synced folder keeps, for one) is an ordinary file to its
-    /// readers: it is opened the ordinary way, and only if that is the same file.
+    /// readers: it is opened the ordinary way, and only if that is the same file. And the file opened must be where it
+    /// was listed (<paramref name="path"/> is its real path then): a folder above it swapped for a link since leads
+    /// somewhere else, and that isn't sent either.
     /// </summary>
     public static FileStream OpenToSend(string path)
     {
@@ -32,6 +66,7 @@ public static class ClipFileSystem
         try
         {
             if (!GetFileInformationByHandle(itself, out var info) || (info.Attributes & directory) != 0) throw new IOException("Not a plain file: it isn't sent.");
+            if (!IsWhereListed(itself, full)) throw new IOException("Not where it was listed: it isn't sent.");
             if ((info.Attributes & reparsePoint) == 0)
             {
                 var stream = new FileStream(itself, FileAccess.Read, 1, isAsync: true);
@@ -97,6 +132,9 @@ public static class ClipFileSystem
 
     [DllImport("kernel32.dll", SetLastError = true)]
     private static extern bool GetFileInformationByHandle(SafeFileHandle file, out FileInformation info);
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, EntryPoint = "GetFinalPathNameByHandleW", SetLastError = true)]
+    private static extern uint GetFinalPathNameByHandle(SafeFileHandle file, [Out] char[] path, uint size, uint flags);
 
     [DllImport("kernel32.dll", SetLastError = true)]
     private static extern bool GetFileInformationByHandleEx(SafeFileHandle file, int infoClass, out TagInformation info, int size);

@@ -103,7 +103,7 @@ public sealed class ClipSyncViewer : IDisposable
         // A big folder takes a while to count: not on the window's thread.
         _ = Task.Run(() =>
         {
-            var (payload, failed) = ClipFiles.Collect(paths, maxItems: (int)ClipSyncWire.MaxDropItems);
+            var (payload, failed) = ClipFiles.Collect(paths, maxItems: (int)ClipSyncWire.MaxDropItems, canonical: ClipFileSystem.FinalPath);
             ClipSyncSession? session;
             lock (_lock) session = _session;
             if (session is null) { Status(null); return; }

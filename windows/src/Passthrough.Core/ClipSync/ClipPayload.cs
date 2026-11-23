@@ -152,18 +152,21 @@ public static class ClipFiles
     public enum Failure { TooLarge, Unreadable }
 
     /// <summary>
-    /// The files and folders at <paramref name="paths"/> and everything under the folders, named from each one's own
-    /// name down, every folder before what's in it. Links and junctions are left out (nothing outside what was copied
-    /// is read). Counting stops at the first byte over <paramref name="maxBytes"/> or item over <paramref name="maxItems"/>.
-    /// </summary>
-    /// <summary>
     /// A symbolic link or a junction: what it points at was not copied, so it is left out. Other reparse points (the
     /// files of a cloud-synced folder, for one) are ordinary files to whoever reads them.
     /// </summary>
     private static bool IsLink(FileSystemInfo info) => info.Attributes.HasFlag(FileAttributes.ReparsePoint) && info.LinkTarget is not null;
 
+    /// <summary>
+    /// The files and folders at <paramref name="paths"/> and everything under the folders, named from each one's own
+    /// name down, every folder before what's in it. Links and junctions are left out (nothing outside what was copied
+    /// is read). Counting stops at the first byte over <paramref name="maxBytes"/> or item over <paramref name="maxItems"/>.
+    /// <paramref name="canonical"/> gives each listed thing's real path (every link above it followed, once, now):
+    /// what is under it is found from there, so each file's path is where it truly is, and a sender can refuse a file
+    /// that isn't there any more when it comes to open it (a folder above it swapped for a link meanwhile).
+    /// </summary>
     public static (ClipPayload? Payload, Failure? Failed) Collect(IReadOnlyList<string> paths, ulong? maxBytes = null, int maxItems = int.MaxValue,
-        CancellationToken cancel = default)
+        CancellationToken cancel = default, Func<string, string>? canonical = null)
     {
         var items = new List<ClipItem>();
         ulong total = 0;
@@ -209,6 +212,11 @@ public static class ClipFiles
                 if (!info.Exists) return (null, Failure.Unreadable);
                 if (IsLink(info)) continue;
                 var name = ClipNames.Unique(ClipNames.WirePart(info.Name.Length > 0 ? info.Name : "Drive"), top);
+                if (canonical is not null)
+                {
+                    var real = canonical(path);
+                    info = info is DirectoryInfo ? new DirectoryInfo(real) : new FileInfo(real);
+                }
                 if (Add(info, name) is { } failed) return (null, failed);
                 if (info is DirectoryInfo folder && Walk(folder, name) is { } inside) return (null, inside);
             }

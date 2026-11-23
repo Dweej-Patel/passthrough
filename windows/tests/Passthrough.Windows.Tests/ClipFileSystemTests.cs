@@ -5,9 +5,15 @@ namespace Passthrough.Windows.Tests;
 
 public sealed class ClipFileSystemTests : IDisposable
 {
-    private readonly string _root = Path.Combine(Path.GetTempPath(), "pt-clipfs-" + Guid.NewGuid().ToString("N"));
+    private readonly string _root;
 
-    public ClipFileSystemTests() => Directory.CreateDirectory(_root);
+    public ClipFileSystemTests()
+    {
+        var made = Path.Combine(Path.GetTempPath(), "pt-clipfs-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(made);
+        // As files are listed: by where they truly are (the temp folder's own path may be a short name or behind a link).
+        _root = ClipFileSystem.FinalPath(made);
+    }
 
     public void Dispose()
     {
@@ -38,6 +44,39 @@ public sealed class ClipFileSystemTests : IDisposable
         try { File.CreateSymbolicLink(link, secret); }
         catch (Exception e) when (e is IOException or UnauthorizedAccessException) { return; } // this account may not make links: nothing to check
         Assert.Throws<IOException>(() => ClipFileSystem.OpenToSend(link));
+    }
+
+    [Fact]
+    public void AFolderAboveTheFile_SwappedForAJunctionSinceItWasListed_LeadsNowhere()
+    {
+        // Copied: a folder with one file. Elsewhere: a folder with a file of the same name that was never copied.
+        var copied = Path.Combine(_root, "Copied");
+        var elsewhere = Path.Combine(_root, "Elsewhere");
+        Directory.CreateDirectory(copied);
+        Directory.CreateDirectory(elsewhere);
+        File.WriteAllText(Path.Combine(copied, "notes.txt"), "copied");
+        File.WriteAllText(Path.Combine(elsewhere, "notes.txt"), "never copied");
+        var (payload, failed) = Passthrough.Core.ClipSync.ClipFiles.Collect([copied], canonical: ClipFileSystem.FinalPath);
+        Assert.Null(failed);
+        var listed = payload!.Items.Single(i => i.Name == "Copied/notes.txt").Path!;
+        using (ClipFileSystem.OpenToSend(listed)) { }
+
+        // The folder is swapped for a junction to the other one before the file is opened.
+        Directory.Move(copied, copied + "-moved");
+        using var mklink = System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo("cmd.exe", $"/c mklink /J \"{copied}\" \"{elsewhere}\"")
+        {
+            UseShellExecute = false, CreateNoWindow = true, RedirectStandardOutput = true,
+        })!;
+        mklink.WaitForExit();
+        if (mklink.ExitCode != 0) return; // no junctions here: nothing to check
+        try
+        {
+            Assert.Equal("never copied", File.ReadAllText(listed)); // an ordinary open is led there
+            Assert.Throws<IOException>(() => ClipFileSystem.OpenToSend(listed));
+            // And a folder that is itself a junction is not listed at all.
+            Assert.Empty(Passthrough.Core.ClipSync.ClipFiles.Collect([copied], canonical: ClipFileSystem.FinalPath).Payload!.Items);
+        }
+        finally { Directory.Delete(copied); } // the junction, not what it points at
     }
 
     [Fact]

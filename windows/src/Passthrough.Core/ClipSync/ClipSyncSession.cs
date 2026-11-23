@@ -35,6 +35,9 @@ public sealed class ClipSyncOptions
     /// </summary>
     public Func<string, FileStream>? OpenToSend { get; init; }
 
+    /// <summary>The real path of a folder this side made for received files (links above it followed), so files sent on from it are found where they truly are.</summary>
+    public Func<string, string>? Canonical { get; init; }
+
     /// <summary>Told each received file once it is whole and closed (a PC marks it as from another computer, so Windows warns before running it).</summary>
     public Action<string>? FileReceived { get; init; }
 
@@ -482,7 +485,7 @@ public sealed class ClipSyncSession
             {
                 var made = Path.Combine(_options.Staging, Guid.NewGuid().ToString("D"));
                 Directory.CreateDirectory(made);
-                t.Folder = made;
+                t.Folder = _options.Canonical?.Invoke(made) ?? made;
             }
             var name = item.Name!;
             var parentKey = ClipSyncWire.Parent(name) is { } parent ? ClipSyncWire.ItemCheck.Key(parent) : null;
