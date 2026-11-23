@@ -404,6 +404,14 @@ these steps as written and check each one before building.
   opened from the home screen; `--no-pc-screen` turns it off. With the switch
   off, a PC's Screen row says so instead of "isn't in this version yet".
 
+* **Sharing a computer with a PC says what to do on the PC.** When the PC
+  can't take the access because no one is signed in or Passthrough isn't open
+  there, the iPhone and iPad say so (*Sign in to … and open Passthrough there*,
+  *Open Passthrough on …*). Before, they said the PC "needs the latest
+  Passthrough". While the PC keeps the access, the sheet says *Confirm on …
+  when it asks (Windows Hello or the account's password)*, because the PC
+  waits only about half a minute for that.
+
 * **Saved Windows logins follow the PC, not just its id.** A login saved on
   the iPhone or the Mac is used only while the PC's credential has the same
   certificate and iroh id, so a host that later claimed the same id with its
@@ -497,6 +505,16 @@ these steps as written and check each one before building.
   couldn't open one. It now starts the tray app as you, through Explorer, and
   `doctor` says when the tray app runs as administrator; the app logs why it
   doesn't link to the service then.
+
+### Added (Windows: a Mac's screen fitted to the PC's window)
+
+* **Fit to window** in a Mac's screen window on a PC: the Mac makes a display in the window's shape (as it does for a phone), so the picture fills the window and follows it when resized, half a second after the resizing stops. The Mac's display gets as many points as the window has, so text is the size the PC's is. Remembered per computer. If the Mac can't make the display (another view has one), the window says so and shows the Mac's own.
+
+### Fixed (Windows: Your computers on a PC without Windows Hello)
+
+* **Sharing a Mac with a PC no longer needs Windows Hello set up.** A PC whose account had no Hello PIN didn't tell phones it could keep access to other computers, so *Share with another computer…* failed on the iPhone with "needs the latest Passthrough", and setting up a PIN only helped after Passthrough was restarted. Now every PC can keep it: behind Windows Hello when the PC has it, and otherwise behind the account's Windows password, which Windows' own prompt asks for before *Your computers* opens and before a screen window, at most once in five minutes. Nothing of the password is kept. The flyout now stays open while Windows asks. Without Hello, a program already running as you could read the stored access; with Hello it can't.
+
+* **A Mac's screen on a PC: the app closed as soon as the picture started.** The viewer listed the PC's monitors in a way Windows' projection can't enumerate, which threw on the window's thread and ended the whole app with nothing in the log. The monitors are now read by index, and anything thrown while the picture is being shown is logged and closes only that window, with a sentence.
 
 ### Fixed (Windows: a PC's screen through a relay)
 

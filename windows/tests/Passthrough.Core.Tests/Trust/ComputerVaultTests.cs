@@ -56,6 +56,48 @@ public sealed class ComputerVaultTests
     }
 
     [Fact]
+    public async Task WithoutHelloTheFallbackSealsIt_AndKeepsOpeningItOnceHelloIsSetUp()
+    {
+        var secrets = new MemorySecretStore();
+        var password = new FakeHello([9]);
+        Assert.Equal(ComputerReachStore.SaveResult.Saved, await new ComputerReachStore(secrets, new FakeHello([1], available: false), password).SaveAsync(Computer()));
+        Assert.DoesNotContain("MacBook", secrets.Get(ComputerReachStore.Slot)!, StringComparison.Ordinal);
+        // Hello arrives later: what the password sealed is still opened by the password, not wiped by Hello's different key.
+        var hello = new FakeHello([1]);
+        var later = new ComputerReachStore(secrets, hello, password);
+        Assert.True(await later.UnlockAsync());
+        Assert.Equal("MacBook", later.Computers!.Single().Credential.MacName);
+        Assert.Equal(0, hello.Prompts);
+        Assert.Equal(ComputerReachStore.SaveResult.Saved, await later.SaveAsync(Computer("mac-2")));
+        var again = new ComputerReachStore(secrets, hello, password);
+        Assert.True(await again.UnlockAsync());
+        Assert.Equal(2, again.Computers!.Count);
+        // A declined password opens nothing, and nothing is lost.
+        Assert.False(await new ComputerReachStore(secrets, hello, new FakeHello([9], confirms: false)).UnlockAsync());
+        Assert.NotNull(secrets.Get(ComputerReachStore.Slot));
+    }
+
+    [Fact]
+    public async Task HelloIsPreferred_AndAStoreItSealedIsLeftAloneWhileHelloIsAway()
+    {
+        var secrets = new MemorySecretStore();
+        var (hello, password) = (new FakeHello([1]), new FakeHello([9]));
+        Assert.Equal(ComputerReachStore.SaveResult.Saved, await new ComputerReachStore(secrets, hello, password).SaveAsync(Computer()));
+        Assert.Equal((1, 0), (hello.Prompts, password.Prompts));
+        var kept = secrets.Get(ComputerReachStore.Slot);
+        // Hello away (a Remote Desktop session, say): the password doesn't open it, and a hand-over doesn't replace it.
+        var without = new ComputerReachStore(secrets, new FakeHello([1], available: false), password);
+        Assert.False(await without.UnlockAsync());
+        Assert.Equal(ComputerReachStore.SaveResult.Locked, await without.SaveAsync(Computer("mac-2")));
+        Assert.Equal(kept, secrets.Get(ComputerReachStore.Slot));
+        Assert.Equal(0, password.Prompts);
+        // Hello back: everything is still there.
+        var back = new ComputerReachStore(secrets, hello, password);
+        Assert.True(await back.UnlockAsync());
+        Assert.Equal("mac-1", back.Computers!.Single().HostId);
+    }
+
+    [Fact]
     public async Task AHandOverWithDifferentDetailsDoesntReplace()
     {
         var store = new ComputerReachStore(new MemorySecretStore(), new FakeHello([1]));

@@ -151,6 +151,19 @@ public static class ScreenFrame
     /// <summary>The side to ask for (fit <c>mac</c>): the largest monitor's longest side in pixels, 1280…4096.</summary>
     public static int RequestedSide(IEnumerable<int> monitorLongestSides) => Math.Clamp(monitorLongestSides.DefaultIfEmpty(2560).Max(), 1280, 4096);
 
+    /// <summary>
+    /// The display to ask a Mac for (fit <c>device</c>) so its picture fills a view of this many device-independent
+    /// pixels on a monitor at <paramref name="scale"/> (1 at 100 %): the stream is the view's own pixels (even, 320…4096, the Mac's own limits:
+    /// a smaller view gets bars), and <c>Space</c> makes the Mac's display that many points, so its text is the size this PC's is. The
+    /// Mac's display has two pixels to the point: at 100 % it is asked for twice the stream (space 200), at 200 % the same.
+    /// </summary>
+    public static (int Width, int Height, int Space) Fitted(double dipWidth, double dipHeight, double scale)
+    {
+        if (!double.IsFinite(scale) || scale <= 0) scale = 1;
+        int Side(double dip) => Math.Clamp(double.IsFinite(dip) ? (int)Math.Round(dip * scale) : 0, 320, 4096) & ~1;
+        return (Side(dipWidth), Side(dipHeight), Math.Clamp((int)Math.Round(200 / scale), 50, 200));
+    }
+
     /// <summary>What a refusal of the screen says (RemoteScreenWindow.swift's wording, for a PC).</summary>
     public static string Refusal(Shell.ShellError error, string name) => error switch
     {

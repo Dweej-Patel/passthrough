@@ -103,7 +103,12 @@ final class ComputerShareModel: ObservableObject {
                     }
                 case let .host(info):
                     guard !self.askedViewer else { return }
-                    guard let hex = info.idKey, let idKey = ComputerProof.publicKey(hex: hex) else { return self.failed(tooOld) }
+                    guard let hex = info.idKey, let idKey = ComputerProof.publicKey(hex: hex) else {
+                        // Answered without a key: say why when it says (no one signed in, Passthrough not open).
+                        self.askedViewer = true
+                        let words = HostWords(kind: Hosts.kind(live: info, stored: nil), name: viewerHost.macName, device: ThisDevice.name)
+                        return self.failed(HostCopy.cantTakeAccess(info, words))
+                    }
                     self.askedViewer = true
                     let kind = Hosts.isRecordable(info.kind) ? info.kind : nil
                     self.grant(sharedHost, to: viewerHost, name: name, scopes: scopes, idKey: idKey, kind: kind, shell: shell, generation: gen)
@@ -166,7 +171,8 @@ final class ComputerShareModel: ObservableObject {
                     guard Computers.isUsable(pass) else {
                         return self.failed("This \(ThisDevice.name)'s details for \(sharedHost.macName) can't be handed over. Open \(sharedHost.macName) on this \(ThisDevice.name) so they refresh, then try again.")
                     }
-                    self.phase = .working("Handing it to \(viewerHost.macName)…")
+                    self.phase = .working(HostCopy.handingOver(HostWords(kind: shell.kind(of: viewerHost.macID), name: viewerHost.macName,
+                                                                         device: ThisDevice.name)))
                     self.passSent = true
                     self.viewer?.client.giveComputerPass(pass, scopes: grantedScopes, pending: pending)
                 case let .failed(error, _):

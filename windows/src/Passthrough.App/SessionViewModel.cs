@@ -77,7 +77,7 @@ public sealed partial class SessionViewModel : ObservableBase
         if (OpenComputers is not { } open) return;
         if (await open() is not { } list)
         {
-            SetComputersNote("Windows didn't confirm it's you. Your computers open after Windows Hello (a PIN is enough); set it up in Settings ▸ Accounts ▸ Sign-in options if it isn't.");
+            SetComputersNote("Windows didn't confirm it's you. Your computers open after Windows Hello, or your Windows password when Hello isn't set up.");
             return;
         }
         _computersShown = true;

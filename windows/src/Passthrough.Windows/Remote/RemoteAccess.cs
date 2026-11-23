@@ -68,14 +68,10 @@ public sealed class RemoteAccess : IAccessAdmin, IDisposable
         _admin.Changed += () => _ = RefreshGrantAsync();
         _admin.AccessChanged += () => _ = RefreshPhonesAsync();
         _admin.NoticesChanged += () => _ = RefreshNoticesAsync();
-        Reach = new Passthrough.Core.Trust.ComputerReachStore(secrets, new Passthrough.Windows.Trust.HelloSigner());
+        // Windows Hello when this PC has it; without (no PIN set up), the account's Windows password stands in.
+        _password = new Passthrough.Windows.Trust.PasswordSigner(secrets, "Type your Windows password to confirm it's you. Passthrough asks before it uses your other computers from this PC.", log);
+        Reach = new Passthrough.Core.Trust.ComputerReachStore(secrets, new Passthrough.Windows.Trust.HelloSigner(), _password);
         _server.SavePass = KeepPassAsync;
-        _ = Task.Run(async () =>
-        {
-            // Only with Windows Hello can this PC keep access to other computers; then phones are told its identity key.
-            _canKeep = await new Passthrough.Windows.Trust.HelloSigner().IsAvailableAsync().ConfigureAwait(false);
-            _server.PushState();
-        });
         _server.LinkChanged += linked =>
         {
             if (linked) _ = Task.Run(AfterLinkAsync);
@@ -403,20 +399,24 @@ public sealed class RemoteAccess : IAccessAdmin, IDisposable
     {
         Shells = [.. Catalog.Shells],
         User = Environment.UserName,
-        IdKey = _canKeep && Identity() is { } identity ? Convert.ToHexStringLower(identity.PublicKey) : null, // lowercase hex, as host.idKey is on the wire
+        // Every account can keep access to other computers (behind Hello, or its password), so phones are always told its key.
+        IdKey = Identity() is { } identity ? Convert.ToHexStringLower(identity.PublicKey) : null, // lowercase hex, as host.idKey is on the wire
         Display = _display.Current(),
     };
 
-    private volatile bool _canKeep;
+    private readonly Passthrough.Windows.Trust.PasswordSigner _password;
     private Passthrough.Windows.Trust.CngComputerIdentity? _identity;
+    private readonly Lock _identityLock = new();
 
-    /// <summary>The computers this PC can reach (stage 7 a.5), sealed behind Windows Hello.</summary>
+    /// <summary>The computers this PC can reach (stage 7 a.5), sealed behind Windows Hello, or the Windows password on a PC without it.</summary>
     public Passthrough.Core.Trust.ComputerReachStore Reach { get; }
 
     /// <summary>This account's identity key as a viewer, made on first need.</summary>
     public Passthrough.Core.Trust.IComputerIdentity? Identity()
     {
-        try { return _identity ??= Passthrough.Windows.Trust.CngComputerIdentity.LoadOrCreate(); }
+        // Asked from the pipe's thread and the display timer's: made once, or two could each make a key in a different
+        // provider and a phone be told one this PC doesn't load next time.
+        try { lock (_identityLock) return _identity ??= Passthrough.Windows.Trust.CngComputerIdentity.LoadOrCreate(); }
         catch (System.Security.Cryptography.CryptographicException e) { _log?.Invoke($"trust: no identity key ({e.HResult:X8})"); return null; }
     }
 
@@ -426,15 +426,21 @@ public sealed class RemoteAccess : IAccessAdmin, IDisposable
 
     /// <summary>
     /// Windows Hello for one screen window (stage 8: every window asks, so someone at an unlocked PC can't take over the
-    /// Mac with a click): a signature over a fresh challenge with this account's Hello key. False when not confirmed.
+    /// Mac with a click): a signature over a fresh challenge with this account's Hello key, or, on a PC without Hello,
+    /// its Windows password. False when not confirmed.
     /// </summary>
-    public async Task<bool> ConfirmPresenceAsync() =>
-        await new Passthrough.Windows.Trust.HelloSigner().SignAsync(System.Security.Cryptography.RandomNumberGenerator.GetBytes(32)) is not null;
+    public async Task<bool> ConfirmPresenceAsync()
+    {
+        var hello = new Passthrough.Windows.Trust.HelloSigner();
+        return await hello.IsAvailableAsync().ConfigureAwait(false)
+            ? await hello.SignAsync(System.Security.Cryptography.RandomNumberGenerator.GetBytes(32)).ConfigureAwait(false) is not null
+            : await _password.ConfirmAsync().ConfigureAwait(false);
+    }
 
     /// <summary>Fires when this PC was handed access to another computer.</summary>
     public event Action<string>? ComputerReceived;
 
-    /// <summary>A phone handed this account access to another computer: kept behind Windows Hello, after one confirmation.</summary>
+    /// <summary>A phone handed this account access to another computer: kept behind Windows Hello (or the Windows password), after one confirmation.</summary>
     private async Task<string?> KeepPassAsync(PipeMessage m)
     {
         if (m.Pass is not { } pass) return ShellError.BadRequest.ToWire();

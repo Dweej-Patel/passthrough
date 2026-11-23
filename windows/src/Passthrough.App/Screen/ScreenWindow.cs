@@ -79,12 +79,32 @@ internal sealed class ScreenWindow : Window, IScreenView
     private (double X, double Y)? _localPointer;
     private (int Width, int Height, int HotX, int HotY)? _shape;
     private DispatcherQueueTimerWrapper? _pinchEnd;
+    private DispatcherQueueTimerWrapper? _refit;
+    private DispatcherQueueTimerWrapper? _fitRefused;
+    private ScreenFit? _lastFitted;
+    private (int Width, int Height, int Space)? _lastFit;
+
+    /// <summary>
+    /// How long the Mac's own display must stay the answer before a fitted one counts as refused: the Mac says
+    /// <c>fitted</c> for every capture it starts, so an answer to an earlier ask can come just after Fit to window is clicked.
+    /// </summary>
+    private static readonly TimeSpan RefusedAfter = TimeSpan.FromSeconds(2);
     private bool _pinching;
+    private bool _fit;
+    private readonly Passthrough.Core.Storage.ISettingsStore? _settings;
+    private readonly Microsoft.UI.Xaml.Controls.Primitives.ToggleButton _fitButton = new() { Content = "Fit to window" };
+
+    /// <summary>After the window stops changing size for this long, the Mac is asked for a display in its new shape (each ask is a new display there).</summary>
+    private static readonly TimeSpan RefitAfter = TimeSpan.FromMilliseconds(500);
+
+    private string FitKey => "screen.fit." + _computer.HostId;
     private int _toastId;
 
-    public ScreenWindow(ReachableComputer computer, IComputerIdentity identity, Func<Task<bool>> confirm)
+    public ScreenWindow(ReachableComputer computer, IComputerIdentity identity, Func<Task<bool>> confirm, Passthrough.Core.Storage.ISettingsStore? settings = null)
     {
         _computer = computer;
+        _settings = settings;
+        _fit = settings?.Get(FitKey) == "true";
         _identity = identity;
         _confirm = confirm;
         _name = ScreenFrame.Clean(computer.Credential.MacName);
@@ -127,6 +147,17 @@ internal sealed class ScreenWindow : Window, IScreenView
         full.Click += (_, _) => ToggleFullScreen();
         _retry.Click += async (_, _) => await StartAsync();
         AutomationName(_retry, "Try again");
+        _fitButton.IsChecked = _fit;
+        ToolTipService.SetToolTip(_fitButton, "The Mac makes a display in this window's shape, so its picture fills the window. The Mac's own screen shows that display while you're here.");
+        AutomationName(_fitButton, "Fit to window");
+        _fitButton.Click += (_, _) =>
+        {
+            _fit = _fitButton.IsChecked == true;
+            try { _settings?.Set(FitKey, _fit ? "true" : "false"); }
+            catch (Exception e) when (e is IOException or UnauthorizedAccessException or InvalidOperationException) { LogFile.Error(e); } // not remembered, still done
+            _client?.Relayout(Layout());
+            _typing.Focus(FocusState.Programmatic);
+        };
 
         var bar = new Grid { Padding = new Thickness(12, 6, 12, 6), ColumnSpacing = 8 };
         bar.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
@@ -139,6 +170,7 @@ internal sealed class ScreenWindow : Window, IScreenView
         var buttons = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 6 };
         buttons.Children.Add(send);
         buttons.Children.Add(copy);
+        buttons.Children.Add(_fitButton);
         buttons.Children.Add(full);
         Grid.SetColumn(buttons, 2);
         bar.Children.Add(buttons);
@@ -157,7 +189,14 @@ internal sealed class ScreenWindow : Window, IScreenView
         _stage.PointerCaptureLost += (_, _) => ReleaseButtons();
         _stage.PointerExited += (_, _) => { _localPointer = null; PlacePointer(); };
         _stage.PointerWheelChanged += OnWheel;
-        _stage.SizeChanged += (_, _) => PlacePointer();
+        _stage.SizeChanged += (_, _) =>
+        {
+            PlacePointer();
+            if (!_fit || _client is null) return;
+            // Dragging the edge sends one ask, when it stops: each is a new display on the Mac.
+            _refit ??= new DispatcherQueueTimerWrapper(_ui, RefitAfter, () => { if (_fit && !_minimized) _client?.Relayout(Layout()); });
+            _refit.Restart();
+        };
         _typing.PreviewKeyDown += OnKeyDown;
         _typing.PreviewKeyUp += OnKeyUp;
         _typing.TextChanged += OnTyped;
@@ -229,21 +268,21 @@ internal sealed class ScreenWindow : Window, IScreenView
             switch (e)
             {
                 case ShellClientEvent.Ready ready:
-                    _ui.TryEnqueue(() => { if (generation == _generation) _path = ready.Path; });
+                    OnUi(() => { if (generation == _generation) _path = ready.Path; });
                     shell!.RequestScreen(video: true);
                     break;
                 case ShellClientEvent.Screen screen:
                     screenGiven = true;
                     var codecs = SafeCodecs(); // probed off the UI thread
-                    _ui.TryEnqueue(() => StartStream(generation, screen, codecs));
+                    OnUi(() => StartStream(generation, screen, codecs));
                     break;
                 case ShellClientEvent.Failed failed:
-                    _ui.TryEnqueue(() => { if (generation == _generation) Fail(ScreenFrame.Refusal(failed.Reason, _name)); });
+                    OnUi(() => { if (generation == _generation) Fail(ScreenFrame.Refusal(failed.Reason, _name)); });
                     shell!.Disconnect();
                     break;
                 case ShellClientEvent.Disconnected d when !screenGiven:
                     LogFile.Write($"screen: no connection ({d.Error?.GetType().Name ?? "clean"})");
-                    _ui.TryEnqueue(() => { if (generation == _generation && _phase is Phase.Connecting or Phase.Reconnecting) Lost(); });
+                    OnUi(() => { if (generation == _generation && _phase is Phase.Connecting or Phase.Reconnecting) Lost(); });
                     break;
             }
         }, identity: _identity);
@@ -259,7 +298,19 @@ internal sealed class ScreenWindow : Window, IScreenView
 
     private ScreenVideoClient.Layout Layout()
     {
-        var sides = DisplayArea.FindAll().Select(d => Math.Max(d.OuterBounds.Width, d.OuterBounds.Height));
+        if (_fit)
+        {
+            // Minimised or not laid out yet, the stage has no size: the last shape is kept, so only the rate changes.
+            if (!_minimized && _stage.ActualWidth >= 1 && _stage.ActualHeight >= 1)
+                _lastFit = ScreenFrame.Fitted(_stage.ActualWidth, _stage.ActualHeight, _stage.XamlRoot?.RasterizationScale ?? 1);
+            if (_lastFit is var (width, height, space))
+                return new ScreenVideoClient.Layout(width, height, ScreenFit.Device, _minimized ? 15 : 60, Space: space);
+        }
+        // By index, never enumerated: the list DisplayArea.FindAll returns can't be cast to IEnumerable by the WinRT
+        // projection (InvalidCastException, E_NOINTERFACE), so foreach or LINQ over it throws.
+        var areas = DisplayArea.FindAll();
+        var sides = new List<int>();
+        for (var i = 0; i < areas.Count; i++) sides.Add(Math.Max(areas[i].OuterBounds.Width, areas[i].OuterBounds.Height));
         var side = ScreenFrame.RequestedSide(sides);
         return new ScreenVideoClient.Layout(side, side, ScreenFit.Mac, _minimized ? 15 : 60);
     }
@@ -288,6 +339,22 @@ internal sealed class ScreenWindow : Window, IScreenView
         ShowSubtitle();
     }
 
+    /// <summary>
+    /// Runs on the window's thread. Anything thrown there is logged and ends the view with a sentence: an exception
+    /// left in a dispatcher callback ends the whole app, and Windows keeps no trace of where.
+    /// </summary>
+    private void OnUi(Action action) => _ui.TryEnqueue(() =>
+    {
+        try { action(); }
+        catch (Exception e) when (e is not OutOfMemoryException)
+        {
+            LogFile.Error(e);
+            LogFile.Flush();
+            try { if (_phase != Phase.Closed) Fail($"{_name}'s screen couldn't be shown on this PC."); }
+            catch (Exception again) when (again is not OutOfMemoryException) { LogFile.Error(again); }
+        }
+    });
+
     private void Lost()
     {
         if (_redial < Redials.Length)
@@ -297,7 +364,7 @@ internal sealed class ScreenWindow : Window, IScreenView
             _picture.Opacity = 0.4;
             Status("Reconnecting…", retry: false);
             var generation = _generation;
-            _ = Task.Delay(delay).ContinueWith(_ => _ui.TryEnqueue(() =>
+            _ = Task.Delay(delay).ContinueWith(_ => OnUi(() =>
             {
                 if (generation == _generation && _phase == Phase.Reconnecting) Connect();
             }), TaskScheduler.Default);
@@ -373,6 +440,7 @@ internal sealed class ScreenWindow : Window, IScreenView
         _streamHeight = height;
         if (_sized) return;
         _sized = true;
+        if (_fit) return; // the stream follows the window, not the other way round
         // First size: the stream's shape fitted in 80% of the work area.
         var work = DisplayArea.GetFromWindowId(AppWindow.Id, DisplayAreaFallback.Nearest).WorkArea;
         var barHeight = (int)(44 * NativeMethods.DpiOf(Win32Interop.GetWindowFromWindowId(AppWindow.Id)) / 96.0);
@@ -423,12 +491,31 @@ internal sealed class ScreenWindow : Window, IScreenView
             PlacePointer();
         }
         catch (Exception e) when (e is COMException or ArgumentException or InvalidOperationException) { } // the last shape stays
+        catch (Exception e) when (e is not OutOfMemoryException) { LogFile.Error(e); LogFile.Flush(); } // async void: anything left here would end the app
     }
 
     public void Viewers(IReadOnlyList<string> names)
     {
         _viewers = names;
         ShowSubtitle();
+    }
+
+    public void Fitted(ScreenFit fit)
+    {
+        _lastFitted = fit;
+        if (!_fit || fit == ScreenFit.Device) return;
+        // Asked for a display in this window's shape and told the Mac's own: a refusal (another view has the one it can
+        // make, or macOS wouldn't) only if that is still the answer in a moment, not the answer to an earlier ask.
+        _fitRefused ??= new DispatcherQueueTimerWrapper(_ui, RefusedAfter, () =>
+        {
+            if (!_fit || _lastFitted != ScreenFit.Mac || _phase != Phase.Live) return;
+            // The choice is kept for next time; this view shows what it was given, and asks for it at full size.
+            _fit = false;
+            _fitButton.IsChecked = false;
+            _client?.Relayout(Layout());
+            Toast($"{_name} couldn't make a display for this window. Showing its own.");
+        });
+        _fitRefused.Restart();
     }
 
     public void MovedAway(string to)

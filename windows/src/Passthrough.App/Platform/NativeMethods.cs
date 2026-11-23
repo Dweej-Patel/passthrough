@@ -31,6 +31,8 @@ internal static class NativeMethods
     /// for the call is the way round it. A front window that isn't answering is left alone (joining its queue would
     /// wait on it), and Windows refuses the join for an elevated one. False when the window did not get to the front.
     /// </summary>
+    public static bool IsInFront(IntPtr hwnd) => GetForegroundWindow() == hwnd;
+
     public static bool BringToFront(IntPtr hwnd)
     {
         if (SetForegroundWindow(hwnd)) return GetForegroundWindow() == hwnd;

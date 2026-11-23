@@ -29,6 +29,8 @@ internal interface IScreenView
     void Cursor(double x, double y, bool visible);
     void CursorShape(int width, int height, int hotX, int hotY, byte[] png);
     void Viewers(IReadOnlyList<string> names);
+    /// <summary>What the Mac shows from now on: its own display, or one made in this window's shape.</summary>
+    void Fitted(ScreenFit fit);
     void MovedAway(string to);
     void Copied(ScreenCopyResult result);
     void StreamClosed(Exception? error);
@@ -78,7 +80,20 @@ internal sealed class ScreenPipeline : IScreenSink, IDisposable
     private FormatItem? _latestFormat;
     private bool _formatQueued;
 
-    private void Post(Action action) => _ui.TryEnqueue(() => { if (!_closed) action(); });
+    private void Post(Action action) => OnUi(() => { if (!_closed) action(); });
+
+    /// <summary>On the window's thread; what is thrown there is logged and closes the view, instead of ending the app with no trace.</summary>
+    private void OnUi(Action action) => _ui.TryEnqueue(() =>
+    {
+        try { action(); }
+        catch (Exception e) when (e is not OutOfMemoryException)
+        {
+            Platform.LogFile.Error(e);
+            Platform.LogFile.Flush();
+            try { _view.StreamClosed(new DecodeException("The picture couldn't be drawn.", e)); }
+            catch (Exception again) when (again is not OutOfMemoryException) { Platform.LogFile.Error(again); }
+        }
+    });
 
     // MARK: IScreenSink (the read loop)
 
@@ -124,7 +139,7 @@ internal sealed class ScreenPipeline : IScreenSink, IDisposable
 
     private volatile bool _dropUntilKeyframe;
 
-    public void Fitted(ScreenFit fit) { }
+    public void Fitted(ScreenFit fit) => Post(() => _view.Fitted(fit));
     public void Cursor(double x, double y, bool visible) => Post(() => _view.Cursor(x, y, visible));
     public void CursorShape(int width, int height, int hotX, int hotY, ReadOnlyMemory<byte> png)
     {
@@ -141,7 +156,7 @@ internal sealed class ScreenPipeline : IScreenSink, IDisposable
     public void Closed(Exception? error)
     {
         _queue.Writer.TryComplete();
-        _ui.TryEnqueue(() => _view.StreamClosed(error));
+        OnUi(() => _view.StreamClosed(error));
     }
 
     // MARK: Decoding
@@ -190,6 +205,7 @@ internal sealed class ScreenPipeline : IScreenSink, IDisposable
         catch (Exception e) when (e is not OutOfMemoryException)
         {
             Platform.LogFile.Error(e);
+            Platform.LogFile.Flush();
             Fail(e);
         }
         finally
@@ -267,7 +283,7 @@ internal sealed class ScreenPipeline : IScreenSink, IDisposable
 
     private void Fail(Exception e)
     {
-        _ui.TryEnqueue(() => _view.StreamClosed(e));
+        OnUi(() => _view.StreamClosed(e));
         if (_client is { } c) _ = c.DisposeAsync().AsTask();
     }
 
