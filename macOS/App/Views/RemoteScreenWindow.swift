@@ -57,20 +57,25 @@ struct RemoteScreenWindow: View {
                 .padding(24)
             }
         }
-        .overlay(alignment: .bottom) {
+        .overlay(alignment: .top) {
+            // At the top, clear of the other Mac's Dock.
             if model.phase == .live, let status = model.clipStatus {
-                ClipStatusBadge(text: status)
+                ClipStatusBadge(status: status)
             }
         }
         .frame(minWidth: 480, minHeight: 300)
         .navigationTitle(model.macName)
-        .navigationSubtitle(model.subtitle)
+        .navigationSubtitle(model.clipActive && !model.subtitle.isEmpty ? "\(model.subtitle) · clipboard shared" : model.subtitle)
         .toolbar {
             ToolbarItemGroup(placement: .primaryAction) {
-                Toggle(isOn: $model.clipSyncOn) { Label("Sync Clipboard", systemImage: "arrow.left.arrow.right.square") }
+                Toggle(isOn: $model.clipSyncOn) { Label("Sync Clipboard", systemImage: "list.clipboard") }
                     .help(model.clipActive
-                          ? "Copies here and on \(model.macName) go to the other, and files dropped on the window land there. Click to stop."
-                          : "Sync the clipboard with \(model.macName) and drop files on it")
+                          ? "Copies here and on \(model.macName) can be pasted on the other, and files dropped on the window land there. Click to stop."
+                          : model.clipSyncOn
+                            ? "Clipboard sync with \(model.macName) isn't running right now"
+                            : "Share the clipboard with \(model.macName), and drop files on it")
+                    .accessibilityLabel("Sync Clipboard")
+                    .accessibilityValue(model.clipActive ? "On, running" : model.clipSyncOn ? "On, not running" : "Off")
                 if !model.clipActive {
                     Button { model.sendClipboard() } label: { Label("Send Clipboard", systemImage: "doc.on.clipboard") }
                         .help("Put this Mac's clipboard text on \(model.macName)'s clipboard")
@@ -88,7 +93,7 @@ struct RemoteScreenWindow: View {
         }
         .onDisappear {
             shown = false
-            model.stop()
+            model.close()
         }
         .onReceive(NotificationCenter.default.publisher(for: .passthroughScreenPassChanged)) { note in
             guard note.userInfo?["macID"] as? String == macID else { return }
@@ -154,26 +159,47 @@ protocol RemoteScreenSource: AnyObject {
     var acceptsDrops: Bool { get }
     /// Files dropped at (`x`, `y`), each 0…1 across the stream.
     func drop(_ urls: [URL], x: Double, y: Double)
+    /// Files are being dragged over the window but can't be dropped there: say why.
+    func dropRefused(outsidePicture: Bool)
 }
 
 extension RemoteScreenSource {
     var acceptsDrops: Bool { false }
     func drop(_ urls: [URL], x: Double, y: Double) {}
+    func dropRefused(outsidePicture: Bool) {}
 }
 
-/// What clipboard sync is doing, for a few seconds, at the bottom of a screen window.
+/// What clipboard sync is doing, at the top of a screen window, with its buttons when it asks something.
 struct ClipStatusBadge: View {
-    let text: String
+    let status: ClipStatus
 
     var body: some View {
-        Text(text)
-            .font(.callout)
-            .padding(.horizontal, 14)
-            .padding(.vertical, 7)
-            .background(.regularMaterial, in: Capsule())
-            .padding(.bottom, 16)
-            .transition(.opacity)
-            .allowsHitTesting(false)
+        HStack(spacing: 10) {
+            Text(status.text)
+                .font(.callout)
+                .fixedSize(horizontal: false, vertical: true)
+            ForEach(Array(status.actions.enumerated()), id: \.offset) { index, action in
+                Button(action.title) { action.run() }
+                    .controlSize(.small)
+                    .keyboardShortcut(index == 0 ? .defaultAction : .cancelAction)
+            }
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 7)
+        .background(.regularMaterial, in: Capsule())
+        .padding(.top, 12)
+        .padding(.horizontal, 16)
+        .transition(.opacity)
+        .allowsHitTesting(!status.actions.isEmpty)
+        .accessibilityElement(children: .combine)
+        .onAppear { announce() }
+        .onChange(of: status.text) { announce() }
+    }
+
+    private func announce() {
+        guard status.announce else { return }
+        NSAccessibility.post(element: NSApp as Any, notification: .announcementRequested,
+                             userInfo: [.announcement: status.text, .priority: NSAccessibilityPriorityLevel.high.rawValue])
     }
 }
 
@@ -209,14 +235,13 @@ final class RemoteScreenModel: ObservableObject {
     private var dialer: IrohShellDialer?
     private var video: ScreenVideoClient?
     /// What clipboard sync is doing, shown for a while (nil: nothing to say).
-    @Published private(set) var clipStatus: String?
+    @Published private(set) var clipStatus: ClipStatus?
     /// Sync this Mac's clipboard with the other one's while the window is open. Remembered for every window.
     @Published var clipSyncOn = UserDefaults.standard.object(forKey: RemoteScreenModel.clipSyncKey) as? Bool ?? true {
         didSet {
             guard clipSyncOn != oldValue else { return }
             UserDefaults.standard.set(clipSyncOn, forKey: Self.clipSyncKey)
             clipTries = 0
-            clipOffered = false
             if clipSyncOn { startClipSync() } else { stopClipSync() }
         }
     }
@@ -234,8 +259,6 @@ final class RemoteScreenModel: ObservableObject {
     private var clipSession: UUID?
     /// Sync is running: drops are taken, and the Copy and Send buttons give way to it.
     @Published private(set) var clipActive = false
-    /// This window already sent its clipboard as it was when sync started.
-    private var clipOffered = false
     private var clipStatusClear: DispatchWorkItem?
     private var browser: NWBrowser?
     private var generation = 0
@@ -304,6 +327,13 @@ final class RemoteScreenModel: ObservableObject {
         dialer?.shutdown()
         dialer = nil
         buttons = []
+        // The screen is reconnecting or stopped: sync pauses, and what it received stays (it may be on this clipboard).
+        pauseClipSync()
+    }
+
+    /// The window closed: sync ends for good.
+    func close() {
+        stop()
         stopClipSync()
     }
 
@@ -490,6 +520,16 @@ final class RemoteScreenModel: ObservableObject {
         client.connect(discovered: discovered)
     }
 
+    /// Ends this connection's sync but keeps the window's viewer and what it received.
+    private func pauseClipSync() {
+        dropClipClient()
+        clipViewer?.disconnect()
+        clipActive = false
+        clipSession = nil
+        clipStatusClear?.cancel()
+        clipStatus = nil
+    }
+
     private func stopClipSync() {
         clipToken = nil
         clipClient?.disconnect()
@@ -524,7 +564,7 @@ final class RemoteScreenModel: ObservableObject {
             clipToken = nil
             clipClient = nil   // it let go of the stream; the dialer stays up for it
             // One per window, across reconnects: the copies it received stay where its clipboard points.
-            let viewer = clipViewer ?? ClipSyncViewer(hostName: macName) { [weak self] in self?.showClipStatus($0, timed: false) }
+            let viewer = clipViewer ?? ClipSyncViewer(hostName: macName) { [weak self] in self?.showClipStatus($0) }
             clipViewer = viewer
             clipActive = true
             // The cap counts tries in a row that didn't hold: one that lasts a while starts it again,
@@ -535,20 +575,20 @@ final class RemoteScreenModel: ObservableObject {
                 guard let self, self.clipSession == session, self.clipActive else { return }
                 self.clipTries = 0
             }
-            // This Mac's clipboard goes over once per window (and when sync is turned back on), not on every reconnect:
-            // it would replace what was copied on the other Mac meanwhile.
-            viewer.start(stream: stream, initialBytes: initialBytes, offerCurrent: !clipOffered) { [weak self, weak viewer] in
+            // Only what's copied from now on goes over: opening the window doesn't change the other Mac's clipboard.
+            viewer.start(stream: stream, initialBytes: initialBytes) { [weak self, weak viewer] in
                 guard let self, let viewer, self.clipViewer === viewer else { return }
                 self.clipEnded(generation: gen)
             }
-            clipOffered = true
         case let .clipSyncRefused(reason):
             dropClipClient()
             switch reason {
             // The view's start hadn't reached it yet: ask again shortly.
             case .noScreenView: retryClipSync(after: 1.5, generation: gen)
-            case .clipSyncOff: showClipStatus("\(macName) has clipboard sync turned off. Once it's on again there, turn Sync Clipboard off and on here.")
-            default: showClipStatus("\(macName) can't sync the clipboard (update Passthrough there).")
+            case .clipSyncOff: showClipStatus("Clipboard sync is off on \(macName). Send Clipboard and Copy from Mac still work.", timed: 8)
+            case .clipSyncUnavailable: showClipStatus("\(macName) can't sync its clipboard right now.", timed: 8)
+            // Too old to know the request.
+            default: showClipStatus("\(macName) needs a newer Passthrough to sync the clipboard.", timed: 8)
             }
         case .failed(_, _), .disconnected:
             dropClipClient()
@@ -569,7 +609,7 @@ final class RemoteScreenModel: ObservableObject {
 
     private func retryClipSync(after delay: TimeInterval, generation gen: Int) {
         guard clipTries < 5 else {
-            return showClipStatus("Clipboard sync with \(macName) stopped. Turn Sync Clipboard off and on to try again.")
+            return showClipStatus("Clipboard sync with \(macName) stopped. Turn Sync Clipboard off and on to try again.", timed: 8)
         }
         DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
             guard let self, gen == self.generation else { return }
@@ -577,14 +617,30 @@ final class RemoteScreenModel: ObservableObject {
         }
     }
 
-    /// A line at the bottom of the window; `timed` ones go after a few seconds.
-    private func showClipStatus(_ text: String?, timed: Bool = true) {
+    /// A line at the top of the window: the viewer's (it clears its own), or one of the model's that
+    /// goes after `timed` seconds.
+    private func showClipStatus(_ status: ClipStatus?) {
         clipStatusClear?.cancel()
-        clipStatus = text
-        guard timed, text != nil else { return }
+        clipStatus = status
+    }
+
+    private func showClipStatus(_ text: String, timed seconds: TimeInterval) {
+        clipStatusClear?.cancel()
+        clipStatus = ClipStatus(text)
         let clear = DispatchWorkItem { [weak self] in self?.clipStatus = nil }
         clipStatusClear = clear
-        DispatchQueue.main.asyncAfter(deadline: .now() + 5, execute: clear)
+        DispatchQueue.main.asyncAfter(deadline: .now() + seconds, execute: clear)
+    }
+
+    func dropRefused(outsidePicture: Bool) {
+        guard clipStatus == nil || clipStatusClear != nil else { return }
+        if outsidePicture, clipActive {
+            showClipStatus("Drop on the picture to put them there on \(macName).", timed: 3)
+        } else if !clipSyncOn {
+            showClipStatus("Turn on Sync Clipboard to drop files on \(macName).", timed: 3)
+        } else if !clipActive {
+            showClipStatus("Clipboard sync with \(macName) isn't running, so files can't go there.", timed: 3)
+        }
     }
 }
 
@@ -658,7 +714,14 @@ final class RemoteScreenView: NSView, NSTextInputClient {
         return .copy
     }
 
-    override func draggingEntered(_ info: NSDraggingInfo) -> NSDragOperation { dropOperation(info) }
+    override func draggingEntered(_ info: NSDraggingInfo) -> NSDragOperation {
+        let operation = dropOperation(info)
+        // Not taken: say why rather than only showing the no-entry pointer.
+        if operation.isEmpty, isLive, info.draggingPasteboard.canReadObject(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true]) {
+            model.dropRefused(outsidePicture: !pictureRect.contains(convert(info.draggingLocation, from: nil)))
+        }
+        return operation
+    }
     override func draggingUpdated(_ info: NSDraggingInfo) -> NSDragOperation { dropOperation(info) }
 
     override func performDragOperation(_ info: NSDraggingInfo) -> Bool {

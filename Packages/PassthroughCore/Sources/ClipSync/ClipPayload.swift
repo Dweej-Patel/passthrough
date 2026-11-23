@@ -138,6 +138,8 @@ public struct ReceivedTransfer: Sendable {
     public var items: [Item]
     /// The folder the files are in (nil when there are none); the receiver decides when it goes.
     public var folder: URL?
+    /// The items' sizes added up, as offered.
+    public var total: UInt64 = 0
 
     /// The files and folders at the top, which hold the rest.
     public var topLevel: [URL] { items.filter { $0.format.isFile && ClipSyncWire.parent(of: $0.name) == nil }.compactMap(\.url) }

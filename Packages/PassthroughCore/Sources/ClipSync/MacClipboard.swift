@@ -17,8 +17,8 @@ public enum MacClipboard {
 
     public enum Snapshot: Sendable {
         case payload(ClipPayload)
-        /// Over the clipboard's limits: drag it in instead.
-        case tooLarge
+        /// Over the clipboard's limits: files over 500 MB in all (drag them in instead), or text or an image over its own.
+        case tooLarge(files: Bool)
         /// Nothing that syncs (empty, secret, or from the stream).
         case nothing
     }
@@ -45,7 +45,7 @@ public enum MacClipboard {
         if !urls.isEmpty {
             switch ClipPayload.files(urls, maxBytes: ClipSyncWire.maxClipboardFiles, maxItems: ClipSyncWire.maxItems) {
             case let .success(payload): return payload.items.isEmpty ? .nothing : .payload(payload)
-            case .failure(.tooLarge): return .tooLarge
+            case .failure(.tooLarge): return .tooLarge(files: true)
             case .failure: return .nothing
             }
         }
@@ -60,7 +60,7 @@ public enum MacClipboard {
         add(.rtf, pasteboard.data(forType: .rtf), cap: ClipSyncWire.maxClipboardText)
         add(.html, pasteboard.data(forType: .html), cap: ClipSyncWire.maxClipboardText)
         add(.png, png(pasteboard), cap: ClipSyncWire.maxClipboardImage)
-        if items.isEmpty { return over ? .tooLarge : .nothing }
+        if items.isEmpty { return over ? .tooLarge(files: false) : .nothing }
         return .payload(ClipPayload(items: items))
     }
 
@@ -69,6 +69,17 @@ public enum MacClipboard {
         if let png = pasteboard.data(forType: .png) { return png }
         guard let tiff = pasteboard.data(forType: .tiff), let rep = NSBitmapImageRep(data: tiff) else { return nil }
         return rep.representation(using: .png, properties: [:])
+    }
+
+    /// The folders directly under `staging` that the clipboard's files are in now, standardized.
+    public static func folders(within staging: URL, _ pasteboard: NSPasteboard = .general) -> Set<URL> {
+        let urls = (pasteboard.readObjects(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true]) as? [URL]) ?? []
+        let base = staging.standardizedFileURL.pathComponents
+        return Set(urls.compactMap { url -> URL? in
+            let parts = url.standardizedFileURL.pathComponents
+            guard parts.count > base.count, Array(parts.prefix(base.count)) == base else { return nil }
+            return staging.appendingPathComponent(parts[base.count], isDirectory: true).standardizedFileURL
+        })
     }
 
     /// Puts what came from the other side on the clipboard, marked as from the

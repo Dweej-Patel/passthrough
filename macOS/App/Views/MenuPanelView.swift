@@ -565,8 +565,14 @@ struct ScreenViewerRows: View {
             VStack(spacing: 4) {
                 ForEach(viewers) { viewer in
                     PanelRow(symbol: Self.symbol(viewer.phoneID), symbolColor: PTColor.tintText, fill: PTColor.surfaceOn) {
-                        Text(Self.viewing(viewer))
-                            .font(.system(size: 12.5, weight: .medium)).lineLimit(1).truncationMode(.middle)
+                        VStack(alignment: .leading, spacing: 1) {
+                            Text(Self.viewing(viewer))
+                                .font(.system(size: 12.5, weight: .medium)).lineLimit(1).truncationMode(.middle)
+                            if shell.clipSyncing.contains(viewer.phoneID) {
+                                Text("Syncing the clipboard: copies here and there go to each other")
+                                    .font(.system(size: 11)).foregroundStyle(.secondary).lineLimit(1).truncationMode(.tail)
+                            }
+                        }
                     } trailing: {
                         Button("Stop") { shell.endScreen(for: viewer.phoneID) }
                             .controlSize(.small)

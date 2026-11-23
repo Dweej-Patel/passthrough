@@ -253,7 +253,10 @@ public enum ClipSyncWire {
     }
 
     /// Why a transfer's header can't be taken, or nil. `room`: bytes free where files go.
-    public static func refusal(of offer: Offer, room: UInt64? = nil, maxItems itemCap: UInt32 = 200_000) -> DeclineReason? {
+    /// Most items in a drop either side takes.
+    public static let maxDropItems: UInt32 = 50_000
+
+    public static func refusal(of offer: Offer, room: UInt64? = nil, maxItems itemCap: UInt32 = maxDropItems) -> DeclineReason? {
         let cap = offer.kind == .clipboard ? UInt32(maxItems) : itemCap
         guard offer.count > 0 else { return .badOffer }
         guard offer.count <= cap else { return .tooLarge }

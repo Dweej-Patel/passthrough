@@ -585,8 +585,8 @@ private struct ComputersWithAccessSection: View {
             }
             Toggle(isOn: $clipSync) {
                 VStack(alignment: .leading, spacing: 2) {
-                    Text("Sync the clipboard with computers viewing this screen")
-                    Text("While one has this screen open, what you copy here (text, images, files up to 500 MB) is on its clipboard, and its copies are on this one. Files dropped on its window land where they're dropped here. Passwords from password managers aren't synced. Phones keep their Copy and Paste buttons.")
+                    Text("Share the clipboard with computers viewing this screen")
+                    Text("While one has this screen open, copies on either can be pasted on the other (text, images, files up to 500 MB). Files dragged onto its window are dropped here, so the pointer moves by itself for a moment. What an app marks as secret, as most password managers do, stays here. Phones keep their Copy and Paste buttons.")
                         .font(.caption).foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
                 }

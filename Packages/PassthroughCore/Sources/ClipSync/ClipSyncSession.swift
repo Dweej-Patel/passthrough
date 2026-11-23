@@ -28,7 +28,10 @@ public final class ClipSyncSession: @unchecked Sendable {
     /// Bytes this side lets wait on the stream before it reads more from disk.
     static let inFlightLimit = 1 << 20
     /// Most items in a drop this side takes.
-    public static let maxDropItems: UInt32 = 200_000
+    public static let maxDropItems = ClipSyncWire.maxDropItems
+    /// What each item of a drop is counted as against free space, on top of its bytes (its
+    /// file system entry), so a drop of many empty files can't pass the room check for nothing.
+    static let bytesPerItem: UInt64 = 4096
     /// Most transfers from the other side this side takes at once; past it, an offer is declined (2).
     public static let maxOpenIncoming = 4
 
@@ -43,7 +46,9 @@ public final class ClipSyncSession: @unchecked Sendable {
     private var started = false
 
     // Sending
+    /// Taken under `numbers`, so `send` can answer at once without waiting for the queue.
     private var nextTransfer: UInt32 = 1
+    private let numbers = NSLock()
     private var outgoing: [Outgoing] = []
     private var inFlight = 0
 
@@ -90,10 +95,13 @@ public final class ClipSyncSession: @unchecked Sendable {
     /// transfer abandons this side's previous unfinished one.
     @discardableResult
     public func send(_ payload: ClipPayload, kind: ClipSyncWire.Kind, x: UInt16 = 0, y: UInt16 = 0) -> UInt32 {
-        queue.sync {
-            let id = nextTransfer
-            nextTransfer &+= 1
-            guard !closed, !payload.items.isEmpty else { return id }
+        numbers.lock()
+        let id = nextTransfer
+        nextTransfer &+= 1
+        numbers.unlock()
+        // The rest on the queue: starting to send reads files, which mustn't hold up the caller (the main thread).
+        queue.async { [self] in
+            guard !closed, !payload.items.isEmpty else { return }
             if kind == .clipboard {
                 for old in outgoing where old.offer.kind == .clipboard {
                     old.handle?.closeFile()
@@ -104,7 +112,15 @@ public final class ClipSyncSession: @unchecked Sendable {
             let offer = ClipSyncWire.Offer(transfer: id, kind: kind, x: x, y: y, count: UInt32(payload.items.count), total: payload.total)
             outgoing.append(Outgoing(offer: offer, items: payload.items))
             pump()
-            return id
+        }
+        return id
+    }
+
+    /// Stops the other side's transfer coming (declined, its files thrown away): the user said no.
+    public func stopIncoming(_ transfer: UInt32) {
+        queue.async { [self] in
+            guard !closed, let t = incoming[transfer] else { return }
+            decline(t, .failed)
         }
     }
 
@@ -153,7 +169,7 @@ public final class ClipSyncSession: @unchecked Sendable {
                 write(.item(transfer: t.offer.transfer, index: UInt32(t.index),
                             ClipSyncWire.Item(format: item.format, size: item.size, name: item.name)))
                 if case let .file(url) = item.content, item.size > 0 {
-                    guard let handle = try? FileHandle(forReadingFrom: url) else { abandon(t); continue }
+                    guard let handle = Self.openRegularFile(url) else { abandon(t); continue }
                     t.handle = handle
                 }
                 continue
@@ -187,6 +203,16 @@ public final class ClipSyncSession: @unchecked Sendable {
             t.sentOfItem += UInt64(n)
             write(.data(transfer: t.offer.transfer, item: UInt32(t.index), bytes: Data(chunk)))
         }
+    }
+
+    /// Opens a file to send without following a link: what was listed as a file may have been swapped for
+    /// a link to something else (a key) since, and that mustn't be what's read.
+    static func openRegularFile(_ url: URL) -> FileHandle? {
+        let fd = open(url.path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC)
+        guard fd >= 0 else { return nil }
+        var info = stat()
+        guard fstat(fd, &info) == 0, (info.st_mode & S_IFMT) == S_IFREG else { Darwin.close(fd); return nil }
+        return FileHandle(fileDescriptor: fd, closeOnDealloc: true)
     }
 
     private func abandon(_ t: Outgoing) {
@@ -289,7 +315,7 @@ public final class ClipSyncSession: @unchecked Sendable {
             guard t.check.isComplete else { return decline(t, .badOffer) }
             incoming[transfer] = nil
             emit(.received(ReceivedTransfer(transfer: transfer, kind: t.offer.kind, x: t.offer.x, y: t.offer.y,
-                                            items: t.items, folder: t.folder)))
+                                            items: t.items, folder: t.folder, total: t.offer.total)))
         case let .abandon(transfer):
             guard let t = incoming.removeValue(forKey: transfer) else { return }
             discard(t)
@@ -315,11 +341,19 @@ public final class ClipSyncSession: @unchecked Sendable {
             }
         }
         // Free space less what transfers already coming may still write.
-        let committed = incoming.values.reduce(UInt64(0)) { $0 &+ ($1.offer.total - min($1.written, $1.offer.total)) }
-        let room = self.room().map { $0 > committed ? $0 - committed : 0 }
+        // Each drop's items count against room too (their file system entries); a copy's are few and held to its own limits.
+        let committed = incoming.values.reduce(UInt64(0)) {
+            $0 &+ ($1.offer.total - min($1.written, $1.offer.total)) &+ ($1.offer.kind == .drop ? UInt64($1.offer.count) &* Self.bytesPerItem : 0)
+        }
+        // Free space that can't be read counts as none for a drop (a copy is held to the clipboard's limits anyway).
+        let free = self.room() ?? (offer.kind == .drop ? 0 : nil)
+        let room = free.map { $0 > committed ? $0 - committed : 0 }
+        let need = offer.total &+ UInt64(offer.count) &* Self.bytesPerItem
         let reason: ClipSyncWire.DeclineReason? = if offer.kind == .drop && !acceptsDrops {
             .badOffer
         } else if incoming.count >= Self.maxOpenIncoming {
+            .noRoom
+        } else if offer.kind == .drop, let room, need > room {
             .noRoom
         } else {
             ClipSyncWire.refusal(of: offer, room: room, maxItems: Self.maxDropItems)
@@ -364,6 +398,7 @@ public final class ClipSyncSession: @unchecked Sendable {
                     guard FileManager.default.createFile(atPath: url.path, contents: nil) else { return decline(t, .failed) }
                     t.handle = try FileHandle(forWritingTo: url)
                 }
+                Self.quarantine(url)
             } catch {
                 return decline(t, .failed)
             }
@@ -376,6 +411,15 @@ public final class ClipSyncSession: @unchecked Sendable {
             t.inline = Data()
             t.items.append(ReceivedTransfer.Item(format: format, name: "", data: nil, url: nil))
         }
+    }
+
+    /// Marks a received file or folder as from elsewhere, as a browser marks a download, so
+    /// Gatekeeper asks before anything in it is opened or run.
+    static func quarantine(_ url: URL) {
+        var url = url
+        var values = URLResourceValues()
+        values.quarantineProperties = ["LSQuarantineAgentName": "Passthrough", "LSQuarantineType": "LSQuarantineTypeOtherDownload"]
+        try? url.setResourceValues(values)
     }
 
     private func folder(for t: Incoming) -> URL? {

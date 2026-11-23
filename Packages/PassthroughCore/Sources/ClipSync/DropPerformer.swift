@@ -39,11 +39,25 @@ public final class DropPerformer: NSObject, NSDraggingSource {
     /// the main display at 0, 0, as CoreGraphics' events use), then calls `done`.
     public static func drop(_ files: [URL], at point: CGPoint, done: @escaping (Outcome) -> Void) {
         let run = { DropPerformer().start(files, at: point, done: done) }
-        if busy { queued.append(run) } else { run() }
+        guard busy else { return run() }
+        // A few may wait their turn; more aren't taken (so drops can't keep viewers' input held without end).
+        guard queued.count < maxQueued else { return done(.notTaken) }
+        queued.append(run)
+    }
+
+    static let maxQueued = 3
+
+    /// The next waiting drop, once none is running.
+    private static func next() {
+        guard !busy, !queued.isEmpty else { return }
+        queued.removeFirst()()
     }
 
     private func start(_ files: [URL], at point: CGPoint, done: @escaping (Outcome) -> Void) {
-        guard !files.isEmpty, CGPreflightPostEventAccess() else { return done(.notTaken) }
+        guard !files.isEmpty, CGPreflightPostEventAccess() else {
+            done(.notTaken)
+            return Self.next()
+        }
         Self.busy = true
         Self.active = self
         self.files = files
@@ -70,28 +84,39 @@ public final class DropPerformer: NSObject, NSDraggingSource {
         panel.orderFrontRegardless()
         window = panel
 
-        let timeout = DispatchWorkItem { [weak self] in self?.finish(.timedOut) }
+        let timeout = DispatchWorkItem { [weak self] in
+            // A drag still going after all this time is ended (Escape), so the next pointer move doesn't carry the files on.
+            for down in [true, false] {
+                CGEvent(keyboardEventSource: nil, virtualKey: 53, keyDown: down)?.post(tap: .cghidEventTap)
+            }
+            self?.finish(.timedOut)
+        }
         self.timeout = timeout
         DispatchQueue.main.asyncAfter(deadline: .now() + Self.limit, execute: timeout)
-        // Viewers' own input waits meanwhile, so a move or click of theirs doesn't end the drag elsewhere.
+        // Viewers' own input is set aside while the pointer is ours (about half a second, until it's let go),
+        // so a move or click of theirs doesn't end the drag elsewhere.
         ScreenInputHold.set(true)
 
         // The pointer's path, off the main thread: the drag runs on it meanwhile.
         let pressed = self.pressed
-        DispatchQueue.global(qos: .userInteractive).asyncAfter(deadline: .now() + 0.05) {
+        let me = ProcessInfo.processInfo.processIdentifier
+        DispatchQueue.global(qos: .userInteractive).asyncAfter(deadline: .now() + 0.05) { [weak self] in
             func post(_ type: CGEventType, _ p: CGPoint) {
                 CGEvent(mouseEventSource: nil, mouseType: type, mouseCursorPosition: p, mouseButton: .left)?.post(tap: .cghidEventTap)
             }
+            func end(_ outcome: Outcome) {
+                DispatchQueue.main.async { MainActor.assumeIsolated { self?.finish(outcome) } }
+            }
+            // Only press where our window is on top: otherwise the press would click whatever is there.
+            guard Self.frontmostOwner(at: start) == me else { return end(.notTaken) }
             post(.mouseMoved, start); usleep(30_000)
             post(.leftMouseDown, start)
-            // The press must have reached our window. If it went to something else, let go where it was:
-            // no drag, so nothing under it is moved.
+            // The press must have reached our window; if it somehow didn't, let go at once.
             var waited = 0
             while !pressed.get(), waited < 250 { usleep(10_000); waited += 10 }
             guard pressed.get() else {
                 post(.leftMouseUp, start)
-                DispatchQueue.main.async { MainActor.assumeIsolated { DropPerformer.active?.finish(.notTaken) } }
-                return
+                return end(.notTaken)
             }
             usleep(40_000)
             let steps = 16
@@ -102,7 +127,21 @@ public final class DropPerformer: NSObject, NSDraggingSource {
             // A moment over the target, as a hand would pause, so it accepts.
             post(.leftMouseDragged, point); usleep(120_000)
             post(.leftMouseUp, point)
+            // Let go: viewers' input goes on at once, whatever the target takes to answer.
+            DispatchQueue.main.async { ScreenInputHold.set(false) }
         }
+    }
+
+    /// The owner of the frontmost window at a point (Passthrough's own included).
+    nonisolated static func frontmostOwner(at point: CGPoint) -> pid_t? {
+        guard let list = CGWindowListCopyWindowInfo([.optionOnScreenOnly], kCGNullWindowID) as? [[String: Any]] else { return nil }
+        for info in list {
+            guard (info[kCGWindowAlpha as String] as? Double ?? 1) > 0,
+                  let boundsDict = info[kCGWindowBounds as String] as? NSDictionary,
+                  let bounds = CGRect(dictionaryRepresentation: boundsDict), bounds.contains(point) else { continue }
+            return info[kCGWindowOwnerPID as String] as? pid_t
+        }
+        return nil
     }
 
     fileprivate func begin(from view: NSView, event: NSEvent) {
@@ -134,7 +173,7 @@ public final class DropPerformer: NSObject, NSDraggingSource {
         done(outcome)
         Self.busy = false
         Self.active = nil
-        if !Self.queued.isEmpty { Self.queued.removeFirst()() }
+        Self.next()
     }
 
     /// What's at a point on the screen: the frontmost window there (not Passthrough's own), by its
@@ -167,13 +206,27 @@ public final class DropPerformer: NSObject, NSDraggingSource {
         return CGRect(x: screen.frame.minX, y: mainHeight - screen.frame.maxY, width: screen.frame.width, height: screen.frame.height)
     }
 
-    /// Files that couldn't be dropped go to Downloads (under a free name) and are shown there.
-    /// `copy`: leave them where they are too (something may still be reading them).
-    public static func saveToDownloads(_ files: [URL], copy: Bool = false) -> Bool {
-        guard let downloads = FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask).first else { return false }
+    /// Files that couldn't be dropped go to Downloads (under a free name) and are shown there; `done`
+    /// says whether any got there. `copy`: leave them where they are too (something may still be
+    /// reading them). The moving or copying is done off the main thread: it can be gigabytes.
+    public static func saveToDownloads(_ files: [URL], copy: Bool = false, done: @escaping @MainActor (Bool) -> Void) {
+        DispatchQueue.global(qos: .userInitiated).async {
+            let moved = save(files, copy: copy)
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    if !moved.isEmpty { NSWorkspace.shared.activateFileViewerSelecting(moved) }
+                    done(!moved.isEmpty)
+                }
+            }
+        }
+    }
+
+    nonisolated private static func save(_ files: [URL], copy: Bool) -> [URL] {
+        guard let downloads = FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask).first else { return [] }
         var moved: [URL] = []
+        // Listed once: names taken there, and each one used here.
+        var taken = Set((try? FileManager.default.contentsOfDirectory(atPath: downloads.path))?.map { $0.lowercased() } ?? [])
         for url in files {
-            var taken = Set((try? FileManager.default.contentsOfDirectory(atPath: downloads.path))?.map { $0.lowercased() } ?? [])
             let name = ClipPayload.unique(url.lastPathComponent, in: &taken)
             let target = downloads.appendingPathComponent(name)
             do {
@@ -183,9 +236,7 @@ public final class DropPerformer: NSObject, NSDraggingSource {
                 continue
             }
         }
-        guard !moved.isEmpty else { return false }
-        NSWorkspace.shared.activateFileViewerSelecting(moved)
-        return true
+        return moved
     }
 }
 

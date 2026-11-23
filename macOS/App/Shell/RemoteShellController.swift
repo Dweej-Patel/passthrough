@@ -15,6 +15,10 @@ import ShellHost
 final class RemoteShellController: ObservableObject {
     /// Clipboard sync with the computers viewing this Mac's screen (both listeners').
     let clipSync = ClipSyncHost { id, x, y in ScreenStreamDisplays.point(x: x, y: y, for: id) }
+    /// Who of the screen's viewers syncs the clipboard now (for their row in the panel).
+    @Published private(set) var clipSyncing: Set<String> = []
+    /// Tells whoever is at this Mac that a viewer is dropping files (the pointer moves by itself meanwhile).
+    private let dropNotice = NotchNotice()
     @Published private(set) var sessions: [ShellSessionInfo] = []
     /// The running sessions with who is looking at each: a phone, a terminal window on this Mac, or both.
     @Published private(set) var terminals: [ShellSessionDetail] = []
@@ -279,6 +283,12 @@ final class RemoteShellController: ObservableObject {
                 self.terminalServer?.stopShowing(session)
                 self.contestedNotice.show(self.title(of: session))
             }
+        }
+        clipSync.onSyncingChanged = { [weak self] ids in self?.clipSyncing = ids }
+        clipSync.onDropNotice = { [weak self] viewer, count, point in
+            let items = count == 1 ? "1 item" : "\(count) items"
+            self?.dropNotice.show(.quiet(title: point == nil ? "\(viewer) put \(items) in Downloads" : "\(viewer) is dropping \(items) here",
+                                         detail: nil, symbol: "tray.and.arrow.down"))
         }
     }
 

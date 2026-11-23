@@ -152,8 +152,13 @@ final class ClipSyncSessionTests: XCTestCase {
     private final class Recorder: @unchecked Sendable {
         let lock = NSLock()
         var events: [ClipSyncSession.Event] = []
-        var onEvent: ((ClipSyncSession.Event) -> Void)?
-        func add(_ e: ClipSyncSession.Event) { lock.lock(); events.append(e); let f = onEvent; lock.unlock(); f?(e) }
+        private var handler: ((ClipSyncSession.Event) -> Void)?
+        /// Set under the lock, as `add` reads it.
+        var onEvent: ((ClipSyncSession.Event) -> Void)? {
+            get { lock.lock(); defer { lock.unlock() }; return handler }
+            set { lock.lock(); handler = newValue; lock.unlock() }
+        }
+        func add(_ e: ClipSyncSession.Event) { lock.lock(); events.append(e); let f = handler; lock.unlock(); f?(e) }
     }
 
     private func pair() throws -> (a: ClipSyncSession, b: ClipSyncSession, aEvents: Recorder, bEvents: Recorder) {
@@ -166,14 +171,15 @@ final class ClipSyncSessionTests: XCTestCase {
         return (a, b, ra, rb)
     }
 
-    private func received(_ r: Recorder, count: Int = 1) -> [ReceivedTransfer] {
+    /// Waits until what was received satisfies `until` (by default: anything at all).
+    private func received(_ r: Recorder, until: @escaping ([ReceivedTransfer]) -> Bool = { !$0.isEmpty }) -> [ReceivedTransfer] {
         let done = expectation(description: "received")
         done.assertForOverFulfill = false
         r.onEvent = { _ in
             r.lock.lock()
-            let n = r.events.filter { if case .received = $0 { true } else { false } }.count
+            let got = r.events.compactMap { if case let .received(t) = $0 { t } else { nil } }
             r.lock.unlock()
-            if n >= count { done.fulfill() }
+            if until(got) { done.fulfill() }
         }
         r.add(.sent(transfer: 0))   // checks what came before the handler was set
         wait(for: [done], timeout: 10)
@@ -232,7 +238,8 @@ final class ClipSyncSessionTests: XCTestCase {
         let (a, b, _, rb) = try pair(); defer { a.close(); b.close() }
         a.send(ClipPayload(items: [.data(.text, Data(repeating: 65, count: 3 << 20))]), kind: .clipboard)
         a.send(ClipPayload(items: [.data(.text, Data("second".utf8))]), kind: .clipboard)
-        let got = received(rb)
+        // The first may land before the second is offered, or be abandoned for it; either way the second lands, last.
+        let got = received(rb) { $0.contains { $0.data(.text) == Data("second".utf8) } }
         XCTAssertEqual(got.last?.data(.text), Data("second".utf8))
     }
 
@@ -352,6 +359,80 @@ extension ClipSyncSessionTests {
         XCTAssertFalse(rb.events.contains { if case .received = $0 { true } else { false } })
     }
 }
+
+extension ClipSyncSessionTests {
+    /// Received files are quarantined, so Gatekeeper asks before one is opened.
+    func testReceivedFilesAreQuarantined() throws {
+        let src = try tempDir()
+        let file = src.appendingPathComponent("tool.terminal")
+        try Data("x".utf8).write(to: file)
+        let (a, b, _, rb) = try pair(); defer { a.close(); b.close() }
+        a.send(try ClipPayload.files([file]).get(), kind: .clipboard)
+        let url = try XCTUnwrap(received(rb).first?.topLevel.first)
+        let size = getxattr(url.path, "com.apple.quarantine", nil, 0, 0, 0)
+        XCTAssertGreaterThan(size, 0, "no quarantine on \(url.path)")
+    }
+
+    /// A file listed for sending and swapped for a link since isn't read through the link.
+    func testALinkSwappedInIsNotRead() throws {
+        let src = try tempDir()
+        let secret = src.appendingPathComponent("secret")
+        try Data("key".utf8).write(to: secret)
+        let file = src.appendingPathComponent("copied.txt")
+        try Data("abc".utf8).write(to: file)
+        XCTAssertNotNil(ClipSyncSession.openRegularFile(file))
+        try FileManager.default.removeItem(at: file)
+        try FileManager.default.createSymbolicLink(at: file, withDestinationURL: secret)
+        XCTAssertNil(ClipSyncSession.openRegularFile(file))
+    }
+}
+
+#if canImport(AppKit)
+import AppKit
+
+final class MacClipboardTests: XCTestCase {
+    private var pasteboard: NSPasteboard!
+
+    override func setUp() { pasteboard = NSPasteboard(name: .init("passthrough.test.\(UUID().uuidString)")) }
+    override func tearDown() { pasteboard.releaseGlobally() }
+
+    func testSecretsAndOwnCopiesDontSync() {
+        pasteboard.clearContents()
+        pasteboard.setString("hunter2", forType: .string)
+        pasteboard.setData(Data(), forType: .init("org.nspasteboard.ConcealedType"))
+        if case .nothing = MacClipboard.snapshot(pasteboard) {} else { XCTFail("a concealed copy synced") }
+
+        let transfer = ReceivedTransfer(transfer: 1, kind: .clipboard, x: 0, y: 0,
+                                        items: [.init(format: .text, name: "", data: Data("from there".utf8), url: nil)], folder: nil)
+        MacClipboard.write(transfer, to: pasteboard)
+        XCTAssertEqual(pasteboard.string(forType: .string), "from there")
+        if case .nothing = MacClipboard.snapshot(pasteboard) {} else { XCTFail("what came from the stream was sent back") }
+    }
+
+    func testTextSyncsAndTooLargeSaysWhich() {
+        pasteboard.clearContents()
+        pasteboard.setString("hello", forType: .string)
+        guard case let .payload(p) = MacClipboard.snapshot(pasteboard) else { return XCTFail("plain text didn't sync") }
+        XCTAssertEqual(p.items.first?.format, .text)
+
+        pasteboard.clearContents()
+        pasteboard.setData(Data(count: Int(ClipSyncWire.maxClipboardImage) + 1), forType: .png)
+        guard case .tooLarge(files: false) = MacClipboard.snapshot(pasteboard) else { return XCTFail("a huge image wasn't too large") }
+    }
+
+    func testFoldersTheClipboardHolds() throws {
+        let staging = FileManager.default.temporaryDirectory.appendingPathComponent("st-\(UUID().uuidString)", isDirectory: true)
+        let held = staging.appendingPathComponent("A", isDirectory: true)
+        try FileManager.default.createDirectory(at: held, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: staging) }
+        let file = held.appendingPathComponent("f.txt")
+        try Data().write(to: file)
+        pasteboard.clearContents()
+        pasteboard.writeObjects([file as NSURL])
+        XCTAssertEqual(MacClipboard.folders(within: staging, pasteboard), [held.standardizedFileURL])
+    }
+}
+#endif
 
 extension Result {
     var failureValue: Failure? { if case let .failure(e) = self { e } else { nil } }

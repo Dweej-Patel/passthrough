@@ -20,11 +20,17 @@ public final class ClipSyncHost {
     /// Clipboard folders kept, newest last, so pasting a recent copy still finds its files.
     private var clipboardFolders: [URL] = []
     /// Dropped files kept, newest last, with their size: an app that took them by reference (an upload)
-    /// may still be reading them. The last 5, up to 2 GB in all (the newest whatever its size); the rest
-    /// go at the next launch.
+    /// may still be reading them. The last 5, up to 2 GB in all (the newest whatever its size); older
+    /// ones go at once, and the kept ones at the next launch.
     private var dropFolders: [(url: URL, bytes: UInt64)] = []
     static let dropsKept = 5
     static let dropBytesKept: UInt64 = 2 << 30
+    /// Viewers' names, by id, while they sync.
+    private var labels: [String: String] = [:]
+    /// A viewer is dropping files here (its name, how many, where; nil: they go to Downloads), for a notice.
+    public var onDropNotice: ((String, Int, CGPoint?) -> Void)?
+    /// Who syncs the clipboard now, by id, whenever that changes (for the panel's viewer rows).
+    public var onSyncingChanged: ((Set<String>) -> Void)?
     /// What was at each drop's point when its offer came, by viewer and transfer: it's dropped only on that.
     private var dropTargets: [String: DropPerformer.Target?] = [:]
     /// Read on the listener's queue.
@@ -127,6 +133,8 @@ public final class ClipSyncHost {
             MainActor.assumeIsolated { self?.handle(event, from: id, source: source, ended: ended) }
         }
         sessions[id] = Entry(source: source, session: session)
+        labels[id] = source.label
+        onSyncingChanged?(Set(sessions.keys))
         session.start()
         ptLog(.info, "clipsync: \(source.label) syncs the clipboard")
         if watch == nil {
@@ -142,6 +150,7 @@ public final class ClipSyncHost {
     private func end(_ id: String) {
         guard let entry = sessions.removeValue(forKey: id) else { return }
         entry.session.close()
+        onSyncingChanged?(Set(sessions.keys))
         if sessions.isEmpty, let watch {
             ClipboardWatcher.shared.unwatch(watch)
             self.watch = nil
@@ -173,6 +182,7 @@ public final class ClipSyncHost {
             dropTargets["\(id)#\(transfer)"] = nil
         case .closed:
             sessions[id] = nil
+            onSyncingChanged?(Set(sessions.keys))
             dropTargets = dropTargets.filter { !$0.key.hasPrefix(id + "#") }
             if sessions.isEmpty, let watch {
                 ClipboardWatcher.shared.unwatch(watch)
@@ -196,18 +206,6 @@ public final class ClipSyncHost {
         }
     }
 
-    /// A file's or folder's size on disk, everything in it counted.
-    static func size(of url: URL) -> UInt64 {
-        let keys: Set<URLResourceKey> = [.fileSizeKey, .isRegularFileKey]
-        if let v = try? url.resourceValues(forKeys: keys), v.isRegularFile == true { return UInt64(max(v.fileSize ?? 0, 0)) }
-        guard let walker = FileManager.default.enumerator(at: url, includingPropertiesForKeys: Array(keys)) else { return 0 }
-        var total: UInt64 = 0
-        for case let child as URL in walker {
-            if let v = try? child.resourceValues(forKeys: keys), v.isRegularFile == true { total += UInt64(max(v.fileSize ?? 0, 0)) }
-        }
-        return total
-    }
-
     private func keep(_ folder: URL) {
         clipboardFolders.append(folder)
         while clipboardFolders.count > 3 {
@@ -221,30 +219,38 @@ public final class ClipSyncHost {
         let noted = dropTargets.removeValue(forKey: "\(id)#\(transfer.transfer)")
         func cleanUp() {
             guard let folder else { return }
-            let bytes = files.reduce(UInt64(0)) { $0 + Self.size(of: $1) }
-            dropFolders.append((folder, bytes))
+            dropFolders.append((folder, transfer.total))
             while dropFolders.count > Self.dropsKept
                     || (dropFolders.count > 1 && dropFolders.reduce(0, { $0 + $1.bytes }) > Self.dropBytesKept) {
                 try? FileManager.default.removeItem(at: dropFolders.removeFirst().url)
+            }
+        }
+        func toDownloads(copy: Bool = false) {
+            DropPerformer.saveToDownloads(files, copy: copy) { saved in
+                session.result(transfer.transfer, saved ? .savedToDownloads : .failed)
+                cleanUp()
             }
         }
         guard !files.isEmpty else {
             session.result(transfer.transfer, .failed)
             return cleanUp()
         }
+        let viewer = labels[id] ?? "A computer"
         // Unknown point, or something else there now (another window came up while the files came): Downloads.
         guard let point = dropPoint(id, transfer.x, transfer.y), let noted, DropPerformer.target(at: point) == noted else {
-            session.result(transfer.transfer, DropPerformer.saveToDownloads(files) ? .savedToDownloads : .failed)
-            return cleanUp()
+            onDropNotice?(viewer, files.count, nil)
+            return toDownloads()
         }
+        onDropNotice?(viewer, files.count, point)
         DropPerformer.drop(files, at: point) { outcome in
             switch outcome {
-            case .dropped: session.result(transfer.transfer, .placed)
-            case .notTaken: session.result(transfer.transfer, DropPerformer.saveToDownloads(files) ? .savedToDownloads : .failed)
+            case .dropped:
+                session.result(transfer.transfer, .placed)
+                cleanUp()
+            case .notTaken: toDownloads()
             // Whatever is there may still be taking them: a copy in Downloads, the originals left as they are.
-            case .timedOut: session.result(transfer.transfer, DropPerformer.saveToDownloads(files, copy: true) ? .savedToDownloads : .failed)
+            case .timedOut: toDownloads(copy: true)
             }
-            cleanUp()
         }
     }
 }

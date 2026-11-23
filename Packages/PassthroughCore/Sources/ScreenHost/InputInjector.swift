@@ -68,10 +68,11 @@ final class InputInjector: InputSink {
     }
 
     func pointer(x: UInt16, y: UInt16, buttons new: UInt8) {
-        guard !ScreenInputHold.isHeld else { return }
         let before = position
         position = CGPoint(x: display.minX + CGFloat(x) / 65535 * (display.width - 1),
                            y: display.minY + CGFloat(y) / 65535 * (display.height - 1))
+        // During a drop's drag the move is noted, not posted, so the next one starts from where the viewer is.
+        guard !ScreenInputHold.isHeld else { return }
         travel.x += position.x - before.x
         travel.y += position.y - before.y
         let changed = (new ^ buttons) & 0b111
@@ -154,7 +155,7 @@ final class InputInjector: InputSink {
 
     /// The Fn key as a keyboard sends it: a "modifiers changed" event of its own, down until it's let go.
     func function(_ down: Bool) {
-        guard down != functionDown else { return }
+        guard !ScreenInputHold.isHeld, down != functionDown else { return }
         functionDown = down
         guard let event = CGEvent(keyboardEventSource: source, virtualKey: 63, keyDown: down) else { return }
         event.type = .flagsChanged
@@ -207,6 +208,7 @@ final class InputInjector: InputSink {
     /// as those that read the character. What no key types there, and long text, goes as
     /// characters, which only apps that read them get (`ScreenVideoWire.typedAsKeys`).
     func text(_ text: String) {
+        guard !ScreenInputHold.isHeld else { return }
         guard text.utf16.count <= ScreenVideoWire.typedAsKeys else { return characters(Array(text.utf16)) }
         var unkeyed: [UniChar] = []
         for character in text {

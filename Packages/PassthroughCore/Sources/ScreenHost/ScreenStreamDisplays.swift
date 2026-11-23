@@ -12,6 +12,11 @@ public enum ScreenStreamDisplays {
         lock.lock(); rects[viewer] = rect; lock.unlock()
     }
 
+    /// A stream that showed `rect` ended: its entry goes, unless a newer stream of the viewer's set another.
+    static func remove(_ rect: CGRect, for viewer: String) {
+        lock.lock(); if rects[viewer] == rect { rects[viewer] = nil }; lock.unlock()
+    }
+
     public static func rect(for viewer: String) -> CGRect? {
         lock.lock(); defer { lock.unlock() }
         return rects[viewer]
@@ -25,9 +30,10 @@ public enum ScreenStreamDisplays {
 }
 
 /// While a drop is being dragged into place on this Mac (clipboard sync's
-/// drop), viewers' pointer, scroll, gesture and key input is set aside, so a
-/// click or a move from the viewer doesn't end the drag somewhere else. Only
-/// for that half second; otherwise nothing is held.
+/// drop), viewers' pointer, scroll, gesture, key and text input is dropped
+/// (not delayed), so a click or a move from a viewer doesn't end the drag
+/// somewhere else. Set from the press until the drag is let go (about half a
+/// second); otherwise nothing is held.
 public enum ScreenInputHold {
     private static let lock = NSLock()
     nonisolated(unsafe) private static var held = false
