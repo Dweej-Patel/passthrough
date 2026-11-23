@@ -9,16 +9,24 @@ public enum ClipSyncStaging {
         return caches.appendingPathComponent("Passthrough/Received", isDirectory: true)
     }
 
-    /// What earlier runs received (a quit or crash leaves it) is of no use now. Call once, at launch.
+    nonisolated(unsafe) private static var cleared = false
+    private static let lock = NSLock()
+
+    /// What earlier runs received (a quit or crash leaves it) is of no use now. Only the
+    /// first call in a run clears it, so a later one can't take files a clipboard points at.
     public static func clearAtLaunch() {
+        lock.lock(); defer { lock.unlock() }
+        guard !cleared else { return }
+        cleared = true
         try? FileManager.default.removeItem(at: root)
     }
 }
 
 /// A viewer window's side of clipboard sync with the computer it shows: this
 /// Mac's copies go there, that computer's land here, and files dropped on the
-/// window are sent to be dropped there. `onStatus` gets a line to show for a
-/// while (nil clears it), on the main thread.
+/// window are sent to be dropped there. One per window, across reconnects
+/// (its received files, the last 3 copies, span them). `onStatus` gets a line
+/// to show for a while (nil clears it), on the main thread.
 @MainActor
 public final class ClipSyncViewer {
     private let hostName: String
@@ -33,6 +41,7 @@ public final class ClipSyncViewer {
     private var copyingOut: UInt32?
     private var copyingIn: UInt32?
     private var clearStatus: DispatchWorkItem?
+    private var sessionNumber = 0
 
     public init(hostName: String, onStatus: @escaping (String?) -> Void) {
         self.hostName = hostName
@@ -42,19 +51,21 @@ public final class ClipSyncViewer {
 
     public var isActive: Bool { session != nil }
 
-    /// Syncs over `stream` (after `clipSyncReady`) until `stop()`; `ended` when the stream ends by itself.
-    /// `offerCurrent`: send what's on this Mac's clipboard now (unless it's files, an upload nobody asked for).
+    /// Syncs over `stream` (after `clipSyncReady`) until the stream ends (`ended`) or
+    /// `stop()`. `offerCurrent`: send what's on this Mac's clipboard now (unless it's
+    /// files, an upload nobody asked for).
     public func start(stream: any ByteStream, initialBytes: Data, offerCurrent: Bool, ended: @escaping () -> Void) {
-        stop()
-        var made: ClipSyncSession?
-        let session = ClipSyncSession(stream: stream, initialBytes: initialBytes, staging: staging) { [weak self] event in
+        endSession()
+        // Its events carry its number: those of one ended since say nothing more.
+        sessionNumber += 1
+        let number = sessionNumber
+        // The host never drops on its viewer: such an offer is declined at once.
+        let session = ClipSyncSession(stream: stream, initialBytes: initialBytes, staging: staging, acceptsDrops: false) { [weak self] event in
             MainActor.assumeIsolated {
-                // Only the current session's: one stopped since says nothing more.
-                guard let self, let made, self.session === made else { return }
+                guard let self, self.sessionNumber == number, self.session != nil else { return }
                 self.handle(event, ended: ended)
             }
         }
-        made = session
         self.session = session
         session.start()
         watch = ClipboardWatcher.shared.watch { [weak self] snapshot in self?.copied(snapshot, announce: true) }
@@ -65,7 +76,14 @@ public final class ClipSyncViewer {
         }
     }
 
+    /// Ends syncing for good: the window closed, or sync was turned off. Received files go.
     public func stop() {
+        endSession()
+        try? FileManager.default.removeItem(at: staging)
+        clipboardFolders = []
+    }
+
+    private func endSession() {
         session?.close()
         session = nil
         if let watch { ClipboardWatcher.shared.unwatch(watch) }
@@ -73,8 +91,6 @@ public final class ClipSyncViewer {
         drops = [:]
         copyingOut = nil
         copyingIn = nil
-        try? FileManager.default.removeItem(at: staging)
-        clipboardFolders = []
     }
 
     /// Files dropped on the window at (`x`, `y`), each 0…65535 across the stream.
@@ -138,11 +154,10 @@ public final class ClipSyncViewer {
                     status("Copied from \(hostName).")
                 }
             case .drop:
-                // A host doesn't drop on its viewer.
-                session?.result(transfer.transfer, .failed)
+                // Declined at the offer (`acceptsDrops`); never here.
                 if let folder = transfer.folder { try? FileManager.default.removeItem(at: folder) }
             }
-        case let .incoming(transfer, kind, total) where kind == .clipboard && total > 20 << 20:
+        case let .incoming(transfer, kind, total, _, _) where kind == .clipboard && total > 20 << 20:
             copyingIn = transfer
             status("Copying \(Self.size(total)) from \(hostName)…", hold: true)
         case let .incomingEnded(transfer):
@@ -160,7 +175,7 @@ public final class ClipSyncViewer {
             guard let count = drops.removeValue(forKey: transfer) else { return }
             switch result {
             case .placed: status("Dropped \(Self.files(count, nil)) on \(hostName).")
-            case .savedToDownloads: status("Nothing there took \(count == 1 ? "it" : "them"), so \(count == 1 ? "it's" : "they're") in \(hostName)'s Downloads.")
+            case .savedToDownloads: status("\(count == 1 ? "It's" : "They're") in \(hostName)'s Downloads: nothing took \(count == 1 ? "it" : "them") at that spot, or something else was there by then.")
             case .failed: status("\(hostName) couldn't take \(count == 1 ? "that file" : "those files").")
             }
         case let .declined(transfer, reason):

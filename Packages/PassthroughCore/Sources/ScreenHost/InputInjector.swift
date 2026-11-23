@@ -68,6 +68,7 @@ final class InputInjector: InputSink {
     }
 
     func pointer(x: UInt16, y: UInt16, buttons new: UInt8) {
+        guard !ScreenInputHold.isHeld else { return }
         let before = position
         position = CGPoint(x: display.minX + CGFloat(x) / 65535 * (display.width - 1),
                            y: display.minY + CGFloat(y) / 65535 * (display.height - 1))
@@ -122,6 +123,7 @@ final class InputInjector: InputSink {
     }
 
     func scroll(dx: Int16, dy: Int16) {
+        guard !ScreenInputHold.isHeld else { return }
         guard let event = CGEvent(scrollWheelEvent2Source: source, units: .pixel, wheelCount: 2, wheel1: Int32(dy), wheel2: Int32(dx), wheel3: 0)
         else { return }
         event.flags = []
@@ -133,6 +135,7 @@ final class InputInjector: InputSink {
     /// them), which AppKit turns into `magnify(with:)` and `rotate(with:)` for the
     /// window under the pointer. Checked on macOS 27: phases and sums arrive intact.
     func gesture(_ gesture: ScreenVideoWire.Gesture, phase: ScreenVideoWire.GesturePhase, value: Double) {
+        guard !ScreenInputHold.isHeld else { return }
         switch phase {
         case .began: gestures.insert(gesture)
         case .ended, .cancelled: gestures.remove(gesture)
@@ -176,6 +179,7 @@ final class InputInjector: InputSink {
     private static let gesturePhaseField = CGEventField(rawValue: 132)!   // kCGEventGesturePhase
 
     func key(keysym: UInt32, modifiers: UInt8) {
+        guard !ScreenInputHold.isHeld else { return }
         let held = ScreenVideoWire.Modifiers(rawValue: modifiers)
         // Plain typing goes as text, which every keyboard layout gets right.
         if held.subtracting(.shift).isEmpty, Self.printable(keysym), let scalar = Unicode.Scalar(Self.codePoint(keysym)) {

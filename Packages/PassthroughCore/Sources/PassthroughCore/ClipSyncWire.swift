@@ -89,6 +89,8 @@ public enum ClipSyncWire {
         case abandon(transfer: UInt32)
         case decline(transfer: UInt32, reason: DeclineReason)
         case result(transfer: UInt32, status: ResultStatus)
+        /// An offer of a kind this side doesn't know: declined (4), nothing else changes.
+        case unknownOffer(transfer: UInt32)
         /// A type this side doesn't know, or a payload it can't read: skipped.
         case unknown(type: UInt8)
     }
@@ -147,7 +149,7 @@ public enum ClipSyncWire {
             type = .result
             p.appendBE(transfer)
             p.append(status.rawValue)
-        case .unknown:
+        case .unknown, .unknownOffer:
             return Data()
         }
         var out = Data([type.rawValue])
@@ -192,10 +194,7 @@ public enum ClipSyncWire {
         case .offer:
             guard let transfer = r.u32(), let kindRaw = r.u8(), let x = r.u16(), let y = r.u16(),
                   let count = r.u32(), let total = r.u64() else { return .unknown(type: raw) }
-            // An unknown kind can't be done: an offer no check passes.
-            guard let kind = Kind(rawValue: kindRaw) else {
-                return .offer(Offer(transfer: transfer, kind: .clipboard, count: UInt32.max, total: UInt64.max))
-            }
+            guard let kind = Kind(rawValue: kindRaw) else { return .unknownOffer(transfer: transfer) }
             return .offer(Offer(transfer: transfer, kind: kind, x: x, y: y, count: count, total: total))
         case .item:
             guard let transfer = r.u32(), let index = r.u32(), let format = r.u8(), let size = r.u64(),
@@ -223,21 +222,34 @@ public enum ClipSyncWire {
 
     // MARK: Checks
 
-    /// Whether `name` is a relative path this side will make: `/`-separated
-    /// parts, none empty, `.` or `..`, none with NUL, `\`, `:` or control
+    /// Whether `name` is a relative path this side will make: parts separated
+    /// by the `/` code point (whatever follows it: a combining mark after `/`
+    /// makes one Swift `Character` but is still a separator to the file
+    /// system), none empty, `.` or `..`, none with NUL, `\`, `:` or control
     /// characters, each at most 255 UTF-8 bytes and all at most 1024.
     public static func isValidName(_ name: String) -> Bool {
         let bytes = name.utf8
         guard !bytes.isEmpty, bytes.count <= maxNameBytes else { return false }
-        let parts = name.split(separator: "/", omittingEmptySubsequences: false)
-        for part in parts {
-            guard !part.isEmpty, part != ".", part != "..", part.utf8.count <= maxNamePartBytes else { return false }
-            for scalar in part.unicodeScalars {
+        for part in parts(of: name) {
+            let s = String(Substring(part))
+            guard !part.isEmpty, s.utf8.count <= maxNamePartBytes, s != ".", s != ".." else { return false }
+            for scalar in part {
                 let v = scalar.value
                 if v < 0x20 || v == 0x7F || (0x80...0x9F).contains(v) || scalar == "\\" || scalar == ":" { return false }
             }
         }
         return true
+    }
+
+    /// A name's parts, split on the `/` code point.
+    static func parts(of name: String) -> [Substring.UnicodeScalarView] {
+        name.unicodeScalars[...].split(separator: "/", omittingEmptySubsequences: false)
+    }
+
+    /// The folder a name is in (code-point split, as `isValidName`), or nil at the top.
+    public static func parent(of name: String) -> String? {
+        guard let slash = name.unicodeScalars.lastIndex(of: "/") else { return nil }
+        return String(name.unicodeScalars[..<slash])
     }
 
     /// Why a transfer's header can't be taken, or nil. `room`: bytes free where files go.
@@ -275,7 +287,7 @@ public enum ClipSyncWire {
                 if format.isFile {
                     guard !hasOther, ClipSyncWire.isValidName(item.name) else { return .badOffer }
                     let key = item.name.precomposedStringWithCanonicalMapping.lowercased()
-                    if let slash = key.lastIndex(of: "/"), !folders.contains(String(key[..<slash])) { return .badOffer }
+                    if let parent = ClipSyncWire.parent(of: key), !folders.contains(parent) { return .badOffer }
                     guard !names.contains(key) else { return .badOffer }
                     if format == .folder {
                         guard item.size == 0 else { return .badOffer }

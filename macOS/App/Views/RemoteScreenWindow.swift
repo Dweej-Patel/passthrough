@@ -230,6 +230,8 @@ final class RemoteScreenModel: ObservableObject {
     private var clipTries = 0
     /// The client asking for sync now: events from any other are ignored.
     private var clipToken: UUID?
+    /// The sync session now, to tell whether it's still the one that started a while ago.
+    private var clipSession: UUID?
     /// Sync is running: drops are taken, and the Copy and Send buttons give way to it.
     @Published private(set) var clipActive = false
     /// This window already sent its clipboard as it was when sync started.
@@ -471,7 +473,7 @@ final class RemoteScreenModel: ObservableObject {
 
     /// Asks the other Mac for clipboard sync on a connection of its own, once the view is live.
     private func startClipSync() {
-        guard clipSyncOn, phase == .live, clipClient == nil, clipViewer == nil, let pass else { return }
+        guard clipSyncOn, phase == .live, clipClient == nil, clipViewer?.isActive != true, let pass else { return }
         clipTries += 1
         let gen = generation
         // Events from a client this model has since let go of (it disconnects with a late
@@ -521,10 +523,18 @@ final class RemoteScreenModel: ObservableObject {
         case let .clipSync(stream, initialBytes):
             clipToken = nil
             clipClient = nil   // it let go of the stream; the dialer stays up for it
-            clipTries = 0      // the cap counts tries in a row that didn't get through
-            let viewer = ClipSyncViewer(hostName: macName) { [weak self] in self?.showClipStatus($0, timed: false) }
+            // One per window, across reconnects: the copies it received stay where its clipboard points.
+            let viewer = clipViewer ?? ClipSyncViewer(hostName: macName) { [weak self] in self?.showClipStatus($0, timed: false) }
             clipViewer = viewer
             clipActive = true
+            // The cap counts tries in a row that didn't hold: one that lasts a while starts it again,
+            // a host that accepts and closes at once doesn't.
+            let session = UUID()
+            clipSession = session
+            DispatchQueue.main.asyncAfter(deadline: .now() + 10) { [weak self] in
+                guard let self, self.clipSession == session, self.clipActive else { return }
+                self.clipTries = 0
+            }
             // This Mac's clipboard goes over once per window (and when sync is turned back on), not on every reconnect:
             // it would replace what was copied on the other Mac meanwhile.
             viewer.start(stream: stream, initialBytes: initialBytes, offerCurrent: !clipOffered) { [weak self, weak viewer] in
@@ -537,7 +547,7 @@ final class RemoteScreenModel: ObservableObject {
             switch reason {
             // The view's start hadn't reached it yet: ask again shortly.
             case .noScreenView: retryClipSync(after: 1.5, generation: gen)
-            case .clipSyncOff: showClipStatus("\(macName) has clipboard sync turned off.")
+            case .clipSyncOff: showClipStatus("\(macName) has clipboard sync turned off. Once it's on again there, turn Sync Clipboard off and on here.")
             default: showClipStatus("\(macName) can't sync the clipboard (update Passthrough there).")
             }
         case .failed(_, _), .disconnected:
@@ -550,7 +560,7 @@ final class RemoteScreenModel: ObservableObject {
 
     private func clipEnded(generation gen: Int) {
         guard gen == generation else { return }
-        clipViewer = nil
+        clipSession = nil
         clipActive = false
         clipDialer?.shutdown()
         clipDialer = nil

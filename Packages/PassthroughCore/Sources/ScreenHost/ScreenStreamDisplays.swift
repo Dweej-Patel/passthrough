@@ -23,3 +23,21 @@ public enum ScreenStreamDisplays {
         return CGPoint(x: rect.minX + CGFloat(x) / 65535 * (rect.width - 1), y: rect.minY + CGFloat(y) / 65535 * (rect.height - 1))
     }
 }
+
+/// While a drop is being dragged into place on this Mac (clipboard sync's
+/// drop), viewers' pointer, scroll, gesture and key input is set aside, so a
+/// click or a move from the viewer doesn't end the drag somewhere else. Only
+/// for that half second; otherwise nothing is held.
+public enum ScreenInputHold {
+    private static let lock = NSLock()
+    nonisolated(unsafe) private static var held = false
+
+    public static var isHeld: Bool {
+        lock.lock(); defer { lock.unlock() }
+        return held
+    }
+
+    public static func set(_ on: Bool) {
+        lock.lock(); held = on; lock.unlock()
+    }
+}

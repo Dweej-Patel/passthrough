@@ -32,6 +32,14 @@ public enum MacClipboard {
     /// What's on the clipboard to send. May block: an app that provides its data
     /// lazily is asked for it, so call it off the main thread.
     public static func snapshot(_ pasteboard: NSPasteboard = .general) -> Snapshot {
+        // The types are looked at once and the contents read after: if the clipboard changed in
+        // between (a password manager copying meanwhile), what was read isn't what was checked.
+        let count = pasteboard.changeCount
+        let snapshot = read(pasteboard)
+        return pasteboard.changeCount == count ? snapshot : .nothing
+    }
+
+    private static func read(_ pasteboard: NSPasteboard) -> Snapshot {
         guard maySync(pasteboard.types) else { return .nothing }
         let urls = (pasteboard.readObjects(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true]) as? [URL]) ?? []
         if !urls.isEmpty {
@@ -84,7 +92,8 @@ public enum MacClipboard {
             items.append(item)
         }
         items.first?.setData(Data(), forType: synced)
-        pasteboard.clearContents()
+        // This Mac's only: not on to Universal Clipboard and the owner's other devices, as Windows keeps it off its cloud clipboard.
+        pasteboard.prepareForNewContents(with: .currentHostOnly)
         pasteboard.writeObjects(items)
         return pasteboard.changeCount
     }

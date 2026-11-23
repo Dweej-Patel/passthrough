@@ -968,22 +968,34 @@ sent.
   kind u8 (0 clipboard, 1 drop), x u16, y u16 (a drop's point, 0…65535 across
   the stream as `pointer`'s, or across the session's virtual desktop on an
   `rdp` view; 0 for the clipboard), count u32, total u64 (the items' sizes
-  added up).
+  added up). An offer of a kind the receiver doesn't know is declined (4),
+  and nothing else changes. A receiver takes at most 4 transfers at once
+  (a fifth is declined, 2), and checks room against free space less what
+  the transfers already coming may still write. A viewer takes no drops
+  from its host: declined at the offer (4).
 - `8` item: transfer u32, index u32 (from 0, in order), format u8, size u64,
   name length u16, name (UTF-8). Sent just before the item's data. Formats:
   1 text (UTF-8), 2 RTF, 3 HTML (UTF-8, plain HTML: a Windows side strips or
   adds the CF_HTML header), 4 PNG, 16 file, 17 folder (size 0, made empty, so
   empty folders come along). Names are for files and folders only: a
-  relative path, `/`-separated, every part non-empty, not `.` or `..`, with no
-  NUL, `\`, `:` or control characters, at most 255 UTF-8 bytes each and 1024
-  in all, sent precomposed (NFC); a folder comes before anything in it. A
+  relative path whose parts are separated by the `/` code point (checked over
+  code points or bytes, never grapheme clusters: a combining mark after `/`
+  doesn't hide it), every part non-empty, not `.` or `..`, with no NUL, `\`,
+  `:` or control characters, at most 255 UTF-8 bytes each and 1024 in all,
+  sent precomposed (NFC); a folder comes before anything in it. The sender
+  makes names unique ignoring case and normalisation; the receiver judges
+  duplicates by its own file system's rule. A receiver may rename a part its
+  file system can't hold (`< > " | ? *`, a trailing dot or space, a device
+  name on Windows), keeping names unique, rather than decline. A
   transfer with files holds files and folders only; otherwise it holds at
   most one each of 1–4. An item of a format the receiver doesn't know has its
   bytes skipped.
-- `3` data: transfer u32, item u32, then 1…262,144 bytes. Each item's bytes
-  in order, items in order, with no gaps; a size-0 item has none. The sender
-  sends exactly `size` bytes or abandons the transfer, never padding or
-  cutting short a file that changed meanwhile. Data of different transfers
+- `3` data: transfer u32, item u32, then 1…262,144 bytes (a receiver takes
+  any length the payload limit allows). Each item's bytes in order, items in
+  order, with no gaps; a size-0 item has none. The sender sends exactly
+  `size` bytes or abandons the transfer, never padding or cutting short a
+  file that changed meanwhile: one that shrank or grew since the offer is
+  abandoned. Data of different transfers
   may interleave (a copy needn't wait behind a long drop).
 - `4` done: transfer u32. The receiver checks that `count` items came, their
   sizes adding up to `total`, the last one whole; otherwise it declines.
@@ -1032,14 +1044,20 @@ clipboard; files land in a folder of its own (on a Mac under
 last 3 kept. A host passes a viewer's copy on to its other `clipSync`
 viewers.
 
-**Drops.** Once a drop is done, the host drags the files from where it put
-them to the point, as its own drag-and-drop would (offering copy only), so
+**Drops.** When a drop's offer arrives the host notes what is at the point
+(the frontmost window there and its owner, or the desktop). Once the drop is
+done, if the same thing is still there, the host drags the files from where
+it put them to the point, as its own drag-and-drop would (offering copy only), so
 whatever is there takes them its own way: a Finder or Explorer folder, the
 desktop, a mail or chat window. On a Mac a tiny window of Passthrough's
 starts the drag and the pointer's events are posted to the point (it needs
 Accessibility, as the screen's input does); on a PC the tray app in the
-viewed session does it. If nothing there takes them, they're moved to
-Downloads and shown, answered `result` 1.
+viewed session does it. If something else is there by then, or nothing
+there takes them, they're moved to Downloads and shown, answered `result` 1;
+if the drag gets no answer in time, they're copied there instead (whatever
+is at the point may still be taking them). A host keeps received drops a
+while (a Mac: the last 5, up to 2 GB) for an app that took them by
+reference, and holds its viewers' input for the moment of the drag.
 
 ### Address policy
 

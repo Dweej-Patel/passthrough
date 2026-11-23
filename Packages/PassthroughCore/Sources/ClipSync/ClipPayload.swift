@@ -44,7 +44,8 @@ public struct ClipPayload: Sendable {
     /// from each one's own name down. Symbolic links and anything that isn't
     /// a regular file or a folder are left out. Counting stops at the first
     /// byte over `maxBytes` or item over `maxItems`. Names are sent precomposed
-    /// (NFC), with characters the other side can't take replaced.
+    /// (NFC), with the characters the wire doesn't allow (`/`, `\`, `:`, control
+    /// characters) replaced; a receiver renames what its own file system can't hold.
     public static func files(_ urls: [URL], maxBytes: UInt64? = nil, maxItems: Int = .max) -> Result<ClipPayload, FilesError> {
         var items: [Item] = []
         var total: UInt64 = 0
@@ -139,7 +140,7 @@ public struct ReceivedTransfer: Sendable {
     public var folder: URL?
 
     /// The files and folders at the top, which hold the rest.
-    public var topLevel: [URL] { items.filter { $0.format.isFile && !$0.name.contains("/") }.compactMap(\.url) }
+    public var topLevel: [URL] { items.filter { $0.format.isFile && ClipSyncWire.parent(of: $0.name) == nil }.compactMap(\.url) }
     public func data(_ format: ClipSyncWire.Format) -> Data? { items.first { $0.format == format }?.data }
 
     /// The same contents to send on to another side (a host passing a viewer's copy to its other viewers).

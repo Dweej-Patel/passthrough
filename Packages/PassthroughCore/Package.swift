@@ -74,7 +74,7 @@ let package = Package(
         // Mac-only: streams the Mac's screen to a phone as H.264 and posts its input.
         .target(name: "ScreenHost", dependencies: ["PassthroughCore", "ShellHost", "CVirtualDisplay"]),
         // Mac-only: the transfers (Foundation only, tested) and the Mac's clipboard and drops (AppKit).
-        .target(name: "ClipSync", dependencies: ["PassthroughCore", "ShellHost"]),
+        .target(name: "ClipSync", dependencies: ["PassthroughCore", "ShellHost", "ScreenHost"]),
         .executableTarget(name: "passthrough-devserver", dependencies: ["PassthroughCore"]),
         // Mac-only: what a terminal window runs to show one of the app's sessions
         // (the app's own copy is built by the Xcode project from the same source).

@@ -102,7 +102,8 @@ final class ClipSyncWireTests: XCTestCase {
         for good in ["a", "a/b", "Fotos/été.jpg", "x y/z.txt", String(repeating: "a", count: 255)] {
             XCTAssertTrue(ClipSyncWire.isValidName(good), good)
         }
-        for bad in ["", "/a", "a/", "a//b", ".", "..", "a/../b", "a\\b", "C:x", "a\u{0}b", "a\nb", "a\u{85}b",
+        // A combining mark after `/` makes one Character with it, but the file system still splits there.
+        for bad in ["../\u{0301}x", "a/../\u{0301}b", "../\u{200D}x", "", "/a", "a/", "a//b", ".", "..", "a/../b", "a\\b", "C:x", "a\u{0}b", "a\nb", "a\u{85}b",
                     String(repeating: "a", count: 256), Array(repeating: "abcd", count: 300).joined(separator: "/")] {
             XCTAssertFalse(ClipSyncWire.isValidName(bad), bad)
         }
@@ -264,6 +265,91 @@ final class ClipSyncSessionTests: XCTestCase {
         rb.lock.lock(); defer { rb.lock.unlock() }
         XCTAssertFalse(rb.events.contains { if case .received = $0 { true } else { false } })
         b.close()
+    }
+}
+
+extension ClipSyncSessionTests {
+    /// Writes `messages` to a session from a raw peer and collects what it answers.
+    private func raw(_ messages: [ClipSyncWire.Message], acceptsDrops: Bool = true,
+                     until done: @escaping ([ClipSyncWire.Message]) -> Bool) throws -> [ClipSyncWire.Message] {
+        let (sa, sb) = PipeStream.pair()
+        let b = ClipSyncSession(stream: sb, staging: try tempDir(), acceptsDrops: acceptsDrops, eventQueue: .global()) { _ in }
+        b.start()
+        defer { b.close() }
+        let finished = expectation(description: "answers")
+        let got = Locked(Data())
+        let answers = Locked<[ClipSyncWire.Message]>([])
+        @Sendable func read() {
+            sa.receive(maximumLength: 1 << 16) { data, _, _ in
+                if let data { got.set(got.get() + data) }
+                var r = ClipSyncWire.Reader()
+                let all = (try? r.append(got.get())) ?? []
+                answers.set(all)
+                if done(all) { finished.fulfill(); return }
+                read()
+            }
+        }
+        read()
+        sa.send(messages.reduce(into: Data()) { $0.append(ClipSyncWire.encode($1)) }, isComplete: false) { _ in }
+        wait(for: [finished], timeout: 5)
+        return answers.get()
+    }
+
+    /// An offer of a kind this side doesn't know is declined (4) and the copy coming meanwhile still lands.
+    func testUnknownKindIsDeclinedWithoutTouchingTheRest() throws {
+        var unknown = ClipSyncWire.encode(.offer(.init(transfer: 2, kind: .clipboard, count: 1, total: 1)))
+        unknown[unknown.startIndex + 9] = 9   // the kind byte: no such kind
+        var r = ClipSyncWire.Reader()
+        XCTAssertEqual(try r.append(unknown), [.unknownOffer(transfer: 2)])
+
+        let (sa, sb) = PipeStream.pair()
+        let rb = Recorder()
+        let b = ClipSyncSession(stream: sb, staging: try tempDir(), eventQueue: .global()) { rb.add($0) }
+        b.start()
+        defer { b.close() }
+        var wire = ClipSyncWire.encode(.offer(.init(transfer: 1, kind: .clipboard, count: 1, total: 2)))
+        wire.append(ClipSyncWire.encode(.item(transfer: 1, index: 0, .init(format: .text, size: 2))))
+        wire.append(unknown)
+        wire.append(ClipSyncWire.encode(.data(transfer: 1, item: 0, bytes: Data("hi".utf8))))
+        wire.append(ClipSyncWire.encode(.done(transfer: 1)))
+        sa.send(wire, isComplete: false) { _ in }
+        XCTAssertEqual(received(rb).first?.data(.text), Data("hi".utf8))
+    }
+
+    func testAViewerDeclinesDrops() throws {
+        let answers = try raw([.offer(.init(transfer: 1, kind: .drop, count: 1, total: 5))], acceptsDrops: false) {
+            $0.contains(.decline(transfer: 1, reason: .badOffer))
+        }
+        XCTAssertTrue(answers.contains(.decline(transfer: 1, reason: .badOffer)))
+    }
+
+    func testOnlyFourTransfersAtOnce() throws {
+        let offers = (1...5).map { ClipSyncWire.Message.offer(.init(transfer: UInt32($0), kind: .drop, count: 1, total: 1)) }
+        let answers = try raw(offers) { $0.contains { if case .decline = $0 { true } else { false } } }
+        XCTAssertEqual(answers.filter { if case .decline = $0 { true } else { false } }, [.decline(transfer: 5, reason: .noRoom)])
+    }
+
+    /// A file that grew after it was offered isn't sent cut short: the transfer is abandoned.
+    func testAFileThatGrewIsAbandoned() throws {
+        let src = try tempDir()
+        let file = src.appendingPathComponent("grows.txt")
+        try Data("abc".utf8).write(to: file)
+        var payload = try ClipPayload.files([file]).get()
+        try Data("abcdef".utf8).write(to: file)
+        XCTAssertEqual(payload.items.first?.size, 3)
+        payload = ClipPayload(items: payload.items)
+        let (a, b, ra, rb) = try pair()
+        defer { a.close(); b.close() }
+        let gone = expectation(description: "abandoned")
+        gone.assertForOverFulfill = false
+        let abandoned: @Sendable (ClipSyncSession.Event) -> Bool = { if case .declined(_, .failed) = $0 { true } else { false } }
+        ra.onEvent = { if abandoned($0) { gone.fulfill() } }
+        a.send(payload, kind: .drop)
+        ra.lock.lock(); let already = ra.events.contains(where: abandoned); ra.lock.unlock()
+        if already { gone.fulfill() }
+        wait(for: [gone], timeout: 5)
+        rb.lock.lock(); defer { rb.lock.unlock() }
+        XCTAssertFalse(rb.events.contains { if case .received = $0 { true } else { false } })
     }
 }
 

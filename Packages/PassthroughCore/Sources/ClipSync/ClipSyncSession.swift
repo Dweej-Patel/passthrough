@@ -17,7 +17,8 @@ public final class ClipSyncSession: @unchecked Sendable {
         /// All of one of ours has gone out.
         case sent(transfer: UInt32)
         /// The other side began sending one: `total` bytes are coming.
-        case incoming(transfer: UInt32, kind: ClipSyncWire.Kind, total: UInt64)
+        /// (`x`, `y`): a drop's point, for the receiver to note what's there now.
+        case incoming(transfer: UInt32, kind: ClipSyncWire.Kind, total: UInt64, x: UInt16, y: UInt16)
         /// The other side stopped sending one, or it failed here.
         case incomingEnded(transfer: UInt32)
         /// The stream ended (nil: `close()`).
@@ -28,6 +29,8 @@ public final class ClipSyncSession: @unchecked Sendable {
     static let inFlightLimit = 1 << 20
     /// Most items in a drop this side takes.
     public static let maxDropItems: UInt32 = 200_000
+    /// Most transfers from the other side this side takes at once; past it, an offer is declined (2).
+    public static let maxOpenIncoming = 4
 
     private let stream: any ByteStream
     private var initialBytes: Data
@@ -47,10 +50,13 @@ public final class ClipSyncSession: @unchecked Sendable {
     // Receiving
     private var incoming: [UInt32: Incoming] = [:]
     private var lastOffer: UInt32 = 0
+    /// Whether the other side may drop files here (a host takes its viewers' drops; a viewer takes none).
+    private let acceptsDrops: Bool
 
     /// `staging`: where the other side's files go, one folder per transfer.
-    public init(stream: any ByteStream, initialBytes: Data = Data(), staging: URL,
+    public init(stream: any ByteStream, initialBytes: Data = Data(), staging: URL, acceptsDrops: Bool = true,
                 eventQueue: DispatchQueue = .main, onEvent: @escaping @Sendable (Event) -> Void) {
+        self.acceptsDrops = acceptsDrops
         self.stream = stream
         self.initialBytes = initialBytes
         self.staging = staging
@@ -154,6 +160,11 @@ public final class ClipSyncSession: @unchecked Sendable {
             }
             let left = item.size - t.sentOfItem
             guard left > 0 else {
+                // A file that grew since it was offered isn't cut short without a word: abandoned.
+                if case .file = item.content, let handle = t.handle, let more = try? handle.read(upToCount: 1), !more.isEmpty {
+                    abandon(t)
+                    continue
+                }
                 t.handle?.closeFile()
                 t.handle = nil
                 t.index += 1
@@ -217,6 +228,8 @@ public final class ClipSyncSession: @unchecked Sendable {
         var got: UInt64 = 0
         var inline: Data?
         var handle: FileHandle?
+        /// Bytes taken so far, all items.
+        var written: UInt64 = 0
 
         init(_ offer: ClipSyncWire.Offer) { check = ClipSyncWire.ItemCheck(offer) }
         var offer: ClipSyncWire.Offer { check.offer }
@@ -251,6 +264,11 @@ public final class ClipSyncSession: @unchecked Sendable {
             break
         case let .offer(offer):
             offered(offer)
+        case let .unknownOffer(transfer):
+            // A kind this side can't do: declined, and nothing else changes.
+            guard transfer > lastOffer else { return }
+            lastOffer = transfer
+            write(.decline(transfer: transfer, reason: .badOffer))
         case let .item(transfer, index, item):
             guard let t = incoming[transfer] else { return }
             if let reason = t.check.refusal(of: item, index: index) ?? completeCurrent(t) { return decline(t, reason) }
@@ -259,6 +277,7 @@ public final class ClipSyncSession: @unchecked Sendable {
             guard let t = incoming[transfer] else { return }
             guard t.current == item, UInt64(bytes.count) <= t.size - t.got else { return decline(t, .badOffer) }
             t.got += UInt64(bytes.count)
+            t.written += UInt64(bytes.count)
             if t.inline != nil {
                 t.inline!.append(bytes)
             } else if let handle = t.handle {
@@ -295,12 +314,22 @@ public final class ClipSyncSession: @unchecked Sendable {
                 emit(.incomingEnded(transfer: id))
             }
         }
-        if let reason = ClipSyncWire.refusal(of: offer, room: room(), maxItems: Self.maxDropItems) {
+        // Free space less what transfers already coming may still write.
+        let committed = incoming.values.reduce(UInt64(0)) { $0 &+ ($1.offer.total - min($1.written, $1.offer.total)) }
+        let room = self.room().map { $0 > committed ? $0 - committed : 0 }
+        let reason: ClipSyncWire.DeclineReason? = if offer.kind == .drop && !acceptsDrops {
+            .badOffer
+        } else if incoming.count >= Self.maxOpenIncoming {
+            .noRoom
+        } else {
+            ClipSyncWire.refusal(of: offer, room: room, maxItems: Self.maxDropItems)
+        }
+        if let reason {
             write(.decline(transfer: offer.transfer, reason: reason))
             return
         }
         incoming[offer.transfer] = Incoming(offer)
-        emit(.incoming(transfer: offer.transfer, kind: offer.kind, total: offer.total))
+        emit(.incoming(transfer: offer.transfer, kind: offer.kind, total: offer.total, x: offer.x, y: offer.y))
     }
 
     /// Why the item being received isn't whole, or nil (also with none).
@@ -326,6 +355,8 @@ public final class ClipSyncSession: @unchecked Sendable {
         if format.isFile {
             guard let folder = folder(for: t) else { return decline(t, .failed) }
             let url = folder.appendingPathComponent(item.name, isDirectory: format == .folder)
+            // Names are checked already; this is the last word on where a file may go.
+            guard url.standardizedFileURL.path.hasPrefix(folder.standardizedFileURL.path + "/") else { return decline(t, .badOffer) }
             do {
                 if format == .folder {
                     try FileManager.default.createDirectory(at: url, withIntermediateDirectories: false)
@@ -341,7 +372,8 @@ public final class ClipSyncSession: @unchecked Sendable {
             // Inline formats are held in memory, so they're held to the clipboard's sizes whatever the kind.
             let cap = format == .png ? ClipSyncWire.maxClipboardImage : ClipSyncWire.maxClipboardText
             guard item.size <= cap else { return decline(t, .tooLarge) }
-            t.inline = Data(capacity: Int(item.size))
+            // Grown as bytes come, not reserved on the sender's word.
+            t.inline = Data()
             t.items.append(ReceivedTransfer.Item(format: format, name: "", data: nil, url: nil))
         }
     }

@@ -19,10 +19,14 @@ public final class ClipSyncHost {
     private var watch: UUID?
     /// Clipboard folders kept, newest last, so pasting a recent copy still finds its files.
     private var clipboardFolders: [URL] = []
-    /// Dropped files kept, newest last: an app that took them by reference (an upload) may still be reading them.
-    /// The rest go at the next launch.
-    private var dropFolders: [URL] = []
+    /// Dropped files kept, newest last, with their size: an app that took them by reference (an upload)
+    /// may still be reading them. The last 5, up to 2 GB in all (the newest whatever its size); the rest
+    /// go at the next launch.
+    private var dropFolders: [(url: URL, bytes: UInt64)] = []
     static let dropsKept = 5
+    static let dropBytesKept: UInt64 = 2 << 30
+    /// What was at each drop's point when its offer came, by viewer and transfer: it's dropped only on that.
+    private var dropTargets: [String: DropPerformer.Target?] = [:]
     /// Read on the listener's queue.
     private let state = Locked(State())
 
@@ -110,6 +114,12 @@ public final class ClipSyncHost {
     }
 
     private func began(_ source: Source, stream: any ByteStream, initialBytes: Data, ended: @escaping @Sendable () -> Void) {
+        // Asked on the listener's queue; by now the view may have ended or sync been turned off.
+        let s = state.get()
+        guard s.enabled, s.viewing[source.id] != nil else {
+            stream.cancel()
+            return ended()
+        }
         // One per viewer: a new one replaces the old.
         end(source.id)
         let id = source.id
@@ -156,8 +166,14 @@ public final class ClipSyncHost {
             case .clipboard: paste(transfer, from: id, session: entry.session)
             case .drop: drop(transfer, from: id, session: entry.session)
             }
+        case let .incoming(transfer, kind, _, x, y) where kind == .drop:
+            // The drop goes where the user let go only if the same thing is still there when it's all here.
+            dropTargets["\(id)#\(transfer)"] = dropPoint(id, x, y).map(DropPerformer.target(at:)) ?? nil
+        case let .incomingEnded(transfer):
+            dropTargets["\(id)#\(transfer)"] = nil
         case .closed:
             sessions[id] = nil
+            dropTargets = dropTargets.filter { !$0.key.hasPrefix(id + "#") }
             if sessions.isEmpty, let watch {
                 ClipboardWatcher.shared.unwatch(watch)
                 self.watch = nil
@@ -180,6 +196,18 @@ public final class ClipSyncHost {
         }
     }
 
+    /// A file's or folder's size on disk, everything in it counted.
+    static func size(of url: URL) -> UInt64 {
+        let keys: Set<URLResourceKey> = [.fileSizeKey, .isRegularFileKey]
+        if let v = try? url.resourceValues(forKeys: keys), v.isRegularFile == true { return UInt64(max(v.fileSize ?? 0, 0)) }
+        guard let walker = FileManager.default.enumerator(at: url, includingPropertiesForKeys: Array(keys)) else { return 0 }
+        var total: UInt64 = 0
+        for case let child as URL in walker {
+            if let v = try? child.resourceValues(forKeys: keys), v.isRegularFile == true { total += UInt64(max(v.fileSize ?? 0, 0)) }
+        }
+        return total
+    }
+
     private func keep(_ folder: URL) {
         clipboardFolders.append(folder)
         while clipboardFolders.count > 3 {
@@ -190,16 +218,22 @@ public final class ClipSyncHost {
     private func drop(_ transfer: ReceivedTransfer, from id: String, session: ClipSyncSession) {
         let files = transfer.topLevel
         let folder = transfer.folder
+        let noted = dropTargets.removeValue(forKey: "\(id)#\(transfer.transfer)")
         func cleanUp() {
             guard let folder else { return }
-            dropFolders.append(folder)
-            while dropFolders.count > Self.dropsKept { try? FileManager.default.removeItem(at: dropFolders.removeFirst()) }
+            let bytes = files.reduce(UInt64(0)) { $0 + Self.size(of: $1) }
+            dropFolders.append((folder, bytes))
+            while dropFolders.count > Self.dropsKept
+                    || (dropFolders.count > 1 && dropFolders.reduce(0, { $0 + $1.bytes }) > Self.dropBytesKept) {
+                try? FileManager.default.removeItem(at: dropFolders.removeFirst().url)
+            }
         }
         guard !files.isEmpty else {
             session.result(transfer.transfer, .failed)
             return cleanUp()
         }
-        guard let point = dropPoint(id, transfer.x, transfer.y) else {
+        // Unknown point, or something else there now (another window came up while the files came): Downloads.
+        guard let point = dropPoint(id, transfer.x, transfer.y), let noted, DropPerformer.target(at: point) == noted else {
             session.result(transfer.transfer, DropPerformer.saveToDownloads(files) ? .savedToDownloads : .failed)
             return cleanUp()
         }
@@ -207,6 +241,8 @@ public final class ClipSyncHost {
             switch outcome {
             case .dropped: session.result(transfer.transfer, .placed)
             case .notTaken: session.result(transfer.transfer, DropPerformer.saveToDownloads(files) ? .savedToDownloads : .failed)
+            // Whatever is there may still be taking them: a copy in Downloads, the originals left as they are.
+            case .timedOut: session.result(transfer.transfer, DropPerformer.saveToDownloads(files, copy: true) ? .savedToDownloads : .failed)
             }
             cleanUp()
         }
