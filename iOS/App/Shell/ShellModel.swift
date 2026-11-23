@@ -584,8 +584,9 @@ final class ShellModel: ObservableObject {
 
     func forgetAll() {
         ShellKeyVault.deleteAll()
-        for id in Set(macs.map(\.macID) + granted.keys + paired.map(\.id)) { ScreenLoginStore.deleteAll(hostID: id) }
-        for id in macs.map(\.macID) + granted.keys {
+        let known = macs.map(\.macID) + Array(granted.keys)
+        for id in Set(known + paired.map(\.id)) { ScreenLoginStore.deleteAll(hostID: id) }
+        for id in known {
             UserDefaults.standard.removeObject(forKey: Self.manualAddressPrefix + id)
         }
         granted = [:]
