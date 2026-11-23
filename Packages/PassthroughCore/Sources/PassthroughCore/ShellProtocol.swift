@@ -79,6 +79,30 @@ public struct ShellEnvelope: Codable, Equatable, Sendable {
     public var key: String?
     /// screenPass: what a Mac keeps to view another Mac's screen.
     public var pass: ShellCredential?
+    /// host: what the host says about itself (`HostInfo`).
+    public var host: HostInfo?
+    /// open: which of the host's shells to start (`HostShell.id`).
+    public var shell: String?
+    /// error: more about the reason (`rdp_unavailable`'s cause, in `HostInfo.rdp`'s words).
+    public var detail: String?
+    /// error: a sentence the host wrote, shown when the client has none of its own.
+    public var message: String?
+    /// error `try_later`: seconds until a retry can work.
+    public var retryAfter: Int?
+    /// rdpReady: SHA-256 of the certificate Remote Desktop presents, lowercase hex; the viewer accepts only it.
+    public var certSHA256: String?
+    /// computerGrant, computerGranted, computerPass: what the computer may do (`Computers.scopeShell`, `scopeScreen`).
+    public var scopes: [String]?
+    /// computerGranted, computerPass: scopes waiting for the owner at the host (`screen` on a PC).
+    public var pending: [String]?
+    /// computerGrant: the computer's identity public key (65-byte point, base64).
+    public var idKey: String?
+    /// computerGrant: what kind of computer it is (`HostInfo.kindMac`, `kindWindows`).
+    public var kind: String?
+    /// proof from a `computer.` id: the identity key's signature (`ComputerProof`, raw r ‖ s, base64).
+    public var sig: String?
+    /// computerList: the computers this phone gave access to the host (`ComputerAccess`).
+    public var computers: [ComputerAccess]?
 
     public init(t: String) { self.t = t }
 
@@ -146,6 +170,28 @@ public struct ShellEnvelope: Codable, Equatable, Sendable {
     public static let ping = "ping"
     public static let pong = "pong"
     public static let error = "error"
+    /// What the host is (`HostInfo`), after `macInfo` and whenever it changes.
+    public static let host = "host"
+    /// The host is about to go away (`GoingAwayReason` in `reason`).
+    public static let goingAway = "goingAway"
+    /// The screen through the host's Remote Desktop: answered `rdpReady` (`certSHA256`), then raw bytes.
+    public static let rdp = "rdp"
+    public static let rdpReady = "rdpReady"
+    /// A view of the screen on this device's other connection ended (`reason`: `switched_off`, `stopped`, `taken`).
+    public static let screenEnded = "screenEnded"
+    /// Computers (`Computers`): a phone gives another of its computers access (`computerGrant`, answered
+    /// `computerGranted`), hands it over (`computerPass`, answered `computerPassSaved`), or takes back one
+    /// it gave, at any time (`computerRevoke`, answered `computerRevoked`).
+    public static let computerGrant = "computerGrant"
+    public static let computerGranted = "computerGranted"
+    public static let computerPass = "computerPass"
+    public static let computerPassSaved = "computerPassSaved"
+    public static let computerRevoke = "computerRevoke"
+    public static let computerRevoked = "computerRevoked"
+    /// The computers this phone gave access to the host: asked once with `listComputers`, then the host
+    /// sends `computerList` again on that connection whenever it changes.
+    public static let listComputers = "listComputers"
+    public static let computerList = "computerList"
 
     public func encodedLine() throws -> Data {
         var data = try JSONEncoder().encode(self)
@@ -228,14 +274,17 @@ public struct ShellSessionInfo: Codable, Equatable, Sendable {
     /// you, done), when it says; absent for a plain shell. `waiting` carries
     /// a blocked one's question too, so everything that shows "needs you" sees it.
     public var status: ShellStatus?
+    /// The host's shell it runs (`HostShell.id`), when the host offers more than one.
+    public var shell: String?
 
     public static let originMac = "mac"
 
     public init(id: String, title: String, startedAt: Double, lastOutputAt: Double, running: Bool, exitStatus: Int32? = nil,
-                waiting: String? = nil, origin: String? = nil, theme: ShellTheme? = nil, status: ShellStatus? = nil) {
+                waiting: String? = nil, origin: String? = nil, theme: ShellTheme? = nil, status: ShellStatus? = nil,
+                shell: String? = nil) {
         self.id = id; self.title = title; self.startedAt = startedAt; self.lastOutputAt = lastOutputAt
         self.running = running; self.exitStatus = exitStatus; self.waiting = waiting; self.origin = origin; self.theme = theme
-        self.status = status
+        self.status = status; self.shell = shell
     }
 
     /// Started in a terminal window on the Mac.
@@ -296,7 +345,7 @@ public struct ShellHistoryEntry: Codable, Equatable, Sendable {
 }
 
 /// Reasons the Mac gives in an `error` line.
-public enum ShellError: String, Error, Sendable {
+public enum ShellError: String, Error, Sendable, CaseIterable {
     case notAuthorized = "not_authorized"
     case tooManySessions = "too_many_sessions"
     case noSuchSession = "no_such_session"
@@ -319,6 +368,17 @@ public enum ShellError: String, Error, Sendable {
     case screenOnly = "screen_only"
     /// The Mac couldn't save a pass (granted or handed to it).
     case passNotSaved = "pass_not_saved"
+    /// No shell can start: the account that granted this device isn't signed in to
+    /// the host, or Passthrough isn't open there (`HostInfo` says which).
+    case signedOut = "signed_out"
+    /// The Remote Desktop relay can't be used now (`detail` says why).
+    case rdpUnavailable = "rdp_unavailable"
+    /// Too many tries in a short time (`retryAfter`).
+    case tryLater = "try_later"
+    /// The host already lets in as many computers as it allows (8 a phone, 16 in all).
+    case tooManyComputers = "too_many_computers"
+    /// A hand-over would replace access to a host with different details (its certificate or iroh id).
+    case passConflict = "pass_conflict"
 }
 
 /// A screen-only pass one device (a phone) gets a Mac to issue for another
@@ -335,10 +395,17 @@ public enum ScreenPass {
     /// Whether an id is one a Mac minted for a pass.
     public static func isViewerID(_ id: String) -> Bool { id.hasPrefix(idPrefix) }
 
-    /// A device's name as a pass may carry it: one line, at most `maxName` characters.
+    /// A device's name as a pass may carry it: one line with no control or format characters (tabs, bidi and
+    /// zero-width marks), at most `maxName` characters.
     public static func cleanName(_ name: String) -> String {
-        let line = name.split(whereSeparator: \.isNewline).joined(separator: " ").trimmingCharacters(in: .whitespaces)
-        return String(line.prefix(maxName))
+        let line = name.split(whereSeparator: \.isNewline).joined(separator: " ")
+        let visible = String(String.UnicodeScalarView(line.unicodeScalars.map {
+            switch $0.properties.generalCategory {
+            case .control, .format: " "
+            default: $0
+            }
+        }))
+        return String(visible.trimmingCharacters(in: .whitespaces).prefix(maxName))
     }
 
     public static func isValidName(_ name: String) -> Bool {
@@ -366,6 +433,175 @@ public enum ScreenPass {
             && !pass.macID.isEmpty && pass.macID.count <= 128 && isValidName(pass.macName)
             && pass.addresses.count <= IrohInfo.maxAddresses
             && (pass.irohID == nil || IrohInfo.areValid(id: pass.irohID, relay: pass.irohRelay, token: pass.relayToken))
+    }
+}
+
+/// Computers given access to a host (another Mac or a PC): a phone that may
+/// share gets the host to mint one (`computerGrant`) and hands it to the
+/// computer (`computerPass`). The computer proves the key like a phone and
+/// also signs the challenge with its identity key (`ComputerProof`), and may
+/// do only what its scopes say.
+public enum Computers {
+    /// The prefix of every computer's id, so it can never be a phone's or a pass's.
+    public static let idPrefix = "computer."
+    /// Most computers one phone may have given access to a host, and a host lets in at all.
+    /// Past either a grant is refused (`too_many_computers`), never the oldest dropped.
+    public static let maxPerGranter = 8
+    public static let maxTotal = 16
+    public static let scopeShell = "shell"
+    public static let scopeScreen = "screen"
+    /// Every scope there is, in the order they are sent.
+    public static let allScopes = [scopeShell, scopeScreen]
+
+    /// Any id with the prefix is a computer, whatever a store says (fails closed).
+    public static func isComputerID(_ id: String) -> Bool { id.hasPrefix(idPrefix) }
+
+    /// A new computer id: the prefix and a lowercase UUID. Only a host mints them.
+    public static func newID() -> String { idPrefix + UUID().uuidString.lowercased() }
+
+    /// Scopes as sent: the known ones among `scopes`, in `allScopes`' order; nil when there are none
+    /// or any is unknown.
+    public static func validScopes(_ scopes: [String]?) -> [String]? {
+        guard let scopes, !scopes.isEmpty, scopes.allSatisfy(allScopes.contains) else { return nil }
+        return allScopes.filter(scopes.contains)
+    }
+
+    /// Whether access handed to a computer is one it can use: as `ScreenPass.isUsable`, with a computer's id.
+    public static func isUsable(_ pass: ShellCredential) -> Bool {
+        pass.shellKey.count == 32 && isComputerID(pass.phoneID) && pass.phoneID.count <= 128
+            && pass.certSHA256.count == 64 && pass.certSHA256.allSatisfy(\.isHexDigit)
+            && !pass.macID.isEmpty && pass.macID.count <= 128 && ScreenPass.isValidName(pass.macName)
+            && pass.addresses.count <= IrohInfo.maxAddresses
+            && (pass.irohID == nil || IrohInfo.areValid(id: pass.irohID, relay: pass.irohRelay, token: pass.relayToken))
+    }
+}
+
+/// One computer a phone gave access to a host, as the host lists it (`computerList`): only the
+/// asking phone's own grants, oldest first.
+public struct ComputerAccess: Codable, Equatable, Sendable {
+    /// The computer's id on that host (`computer.` …): what `computerRevoke` names.
+    public var phoneID: String
+    /// The id the phone named it by in `computerGrant` (its own id for that computer); nil if the host kept none.
+    public var viewer: String?
+    public var name: String
+    /// `HostInfo.kindMac`, `kindWindows`; nil when the host doesn't know.
+    public var kind: String?
+    /// What it may do now.
+    public var scopes: [String]
+    /// What waits for the host's owner (`screen` on a PC); nil when nothing does.
+    public var pending: [String]?
+    /// It has a connection open to the host right now.
+    public var connected: Bool
+    /// When it was given access (Unix seconds, a whole number on the wire).
+    public var grantedAt: Int64
+
+    public init(phoneID: String, viewer: String? = nil, name: String, kind: String? = nil, scopes: [String], pending: [String]? = nil,
+                connected: Bool, grantedAt: Int64) {
+        self.phoneID = phoneID; self.viewer = viewer; self.name = name; self.kind = kind; self.scopes = scopes
+        self.pending = pending; self.connected = connected; self.grantedAt = grantedAt
+    }
+
+    /// A host's list as this device keeps it: computer ids only, known scopes only, names cleaned as a
+    /// pass's, at most `Computers.maxTotal`, oldest first.
+    public static func cleaned(_ list: [ComputerAccess]) -> [ComputerAccess] {
+        let kept: [ComputerAccess] = list.compactMap { entry in
+            guard Computers.isComputerID(entry.phoneID), entry.phoneID.count <= 128 else { return nil }
+            var entry = entry
+            if let viewer = entry.viewer, viewer.isEmpty || viewer.count > 128 { entry.viewer = nil }
+            entry.name = ScreenPass.cleanName(entry.name)
+            guard !entry.name.isEmpty else { return nil }
+            entry.scopes = Computers.allScopes.filter(entry.scopes.contains)
+            let pending = Computers.allScopes.filter { (entry.pending ?? []).contains($0) && !entry.scopes.contains($0) }
+            entry.pending = pending.isEmpty ? nil : pending
+            if let kind = entry.kind, kind != HostInfo.kindMac, kind != HostInfo.kindWindows { entry.kind = nil }
+            return entry
+        }
+        return Array(kept.sorted { $0.grantedAt < $1.grantedAt }.prefix(Computers.maxTotal))
+    }
+}
+
+/// A computer's identity key: one per computer, used only to sign its shell
+/// proofs as a viewer. Never the TLS key or the iroh key.
+public protocol ComputerIdentitySigning: Sendable {
+    /// The 65-byte uncompressed P-256 point (`04 ‖ X ‖ Y`), what hosts record.
+    var publicKey: Data { get }
+    /// ECDSA P-256 SHA-256 over `message`, raw `r ‖ s` (64 bytes).
+    func sign(_ message: Data) throws -> Data
+}
+
+/// The second half of a computer's proof: ECDSA P-256 over
+/// `"passthrough-computer-v1" ‖ 0x00 ‖ path ‖ nonce ‖ hostBinding ‖ UTF-8(id)`,
+/// sent as `sig` (raw `r ‖ s`, base64) beside the HMAC. The binding (the
+/// SHA-256 of the host's certificate on TLS, its endpoint id on iroh, 32 raw
+/// bytes either way) makes a signature good for one host only, so a copied
+/// credential opens nothing without the computer's own key.
+public enum ComputerProof {
+    public static let label = "passthrough-computer-v1"
+
+    /// Which listener a proof came through.
+    public enum Path: UInt8, Sendable {
+        case tls = 1
+        case iroh = 2
+    }
+
+    /// A valid point (P-256's generator) to verify against when there is no real key: the same work either way.
+    public static let decoyKey: Data = bytes(hex: "046b17d1f2e12c4247f8bce6e563a440f277037d812deb33a0f4a13945d898c2"
+                                                + "964fe342e2fe1a7f9b8ee7eb4a7c0f9e162bce33576b315ececbb6406837bf51f5")!
+    /// A well-formed signature (r and s in range) for the decoy verification, so it does a real one's work.
+    public static let decoySignature = Data(repeating: 0x01, count: 64)
+
+    public static func message(nonce: Data, path: Path, hostBinding: Data, computerID: String) -> Data {
+        var message = Data(label.utf8)
+        message.append(0x00)
+        message.append(path.rawValue)
+        message.append(nonce)
+        message.append(hostBinding)
+        message.append(Data(computerID.utf8))
+        return message
+    }
+
+    /// A 65-byte uncompressed point.
+    public static func isPoint(_ key: Data) -> Bool { key.count == 65 && key.first == 0x04 }
+
+    public static func isValid(_ signature: Data, publicKey: Data, message: Data) -> Bool {
+        guard signature.count == 64, isPoint(publicKey),
+              let key = try? P256.Signing.PublicKey(x963Representation: publicKey),
+              let parsed = try? P256.Signing.ECDSASignature(rawRepresentation: signature) else { return false }
+        return key.isValidSignature(parsed, for: message)
+    }
+
+    /// The 32 raw bytes a binding's hex names (a `certSHA256` pin or an iroh endpoint id); nil for anything else.
+    public static func binding(hex: String) -> Data? {
+        guard hex.utf8.count == 64 else { return nil }
+        return bytes(hex: hex)
+    }
+
+    /// An identity public key as `host.idKey` carries it (lowercase hex of the 65-byte point); nil for anything else.
+    public static func publicKey(hex: String) -> Data? {
+        guard hex.utf8.count == 130, let key = bytes(hex: hex), isPoint(key) else { return nil }
+        return key
+    }
+
+    /// Hex (either case) as bytes; nil for an odd length or a non-hex character.
+    static func bytes(hex: String) -> Data? {
+        let digits = Array(hex.utf8)
+        guard digits.count % 2 == 0 else { return nil }
+        func value(_ c: UInt8) -> UInt8? {
+            switch c {
+            case 0x30...0x39: return c - 0x30
+            case 0x41...0x46: return c - 0x41 + 10
+            case 0x61...0x66: return c - 0x61 + 10
+            default: return nil
+            }
+        }
+        var out = Data(capacity: digits.count / 2)
+        var index = 0
+        while index < digits.count {
+            guard let high = value(digits[index]), let low = value(digits[index + 1]) else { return nil }
+            out.append(high << 4 | low)
+            index += 2
+        }
+        return out
     }
 }
 

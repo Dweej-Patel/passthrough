@@ -56,6 +56,9 @@ public sealed class PhoneDevice : IEquatable<PhoneDevice>
         new($"adb:{d.Serial}", PhoneKind.Android, d.Model ?? d.Serial, SlotFor(PhoneKind.Android, d.Serial),
             WatchTransport.Adb, (port, ct) => client.ConnectAsync(d.Serial, port, ct));
 
+    /// <summary>Whether a secret slot holds a cable pairing token (<c>token.*</c>), not some other secret.</summary>
+    public static bool IsPairingSlot(string slot) => slot.StartsWith("token.", StringComparison.Ordinal);
+
     /// <summary>
     /// The pairing slot for a phone of <paramref name="kind"/> with this UDID or serial: <c>token.iphone.</c>,
     /// <c>token.ipad.</c> or <c>token.android.</c>, then the id as <see cref="SlotSafe"/> leaves it. When that filter

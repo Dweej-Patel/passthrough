@@ -14,12 +14,16 @@ struct MacHeroCard: View {
         PTSurface(stroke: shell.reach == .unreachable ? PTColor.attention.opacity(0.4) : PTColor.hairline) {
             VStack(alignment: .leading, spacing: 14) {
                 HStack(spacing: 16) {
-                    MacFigure(asleep: shell.reach == .unreachable, awake: awake, live: shell.reach == .ready || online)
+                    if isMac {
+                        MacFigure(asleep: shell.reach == .unreachable, awake: awake, live: shell.reach == .ready || online)
+                    } else {
+                        HostFigure(words: shell.words, asleep: shell.reach == .unreachable, live: shell.reach == .ready)
+                    }
                     VStack(alignment: .leading, spacing: 4) {
                         Text(title).font(.title3.weight(.bold))
                             .contentTransition(.opacity)
                         if let detail { Text(detail).font(.subheadline).foregroundStyle(.secondary).contentTransition(.opacity) }
-                        if online, shell.reach == .ready {
+                        if isMac, online, shell.reach == .ready {
                             Label("Online through this \(ThisDevice.name)", systemImage: "cable.connector")
                                 .font(.caption.weight(.semibold))
                                 .foregroundStyle(PTColor.tintText)
@@ -34,11 +38,15 @@ struct MacHeroCard: View {
         .accessibilityElement(children: .contain)
     }
 
+    /// A Mac's page (Keep awake, the cable's internet); a PC's says only what a PC has.
+    private var isMac: Bool { !paired || shell.selectedKind == .mac }
+
     /// Keep awake is on and the Mac says so now.
-    private var awake: Bool { shell.reach == .ready && shell.macState?.awake == true }
+    private var awake: Bool { isMac && shell.reach == .ready && shell.macState?.awake == true }
 
     private var title: String {
-        if !paired { return "Set up your Mac" }
+        if !paired { return "Add a computer" }
+        if !isMac { return HostCopy.title(shell.page.state) }
         switch shell.reach {
         case .ready: return awake ? "Staying awake" : "Reachable"
         case .connecting: return shell.isRedialing ? "Reconnecting…" : "Connecting…"
@@ -70,7 +78,7 @@ struct MacHeroCard: View {
         case .unreachable:
             return shell.lastHeard.map { "Last heard \($0.formatted(.relative(presentation: .named)))" }
         case .noAccess:
-            if online { return "Plugged in over USB" }
+            if isMac, online { return "Plugged in over USB" }
             return lastSeen.map { "Last plugged in \($0.formatted(.relative(presentation: .named)))" }
         case .locked, .needsPasscode, .keyUnavailable: return nil
         }
@@ -81,24 +89,30 @@ struct MacHeroCard: View {
             BatteryLine(state: state, battery: battery, awake: awake)
         }
         if !paired {
-            Text("Then it's online through this \(ThisDevice.name) whenever they're connected, and you can reach its shell from anywhere.")
+            Text("A Mac is then online through this \(ThisDevice.name) whenever they're connected, and you can reach either one's shell from anywhere.")
                 .font(.subheadline).foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
-            Button { showPairing = true } label: { Label("Pair your Mac", systemImage: "laptopcomputer.and.iphone") }
+            Button { showPairing = true } label: { Label("Pair a Mac or PC", systemImage: "laptopcomputer.and.iphone") }
                 .buttonStyle(PTProminentButtonStyle())
         } else {
             switch shell.reach {
             case .unreachable:
                 VStack(alignment: .leading, spacing: 4) {
-                    if shell.macState?.awakeStopped == MacState.stoppedBattery {
+                    if isMac, shell.macState?.awakeStopped == MacState.stoppedBattery {
                         Text("It most likely went to sleep").font(.subheadline.weight(.semibold)).foregroundStyle(PTColor.attentionText)
                         Text("Its battery reached your \(MacFormat.percent(shell.macState?.batteryFloor ?? 0.2)) limit, so Keep awake let it sleep. Plug it in and it wakes for the next connection.")
                             .font(.subheadline).fixedSize(horizontal: false, vertical: true)
-                    } else {
-                        Text("It may be asleep, off, or offline").font(.subheadline.weight(.semibold)).foregroundStyle(PTColor.attentionText)
-                        if let message = shell.reachMessage {
-                            Text(message).font(.subheadline).fixedSize(horizontal: false, vertical: true)
+                    } else if isMac || shell.page.state == .unreachable {
+                        // Cause unknown: the title says it can't be reached and the line under it when it was last
+                        // heard, so only the likely reason and what to check, not the full sentence the other
+                        // screens show.
+                        Text(HostCopy.mayBeAsleep).font(.subheadline.weight(.semibold)).foregroundStyle(PTColor.attentionText)
+                        if let advice = shell.unreachableAdvice {
+                            Text(advice).font(.subheadline).fixedSize(horizontal: false, vertical: true)
                         }
+                    } else if let message = shell.reachMessage {
+                        // A PC said why it left (or its relay is silent): the sentence carries it.
+                        Text(message).font(.subheadline).fixedSize(horizontal: false, vertical: true)
                     }
                 }
                 .padding(12)
@@ -106,6 +120,21 @@ struct MacHeroCard: View {
                 .background(PTColor.attention.opacity(0.1), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
                 Button { shell.connect() } label: { Label("Try again", systemImage: "arrow.clockwise") }
                     .buttonStyle(PTProminentButtonStyle())
+            case .connecting where !isMac:
+                // A connect that runs long can be started again.
+                TimelineView(.periodic(from: .now, by: 5)) { _ in
+                    if shell.page.canRetry {
+                        Button { shell.connect() } label: { Label("Try again", systemImage: "arrow.clockwise") }
+                            .buttonStyle(PTProminentButtonStyle())
+                    }
+                }
+            case .noAccess where !isMac && shell.accessRefused:
+                if let message = shell.reachMessage {
+                    Label(message, systemImage: "exclamationmark.triangle.fill")
+                        .font(.subheadline)
+                        .foregroundStyle(PTColor.attentionText)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
             case .locked, .needsPasscode, .keyUnavailable:
                 if let message = shell.reachMessage {
                     Label(message, systemImage: "exclamationmark.triangle.fill")
@@ -117,6 +146,31 @@ struct MacHeroCard: View {
                 EmptyView()
             }
         }
+    }
+}
+
+/// A PC (or a computer of a kind this build doesn't know), drawn as its symbol in
+/// the laptop's frame: dimmed with a "z" while it can't be reached.
+struct HostFigure: View {
+    let words: HostWords
+    let asleep: Bool
+    let live: Bool
+
+    var body: some View {
+        ZStack(alignment: .topTrailing) {
+            Image(systemName: words.symbol)
+                .font(.system(size: 58, weight: .light))
+                .foregroundStyle(live ? PTColor.tint : Color.primary.opacity(asleep ? 0.22 : 0.35))
+                .frame(width: 104, height: 76)
+            if asleep {
+                Text("z").font(.system(size: 13, weight: .bold, design: .rounded))
+                    .foregroundStyle(.secondary)
+                    .offset(x: -6, y: 8)
+            }
+        }
+        .frame(width: 104, height: 76)
+        .accessibilityElement()
+        .accessibilityLabel(asleep ? "\(words.Noun), not answering" : words.Noun)
     }
 }
 

@@ -358,9 +358,11 @@ struct MacsCard: View {
                         // connectedMacIDs counts Macs only; an iPad is live when it's in the stats' iPads.
                         let live = client.isIPad ? model.stats.connectedIPads.contains { $0.id == client.id }
                                                  : model.connectedMacIDs.contains(client.id)
+                        // A computer's own nouns and glyph: a PC is never called a Mac.
+                        let words = HostWords(kind: model.shell.kind(of: client.id), name: client.name, device: ThisDevice.name)
                         HStack(spacing: 12) {
                             PTStatusDot(color: live ? PTColor.tint : .secondary.opacity(0.5), live: live)
-                            Image(systemName: client.isIPad ? "ipad" : "laptopcomputer")
+                            Image(systemName: client.isIPad ? "ipad" : words.symbol)
                                 .foregroundStyle(.secondary)
                                 .accessibilityHidden(true)
                             VStack(alignment: .leading, spacing: 2) {
@@ -371,7 +373,7 @@ struct MacsCard: View {
                             Spacer()
                             Menu {
                                 Button(role: .destructive) { model.revoke(client) } label: {
-                                    Label(client.isIPad ? "Forget this iPad" : "Forget this Mac", systemImage: "trash")
+                                    Label(client.isIPad ? "Forget this iPad" : "Forget \(words.this)", systemImage: "trash")
                                 }
                             } label: {
                                 Image(systemName: "ellipsis.circle")

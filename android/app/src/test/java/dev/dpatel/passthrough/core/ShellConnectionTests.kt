@@ -259,6 +259,76 @@ class ShellConnectionTests {
         assertEquals(30, received[1].rows)
     }
 
+    /** Phones know a PC: `open` names a shell only when asked to; without one the line is as before. */
+    @Test fun openNamesTheShellOnlyWhenGiven() = runBlocking {
+        val (connection, mac) = piped()
+        val received = mutableListOf<ShellEnvelope>()
+        val t = macThread {
+            mac.handshake()
+            repeat(2) { received += mac.receive() }
+        }
+        connection.open(80, 24)
+        connection.open(80, 24, shell = "wsl:Ubuntu")
+        withTimeout(5000) { connection.awaitReady() }
+        t.join(5000)
+        assertEquals(listOf(ShellEnvelope.OPEN, ShellEnvelope.OPEN), received.map { it.t })
+        assertNull(received[0].shell)
+        assertEquals("wsl:Ubuntu", received[1].shell)
+    }
+
+    @Test fun anOpenWithoutAShellEncodesAsBefore() {
+        val line = ShellEnvelope(ShellEnvelope.OPEN, cols = 80, rows = 24, ref = 1).encodeLine().toString(Charsets.UTF_8)
+        val fields = kotlinx.serialization.json.Json.parseToJsonElement(line.trim()) as kotlinx.serialization.json.JsonObject
+        // `{"t":"open","cols":80,"rows":24,"ref":1}` (modulo key order): no `shell` key, not even null.
+        assertEquals(setOf("t", "cols", "rows", "ref"), fields.keys)
+        assertTrue(line.endsWith("\n"))
+    }
+
+    @Test fun hostAndGoingAwayAfterReadyAreEvents() = runBlocking {
+        val (connection, mac) = piped()
+        val events = events(connection)
+        val t = macThread {
+            mac.handshake()
+            mac.send(ShellEnvelope(ShellEnvelope.HOST, host = HostInfo(kind = "windows", signedIn = false, console = "signedOut",
+                shells = listOf(HostShell("pwsh", "PowerShell", default = true), HostShell("bad id", "Nope")))))
+            mac.send(ShellEnvelope(ShellEnvelope.GOING_AWAY, reason = "sleeping"))
+        }
+        val host = events.next<ShellEvent.Host>().info
+        assertEquals("windows", host.kind)
+        assertEquals(false, host.signedIn)
+        assertEquals("the bad id is dropped", listOf("pwsh"), host.shells?.map { it.id })
+        assertEquals("sleeping", events.next<ShellEvent.GoingAway>().reason)
+        t.join(5000)
+    }
+
+    @Test fun hostBeforeReadyEndsTheAttempt() = runBlocking {
+        val (connection, mac) = piped()
+        val events = events(connection)
+        val t = macThread {
+            mac.send(ShellEnvelope(ShellEnvelope.CHALLENGE, nonce = b64(mac.nonce)))
+            mac.receive()
+            mac.send(ShellEnvelope(ShellEnvelope.HOST, host = HostInfo(kind = "windows")))
+        }
+        val gone = events.next<ShellEvent.Disconnected>()
+        assertTrue(gone.error is ShellConnectError.ProtocolViolation)
+        t.join(5000)
+    }
+
+    @Test fun signedOutAnswersTheOpen() = runBlocking {
+        val (connection, mac) = piped()
+        val events = events(connection)
+        val t = macThread {
+            mac.handshake()
+            val open = mac.receive()
+            mac.send(ShellEnvelope(ShellEnvelope.ERROR, reason = "signed_out", ref = open.ref))
+        }
+        connection.open(80, 24)
+        val failed = events.next<ShellEvent.Failed>()
+        assertEquals(ShellError.SIGNED_OUT, failed.error)
+        assertEquals(1, failed.ref)
+        t.join(5000)
+    }
+
     @Test fun resizeWaitsForReadyAndGoesOutWhileAnOpenIsUnanswered() = runBlocking {
         val (connection, mac) = piped()
         val received = mutableListOf<ShellEnvelope>()

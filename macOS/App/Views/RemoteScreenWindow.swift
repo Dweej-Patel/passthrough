@@ -1,4 +1,5 @@
 import AppKit
+import IOSurface
 import AVFoundation
 import CoreMedia
 import Network
@@ -114,6 +115,36 @@ struct RemoteScreenWindow: View {
 }
 
 // MARK: - Model
+
+/// What the picture's view needs of whatever shows a computer's screen: another Mac's
+/// stream (`RemoteScreenModel`) or a PC's Remote Desktop (`PCScreenModel`).
+@MainActor
+protocol RemoteScreenSource: AnyObject {
+    var isLive: Bool { get }
+    /// The screen's size in pixels, once known.
+    var streamSize: CGSize { get }
+    var cursor: (image: CGImage, size: CGSize, hotSpot: CGPoint)? { get }
+    var remotePointer: (x: Double, y: Double, visible: Bool)? { get }
+    var buttonsHeld: Bool { get }
+    /// ⌥ with a key is a shortcut for the far computer (a PC's Alt), not a way to type another character.
+    var optionIsShortcut: Bool { get }
+    /// A shortcut that stays on this Mac though the picture has the keyboard.
+    func staysLocal(_ event: NSEvent) -> Bool
+    func setVisible(_ visible: Bool)
+    func pointer(x: Double, y: Double)
+    func button(_ button: RFBClient.Buttons, down: Bool, x: Double, y: Double)
+    func scroll(dx: CGFloat, dy: CGFloat)
+    func scrollEnded()
+    func key(_ keysym: UInt32, modifiers: ScreenVideoWire.Modifiers)
+    func text(_ text: String)
+    func gesture(_ gesture: ScreenVideoWire.Gesture, phase: ScreenVideoWire.GesturePhase, value: Double)
+}
+
+extension RemoteScreenModel: RemoteScreenSource {
+    var isLive: Bool { phase == .live }
+    var optionIsShortcut: Bool { false }
+    func staysLocal(_ event: NSEvent) -> Bool { false }
+}
 
 @MainActor
 final class RemoteScreenModel: ObservableObject {
@@ -387,8 +418,10 @@ private struct RemoteScreenCanvas: NSViewRepresentable {
 /// Typing goes through macOS text input, so input methods and dead keys
 /// compose here and only finished text is sent.
 final class RemoteScreenView: NSView, NSTextInputClient {
-    private let model: RemoteScreenModel
+    private let model: any RemoteScreenSource
     private let video = AVSampleBufferDisplayLayer()
+    /// A PC's picture: a surface the engine helper paints into, shown as it is. Hidden for a Mac's stream.
+    private let surfaceLayer = CALayer()
     private let pointer = CALayer()
     private var tracking: NSTrackingArea?
     /// This Mac's pointer over the picture, in view points (nil: elsewhere).
@@ -400,13 +433,19 @@ final class RemoteScreenView: NSView, NSTextInputClient {
     private var occlusionObserver: NSObjectProtocol?
     private static let invisibleCursor = NSCursor(image: NSImage(size: NSSize(width: 1, height: 1)), hotSpot: .zero)
 
-    init(model: RemoteScreenModel) {
+    init(model: any RemoteScreenSource) {
         self.model = model
         super.init(frame: .zero)
         wantsLayer = true
         layer?.backgroundColor = NSColor.black.cgColor
         video.videoGravity = .resizeAspect
         layer?.addSublayer(video)
+        surfaceLayer.isHidden = true
+        surfaceLayer.contentsGravity = .resize
+        surfaceLayer.magnificationFilter = .linear
+        surfaceLayer.minificationFilter = .trilinear
+        surfaceLayer.actions = ["contents": NSNull(), "bounds": NSNull(), "position": NSNull(), "hidden": NSNull()]
+        layer?.addSublayer(surfaceLayer)
         pointer.zPosition = 1
         pointer.isHidden = true
         pointer.actions = ["position": NSNull(), "bounds": NSNull(), "contents": NSNull(), "hidden": NSNull()]
@@ -420,7 +459,29 @@ final class RemoteScreenView: NSView, NSTextInputClient {
         if let occlusionObserver { NotificationCenter.default.removeObserver(occlusionObserver) }
     }
 
-    private var isLive: Bool { model.phase == .live }
+    private var isLive: Bool { model.isLive }
+
+    /// A PC's picture from here on (nil: none). The surface is the helper's; only its pixels are read.
+    func show(surface: IOSurface?) {
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        surfaceLayer.contents = surface
+        surfaceLayer.isHidden = surface == nil
+        surfaceLayer.frame = pictureRect
+        CATransaction.commit()
+        updateCursor()
+    }
+
+    /// The surface's pixels changed.
+    func surfaceChanged() {
+        guard !surfaceLayer.isHidden, let surface = surfaceLayer.contents else { return }
+        // The same surface with new pixels: set again within one transaction, so the layer reads it afresh without a blank frame.
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        surfaceLayer.contents = nil
+        surfaceLayer.contents = surface
+        CATransaction.commit()
+    }
 
     override var acceptsFirstResponder: Bool { isLive }
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
@@ -459,6 +520,7 @@ final class RemoteScreenView: NSView, NSTextInputClient {
         CATransaction.begin()
         CATransaction.setDisableActions(true)
         video.frame = bounds
+        surfaceLayer.frame = pictureRect
         CATransaction.commit()
         updateCursor()
     }
@@ -619,7 +681,9 @@ final class RemoteScreenView: NSView, NSTextInputClient {
 
     /// Shortcuts go to the other Mac, not this app's menus, while the picture is live and has the keyboard.
     override func performKeyEquivalent(with event: NSEvent) -> Bool {
-        guard isLive, window?.firstResponder === self, event.type == .keyDown else { return super.performKeyEquivalent(with: event) }
+        guard isLive, window?.firstResponder === self, event.type == .keyDown, !model.staysLocal(event) else {
+            return super.performKeyEquivalent(with: event)
+        }
         keyDown(with: event)
         return true
     }
@@ -632,7 +696,7 @@ final class RemoteScreenView: NSView, NSTextInputClient {
             if let keysym = RemoteKeys.special[event.keyCode] {
                 return model.key(keysym, modifiers: modifiers)
             }
-            if modifiers.contains(.command) || modifiers.contains(.control) {
+            if modifiers.contains(.command) || modifiers.contains(.control) || (model.optionIsShortcut && modifiers.contains(.option)) {
                 // A shortcut: the key as it is without modifiers, with them held.
                 guard let character = event.charactersIgnoringModifiers?.lowercased().first,
                       let keysym = RFBKeys.keysym(for: character) else { return }

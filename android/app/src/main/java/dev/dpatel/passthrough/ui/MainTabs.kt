@@ -18,6 +18,7 @@ import androidx.compose.foundation.layout.wrapContentWidth
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.DesktopWindows
 import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.Laptop
 import androidx.compose.material.icons.filled.Terminal
@@ -28,7 +29,11 @@ import androidx.compose.material3.NavigationBarItemDefaults
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
 import androidx.compose.ui.Modifier
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import dev.dpatel.passthrough.core.HostKind
+import dev.dpatel.passthrough.core.HostWords
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import dev.dpatel.passthrough.ui.mac.ActivityScreen
@@ -66,13 +71,17 @@ fun MainTabs(
     macScroll: ScrollState,
 ) {
     val c = LocalPT.current
+    val kind by shell.selectedKind.collectAsStateWithLifecycle()
+    val paired by vm.pairedClients.collectAsStateWithLifecycle()
+    val demoPaired by shell.demoPaired.collectAsStateWithLifecycle()
     Scaffold(
         containerColor = c.background,
         contentWindowInsets = WindowInsets(0),
         bottomBar = {
             NavigationBar(containerColor = c.card) {
                 listOf(
-                    Triple(MainTab.MAC, "Mac", Icons.Filled.Laptop),
+                    Triple(MainTab.MAC, computerTabTitle(kind, paired.isNotEmpty() || demoPaired.isNotEmpty()),
+                        if (kind == HostKind.WINDOWS) Icons.Filled.DesktopWindows else Icons.Filled.Laptop),
                     Triple(MainTab.SHELLS, "Shells", Icons.Filled.Terminal),
                     Triple(MainTab.ACTIVITY, "Activity", Icons.Filled.History),
                 ).forEach { (t, label, icon) ->
@@ -99,6 +108,12 @@ fun MainTabs(
             }
         }
     }
+}
+
+/** The first tab's title: the selected computer's kind ("Mac", "PC"), or "Computer" with none paired (or a kind this build doesn't know). */
+fun computerTabTitle(kind: HostKind?, paired: Boolean): String = when {
+    !paired || kind == null -> "Computer"
+    else -> HostWords(kind, null).noun
 }
 
 @Composable

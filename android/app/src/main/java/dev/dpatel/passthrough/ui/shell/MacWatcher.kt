@@ -1,5 +1,6 @@
 package dev.dpatel.passthrough.ui.shell
 
+import dev.dpatel.passthrough.core.HostInfo
 import dev.dpatel.passthrough.core.IrohInfo
 import dev.dpatel.passthrough.core.IrohShellDialer
 import dev.dpatel.passthrough.core.MacState
@@ -45,6 +46,10 @@ class MacWatcher(
     private val storedLastHeard: (String) -> Long?,
     /** Stores that a Mac answered (or stopped answering) at a time (Unix millis). */
     private val noteHeard: (String, Long) -> Unit,
+    /** Keeps what a watched computer says about itself (`host`). */
+    private val noteHost: (String, HostInfo) -> Unit = { _, _ -> },
+    /** Keeps why a watched computer said it was leaving; null: it answered again. Never acted on beyond that. */
+    private val noteGoingAway: (String, String?) -> Unit = { _, _ -> },
 ) {
     /** What a watched Mac last said. */
     data class Seen(
@@ -168,8 +173,11 @@ class MacWatcher(
             is ShellEvent.Ready -> {
                 val now = System.currentTimeMillis()
                 noteHeard(id, now)
+                noteGoingAway(id, null)
                 updateSeen(id) { it.copy(reachable = true, lastHeardMillis = now) }
             }
+            is ShellEvent.Host -> noteHost(id, event.info)
+            is ShellEvent.GoingAway -> noteGoingAway(id, event.reason)
             is ShellEvent.Sessions -> updateSeen(id) { it.copy(sessions = hiddenSessions().visible(event.sessions, id)) }
             is ShellEvent.MacStateChanged -> updateSeen(id) { it.copy(state = event.state) }
             is ShellEvent.Failed -> if (event.error == ShellError.NOT_AUTHORIZED) watch.refused = true

@@ -1,0 +1,25 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- Real ConPTY sessions on this PC (and on the Windows CI runner): what the fakes in Passthrough.Core.Tests can't show. -->
+  <PropertyGroup>
+    <TargetFramework>net10.0-windows10.0.19041.0</TargetFramework>
+    <IsPackable>false</IsPackable>
+    <IsTestProject>true</IsTestProject>
+    <Platforms>x64</Platforms>
+    <PlatformTarget>x64</PlatformTarget>
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <ConptyRequiresx64Host>true</ConptyRequiresx64Host>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.14.2" />
+    <PackageReference Include="xunit" Version="2.9.3" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="2.8.2" />
+    <!-- Directly too, so conpty.dll and x64\OpenConsole.exe are copied beside the tests. -->
+    <PackageReference Include="Microsoft.Windows.Console.ConPTY" Version="1.25.261109001" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\Passthrough.Windows\Passthrough.Windows.csproj" />
+    <ProjectReference Include="..\..\src\Passthrough.Media\Passthrough.Media.csproj" />
+  </ItemGroup>
+</Project>

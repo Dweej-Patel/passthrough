@@ -1,3 +1,4 @@
+using System.Net;
 using System.Net.Sockets;
 
 namespace Passthrough.Core.Transport;
@@ -21,9 +22,12 @@ public static class ByteStreamConnector
     };
 
     /// <summary>A network stream that closes its socket when disposed.</summary>
-    private sealed class OwnedTcpStream(TcpClient client) : Stream
+    private sealed class OwnedTcpStream(TcpClient client) : Stream, IEndpointStream
     {
         private readonly NetworkStream _inner = client.GetStream();
+
+        public IPEndPoint? LocalEndPoint => client.Client.LocalEndPoint as IPEndPoint;
+        public IPEndPoint? RemoteEndPoint => client.Client.RemoteEndPoint as IPEndPoint;
 
         public override bool CanRead => _inner.CanRead;
         public override bool CanSeek => false;
@@ -45,4 +49,11 @@ public static class ByteStreamConnector
             base.Dispose(disposing);
         }
     }
+}
+
+/// <summary>A stream over a socket, saying its two ends: what the cable peer check looks up (who holds the far end).</summary>
+public interface IEndpointStream
+{
+    IPEndPoint? LocalEndPoint { get; }
+    IPEndPoint? RemoteEndPoint { get; }
 }

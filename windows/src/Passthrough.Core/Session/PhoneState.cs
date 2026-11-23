@@ -18,9 +18,6 @@ public enum PhoneState
     /// <summary>A code went to the active phone and has not been answered yet.</summary>
     Pairing,
 
-    /// <summary>The active phone's channel failed in a way retrying cannot fix (see the entry's message).</summary>
+    /// <summary>A device's channel failed in a way retrying cannot fix (see the entry's message).</summary>
     Failed,
-
-    /// <summary>An iPad: it never carries the PC's internet, and pairs only once Remote shell exists.</summary>
-    RemoteOnlyLater,
 }

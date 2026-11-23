@@ -95,6 +95,12 @@ public final class IrohShellListener: @unchecked Sendable {
         set { gate.screenOnlyCheck.set(newValue) }
     }
 
+    /// As `ShellListener.hostInfo`.
+    public var hostInfo: (@Sendable (String) -> HostInfo?)? {
+        get { gate.hostInfoProvider.get() }
+        set { gate.hostInfoProvider.set(newValue) }
+    }
+
     /// As `ShellListener.onScreenGrant`.
     public var onScreenGrant: (@Sendable (_ phoneID: String, _ label: String, _ name: String, _ viewer: String) -> Result<(id: String, key: Data), ShellError>)? {
         get { gate.screenGrant.get() }
@@ -117,6 +123,57 @@ public final class IrohShellListener: @unchecked Sendable {
     public var onScreenPassUsed: (@Sendable (_ viewerID: String) -> Void)? {
         get { gate.screenPassUsed.get() }
         set { gate.screenPassUsed.set(newValue) }
+    }
+
+    /// As `ShellListener.computerKey`; here a computer's signature is bound to this endpoint's id.
+    public var computerKey: (@Sendable (String) -> Data?)? {
+        get { gate.computerKeyLookup.get() }
+        set { gate.computerKeyLookup.set(newValue) }
+    }
+
+    /// As `ShellListener.computerScopes`.
+    public var computerScopes: (@Sendable (String) -> Set<String>)? {
+        get { gate.computerScopesLookup.get() }
+        set { gate.computerScopesLookup.set(newValue) }
+    }
+
+    /// As `ShellListener.computerList`.
+    public var computerList: (@Sendable (String) -> [ComputerAccess])? {
+        get { gate.computerListProvider.get() }
+        set { gate.computerListProvider.set(newValue) }
+    }
+
+    /// As `ShellListener.pushComputerLists`.
+    public func pushComputerLists() { gate.pushComputerLists() }
+
+    /// As `ShellListener.computerPresence`: give both listeners the same one.
+    public var computerPresence: ComputerPresence {
+        get { gate.computerPresence }
+        set { gate.useComputerPresence(newValue) }
+    }
+
+    /// As `ShellListener.onComputerUsed`.
+    public var onComputerUsed: (@Sendable (_ computerID: String) -> Void)? {
+        get { gate.computerUsed.get() }
+        set { gate.computerUsed.set(newValue) }
+    }
+
+    /// As `ShellListener.onComputerGrant`.
+    public var onComputerGrant: (@Sendable (_ phoneID: String, _ label: String, _ request: ComputerGrantRequest) -> Result<(id: String, key: Data, scopes: [String]), ShellError>)? {
+        get { gate.computerGrant.get() }
+        set { gate.computerGrant.set(newValue) }
+    }
+
+    /// As `ShellListener.onComputerPass`.
+    public var onComputerPass: (@Sendable (_ phoneID: String, _ label: String, _ pass: ShellCredential, _ scopes: [String], _ pending: [String]) -> ShellError?)? {
+        get { gate.computerPass.get() }
+        set { gate.computerPass.set(newValue) }
+    }
+
+    /// As `ShellListener.onComputerRevoke`.
+    public var onComputerRevoke: (@Sendable (_ phoneID: String, _ computerID: String) -> Bool)? {
+        get { gate.computerRevoke.get() }
+        set { gate.computerRevoke.set(newValue) }
     }
 
     /// As `ShellListener.pushMacState()`.
@@ -155,7 +212,8 @@ public final class IrohShellListener: @unchecked Sendable {
         self.host = host
         gate = ShellGate(label: "iroh-shell-listener", manager: manager, transcripts: transcripts, shellKeys: shellKeys,
                          keyConfirmed: keyConfirmed, phoneLabel: phoneLabel, macInfo: macInfo,
-                         handshakeTimeout: handshakeTimeout)
+                         handshakeTimeout: handshakeTimeout,
+                         binding: ComputerProof.binding(hex: host.endpointID).map { ShellGate.Binding(path: .iroh, hostBinding: $0) })
     }
 
     /// Starts accepting. Run one listener per endpoint.

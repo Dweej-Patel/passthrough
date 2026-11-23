@@ -120,6 +120,17 @@ public sealed class FakePhone : IAsyncDisposable
     /// <summary>When set, <c>welcome</c> waits for this task.</summary>
     public Task? WelcomeGate { get; init; }
 
+    /// <summary>How the phone answers a <c>shellGrant</c>.</summary>
+    public enum GrantAnswerMode { Echo, None, OtherId, NoId }
+
+    public GrantAnswerMode GrantAnswer { get; init; } = GrantAnswerMode.Echo;
+
+    /// <summary>The id the phone answers <c>shellGrant</c> with.</summary>
+    public string GrantPhoneId { get; init; } = "p-7c1e9a40";
+
+    /// <summary>Sends a <c>shellGranted</c> nobody asked for straight after <c>welcome</c>, before any proof.</summary>
+    public bool ShellGrantedAfterWelcome { get; init; }
+
     /// <summary>The nonce the phone sent in its last <c>welcome</c>.</summary>
     public byte[]? PhoneNonce { get; private set; }
 
@@ -218,6 +229,9 @@ public sealed class FakePhone : IAsyncDisposable
             return;
         }
 
+        if (ShellGrantedAfterWelcome)
+            await SendAsync(s, new ControlEnvelope(ControlEnvelope.ShellGranted) { PhoneID = GrantPhoneId, GrantID = "unasked" });
+
         var silent = false;
         var chatter = false;
         var wrongHere = 0;
@@ -274,6 +288,19 @@ public sealed class FakePhone : IAsyncDisposable
                             return;
                         }
                     }
+                    break;
+                case ControlEnvelope.ShellGrant:
+                    if (GrantAnswer == GrantAnswerMode.None) break;
+                    await SendAsync(s, new ControlEnvelope(ControlEnvelope.ShellGranted)
+                    {
+                        PhoneID = GrantPhoneId,
+                        GrantID = GrantAnswer switch
+                        {
+                            GrantAnswerMode.Echo => m.GrantID,
+                            GrantAnswerMode.OtherId => "another-grant",
+                            _ => null,
+                        },
+                    });
                     break;
                 case ControlEnvelope.Ping:
                     if (chatter) await SendAsync(s, new ControlEnvelope("chatter"));

@@ -1,0 +1,40 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- What only Windows can do for Passthrough.Core: ConPTY, job objects, the user's environment, the registry.
+       No UI; the tray app and (later) the service both use it. -->
+  <PropertyGroup>
+    <TargetFramework>net10.0-windows10.0.19041.0</TargetFramework>
+    <RootNamespace>Passthrough.Windows</RootNamespace>
+    <AssemblyName>Passthrough.Windows</AssemblyName>
+    <Platforms>x64</Platforms>
+    <PlatformTarget>x64</PlatformTarget>
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <!-- The ConPTY package's props run before PlatformTarget is read: name the host it must ship (x64\OpenConsole.exe). -->
+    <ConptyRequiresx64Host>true</ConptyRequiresx64Host>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- Microsoft's own build of the pseudoconsole (MIT), always used: the inbox one breaks OSC 7501
+         (Spikes/ConPtyProbe/README.md). conpty.dll and x64\OpenConsole.exe are copied beside the app. -->
+    <PackageReference Include="Microsoft.Windows.Console.ConPTY" Version="1.25.261109001" />
+    <!-- DPAPI, for the service's own store. -->
+    <PackageReference Include="System.Security.Cryptography.ProtectedData" Version="10.0.0" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\Passthrough.Core\Passthrough.Core.csproj" />
+  </ItemGroup>
+
+  <!-- passthrough_iroh.dll, built from windows/native/iroh-bridge (windows/native/build-iroh-bridge.ps1; CI builds it
+       before the .NET build). Copied beside the app, and beside anything referencing this project, when it has been built. -->
+  <PropertyGroup>
+    <IrohBridgeDll>$(MSBuildThisFileDirectory)..\..\native\iroh-bridge\target\release\passthrough_iroh.dll</IrohBridgeDll>
+  </PropertyGroup>
+  <ItemGroup Condition="Exists('$(IrohBridgeDll)')">
+    <None Include="$(IrohBridgeDll)" Link="passthrough_iroh.dll" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="Passthrough.Windows.Tests" />
+  </ItemGroup>
+</Project>

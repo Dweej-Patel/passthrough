@@ -15,19 +15,33 @@
     <ApplicationManifest>app.manifest</ApplicationManifest>
     <!-- The exe's own icon (Explorer, the taskbar, Task Manager); the same file is loaded at run time for the tray and the windows. -->
     <ApplicationIcon>Assets\app.ico</ApplicationIcon>
+    <ConptyRequiresx64Host>true</ConptyRequiresx64Host>
   </PropertyGroup>
 
   <ItemGroup>
     <PackageReference Include="Microsoft.WindowsAppSDK" Version="1.8.251106002" />
     <PackageReference Include="H.NotifyIcon.WinUI" Version="2.2.0" />
     <PackageReference Include="System.Security.Cryptography.ProtectedData" Version="10.0.0" />
+    <!-- Directly too, so conpty.dll and x64\OpenConsole.exe ship beside Passthrough.exe (Passthrough.Windows uses them). -->
+    <PackageReference Include="Microsoft.Windows.Console.ConPTY" Version="1.25.261109001" />
   </ItemGroup>
 
   <ItemGroup>
     <ProjectReference Include="..\Passthrough.Core\Passthrough.Core.csproj" />
+    <ProjectReference Include="..\Passthrough.Windows\Passthrough.Windows.csproj" />
+    <ProjectReference Include="..\Passthrough.Media\Passthrough.Media.csproj" />
   </ItemGroup>
 
   <ItemGroup>
     <Content Include="Assets\app.ico" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
+
+  <!-- Publishing (scripts/build-windows.ps1) leaves out the app's own resource index and compiled XAML, though the
+       build makes them; without them WinUI can't load a window and the app crashes as it starts. -->
+  <Target Name="PublishOwnXamlResources" AfterTargets="ComputeResolvedFilesToPublishList">
+    <ItemGroup>
+      <_OwnXamlResource Include="$(OutDir)$(AssemblyName).pri;$(OutDir)*.xbf" />
+      <ResolvedFileToPublish Include="@(_OwnXamlResource)" RelativePath="%(Filename)%(Extension)" CopyToPublishDirectory="PreserveNewest" />
+    </ItemGroup>
+  </Target>
 </Project>

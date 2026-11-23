@@ -126,6 +126,10 @@ sealed interface ShellEvent {
         override fun toString() = "MacInfo(irohID=$irohID, irohRelay=$irohRelay, relayToken=${if (relayToken == null) "none" else "<redacted>"}, addresses=$addresses)"
     }
     data class Sessions(val sessions: List<ShellSessionInfo>) : ShellEvent
+    /** What the host says it is (after `macInfo`, and whenever it changes), cleaned ([HostInfo.cleaned]). */
+    data class Host(val info: HostInfo) : ShellEvent
+    /** The host is about to go away; [reason] is one of [HostInfo.GOING_AWAY_REASONS], or one this app doesn't know. */
+    data class GoingAway(val reason: String) : ShellEvent
     /** How the Mac is doing (after `ready`, and whenever it changes). */
     data class MacStateChanged(val state: MacState) : ShellEvent
     /** The answer to [ShellConnection.requestEvents]: what happened since then, oldest first, and the battery meanwhile. */
@@ -266,10 +270,14 @@ class ShellConnection(
 
     fun list() = enqueue(ShellEnvelope(ShellEnvelope.LIST))
 
-    fun open(cols: Int, rows: Int): Unit = synchronized(lock) {
+    /**
+     * Opens a session. [shell]: which of the host's shells ([HostShell.id], from its `host` list);
+     * null leaves it out of the line (the host's default), so the line is as before shells had ids.
+     */
+    fun open(cols: Int, rows: Int, shell: String? = null): Unit = synchronized(lock) {
         if (!active) return
         val ref = ++lastOpenRef
-        enqueue(ShellEnvelope(ShellEnvelope.OPEN, cols = cols, rows = rows, ref = ref))
+        enqueue(ShellEnvelope(ShellEnvelope.OPEN, cols = cols, rows = rows, ref = ref, shell = shell))
     }
 
     fun attach(session: String, cols: Int, rows: Int): Unit = synchronized(lock) {
@@ -413,6 +421,8 @@ class ShellConnection(
             ShellEnvelope.MAC_INFO -> emit(ShellEvent.MacInfo(m.irohID, m.irohRelay, m.relayToken, m.addresses))
             ShellEnvelope.SESSIONS -> emit(ShellEvent.Sessions(m.sessions.orEmpty()))
             ShellEnvelope.MAC_STATE -> m.state?.let { emit(ShellEvent.MacStateChanged(it)) }
+            ShellEnvelope.HOST -> m.host?.cleaned()?.let { emit(ShellEvent.Host(it)) }
+            ShellEnvelope.GOING_AWAY -> emit(ShellEvent.GoingAway(m.reason.orEmpty()))
             ShellEnvelope.EVENT_LIST -> emit(ShellEvent.Events(m.since ?: 0.0, m.events.orEmpty(), m.battery.orEmpty()))
             ShellEnvelope.OPENED -> {
                 val id = m.session ?: return

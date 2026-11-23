@@ -1,6 +1,7 @@
 #if os(macOS)
 import Foundation
 import Network
+import CryptoKit
 import XCTest
 import PhoneTransport
 import ScreenClient
@@ -1667,6 +1668,209 @@ extension ShellListenerTests {
         c.giveScreenPass(bad)
         wait(for: [probe.expect(self, "refused") { _ in probe.failures == [.badRequest] }], timeout: 5)
         XCTAssertEqual(kept.get().count, 1)
+    }
+
+    // MARK: Computers (stage 7 a.1, a.3)
+
+    /// A computer's identity key, signing as a real one does.
+    private struct KeyIdentity: ComputerIdentitySigning {
+        let raw = P256.Signing.PrivateKey().rawRepresentation
+        var publicKey: Data { (try! P256.Signing.PrivateKey(rawRepresentation: raw)).publicKey.x963Representation }
+        func sign(_ message: Data) throws -> Data {
+            try P256.Signing.PrivateKey(rawRepresentation: raw).signature(for: message).rawRepresentation
+        }
+    }
+
+    // Static: an extension can't hold stored instance properties.
+    private static let computerIDValue = "computer.0b1e2a3c-4d5e-4f60-8a71-92b3c4d5e6f7"
+    private static let computerKeyValue = WirelessLink.randomBytes(32)
+    private var computerID: String { Self.computerIDValue }
+    private var computerKey: Data { Self.computerKeyValue }
+
+    /// A listener that knows the phone and one computer, recorded with `recorded`'s key and `scopes`.
+    private func computerListener(recorded: KeyIdentity, scopes: Set<String>) -> ShellListener {
+        let listener = startListener(keys: Locked(["phone-1": key, computerID: computerKey]))
+        let id = computerID, point = recorded.publicKey
+        listener.computerKey = { $0 == id ? point : nil }
+        listener.computerScopes = { $0 == id ? scopes : [] }
+        listener.macState = { _ in MacState(awake: true, control: true) }
+        listener.hostInfo = { _ in HostInfo(kind: HostInfo.kindMac, shells: [HostShell(id: HostShell.loginID, name: "zsh", default: true)]) }
+        return listener
+    }
+
+    private func computerClient(_ listener: ShellListener, identity: (any ComputerIdentitySigning)?) -> (ShellClient, Probe) {
+        let credential = ShellCredential(macID: "mac", macName: "Test Mac", certSHA256: self.identity.fingerprint,
+                                         shellKey: computerKey, phoneID: computerID, port: listener.port!, addresses: [])
+        let probe = Probe()
+        let client = ShellClient(credential: credential, queue: DispatchQueue(label: "probe"), identity: identity) { probe.record($0) }
+        client.connect(discovered: .hostPort(host: "127.0.0.1", port: NWEndpoint.Port(rawValue: listener.port!)!))
+        addTeardownBlock { client.disconnect() }
+        return (client, probe)
+    }
+
+    func testAComputerSignsItsProofAndMayOnlyUseItsShells() {
+        let me = KeyIdentity()
+        let listener = computerListener(recorded: me, scopes: [Computers.scopeShell])
+        let (c, probe) = computerClient(listener, identity: me)
+        wait(for: [probe.expect(self, "ready") { _ in probe.isReady }], timeout: 5)
+        wait(for: [probe.expect(self, "state") { $0.contains { if case let .macState(state) = $0 { return state.control == false } else { return false } } }],
+             timeout: 5)
+        _ = openSession(c, probe)
+        // Nothing a computer may not ask: no history, no lock, no onward grant, no Screen Sharing relay.
+        c.requestHistory()
+        c.lockMac()
+        c.grantComputer(name: "Other", viewer: "v", scopes: ["shell"], idKey: me.publicKey, kind: nil)
+        wait(for: [probe.expect(self, "refused") { _ in probe.failures == [.notAllowed, .notAllowed, .notAllowed] }], timeout: 5)
+        XCTAssertFalse(probe.disconnected, "refusals leave the connection up")
+    }
+
+    func testACopiedCredentialOpensNothingWithoutTheIdentityKey() {
+        let listener = computerListener(recorded: KeyIdentity(), scopes: [Computers.scopeShell])
+        // Another key signs: refused, as a wrong shell key is.
+        let (_, forged) = computerClient(listener, identity: KeyIdentity())
+        wait(for: [forged.expect(self, "refused") { _ in forged.failures == [.notAuthorized] }], timeout: 5)
+        XCTAssertFalse(forged.isReady)
+        // No key at all: the client sends nothing and gives up.
+        let (_, unsigned) = computerClient(listener, identity: nil)
+        wait(for: [unsigned.expect(self, "gave up") { _ in unsigned.disconnected }], timeout: 5)
+        XCTAssertFalse(unsigned.isReady)
+    }
+
+    func testAComputerWithTheScreenOnlyIsToldNoShells() {
+        let me = KeyIdentity()
+        let listener = computerListener(recorded: me, scopes: [Computers.scopeScreen])
+        let (c, probe) = computerClient(listener, identity: me)
+        wait(for: [probe.expect(self, "host") { $0.contains { if case .host = $0 { return true } else { return false } } }], timeout: 5)
+        XCTAssertTrue(probe.events.get().contains { if case let .host(info) = $0 { return info.shells == nil } else { return false } })
+        c.list()
+        c.requestScreen()
+        wait(for: [probe.expect(self, "refused") { _ in probe.failures == [.notAllowed, .screenNotAllowed] }], timeout: 5)
+        XCTAssertFalse(probe.events.get().contains {
+            switch $0 {
+            case .sessions, .macState: return true
+            default: return false
+            }
+        })
+    }
+
+    func testAPhoneGivesAComputerAccess() {
+        let listener = startListener()
+        let asked = Locked<[ComputerGrantRequest]>([])
+        let granted = WirelessLink.randomBytes(32), id = computerID
+        listener.onComputerGrant = { phoneID, _, request in
+            XCTAssertEqual(phoneID, "phone-1")
+            asked.set(asked.get() + [request])
+            return .success((id, granted, request.scopes))
+        }
+        let (c, probe) = readyClient(listener)
+        let point = KeyIdentity().publicKey
+        c.grantComputer(name: "Office-PC", viewer: "pc-1", scopes: ["screen", "shell"], idKey: point, kind: HostInfo.kindWindows)
+        wait(for: [probe.expect(self, "granted") { $0.contains { if case .computerGranted = $0 { return true } else { return false } } }], timeout: 5)
+        XCTAssertEqual(asked.get(), [ComputerGrantRequest(name: "Office-PC", viewer: "pc-1", kind: HostInfo.kindWindows, identityKey: point,
+                                                          scopes: ["shell", "screen"])])
+        for case let .computerGranted(gotID, key, scopes, pending) in probe.events.get() {
+            XCTAssertEqual(gotID, id)
+            XCTAssertEqual(key, granted)
+            XCTAssertEqual(scopes, ["shell", "screen"])
+            XCTAssertEqual(pending, [])
+        }
+        // One without a valid identity key never reaches the app.
+        c.grantComputer(name: "Office-PC", viewer: "pc-1", scopes: ["shell"], idKey: Data(repeating: 4, count: 10), kind: nil)
+        wait(for: [probe.expect(self, "refused") { _ in probe.failures == [.badRequest] }], timeout: 5)
+        XCTAssertEqual(asked.get().count, 1)
+    }
+
+    private func computerLists(_ probe: Probe) -> [[ComputerAccess]] {
+        probe.events.get().compactMap { if case let .computerList(list) = $0 { return list } else { return nil } }
+    }
+
+    func testAPhoneListsItsComputersAndHearsOneConnect() {
+        let me = KeyIdentity()
+        let listener = computerListener(recorded: me, scopes: [Computers.scopeShell])
+        let id = computerID
+        listener.computerList = { phoneID in
+            phoneID == "phone-1"
+                ? [ComputerAccess(phoneID: id, viewer: "mac-2", name: "Office\tMac", kind: HostInfo.kindMac, scopes: ["shell"],
+                                  connected: true, grantedAt: 1_763_790_000)]
+                : []
+        }
+        let (phone, probe) = readyClient(listener)
+        phone.listComputers()
+        wait(for: [probe.expect(self, "list") { _ in !self.computerLists(probe).isEmpty }], timeout: 5)
+        // The listener says whether it is connected, whatever the store did; the name arrives cleaned.
+        XCTAssertEqual(computerLists(probe).first, [ComputerAccess(phoneID: id, viewer: "mac-2", name: "Office Mac", kind: HostInfo.kindMac,
+                                                                     scopes: ["shell"], connected: false, grantedAt: 1_763_790_000)])
+        // The computer connects: the phone that asked hears it, unasked.
+        let (_, computer) = computerClient(listener, identity: me)
+        wait(for: [computer.expect(self, "ready") { _ in computer.isReady }], timeout: 5)
+        wait(for: [probe.expect(self, "connected") { _ in self.computerLists(probe).last?.first?.connected == true }], timeout: 5)
+    }
+
+    /// A computer on the other listener is connected too: both share one presence, and both push the lists.
+    func testAComputerOnEitherListenerShowsAsConnected() {
+        let me = KeyIdentity()
+        let shared = ComputerPresence()
+        let phoneSide = computerListener(recorded: me, scopes: [Computers.scopeShell])
+        let computerSide = computerListener(recorded: me, scopes: [Computers.scopeShell])
+        phoneSide.computerPresence = shared
+        computerSide.computerPresence = shared
+        let id = computerID
+        phoneSide.computerList = { phoneID in
+            phoneID == "phone-1" ? [ComputerAccess(phoneID: id, viewer: "mac-2", name: "Office Mac", scopes: ["shell"], connected: false,
+                                                   grantedAt: 1_763_790_000)] : []
+        }
+        let (phone, probe) = readyClient(phoneSide)
+        phone.listComputers()
+        wait(for: [probe.expect(self, "list") { _ in self.computerLists(probe).first?.first?.connected == false }], timeout: 5)
+        let (computer, computerProbe) = computerClient(computerSide, identity: me)
+        wait(for: [computerProbe.expect(self, "ready") { _ in computerProbe.isReady }], timeout: 5)
+        wait(for: [probe.expect(self, "connected") { _ in self.computerLists(probe).last?.first?.connected == true }], timeout: 5)
+        XCTAssertTrue(shared.isConnected(id))
+        // It leaves: the phone hears that too.
+        computer.disconnect()
+        wait(for: [probe.expect(self, "gone") { _ in self.computerLists(probe).last?.first?.connected == false }], timeout: 5)
+        XCTAssertFalse(shared.isConnected(id))
+    }
+
+    /// A computer that proves itself is reported, so the grant it replaced can go; a phone isn't.
+    func testAComputerConnectingIsReportedAsUsed() {
+        let me = KeyIdentity()
+        let listener = computerListener(recorded: me, scopes: [Computers.scopeShell])
+        let used = Locked<[String]>([])
+        listener.onComputerUsed = { id in used.set(used.get() + [id]) }
+        _ = readyClient(listener)
+        let (_, probe) = computerClient(listener, identity: me)
+        wait(for: [probe.expect(self, "ready") { _ in probe.isReady }], timeout: 5)
+        let reported = expectation(description: "reported")
+        let id = computerID
+        func check() {
+            if used.get() == [id] { return reported.fulfill() }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.05, execute: check)
+        }
+        check()
+        wait(for: [reported], timeout: 5)
+    }
+
+    func testAComputerMayNotListComputers() {
+        let me = KeyIdentity()
+        let listener = computerListener(recorded: me, scopes: [Computers.scopeShell, Computers.scopeScreen])
+        listener.computerList = { _ in [] }
+        let (c, probe) = computerClient(listener, identity: me)
+        wait(for: [probe.expect(self, "ready") { _ in probe.isReady }], timeout: 5)
+        c.listComputers()
+        wait(for: [probe.expect(self, "refused") { _ in probe.failures == [.notAllowed] }], timeout: 5)
+        XCTAssertTrue(computerLists(probe).isEmpty)
+    }
+
+    func testAPhoneThatNeverAskedHearsNoList() {
+        let listener = startListener()
+        listener.computerList = { _ in [] }
+        let (_, probe) = readyClient(listener)
+        listener.pushComputerLists()
+        let settle = expectation(description: "settle")
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { settle.fulfill() }
+        wait(for: [settle], timeout: 2)
+        XCTAssertTrue(computerLists(probe).isEmpty)
     }
 }
 #endif

@@ -30,18 +30,33 @@ public struct ShellPhone: Codable, Equatable, Sendable {
     public var grantedBy: String?
     /// The viewer's own id as that phone knows it: a new pass for it replaces this one.
     public var viewerOf: String?
+    /// A computer (`Computers`): its identity public key (a 65-byte point), recorded at grant. Every
+    /// proof it makes is also signed with it. Absent for phones and passes.
+    public var identityKey: Data?
+    /// A computer's shell scope (its screen scope is `screen`). Absent for phones and passes.
+    public var shell: Bool?
+    /// A computer's kind (`HostInfo.kindMac`, `kindWindows`), for showing.
+    public var kind: String?
+    /// On a phone's record: "May share access with other computers". Off unless turned on.
+    public var share: Bool?
 
     public init(phoneID: String, label: String, pairingSlot: String, key: Data, previousKey: Data? = nil, grantedAt: Date,
-                screen: Bool? = nil, control: Bool? = nil, screenOnly: Bool? = nil, grantedBy: String? = nil, viewerOf: String? = nil) {
+                screen: Bool? = nil, control: Bool? = nil, screenOnly: Bool? = nil, grantedBy: String? = nil, viewerOf: String? = nil,
+                identityKey: Data? = nil, shell: Bool? = nil, kind: String? = nil, share: Bool? = nil) {
         self.phoneID = phoneID; self.label = label; self.pairingSlot = pairingSlot; self.key = key
         self.previousKey = previousKey; self.grantedAt = grantedAt; self.screen = screen; self.control = control
         self.screenOnly = screenOnly; self.grantedBy = grantedBy; self.viewerOf = viewerOf
+        self.identityKey = identityKey; self.shell = shell; self.kind = kind; self.share = share
     }
 
     public var isScreenOnly: Bool { screenOnly ?? false }
     public var screenAllowed: Bool { screen ?? false }
-    /// A screen-only pass never changes Keep awake or the VPN.
-    public var controlAllowed: Bool { !isScreenOnly && (control ?? true) }
+    /// A computer another device gave access (by its id, which only this Mac mints).
+    public var isComputer: Bool { Computers.isComputerID(phoneID) }
+    /// A screen-only pass or a computer never changes Keep awake or the VPN.
+    public var controlAllowed: Bool { !isScreenOnly && !isComputer && (control ?? true) }
+    /// Only a phone may give other computers access, and only once the owner lets it.
+    public var shareAllowed: Bool { !isScreenOnly && !isComputer && (share ?? false) }
 }
 
 /// The phones allowed a shell, with their keys, kept in the Mac's secret store.
@@ -61,9 +76,13 @@ public struct ShellPhone: Codable, Equatable, Sendable {
 /// Screen passes are kept in their own item, apart from the phones: a build
 /// that predates them reads only the phones' item, so it can never take a
 /// pass (whose key another Mac holds) for a phone with full access.
+/// Computers phones gave access (`Computers`) have a third item of their
+/// own for the same reason, and stay in the one list, so removing a phone
+/// removes them through the same fail-closed path as its passes.
 public final class ShellAccessStore: @unchecked Sendable {
     private static let account = "shell.phones"
     private static let passAccount = "shell.screenPasses"
+    private static let computerAccount = "shell.computers"
     /// How long a read that found nothing is answered from memory.
     public static let emptyTTL: TimeInterval = 5
     private let secrets: SecretStore
@@ -89,6 +108,7 @@ public final class ShellAccessStore: @unchecked Sendable {
     private var unsavedRevokes: Set<String> = []
     private var unsavedScreenOff: Set<String> = []
     private var unsavedControlOff: Set<String> = []
+    private var unsavedShareOff: Set<String> = []
     /// A read found entries it left out (passes in the phones' item, from
     /// before they had their own, or passes that can't be used): the next
     /// write rewrites both items without them. Guarded by `lock`.
@@ -146,6 +166,11 @@ public final class ShellAccessStore: @unchecked Sendable {
             ptLog(.error, "A phone claimed a screen pass's id; not recording it")
             return false
         }
+        // The same for a computer's id: its key and identity are another computer's.
+        guard !Computers.isComputerID(phone.phoneID) else {
+            ptLog(.error, "A phone claimed a computer's id; not recording it")
+            return false
+        }
         var phone = phone
         if let earlier = list.first(where: { $0.phoneID == phone.phoneID }) {
             guard !earlier.isScreenOnly else {
@@ -163,6 +188,7 @@ public final class ShellAccessStore: @unchecked Sendable {
             // Plugging the phone in again renews its key, not what it may do.
             phone.screen = earlier.screen
             phone.control = earlier.control
+            phone.share = earlier.share
         }
         list.removeAll { $0.phoneID == phone.phoneID }
         list.append(phone)
@@ -178,16 +204,19 @@ public final class ShellAccessStore: @unchecked Sendable {
     /// It follows the phone's pairing: forgetting the phone removes it.
     /// Returns the new id and key and the ids of passes it removed, or why not.
     public func grantViewer(by granter: String, name: String, viewer: String) -> Result<(id: String, key: Data, replaced: [String]), ShellError> {
-        guard ScreenPass.isValidName(name), !viewer.isEmpty, viewer.count <= ScreenPass.maxName * 2 else { return .failure(.badRequest) }
+        // Stored as shown: Settings and the notices print it, so no tabs, bidi or zero-width marks.
+        let label = ScreenPass.cleanName(name)
+        guard ScreenPass.isValidName(name), !label.isEmpty, !viewer.isEmpty, viewer.count <= ScreenPass.maxName * 2 else { return .failure(.badRequest) }
         writeLock.lock(); defer { writeLock.unlock() }
         guard var list = loadForWrite() else { return .failure(.passNotSaved) }
         let before = list
-        guard let phone = list.first(where: { $0.phoneID == granter }), !phone.isScreenOnly else { return .failure(.notAuthorized) }
+        guard let phone = list.first(where: { $0.phoneID == granter }), !phone.isScreenOnly, !phone.isComputer else { return .failure(.notAuthorized) }
         guard phone.screenAllowed else { return .failure(.screenNotAllowed) }
-        // In the order granted: the last is the newest, and the one kept.
-        var replaced = Array(list.filter { $0.grantedBy == granter && $0.viewerOf == viewer }.map(\.phoneID).dropLast())
+        // In the order granted: the last is the newest, and the one kept. Only passes: a
+        // computer the phone gave access is never dropped to make room for one.
+        var replaced = Array(list.filter { $0.isScreenOnly && $0.grantedBy == granter && $0.viewerOf == viewer }.map(\.phoneID).dropLast())
         list.removeAll { replaced.contains($0.phoneID) }
-        let others = list.filter { $0.grantedBy == granter }.sorted { $0.grantedAt < $1.grantedAt }
+        let others = list.filter { $0.isScreenOnly && $0.grantedBy == granter }.sorted { $0.grantedAt < $1.grantedAt }
         if others.count >= ScreenPass.maxPerGranter {
             let dropped = others.prefix(others.count - ScreenPass.maxPerGranter + 1).map(\.phoneID)
             replaced += dropped
@@ -195,7 +224,7 @@ public final class ShellAccessStore: @unchecked Sendable {
         }
         let id = ScreenPass.idPrefix + UUID().uuidString.lowercased()
         let key = Self.newKey()
-        list.append(ShellPhone(phoneID: id, label: name.trimmingCharacters(in: .whitespacesAndNewlines), pairingSlot: phone.pairingSlot,
+        list.append(ShellPhone(phoneID: id, label: label, pairingSlot: phone.pairingSlot,
                                key: key, grantedAt: now(), screen: true, control: false, screenOnly: true,
                                grantedBy: granter, viewerOf: viewer))
         return store(list, over: before) ? .success((id, key, replaced)) : .failure(.passNotSaved)
@@ -216,6 +245,186 @@ public final class ShellAccessStore: @unchecked Sendable {
         }
         guard phones.contains(where: stale) else { return [] }
         return removing(where: stale).removed
+    }
+
+    // MARK: Computers
+
+    /// Gives another of the phone's computers access, granted by `granter` (a phone the owner lets
+    /// share), for the computer it calls `name` and knows as `viewer` (its host id), proving with
+    /// `identityKey`. The rules, in order: a valid request, else `bad_request`; a phone, else
+    /// `not_authorized`; one that may share, else `not_allowed`; the screen only for a phone that may
+    /// see it, else `screen_not_allowed`; at most `Computers.maxPerGranter` a phone and
+    /// `Computers.maxTotal` in all, else refused `too_many_computers`. An earlier grant by the same
+    /// phone for the same viewer stays until the new one is first used (`retireComputers(supersededBy:)`),
+    /// since the hand-over to the computer may still fail; it doesn't count, and only the newest such
+    /// earlier grant is kept, as for passes. It follows the phone's pairing: forgetting the phone
+    /// removes it. Returns the new id and key, its scopes and the ids removed now.
+    public func grantComputer(by granter: String, name: String, viewer: String, kind: String?, identityKey: Data,
+                              scopes: Set<String>) -> Result<(id: String, key: Data, scopes: [String], replaced: [String]), ShellError> {
+        // Stored as shown: Settings and the notices print it, so no tabs, bidi or zero-width marks.
+        let label = ScreenPass.cleanName(name)
+        guard ScreenPass.isValidName(name), !label.isEmpty, !viewer.isEmpty, viewer.count <= ScreenPass.maxName * 2,
+              ComputerProof.isPoint(identityKey), !scopes.isEmpty, scopes.isSubset(of: Set(Computers.allScopes)) else { return .failure(.badRequest) }
+        writeLock.lock(); defer { writeLock.unlock() }
+        guard var list = loadForWrite() else { return .failure(.passNotSaved) }
+        let before = list
+        guard let phone = list.first(where: { $0.phoneID == granter }), !phone.isScreenOnly, !phone.isComputer else { return .failure(.notAuthorized) }
+        guard phone.shareAllowed else { return .failure(.notAllowed) }
+        if scopes.contains(Computers.scopeScreen), !phone.screenAllowed { return .failure(.screenNotAllowed) }
+        // In the order granted: the last is the newest, and the one kept.
+        let replaced = Array(list.filter { $0.isComputer && $0.grantedBy == granter && $0.viewerOf == viewer }.map(\.phoneID).dropLast())
+        // Grants waiting to be retired, and this viewer's own, are about to be replaced: they don't count.
+        let waiting = Self.waitingComputerIDs(in: list)
+        let others = list.filter { $0.isComputer && !waiting.contains($0.phoneID) && !($0.grantedBy == granter && $0.viewerOf == viewer) }
+        guard others.filter({ $0.grantedBy == granter }).count < Computers.maxPerGranter, others.count < Computers.maxTotal else {
+            return .failure(.tooManyComputers)
+        }
+        list.removeAll { replaced.contains($0.phoneID) }
+        let id = Computers.newID()
+        let key = Self.newKey()
+        list.append(ShellPhone(phoneID: id, label: label, pairingSlot: phone.pairingSlot,
+                               key: key, grantedAt: now(), screen: scopes.contains(Computers.scopeScreen) ? true : nil, control: false,
+                               grantedBy: granter, viewerOf: viewer, identityKey: identityKey,
+                               shell: scopes.contains(Computers.scopeShell) ? true : nil,
+                               kind: Hosts.isRecordable(kind) ? kind : nil))
+        guard store(list, over: before) else { return .failure(.passNotSaved) }
+        return .success((id, key, Computers.allScopes.filter(scopes.contains), replaced))
+    }
+
+    /// Who gave a computer access, and for which of its computers: grants that share both are one
+    /// computer's, the last in the list its current one.
+    private struct ComputerSlot: Hashable {
+        let granter: String
+        let viewer: String
+
+        init?(_ entry: ShellPhone) {
+            guard entry.isComputer, let granter = entry.grantedBy, let viewer = entry.viewerOf else { return nil }
+            self.granter = granter
+            self.viewer = viewer
+        }
+    }
+
+    /// Computers' grants a newer one for the same granter and viewer replaced, still accepted until
+    /// that one is first used. In the list's order, which is the order granted.
+    private static func waitingComputerIDs(in list: [ShellPhone]) -> Set<String> {
+        var seen = Set<ComputerSlot>(), waiting = Set<String>()
+        for entry in list.reversed() {
+            guard let slot = ComputerSlot(entry) else { continue }
+            if !seen.insert(slot).inserted { waiting.insert(entry.phoneID) }
+        }
+        return waiting
+    }
+
+    /// From memory: computers' grants waiting to be retired (`retireComputers(supersededBy:)`). They
+    /// still work, but are neither listed nor counted: a newer grant for the same computer stands for them.
+    public var waitingComputerIDs: Set<String> { Self.waitingComputerIDs(in: phones) }
+
+    /// The grant `computerID` was used (its computer proved it), so the computer has it: the earlier
+    /// grants the same phone made for that computer go. Answered from memory when there are none, as
+    /// there usually aren't. Returns what it removed, for the caller to cut their connections.
+    @discardableResult
+    public func retireComputers(supersededBy computerID: String) -> [ShellPhone] {
+        let list = phones
+        guard let index = list.firstIndex(where: { $0.phoneID == computerID }), let slot = ComputerSlot(list[index]) else { return [] }
+        // Only older ones: a grant made after this one may still be on its way to the computer.
+        let stale = Set(list[..<index].filter { ComputerSlot($0) == slot }.map(\.phoneID))
+        guard !stale.isEmpty else { return [] }
+        return removing { stale.contains($0.phoneID) }.removed
+    }
+
+    /// Every grant that is the same computer's as `id` (the same phone, for the same computer), `id`
+    /// included: the current one and any waiting to be retired.
+    public func sameComputer(as id: String) -> [String] {
+        let list = phones
+        guard let entry = list.first(where: { $0.phoneID == id && $0.isComputer }) else { return [] }
+        guard let slot = ComputerSlot(entry) else { return [id] }
+        return list.filter { ComputerSlot($0) == slot }.map(\.phoneID)
+    }
+
+    /// From memory: the identity key a computer's proof must be signed with; nil for anything that
+    /// isn't a computer with access (unknown, its phone gone, or nothing left it may do).
+    public func computerKey(_ id: String) -> Data? {
+        let list = phones
+        guard !Self.scopes(of: id, in: list).isEmpty else { return nil }
+        return list.first { $0.phoneID == id }?.identityKey
+    }
+
+    /// From memory, asked on every request: what a computer may do now. `shell` while its phone keeps
+    /// access, `screen` while that phone may also see the screen. Empty for anything else.
+    public func scopes(of id: String) -> Set<String> {
+        Self.scopes(of: id, in: phones)
+    }
+
+    private static func scopes(of id: String, in list: [ShellPhone]) -> Set<String> {
+        guard Computers.isComputerID(id), let computer = list.first(where: { $0.phoneID == id }) else { return [] }
+        let granter = computer.grantedBy.flatMap { by in list.first { $0.phoneID == by && !$0.isScreenOnly && !$0.isComputer } }
+        guard computer.grantedBy == nil || granter != nil else { return [] }
+        var scopes = Set<String>()
+        if computer.shell == true { scopes.insert(Computers.scopeShell) }
+        if computer.screen == true, granter?.screenAllowed ?? true { scopes.insert(Computers.scopeScreen) }
+        return scopes
+    }
+
+    /// The computers `granter` gave access here, oldest first, as `computerList` lists them (`connected`
+    /// is the listener's to say). On a Mac nothing waits for the owner: there is no `pending`. A grant
+    /// waiting to be retired isn't listed: the newer one for that computer is.
+    public func computers(grantedBy granter: String) -> [ComputerAccess] {
+        let list = phones
+        let waiting = Self.waitingComputerIDs(in: list)
+        return list.filter { $0.isComputer && $0.grantedBy == granter && !waiting.contains($0.phoneID) }
+            .sorted { $0.grantedAt < $1.grantedAt }
+            .prefix(Computers.maxTotal)
+            .map { computer in
+                let scopes = Self.scopes(of: computer.phoneID, in: list)
+                return ComputerAccess(phoneID: computer.phoneID, viewer: computer.viewerOf, name: computer.label, kind: computer.kind,
+                                      scopes: Computers.allScopes.filter(scopes.contains), connected: false,
+                                      grantedAt: Int64(computer.grantedAt.timeIntervalSince1970))
+            }
+    }
+
+    /// Takes back one computer `granter` gave access (one it couldn't hand over after all), as
+    /// `revokeViewer`. Only that grant goes: an earlier one for the same computer, kept until this one
+    /// was used, works again. Returns what it removed (empty: nothing of that phone's by that id).
+    @discardableResult
+    public func revokeComputer(_ id: String, grantedBy granter: String) -> (done: Bool, removed: [ShellPhone]) {
+        let matches = { (entry: ShellPhone) in entry.phoneID == id && entry.grantedBy == granter && entry.isComputer }
+        guard Computers.isComputerID(id), phones.contains(where: matches) else { return (true, []) }
+        return removing(where: matches)
+    }
+
+    /// The owner takes back a computer's access, whichever phone gave it (Settings ▸ Computers with
+    /// access). Only that computer goes, with any earlier grant for it still waiting to be retired (the
+    /// owner sees one computer, and takes it all away): its phone's own access and passes stay.
+    /// Returns what it removed (empty: no computer by that id), so the caller cuts its connections
+    /// even when the removal couldn't be saved.
+    @discardableResult
+    public func revokeComputer(_ id: String) -> (done: Bool, removed: [ShellPhone]) {
+        guard Computers.isComputerID(id) else { return (true, []) }
+        let ids = Set(sameComputer(as: id))
+        guard !ids.isEmpty else { return (true, []) }
+        return removing { $0.isComputer && ids.contains($0.phoneID) }
+    }
+
+    /// From memory: whether the phone may give other computers access ("May share access with other computers").
+    public func shareAllowed(forPhone phoneID: String) -> Bool {
+        phones.first { $0.phoneID == phoneID }?.shareAllowed ?? false
+    }
+
+    /// Lets the phone give other computers access, or stops it; as `setScreenAllowed`, a failed stop
+    /// still stops it in memory. Stopping removes nothing it already gave.
+    @discardableResult
+    public func setShareAllowed(_ allowed: Bool, forPhone phoneID: String) -> Bool {
+        writeLock.lock(); defer { writeLock.unlock() }
+        guard var list = loadForWrite(), let index = list.firstIndex(where: { $0.phoneID == phoneID }),
+              !list[index].isScreenOnly, !list[index].isComputer else { return false }
+        let before = list
+        list[index].share = allowed
+        if allowed { return store(list, over: before) }
+        setCache(list)
+        if write(list, over: before).ok { saved(); return true }
+        ptLog(.error, "Could not store that a phone may no longer share access; it stays off until this Mac quits")
+        lock.lock(); unsavedShareOff.insert(phoneID); lock.unlock()
+        return false
     }
 
     /// From memory, like `screenAllowed`: whether this is a screen-only pass.
@@ -239,6 +448,8 @@ public final class ShellAccessStore: @unchecked Sendable {
     /// (even when that can't be saved) stops its passes with it.
     public func screenAllowed(forPhone phoneID: String) -> Bool {
         let list = phones
+        // A computer: its screen scope, while the phone that gave it may see the screen too.
+        if Computers.isComputerID(phoneID) { return Self.scopes(of: phoneID, in: list).contains(Computers.scopeScreen) }
         guard let phone = list.first(where: { $0.phoneID == phoneID }), phone.screenAllowed else { return false }
         guard phone.isScreenOnly else { return true }
         guard let granter = phone.grantedBy, let by = list.first(where: { $0.phoneID == granter }) else { return false }
@@ -271,12 +482,14 @@ public final class ShellAccessStore: @unchecked Sendable {
     /// label changed.
     @discardableResult
     public func relabel(pairingSlot: String, label: String) -> Bool {
-        guard !label.isEmpty, phones.contains(where: { $0.pairingSlot == pairingSlot && !$0.isScreenOnly && $0.label != label }) else { return false }
+        guard !label.isEmpty, phones.contains(where: { $0.pairingSlot == pairingSlot && !$0.isScreenOnly && !$0.isComputer && $0.label != label }) else { return false }
         writeLock.lock(); defer { writeLock.unlock() }
         guard var list = loadForWrite() else { return false }
         let before = list
-        // A screen pass keeps its own name (another Mac's), not the phone's that granted it.
-        for index in list.indices where list[index].pairingSlot == pairingSlot && !list[index].isScreenOnly { list[index].label = label }
+        // A screen pass or a computer keeps its own name (another Mac's), not the phone's that granted it.
+        for index in list.indices where list[index].pairingSlot == pairingSlot && !list[index].isScreenOnly && !list[index].isComputer {
+            list[index].label = label
+        }
         return store(list, over: before)
     }
 
@@ -400,12 +613,18 @@ public final class ShellAccessStore: @unchecked Sendable {
                 ptLog(.error, "Could not update the shell phones; removing them all")
                 secrets.delete(Self.account)
                 gone = secrets.read(Self.account) == nil
-            } else {
-                ptLog(.error, "Could not update the screen passes; removing them all")
             }
-            // Passes without their phones can't be used, but they don't stay behind either.
-            secrets.delete(Self.passAccount)
-            gone = gone && secrets.read(Self.passAccount) == nil
+            // Passes and computers without their phones can't be used, but they don't stay behind either.
+            if !written.phones || !written.passes {
+                if written.phones { ptLog(.error, "Could not update the screen passes; removing them all") }
+                secrets.delete(Self.passAccount)
+                gone = gone && secrets.read(Self.passAccount) == nil
+            }
+            if !written.phones || !written.computers {
+                if written.phones { ptLog(.error, "Could not update the computers with access; removing them all") }
+                secrets.delete(Self.computerAccount)
+                gone = gone && secrets.read(Self.computerAccount) == nil
+            }
             // Still stored: the in-memory list stays the trimmed one, and any
             // later read of the store leaves these phones out.
             if gone { setCache(nil); saved(); return (true, entries) }
@@ -417,7 +636,9 @@ public final class ShellAccessStore: @unchecked Sendable {
         setCache(nil)
         secrets.delete(Self.account)
         secrets.delete(Self.passAccount)
-        return (secrets.read(Self.account) == nil && secrets.read(Self.passAccount) == nil, everyone.filter(shouldRemove))
+        secrets.delete(Self.computerAccount)
+        return (secrets.read(Self.account) == nil && secrets.read(Self.passAccount) == nil && secrets.read(Self.computerAccount) == nil,
+                everyone.filter(shouldRemove))
     }
 
     private func setCache(_ list: [ShellPhone]?) {
@@ -427,18 +648,33 @@ public final class ShellAccessStore: @unchecked Sendable {
     /// A list built on the in-memory one (so with every unsaved reduction
     /// applied) was written, or nothing is stored at all: nothing is unsaved.
     private func saved() {
-        lock.lock(); unsavedRevokes.removeAll(); unsavedScreenOff.removeAll(); unsavedControlOff.removeAll(); lock.unlock()
+        lock.lock()
+        unsavedRevokes.removeAll(); unsavedScreenOff.removeAll(); unsavedControlOff.removeAll(); unsavedShareOff.removeAll()
+        lock.unlock()
     }
 
     /// Whether an entry is a screen pass (kept in the passes' item), by what it says or by its id.
     private static func isPass(_ entry: ShellPhone) -> Bool {
-        entry.isScreenOnly || ScreenPass.isViewerID(entry.phoneID)
+        !entry.isComputer && (entry.isScreenOnly || ScreenPass.isViewerID(entry.phoneID))
     }
 
-    /// Which of the two items a write stored (true when there was nothing to write).
+    /// Whether an entry is a computer (kept in the computers' item), by its id.
+    private static func isComputer(_ entry: ShellPhone) -> Bool { entry.isComputer }
+
+    /// A phone's own entry (kept in the phones' item).
+    private static func isPhone(_ entry: ShellPhone) -> Bool { !isPass(entry) && !isComputer(entry) }
+
+    /// A stored computer that can be used: its key and identity key well formed, something it may
+    /// do, and the phone that gave it access (if one did) among `phones`.
+    private static func isUsableComputer(_ entry: ShellPhone, phones: Set<String>) -> Bool {
+        entry.isComputer && !entry.isScreenOnly && entry.key.count == 32 && entry.identityKey.map(ComputerProof.isPoint) == true
+            && (entry.shell == true || entry.screen == true) && (entry.grantedBy.map(phones.contains) ?? true)
+    }
+
+    /// Which of the three items a write stored (true when there was nothing to write).
     private struct Written {
-        var phones = true, passes = true
-        var ok: Bool { phones && passes }
+        var phones = true, passes = true, computers = true
+        var ok: Bool { phones && passes && computers }
     }
 
     /// Writes `list`, its phones and its passes each to their own item, no
@@ -447,24 +683,31 @@ public final class ShellAccessStore: @unchecked Sendable {
     /// item and a pass never the phones'; both are written while a reduction
     /// is unsaved, or a read found something to tidy.
     private func write(_ list: [ShellPhone], over previous: [ShellPhone]) -> Written {
-        let phones = list.filter { !Self.isPass($0) }, passes = list.filter(Self.isPass)
+        let phones = list.filter(Self.isPhone), passes = list.filter(Self.isPass), computers = list.filter(Self.isComputer)
         lock.lock()
-        let both = needsTidy || !unsavedRevokes.isEmpty || !unsavedScreenOff.isEmpty || !unsavedControlOff.isEmpty
+        let all = needsTidy || !unsavedRevokes.isEmpty || !unsavedScreenOff.isEmpty || !unsavedControlOff.isEmpty || !unsavedShareOff.isEmpty
         lock.unlock()
         var written = Written()
-        if both || previous.filter({ !Self.isPass($0) }) != phones {
+        if all || previous.filter(Self.isPhone) != phones {
             written.phones = (try? JSONEncoder().encode(phones)).map { secrets.write($0, account: Self.account) } ?? false
         }
-        if both || previous.filter(Self.isPass) != passes {
-            if passes.isEmpty {
-                secrets.delete(Self.passAccount)
-                written.passes = secrets.read(Self.passAccount) == nil
-            } else {
-                written.passes = (try? JSONEncoder().encode(passes)).map { secrets.write($0, account: Self.passAccount) } ?? false
-            }
+        if all || previous.filter(Self.isPass) != passes {
+            written.passes = writeItem(passes, account: Self.passAccount)
         }
-        if both, written.ok { lock.lock(); needsTidy = false; lock.unlock() }
+        if all || previous.filter(Self.isComputer) != computers {
+            written.computers = writeItem(computers, account: Self.computerAccount)
+        }
+        if all, written.ok { lock.lock(); needsTidy = false; lock.unlock() }
         return written
+    }
+
+    /// The passes' or the computers' item: deleted when there are none.
+    private func writeItem(_ entries: [ShellPhone], account: String) -> Bool {
+        if entries.isEmpty {
+            secrets.delete(account)
+            return secrets.read(account) == nil
+        }
+        return (try? JSONEncoder().encode(entries)).map { secrets.write($0, account: account) } ?? false
     }
 
     /// Under `writeLock`.
@@ -494,25 +737,33 @@ public final class ShellAccessStore: @unchecked Sendable {
             guard let stored = try? JSONDecoder().decode([ShellPhone].self, from: data) else { return nil }
             // Passes stored among the phones (before they had their own item)
             // are left out, never taken for phones, and that item is rewritten without them.
-            list = stored.filter { !Self.isPass($0) }
+            list = stored.filter(Self.isPhone)
             tidy = list.count != stored.count
         }
+        let phoneIDs = Set(list.map(\.phoneID))
         if let data = secrets.read(Self.passAccount) {
             // Passes that can't be read, aren't passes, or whose phone is gone
             // can't be used: they're left out, and the item rewritten without them.
             let stored = try? JSONDecoder().decode([ShellPhone].self, from: data)
-            let granters = Set(list.map(\.phoneID))
-            let passes = (stored ?? []).filter { $0.isScreenOnly && ScreenPass.isViewerID($0.phoneID) && $0.grantedBy.map(granters.contains) == true }
+            let passes = (stored ?? []).filter { $0.isScreenOnly && ScreenPass.isViewerID($0.phoneID) && $0.grantedBy.map(phoneIDs.contains) == true }
             tidy = tidy || stored == nil || passes.count != stored?.count
             list += passes
         }
+        if let data = secrets.read(Self.computerAccount) {
+            // The same for computers: never taken for phones or passes, and only with their phone.
+            let stored = try? JSONDecoder().decode([ShellPhone].self, from: data)
+            let computers = (stored ?? []).filter { Self.isUsableComputer($0, phones: phoneIDs) }
+            tidy = tidy || stored == nil || computers.count != stored?.count
+            list += computers
+        }
         lock.lock()
         if tidy { needsTidy = true }
-        let revoked = unsavedRevokes, screenOff = unsavedScreenOff, controlOff = unsavedControlOff
+        let revoked = unsavedRevokes, screenOff = unsavedScreenOff, controlOff = unsavedControlOff, shareOff = unsavedShareOff
         lock.unlock()
         list.removeAll { revoked.contains($0.phoneID) }
         for index in list.indices where screenOff.contains(list[index].phoneID) { list[index].screen = false }
         for index in list.indices where controlOff.contains(list[index].phoneID) { list[index].control = false }
+        for index in list.indices where shareOff.contains(list[index].phoneID) { list[index].share = false }
         return list
     }
 }

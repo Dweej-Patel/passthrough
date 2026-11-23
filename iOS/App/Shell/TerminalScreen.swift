@@ -5,7 +5,8 @@ import PassthroughUI
 
 /// What the terminal screen does once it knows its size.
 enum TerminalIntent: Identifiable, Equatable {
-    case new
+    /// A new session; `shell` names one of the computer's shells (nil: its default).
+    case new(shell: String?)
     case attach(String)
 
     var id: String {
@@ -136,14 +137,14 @@ final class ShellTerminalController: ObservableObject {
         driver.afterLayout { [weak self] cols, rows in
             guard let self else { return }
             switch intent {
-            case .new: self.shell.newSession(cols: cols, rows: rows)
+            case let .new(shell): self.shell.newSession(cols: cols, rows: rows, shell: shell)
             case let .attach(id): self.shell.attach(id, cols: cols, rows: rows)
             }
             if !self.driver.readOnly { _ = self.driver.view.becomeFirstResponder() }
         }
     }
 
-    func newSession() { shell.newSession(cols: driver.cols, rows: driver.rows) }
+    func newSession(shell id: String? = nil) { shell.newSession(cols: driver.cols, rows: driver.rows, shell: id) }
 
     /// Shows `id`, attaching to it (and so taking it back from another device).
     func attach(_ id: String) { shell.attach(id, cols: driver.cols, rows: driver.rows) }
@@ -287,19 +288,32 @@ struct TerminalScreen: View {
                         ForEach(shell.openTabs, id: \.self) { id in
                             tab(id).id(id)
                         }
-                        Button { controller.newSession() } label: {
-                            Image(systemName: "plus")
-                                .font(.caption.weight(.bold))
-                                .foregroundStyle(PTTheme.accentEnd)
-                                .frame(width: 34, height: 32)
-                                .background(PTTheme.accentEnd.opacity(0.16), in: Capsule())
-                                .frame(minWidth: 44, minHeight: 44)
-                                .contentShape(Rectangle())
+                        let shells = shell.shells(for: shell.selectedMacID)
+                        let preferred = shell.preferredShell(for: shell.selectedMacID)
+                        if shells.count > 1 {
+                            // A tap opens the preferred shell; a long press chooses another.
+                            Menu {
+                                Section("Shells open as you, never as administrator.") {
+                                    ForEach(shells, id: \.id) { item in
+                                        Button(item.name) { controller.newSession(shell: item.id) }
+                                    }
+                                }
+                            } label: {
+                                Self.plusLabel
+                            } primaryAction: {
+                                controller.newSession(shell: preferred?.id)
+                            }
+                            .disabled(shell.reach != .ready)
+                            .opacity(shell.reach == .ready ? 1 : 0.4)
+                            .accessibilityLabel("New shell")
+                            .accessibilityValue(preferred?.name ?? "")
+                        } else {
+                            Button { controller.newSession() } label: { Self.plusLabel }
+                                .buttonStyle(.plain)
+                                .disabled(shell.reach != .ready)
+                                .opacity(shell.reach == .ready ? 1 : 0.4)
+                                .accessibilityLabel("New shell")
                         }
-                        .buttonStyle(.plain)
-                        .disabled(shell.reach != .ready)
-                        .opacity(shell.reach == .ready ? 1 : 0.4)
-                        .accessibilityLabel("New session")
                     }
                 }
                 .onChange(of: current) { _, id in
@@ -385,8 +399,11 @@ struct TerminalScreen: View {
                     Image(systemName: "lock.fill").foregroundStyle(.secondary)
                 }
                 HStack(spacing: 8) {
-                    Button { controller.newSession() } label: {
-                        Label("New session", systemImage: "plus").font(.caption.weight(.bold))
+                    Button {
+                        let shells = shell.shells(for: shell.selectedMacID)
+                        controller.newSession(shell: shells.count > 1 ? shell.preferredShell(for: shell.selectedMacID)?.id : nil)
+                    } label: {
+                        Label("New shell", systemImage: "plus").font(.caption.weight(.bold))
                     }
                     .buttonStyle(.borderedProminent)
                     .tint(PTTheme.accentEnd)
@@ -417,7 +434,18 @@ struct TerminalScreen: View {
     }
 
     private var macName: String {
-        shell.macs.first { $0.macID == shell.selectedMacID }?.macName ?? "your Mac"
+        shell.macs.first { $0.macID == shell.selectedMacID }?.macName ?? shell.words.your
+    }
+
+    /// The tab strip's `+`.
+    private static var plusLabel: some View {
+        Image(systemName: "plus")
+            .font(.caption.weight(.bold))
+            .foregroundStyle(PTTheme.accentEnd)
+            .frame(width: 34, height: 32)
+            .background(PTTheme.accentEnd.opacity(0.16), in: Capsule())
+            .frame(minWidth: 44, minHeight: 44)
+            .contentShape(Rectangle())
     }
 
     private var copiedBanner: some View {

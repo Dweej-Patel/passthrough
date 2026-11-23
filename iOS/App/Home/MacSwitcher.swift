@@ -49,12 +49,21 @@ struct MacSwitcherSheet: View {
     /// The first tap wins: rows and actions do nothing once one was taken and the sheet is closing.
     @State private var acting = false
 
-    private struct Row: Identifiable { let id: String; let name: String }
+    struct Row: Identifiable { let id: String; let name: String }
 
-    private var rows: [Row] {
-        model.pairedClients.map { client in
+    private var rows: [Row] { Self.rows(model.pairedClients, shell: shell) }
+
+    /// Every paired computer, by the name its shell grant gives it (else its pairing's): the switcher's rows,
+    /// and the Shells and Activity tabs' title menu (`ComputerTitleMenu`).
+    static func rows(_ paired: [PairedClient], shell: ShellModel) -> [Row] {
+        paired.map { client in
             Row(id: client.id, name: shell.macs.first { $0.macID == client.id }?.macName ?? client.name)
         }
+    }
+
+    /// The switch itself, the same from every place that offers one: the shell sets up that computer's tabs.
+    static func switchTo(_ macID: String, shell: ShellModel) {
+        shell.select(macID)
     }
 
     var body: some View {
@@ -71,7 +80,7 @@ struct MacSwitcherSheet: View {
                     }
                     PTSurface(padding: 6) {
                         VStack(spacing: 0) {
-                            actionRow("Add a Mac", systemImage: "plus") { close(then: .addMac) }
+                            actionRow("Add a computer", systemImage: "plus") { close(then: .addMac) }
                             Divider().padding(.leading, 62)
                             actionRow("Settings", systemImage: "gearshape") { close(then: .settings) }
                         }
@@ -82,7 +91,7 @@ struct MacSwitcherSheet: View {
                 .padding(.bottom, 24)
             }
             .background(PTColor.background)
-            .navigationTitle("Your Macs")
+            .navigationTitle("Your computers")
             .navigationBarTitleDisplayMode(.inline)
         }
         .presentationDetents([.medium, .large])
@@ -102,7 +111,7 @@ struct MacSwitcherSheet: View {
                     .accessibilityHidden(true)   // the name beside it says the same
                 VStack(alignment: .leading, spacing: 2) {
                     Text(row.name).font(.body.weight(.semibold)).lineLimit(1)
-                    Text(MacProfiles.statusText(status, now: .now))
+                    Text(MacProfiles.statusText(status, now: .now, kind: shell.kind(of: row.id), showKind: shell.mixedKinds))
                         .font(.caption)
                         .foregroundStyle(isAsking ? PTColor.attentionText : Color.secondary)
                         .lineLimit(1)
@@ -130,7 +139,7 @@ struct MacSwitcherSheet: View {
     private func choose(_ macID: String, asking: String?) {
         guard !acting else { return }
         // The switch sets up the Mac's tabs now; the terminal attaches to the question after the sheet is gone.
-        shell.select(macID)
+        Self.switchTo(macID, shell: shell)
         close(then: asking.map { .answer(macID: macID, session: $0) })
     }
 
@@ -156,4 +165,54 @@ struct MacSwitcherSheet: View {
         let sessions = macID == shell.selectedMacID ? shell.visibleSessions : (shell.watcher.seen[macID]?.sessions ?? [])
         return sessions.first(where: \.isAsking)?.id
     }
+}
+
+// MARK: - Title menu (Shells, Activity)
+
+/// The Shells and Activity tabs' title menu: the switcher's computers, each with its kind and state and a
+/// checkmark on the one selected; picking one switches exactly as the switcher does (`switchTo`).
+struct ComputerTitleMenu: View {
+    @EnvironmentObject private var model: AppModel
+    @ObservedObject var shell: ShellModel
+
+    var body: some View {
+        Picker("Computer", selection: Binding(get: { shell.selectedMacID ?? "" },
+                                              set: { MacSwitcherSheet.switchTo($0, shell: shell) })) {
+            ForEach(MacSwitcherSheet.rows(model.pairedClients, shell: shell)) { row in
+                item(row).tag(row.id)
+            }
+        }
+    }
+
+    private func item(_ row: MacSwitcherSheet.Row) -> some View {
+        let kind = shell.kind(of: row.id)
+        return Label {
+            Text(row.name)
+            Text(MacProfiles.statusText(shell.status(for: row.id), now: .now, kind: kind, showKind: true))
+        } icon: {
+            Image(systemName: HostWords(kind: kind, name: nil, device: ThisDevice.name).symbol)
+        }
+    }
+}
+
+/// With two or more computers paired, the navigation title opens `ComputerTitleMenu`. Inline: that's
+/// where iOS draws a title's menu. With one, the tab keeps its plain large title.
+private struct ComputerTitleMenuModifier: ViewModifier {
+    @EnvironmentObject private var model: AppModel
+    @ObservedObject var shell: ShellModel
+
+    func body(content: Content) -> some View {
+        if model.pairedClients.count >= 2 {
+            content
+                .toolbarTitleMenu { ComputerTitleMenu(shell: shell) }
+                .navigationBarTitleDisplayMode(.inline)
+        } else {
+            content
+        }
+    }
+}
+
+extension View {
+    /// The computer switcher in the navigation title (`ComputerTitleMenuModifier`); goes where `navigationTitle` does.
+    func computerTitleMenu(_ shell: ShellModel) -> some View { modifier(ComputerTitleMenuModifier(shell: shell)) }
 }

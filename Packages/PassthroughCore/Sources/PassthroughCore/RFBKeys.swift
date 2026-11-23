@@ -20,6 +20,12 @@ public enum RFBKeys {
     public static let control: UInt32 = 0xFFE3
     public static let option: UInt32 = 0xFFE7    // Meta_L
     public static let command: UInt32 = 0xFFED   // Hyper_L
+    /// A PC's keys, by their X names: Insert, Print Screen, Alt (`option`
+    /// stays Meta_L for the Mac) and the Windows key (Super_L).
+    public static let insert: UInt32 = 0xFF63
+    public static let printScreen: UInt32 = 0xFF61
+    public static let alt: UInt32 = 0xFFE9       // Alt_L
+    public static let windows: UInt32 = 0xFFEB   // Super_L
 
     /// F1…F12.
     public static func function(_ number: Int) -> UInt32 { 0xFFBE + UInt32(max(1, min(number, 12)) - 1) }

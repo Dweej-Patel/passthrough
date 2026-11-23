@@ -65,6 +65,32 @@ data class ShellEnvelope(
     var since: Double? = null,
     var events: List<MacEvent>? = null,
     var battery: List<BatterySample>? = null,
+    /** host: what the host says about itself ([HostInfo]). */
+    var host: HostInfo? = null,
+    /** open: which of the host's shells to start ([HostShell.id]). */
+    var shell: String? = null,
+    /** error: more about the reason (`rdp_unavailable`'s cause, in [HostInfo.rdp]'s words). */
+    var detail: String? = null,
+    /** error: a sentence the host wrote, shown when the app has none of its own. */
+    var message: String? = null,
+    /** error `try_later`: seconds until a retry can work. */
+    var retryAfter: Int? = null,
+    /** rdpReady: SHA-256 of the certificate Remote Desktop presents, lowercase hex. */
+    var certSHA256: String? = null,
+    /**
+     * Computers (stage 7): computerGrant's name, the viewing computer's id as the phone knows it (`viewer`), what it
+     * may do (`scopes`), its identity key and kind; computerGranted's key and the scopes waiting for the host's owner
+     * (`pending`). This app doesn't hand access to computers yet; the fields are modelled so the messages round-trip.
+     */
+    var name: String? = null,
+    var viewer: String? = null,
+    var key: String? = null,
+    var scopes: List<String>? = null,
+    var pending: List<String>? = null,
+    var idKey: String? = null,
+    var kind: String? = null,
+    /** computerList: the computers this phone gave access to. */
+    var computers: List<ComputerListEntry>? = null,
 ) {
     fun encodeLine(): ByteArray =
         (ControlEnvelope.json.encodeToString(serializer(), this) + "\n").toByteArray(Charsets.UTF_8)
@@ -105,10 +131,39 @@ data class ShellEnvelope(
         const val PING = "ping"
         const val PONG = "pong"
         const val ERROR = "error"
+        /** What the host is ([HostInfo]), after `macInfo` and whenever it changes. */
+        const val HOST = "host"
+        /** The host is about to go away (`reason`: `sleeping`, `turned_off`, `shutting_down`). */
+        const val GOING_AWAY = "goingAway"
+        const val VIEWING = "viewing"
+        const val COMPUTER_GRANT = "computerGrant"
+        const val COMPUTER_GRANTED = "computerGranted"
+        const val COMPUTER_PASS_SAVED = "computerPassSaved"
+        /** Takes back any computer this phone gave access to; answered `computerRevoked`. */
+        const val COMPUTER_REVOKE = "computerRevoke"
+        const val COMPUTER_REVOKED = "computerRevoked"
+        /** The computers this phone gave access to; answered `computerList`, which comes again on each change. */
+        const val LIST_COMPUTERS = "listComputers"
+        const val COMPUTER_LIST = "computerList"
 
         fun decode(line: String): ShellEnvelope = ControlEnvelope.json.decodeFromString(serializer(), line)
     }
 }
+
+/** One computer in `computerList` (protocol/README.md, *Computers*). */
+@Serializable
+data class ComputerListEntry(
+    val phoneID: String,
+    val viewer: String? = null,
+    val name: String,
+    val kind: String? = null,
+    /** Always sent (no defaults, so they are always written back too). */
+    val scopes: List<String>,
+    val pending: List<String>? = null,
+    val connected: Boolean,
+    /** Unix seconds. */
+    val grantedAt: Long,
+)
 
 /** What a phone accepts as the Mac's iroh details (grant and `macInfo`). Mirrors IrohInfo in ShellProtocol.swift. */
 object IrohInfo {
@@ -144,6 +199,8 @@ data class ShellSessionInfo(
     val exitStatus: Int? = null,
     /** The question a running session went quiet on, as the Mac reads its screen; absent when it isn't waiting. */
     val waiting: String? = null,
+    /** The host's shell it runs ([HostShell.id]), when the host offers more than one. */
+    val shell: String? = null,
 )
 
 /** A past session in the Mac's history. Times are Unix seconds. */
@@ -171,6 +228,23 @@ enum class ShellError(val wire: String) {
     NOT_ALLOWED("not_allowed"),
     /** The VPN can't turn on: the Mac has no VPN set up. */
     VPN_NOT_SET_UP("vpn_not_set_up"),
+    // The screen's reasons: this app has no screen view yet, but reads them so it never mistakes one for another.
+    SCREEN_NOT_ALLOWED("screen_not_allowed"),
+    SCREEN_UNAVAILABLE("screen_unavailable"),
+    SCREEN_VIDEO_UNAVAILABLE("screen_video_unavailable"),
+    TOO_MANY_SCREENS("too_many_screens"),
+    SCREEN_ONLY("screen_only"),
+    PASS_NOT_SAVED("pass_not_saved"),
+    /** No shell can start: the granting account isn't signed in to the host, or Passthrough isn't open there. */
+    SIGNED_OUT("signed_out"),
+    /** The Remote Desktop relay can't be used now (`detail` says why). */
+    RDP_UNAVAILABLE("rdp_unavailable"),
+    /** Too many tries in a short time (`retryAfter`). */
+    TRY_LATER("try_later"),
+    /** The host already lets in as many computers as it allows (8 a phone, 16 in all). */
+    TOO_MANY_COMPUTERS("too_many_computers"),
+    /** A hand-over would replace access to a host with different details (its certificate or iroh id). */
+    PASS_CONFLICT("pass_conflict"),
 }
 
 /** Something that happened on the Mac, for the phone's timeline. Mirrors MacEvent in ShellProtocol.swift. */

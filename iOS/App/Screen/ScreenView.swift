@@ -2,6 +2,7 @@ import GameController
 import SwiftUI
 import PassthroughCore
 import PassthroughUI
+import RemoteDesktop
 import ScreenClient
 
 /// The full-screen view of the selected Mac's screen: the Mac's login when
@@ -26,6 +27,8 @@ struct ScreenView: View, Equatable {
     @Environment(\.displayScale) private var displayScale
     @AppStorage("screenTouchMode") private var modeSetting = ScreenTouchMode.trackpad.rawValue
     @State private var keyboard = false
+    /// A hardware keyboard is connected: a PC's menu then offers what its ⌘ key is.
+    @State private var hardwareKeyboard = GCKeyboard.coalesced != nil
     /// iPad: the floating bar is put away at the side (it covers the Mac's menu bar), remembered.
     /// View state, saved by hand: a change to a stored setting doesn't animate.
     @State private var barAside = UserDefaults.standard.bool(forKey: "screenBarAside")
@@ -64,9 +67,13 @@ struct ScreenView: View, Equatable {
         // A connected keyboard types into the Mac from the start, without the on-screen one.
         .onChange(of: model.phase == .live) { _, live in if live, GCKeyboard.coalesced != nil { keyboard = true } }
         .onReceive(NotificationCenter.default.publisher(for: .GCKeyboardDidConnect)) { _ in
+            hardwareKeyboard = true
             if model.phase == .live { keyboard = true }
         }
-        .onReceive(NotificationCenter.default.publisher(for: .GCKeyboardDidDisconnect)) { _ in keyboard = false }
+        .onReceive(NotificationCenter.default.publisher(for: .GCKeyboardDidDisconnect)) { _ in
+            hardwareKeyboard = GCKeyboard.coalesced != nil
+            keyboard = false
+        }
         .onAppear { AppOrientation.allowed = AppOrientation.standard == .all ? .all : .allButUpsideDown }
         .onDisappear {
             model.stop()
@@ -300,9 +307,14 @@ struct ScreenView: View, Equatable {
         ScreenClipboardMenu(model: model, macName: model.macName, copying: model.copying, landscape: landscape).equatable()
     }
 
-    /// Mission Control: the same as the canvas's three-finger swipes.
-    private var desktopsMenu: some View {
-        ScreenDesktopsMenu(model: model, shell: shell, macName: model.macName, canLock: canLock, pad: pad, landscape: landscape).equatable()
+    /// Mission Control: the same as the canvas's three-finger swipes. For a PC, the Windows menu in its place.
+    @ViewBuilder private var desktopsMenu: some View {
+        if model.windowsView {
+            ScreenWindowsMenu(model: model, shell: shell, macName: model.macName, canLock: canLock, hardwareKeyboard: hardwareKeyboard,
+                              commandIsWindows: model.commandIsWindows, pad: pad, landscape: landscape).equatable()
+        } else {
+            ScreenDesktopsMenu(model: model, shell: shell, macName: model.macName, canLock: canLock, pad: pad, landscape: landscape).equatable()
+        }
     }
 
     /// How the Mac's screen is shown here: its shape, text size, picture and gestures, and
@@ -312,6 +324,8 @@ struct ScreenView: View, Equatable {
         ScreenDisplayMenu(model: model, macName: model.macName, canHideMac: model.canHideMac, path: model.connectionPath,
                           fitsDevice: model.fitsDevice, space: model.space, quality: model.quality,
                           pinchesMac: model.pinchesMacOnItsDisplay, playsSound: model.playsSound, macHidden: model.macHidden,
+                          windows: model.windowsView, windowsShape: model.windowsShapeChoice, windowsSpace: model.windowsSpace,
+                          windowsHasDisplay: model.windowsHostDisplay != nil,
                           pad: pad, landscape: landscape).equatable()
     }
 
@@ -374,7 +388,7 @@ struct ScreenView: View, Equatable {
                 .ignoresSafeArea(.container, edges: .bottom)
             }
         case let .login(error):
-            ScreenLoginForm(macName: model.macName, error: error) { login, remember in
+            ScreenLoginForm(macName: model.macName, error: error, style: model.loginStyle) { login, remember in
                 model.connect(login, remember: remember)
             }
         case .confirmScreenSharing:
@@ -487,6 +501,66 @@ struct ScreenDesktopsMenu: View, Equatable {
     }
 }
 
+/// A PC's keys that a touch screen has no way to press, in place of the Mac's Desktops.
+struct ScreenWindowsMenu: View, Equatable {
+    let model: ScreenModel
+    let shell: ShellModel
+    let macName: String
+    let canLock: Bool
+    let hardwareKeyboard: Bool
+    let commandIsWindows: Bool
+    let pad: Bool
+    let landscape: Bool
+    nonisolated static func == (a: Self, b: Self) -> Bool {
+        a.macName == b.macName && a.canLock == b.canLock && a.hardwareKeyboard == b.hardwareKeyboard
+            && a.commandIsWindows == b.commandIsWindows && a.pad == b.pad && a.landscape == b.landscape
+    }
+
+    @ViewBuilder var body: some View {
+        Menu {
+            Button { model.windows(.ctrlAltDel) } label: { Label("Ctrl+Alt+Del", systemImage: "keyboard") }
+            Button { model.windows(.start) } label: { Label("Start", systemImage: "square.grid.2x2") }
+            Section("Or swipe with three fingers") {
+                Button { model.windows(.previousDesktop) } label: { Label("Previous desktop", systemImage: "arrow.left.square") }
+                Button { model.windows(.nextDesktop) } label: { Label("Next desktop", systemImage: "arrow.right.square") }
+                Button { model.windows(.taskView) } label: { Label("Task View", systemImage: "rectangle.3.group") }
+                Button { model.windows(.showDesktop) } label: { Label("Show desktop", systemImage: "menubar.dock.rectangle") }
+            }
+            Button { model.windows(.altTab) } label: { Label("Alt+Tab", systemImage: "rectangle.on.rectangle") }
+            Button { model.windows(.closeWindow) } label: { Label("Close window", systemImage: "xmark.rectangle") }
+            Button { model.windows(.delete) } label: { Label("Delete", systemImage: "delete.forward") }
+            Menu {
+                ForEach(1...12, id: \.self) { number in
+                    Button("F\(number)") { model.windows(.function(number)) }
+                }
+            } label: {
+                Label("F1–F12", systemImage: "fn")
+            }
+            // Only the lock: the PC stays on, and this view stays open on its lock screen.
+            if canLock {
+                Button { shell.control(.lock) } label: { Label("Lock \(macName)", systemImage: "lock") }
+            }
+            // A hardware keyboard's ⌘: Control, so the shortcuts in the fingers work, or the Windows key.
+            if hardwareKeyboard {
+                Picker(selection: Binding(get: { commandIsWindows }, set: { model.setCommandIsWindows($0) })) {
+                    Text("Ctrl").tag(false)
+                    Text("Windows key").tag(true)
+                } label: {
+                    Label("⌘ acts as", systemImage: "command")
+                }
+                .pickerStyle(.menu)
+            }
+        } label: {
+            if pad {
+                Label("Windows", systemImage: "square.grid.2x2").font(.subheadline.weight(.semibold)).padding(.horizontal, 10)
+            } else {
+                Image(systemName: "square.grid.2x2").sideTarget(landscape)
+            }
+        }
+        .accessibilityLabel("Windows keys and desktops")
+    }
+}
+
 struct ScreenDisplayMenu: View, Equatable {
     let model: ScreenModel
     let macName: String
@@ -498,20 +572,52 @@ struct ScreenDisplayMenu: View, Equatable {
     let pinchesMac: Bool
     let playsSound: Bool
     let macHidden: Bool
+    /// A PC: its desktop's shape and Windows' text size, in place of the Mac's rows.
+    var windows = false
+    var windowsShape = WindowsDisplay.Shape.fit
+    var windowsSpace = 100
+    /// The PC said what its own monitor is: its own size can be kept.
+    var windowsHasDisplay = false
     let pad: Bool
     let landscape: Bool
     nonisolated static func == (a: Self, b: Self) -> Bool {
         a.macName == b.macName && a.canHideMac == b.canHideMac && a.path == b.path && a.fitsDevice == b.fitsDevice && a.space == b.space
             && a.quality == b.quality && a.pinchesMac == b.pinchesMac && a.playsSound == b.playsSound && a.macHidden == b.macHidden && a.pad == b.pad
-            && a.landscape == b.landscape
+            && a.landscape == b.landscape && a.windows == b.windows && a.windowsShape == b.windowsShape && a.windowsSpace == b.windowsSpace
+            && a.windowsHasDisplay == b.windowsHasDisplay
     }
 
     @ViewBuilder var body: some View {
-        if canHideMac || path.flatMap(ScreenView.describe) != nil {
+        if canHideMac || windows || path.flatMap(ScreenView.describe) != nil {
             Menu {
                 // How far the picture travels: a relay is the likeliest reason it lags.
                 if let path = path, let reach = ScreenView.describe(path) {
                     Section { Label(reach.text, systemImage: reach.symbol) }
+                }
+                // A PC makes its desktop the shape it is asked for: this device's, or a standard one to pan and zoom.
+                if windows {
+                    Picker(selection: Binding(get: { windowsShape }, set: { model.setWindowsShape($0) })) {
+                        Label("Fit to this \(ThisDevice.name)", systemImage: pad ? "ipad" : "iphone").tag(WindowsDisplay.Shape.fit)
+                        Label("Standard (16:10)", systemImage: "display").tag(WindowsDisplay.Shape.standard)
+                        // Nothing on the PC's desktop moves, here or back at the PC; pan and pinch to zoom.
+                        if windowsHasDisplay {
+                            Label("\(macName)'s own size", systemImage: "pc").tag(WindowsDisplay.Shape.own)
+                        }
+                    } label: {
+                        Label("Screen shape", systemImage: "rectangle.portrait.on.rectangle.portrait")
+                    }
+                    .pickerStyle(.menu)
+                    // The PC's own size is what it is: pinch to zoom instead.
+                    if windowsShape != .own || !windowsHasDisplay {
+                        Picker(selection: Binding(get: { windowsSpace }, set: { model.setWindowsSpace($0) })) {
+                            Label("Larger text", systemImage: "textformat.size.larger").tag(80)
+                            Label("Default", systemImage: "textformat.size").tag(100)
+                            Label("More space", systemImage: "textformat.size.smaller").tag(125)
+                        } label: {
+                            Label("Text size", systemImage: "textformat.size")
+                        }
+                        .pickerStyle(.menu)
+                    }
                 }
                 // Only the Mac's own stream has these; Screen Sharing shows the screen as it is.
                 if canHideMac {
@@ -636,21 +742,37 @@ struct ScreenSharingPrompt: View {
     }
 }
 
-/// The Mac account's name and password, which Screen Sharing on the Mac checks.
+/// The account name and password the far computer checks: a Mac's for Screen
+/// Sharing, or a PC's Windows account for Remote Desktop.
 struct ScreenLoginForm: View {
+    enum Style: Equatable {
+        case mac
+        /// `account`: the one to sign in as (the last used, or the one the PC named); nil asks for it.
+        case windows(account: String?)
+    }
+
     let macName: String
     let error: String?
-    let onConnect: (RFBClient.Login, Bool) -> Void
+    var style: Style = .mac
+    let onConnect: (ScreenLogin, Bool) -> Void
     @State private var username = ""
     @State private var password = ""
     @State private var remember = true
-    @FocusState private var focused: Bool
+    /// Windows: the account field is shown (none was known, or "Use a different account").
+    @State private var editsAccount = false
+    @FocusState private var focus: Field?
+
+    private enum Field { case account, password }
+
+    private var windows: Bool { style != .mac }
 
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
-                Text("Log in to \(macName)").font(.title3.weight(.semibold))
-                Text("Use the name and password of your account on \(macName). Screen Sharing on the Mac checks them.")
+                Text(windows ? "Sign in to \(macName)" : "Log in to \(macName)").font(.title3.weight(.semibold))
+                Text(windows
+                     ? "Windows asks for your account's password, not your PIN. Passthrough passes it to Windows and keeps it on this \(ThisDevice.name) behind Face ID."
+                     : "Use the name and password of your account on \(macName). Screen Sharing on the Mac checks them.")
                     .font(.subheadline).foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
                 if let error {
@@ -658,15 +780,18 @@ struct ScreenLoginForm: View {
                         .font(.subheadline).foregroundStyle(PTTheme.warning)
                 }
                 VStack(spacing: 0) {
-                    TextField("Account name", text: $username)
-                        .textContentType(.username)
-                        .textInputAutocapitalization(.never)
-                        .autocorrectionDisabled()
-                        .focused($focused)
-                        .padding(12)
-                    Divider()
-                    SecureField("Password", text: $password)
+                    if !windows || editsAccount {
+                        TextField(windows ? "Account name or email" : "Account name", text: $username)
+                            .textContentType(.username)
+                            .textInputAutocapitalization(.never)
+                            .autocorrectionDisabled()
+                            .focused($focus, equals: .account)
+                            .padding(12)
+                        Divider()
+                    }
+                    SecureField(windows && !username.isEmpty ? "Password for \(username)" : "Password", text: $password)
                         .textContentType(.password)
+                        .focused($focus, equals: .password)
                         .padding(12)
                         .onSubmit(connect)
                 }
@@ -676,8 +801,15 @@ struct ScreenLoginForm: View {
                     .tint(PTTheme.accentEnd)
                 Text("Kept in this \(ThisDevice.name)'s Keychain behind Face ID, like your shell keys.")
                     .font(.caption).foregroundStyle(.secondary)
+                if windows, !editsAccount {
+                    Button("Use a different account") {
+                        editsAccount = true
+                        focus = .account
+                    }
+                    .font(.subheadline)
+                }
                 Button(action: connect) {
-                    Text("Connect").font(.subheadline.weight(.semibold)).frame(maxWidth: .infinity, minHeight: 34)
+                    Text(windows ? "Sign in" : "Connect").font(.subheadline.weight(.semibold)).frame(maxWidth: .infinity, minHeight: 34)
                 }
                 .buttonStyle(.borderedProminent)
                 .buttonBorderShape(.capsule)
@@ -686,11 +818,20 @@ struct ScreenLoginForm: View {
             }
             .padding(24)
         }
-        .onAppear { focused = true }
+        .onAppear {
+            if case let .windows(account) = style, let account, !account.isEmpty {
+                username = account
+                focus = .password
+            } else {
+                editsAccount = true
+                focus = .account
+            }
+        }
     }
 
     private func connect() {
-        guard !username.isEmpty, !password.isEmpty else { return }
-        onConnect(RFBClient.Login(username: username, password: password), remember)
+        let name = username.trimmingCharacters(in: .whitespaces)
+        guard !name.isEmpty, !password.isEmpty else { return }
+        onConnect(ScreenLogin(username: name, password: password), remember)
     }
 }

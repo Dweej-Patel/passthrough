@@ -1,0 +1,22 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- Pictures from another computer (stage 8 b2): Media Foundation's decoders over a hardware D3D11 device when there is
+       one. Interop is written by hand (Interop/), only the calls made; no package. Referenced by the tray app only: the
+       service never loads a decoder. -->
+  <PropertyGroup>
+    <TargetFramework>net10.0-windows10.0.19041.0</TargetFramework>
+    <RootNamespace>Passthrough.Media</RootNamespace>
+    <AssemblyName>Passthrough.Media</AssemblyName>
+    <Platforms>x64</Platforms>
+    <PlatformTarget>x64</PlatformTarget>
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\Passthrough.Core\Passthrough.Core.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="Passthrough.Windows.Tests" />
+  </ItemGroup>
+</Project>

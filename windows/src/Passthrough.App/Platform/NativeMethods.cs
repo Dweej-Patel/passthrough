@@ -45,7 +45,23 @@ internal static class NativeMethods
 
     [DllImport("user32.dll")]
     [return: MarshalAs(UnmanagedType.Bool)]
+    public static extern bool DestroyIcon(IntPtr icon);
+
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool IsHungAppWindow(IntPtr hwnd);
+
+    [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool SetDllDirectoryW(string? path);
+
+    /// <summary>
+    /// A DLL this process loads by name is never looked for in the current folder (B-3): the app's folder and System32
+    /// come first, and PATH last. Not SetDefaultDllDirectories, which would also keep PATH out: once a process calls
+    /// it, any LoadLibraryEx with LOAD_WITH_ALTERED_SEARCH_PATH fails with E_INVALIDARG, and WinUI's resources make
+    /// one, so App.xaml's XamlControlsResources couldn't find themeresources.xaml and the app never started.
+    /// </summary>
+    public static void RestrictDllSearch() => SetDllDirectoryW("");
 
     [DllImport("user32.dll")]
     [return: MarshalAs(UnmanagedType.Bool)]

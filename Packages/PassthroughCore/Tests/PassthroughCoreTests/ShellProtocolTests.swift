@@ -122,6 +122,63 @@ final class ShellProtocolTests: XCTestCase {
         ])
     }
 
+    func testErrorReasonsMatchFixtures() throws {
+        let reasons = try XCTUnwrap(shell()["errors"] as? [String])
+        // The computers' two reasons join the fixtures with the Kotlin and C# enums that know them.
+        let computers: Set<String> = [ShellError.tooManyComputers.rawValue, ShellError.passConflict.rawValue]
+        let ours = ShellError.allCases.map(\.rawValue).filter { reasons.contains($0) || !computers.contains($0) }
+        XCTAssertEqual(Set(reasons), Set(ours))
+        XCTAssertEqual(reasons.count, ours.count)
+    }
+
+    /// The three `host` lines, the shared limits and shell ids, and what `cleaned()` keeps.
+    func testHostFields() throws {
+        let s = try shell()
+        let lines = try XCTUnwrap(s["messages"] as? [[String: Any]]).compactMap { $0["line"] as? String }
+        let hosts = try lines.map { try ShellEnvelope.decode(Data($0.utf8)) }.filter { $0.t == ShellEnvelope.host }.compactMap { $0.host?.cleaned() }
+        XCTAssertEqual(hosts.count, 3)
+        XCTAssertEqual(hosts[0].kind, HostInfo.kindMac)
+        XCTAssertEqual(hosts[0].shells, [HostShell(id: HostShell.loginID, name: "zsh", default: true)])
+        XCTAssertEqual(hosts[0].screens, [HostInfo.screenVideo, HostInfo.screenRFB])
+        XCTAssertEqual(hosts[1].kind, HostInfo.kindWindows)
+        XCTAssertEqual(hosts[1].shells?.map(\.id), ["pwsh", "powershell", "cmd", "wsl:Ubuntu", "gitbash"])
+        XCTAssertEqual(hosts[1].access, HostAccess(shell: true, screen: true, share: false))
+        XCTAssertEqual(hosts[1].user, "name@outlook.com")
+        XCTAssertEqual(hosts[2].console, "signedOut")
+        XCTAssertEqual(hosts[2].app, false)
+
+        let host = try XCTUnwrap(s["host"] as? [String: Any])
+        XCTAssertEqual(host["maxShells"] as? Int, HostInfo.maxShells)
+        XCTAssertEqual(host["maxLineBytes"] as? Int, HostInfo.maxLineBytes)
+        XCTAssertEqual(host["inUseIdleSeconds"] as? Int, HostInfo.inUseIdleSeconds)
+        XCTAssertEqual(host["consoleStates"] as? [String], HostInfo.consoleStates)
+        XCTAssertEqual(host["goingAwayReasons"] as? [String], GoingAwayReason.allCases.map(\.rawValue))
+        for c in try XCTUnwrap(host["shellIDs"] as? [[String: Any]]) {
+            XCTAssertEqual(HostShell.isValidID(try XCTUnwrap(c["id"] as? String)), c["valid"] as? Bool, "\(c)")
+        }
+        let cleaning = try XCTUnwrap(host["cleaning"] as? [String: Any])
+        let dirty = try JSONDecoder().decode(HostInfo.self, from: JSONSerialization.data(withJSONObject: try XCTUnwrap(cleaning["in"])))
+        let cleaned = try JSONSerialization.jsonObject(with: JSONEncoder().encode(try XCTUnwrap(dirty.cleaned()))) as? NSDictionary
+        XCTAssertEqual(cleaned, cleaning["out"] as? NSDictionary)
+        XCTAssertNil(HostInfo(os: "macOS 15").cleaned(), "no kind: not a host message")
+        XCTAssertEqual(HostInfo(kind: "someday").cleaned()?.kind, "someday", "an unknown kind is kept")
+        XCTAssertNil(HostInfo(kind: "windows", user: "a\nb").cleaned()?.user)
+        XCTAssertNil(HostInfo(kind: "windows", user: "\u{202E}evil").cleaned()?.user, "a bidi override")
+        XCTAssertNil(HostInfo(kind: "windows", os: "e" + String(repeating: "\u{0301}", count: 64)).cleaned()?.os,
+                     "counted in UTF-16 units, as Kotlin and C# count")
+    }
+
+    /// What a PC answers to what only a Mac serves: both lines of every row round-trip.
+    func testPCAnswersRoundTrip() throws {
+        for row in try XCTUnwrap(shell()["pcAnswers"] as? [[String: String]]) {
+            for line in [try XCTUnwrap(row["request"]), try XCTUnwrap(row["answer"])] {
+                let decoded = try ShellEnvelope.decode(Data(line.utf8))
+                let original = try JSONSerialization.jsonObject(with: Data(line.utf8)) as? NSDictionary
+                XCTAssertEqual(original, try JSONSerialization.jsonObject(with: decoded.encodedLine()) as? NSDictionary, line)
+            }
+        }
+    }
+
     func testIrohValidation() {
         let id = String(repeating: "ab", count: 32)
         XCTAssertTrue(IrohInfo.isValidID(id))
@@ -244,5 +301,18 @@ final class ShellProtocolTests: XCTestCase {
         XCTAssertTrue(ScreenPass.isUsable(pass))
         XCTAssertFalse(ScreenPass.isUsable(mac), "a phone's own credential isn't a pass")
         XCTAssertEqual(ScreenPass.cleanName(String(repeating: "a", count: 100)).count, ScreenPass.maxName)
+        // Tabs, bidi overrides and zero-width marks go: a name shows as what it is everywhere it lands.
+        XCTAssertEqual(ScreenPass.cleanName("Bob's\tMac\u{202E}x\u{200B}"), "Bob's Mac x")
+    }
+
+    func testAComputerListArrivesCleaned() throws {
+        let line = #"{"t":"computerList","computers":[{"phoneID":"computer.b","viewer":"mac-2","name":"Mac\u202e","kind":"toaster","scopes":["screen","root","shell"],"pending":["screen"],"connected":false,"grantedAt":20},{"phoneID":"phone-9","name":"x","scopes":[],"connected":true,"grantedAt":1},{"phoneID":"computer.a","name":"PC","kind":"windows","scopes":[],"pending":["screen"],"connected":true,"grantedAt":10}]}"#
+        let message = try ShellEnvelope.decode(Data(line.utf8))
+        XCTAssertEqual(message.t, ShellEnvelope.computerList)
+        // Computer ids only, oldest first, known scopes and kinds only, nothing pending that is already allowed.
+        XCTAssertEqual(ComputerAccess.cleaned(message.computers ?? []), [
+            ComputerAccess(phoneID: "computer.a", name: "PC", kind: HostInfo.kindWindows, scopes: [], pending: ["screen"], connected: true, grantedAt: 10),
+            ComputerAccess(phoneID: "computer.b", viewer: "mac-2", name: "Mac", scopes: ["shell", "screen"], connected: false, grantedAt: 20),
+        ])
     }
 }

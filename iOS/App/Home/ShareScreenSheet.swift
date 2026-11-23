@@ -11,7 +11,8 @@ struct ShareScreenSheet: View {
     @StateObject private var model = ScreenShareModel()
     @Environment(\.dismiss) private var dismiss
 
-    private var others: [ShellCredential] { shell.macs.filter { $0.macID != shared.macID } }
+    /// Macs only: a screen pass is between Macs (a PC is never sent one).
+    private var others: [ShellCredential] { shell.macs.filter { $0.macID != shared.macID && shell.kind(of: $0.macID) == .mac } }
 
     var body: some View {
         NavigationStack {

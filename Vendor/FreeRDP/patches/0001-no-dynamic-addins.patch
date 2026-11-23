@@ -1,0 +1,41 @@
+Passthrough: no FreeRDP add-in is ever loaded from a file.
+
+At 3.33.1, freerdp_load_channel_addin_entry falls back to a dynamic load
+(LoadLibrary, so dlopen) whenever the static table has no entry, and
+freerdp_load_dynamic_addin opens a library by name. Every channel this build
+uses is compiled in, so both paths are closed: a channel or codec that is not
+compiled in is simply not there.
+
+--- a/libfreerdp/common/addin.c
++++ b/libfreerdp/common/addin.c
+@@ -122,6 +122,12 @@
+ PVIRTUALCHANNELENTRY freerdp_load_dynamic_addin(LPCSTR pszFileName, LPCSTR pszPath,
+                                                 LPCSTR pszEntryName)
+ {
++#if 1 /* Passthrough: no add-in is loaded from a file */
++	WINPR_UNUSED(pszFileName);
++	WINPR_UNUSED(pszPath);
++	WINPR_UNUSED(pszEntryName);
++	return nullptr;
++#else
+ 	LPSTR pszAddinInstallPath = freerdp_get_dynamic_addin_install_path();
+ 	PVIRTUALCHANNELENTRY entry = nullptr;
+ 	BOOL bHasExt = TRUE;
+@@ -234,6 +240,7 @@
+ 		FreeLibrary(library);
+ 
+ 	return entry;
++#endif
+ }
+ 
+ PVIRTUALCHANNELENTRY freerdp_load_dynamic_channel_addin_entry(LPCSTR pszName, LPCSTR pszSubsystem,
+@@ -375,8 +382,7 @@
+ 	if (freerdp_load_static_channel_addin_entry)
+ 		entry = freerdp_load_static_channel_addin_entry(pszName, pszSubsystem, pszType, dwFlags);
+ 
+-	if (!entry)
+-		entry = freerdp_load_dynamic_channel_addin_entry(pszName, pszSubsystem, pszType, dwFlags);
++	/* Passthrough: channels are compiled in; nothing is ever loaded from a file. */
+ 
+ 	if (!entry)
+ 		WLog_WARN(TAG, "Failed to load channel %s [%s]", pszName, pszSubsystem);

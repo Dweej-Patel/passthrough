@@ -5,7 +5,8 @@
     xmlns:local="using:Passthrough.App"
     Title="Passthrough settings">
 
-    <!-- No background of its own: the window's Mica shows through. One card per group, as in Windows Settings. -->
+    <!-- No background of its own: the window's Mica shows through. Four pages along the top (General, Remote access,
+         Computers with access, Advanced), one card per setting, as in Windows Settings. -->
     <Grid>
         <Grid.RowDefinitions>
             <RowDefinition Height="32" />
@@ -16,87 +17,295 @@
             <TextBlock Text="Passthrough settings" Style="{StaticResource CaptionTextBlockStyle}" VerticalAlignment="Center"
                        Margin="16,0,0,0" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
         </Grid>
-    <ScrollViewer Grid.Row="1">
-        <StackPanel Padding="24,4,24,24" Spacing="8" MaxWidth="560">
-            <TextBlock Text="Settings" Style="{StaticResource TitleTextBlockStyle}" Margin="0,0,0,8" />
-
+    <NavigationView x:Name="Pages" Grid.Row="1" PaneDisplayMode="Top" IsBackButtonVisible="Collapsed" IsSettingsVisible="False"
+                    SelectionChanged="OnPageChanged">
+        <NavigationView.MenuItems>
+            <NavigationViewItem Content="General" Tag="general" />
+            <NavigationViewItem Content="Remote access" Tag="remote" />
+            <NavigationViewItem Content="Computers with access" Tag="computers" />
+            <NavigationViewItem Content="Advanced" Tag="advanced" />
+        </NavigationView.MenuItems>
+    <ScrollViewer>
+        <StackPanel Padding="24,12,24,24" Spacing="8" MaxWidth="600">
+            <!-- A failed action's sentence, at the top of whichever page is showing -->
             <Border x:Name="ErrorBox" Visibility="Collapsed" Background="{StaticResource PtAttentionFillBrush}"
                     CornerRadius="6" Padding="12,10">
-                <TextBlock x:Name="ErrorText" TextWrapping="Wrap" />
+                <StackPanel Spacing="4">
+                    <TextBlock x:Name="ErrorText" TextWrapping="Wrap" AutomationProperties.LiveSetting="Assertive" />
+                    <HyperlinkButton Content="Open the log folder" Padding="0" Click="OnOpenLogClick" />
+                </StackPanel>
             </Border>
 
-            <TextBlock Text="General" Style="{StaticResource BodyStrongTextBlockStyle}" Margin="0,8,0,0" />
-            <Border Style="{StaticResource PtCardStyle}" Padding="16,12">
-                <Grid ColumnSpacing="12">
-                    <Grid.ColumnDefinitions>
-                        <ColumnDefinition Width="*" />
-                        <ColumnDefinition Width="Auto" />
-                    </Grid.ColumnDefinitions>
-                    <StackPanel VerticalAlignment="Center">
-                        <TextBlock Text="Start at login" />
-                        <TextBlock Text="Passthrough starts in the tray when you sign in to Windows."
-                                   Style="{StaticResource CaptionTextBlockStyle}" TextWrapping="Wrap"
-                                   Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
-                    </StackPanel>
-                    <ToggleSwitch x:Name="StartAtLoginSwitch" Grid.Column="1" MinWidth="0" OnContent="" OffContent=""
-                                  AutomationProperties.Name="Start at login" />
-                </Grid>
-            </Border>
-            <Border Style="{StaticResource PtCardStyle}" Padding="16,12">
-                <Grid ColumnSpacing="12">
-                    <Grid.ColumnDefinitions>
-                        <ColumnDefinition Width="*" />
-                        <ColumnDefinition Width="Auto" />
-                    </Grid.ColumnDefinitions>
-                    <StackPanel VerticalAlignment="Center">
-                        <TextBlock Text="Android support" />
-                        <TextBlock Text="On: Android phones are listed once adb finds them. Off: they are ignored."
-                                   Style="{StaticResource CaptionTextBlockStyle}" TextWrapping="Wrap"
-                                   Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
-                    </StackPanel>
-                    <ToggleSwitch x:Name="AndroidSwitch" Grid.Column="1" MinWidth="0" OnContent="" OffContent=""
-                                  AutomationProperties.Name="Android support" />
-                </Grid>
-            </Border>
+            <!-- General -->
+            <StackPanel x:Name="GeneralPanel" Spacing="8">
+                <Border Style="{StaticResource PtCardStyle}" Padding="16,12">
+                    <Grid ColumnSpacing="12">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="Auto" />
+                        </Grid.ColumnDefinitions>
+                        <StackPanel VerticalAlignment="Center">
+                            <TextBlock Text="Start at login" />
+                            <TextBlock Text="Passthrough starts in the tray when you sign in to Windows."
+                                       Style="{StaticResource CaptionTextBlockStyle}" TextWrapping="Wrap"
+                                       Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                        </StackPanel>
+                        <ToggleSwitch x:Name="StartAtLoginSwitch" Grid.Column="1" MinWidth="0" OnContent="" OffContent=""
+                                      AutomationProperties.Name="Start at login" />
+                    </Grid>
+                </Border>
+                <Border Style="{StaticResource PtCardStyle}" Padding="16,12">
+                    <Grid ColumnSpacing="12">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="Auto" />
+                        </Grid.ColumnDefinitions>
+                        <StackPanel VerticalAlignment="Center">
+                            <TextBlock Text="Android support" />
+                            <TextBlock Text="On: Android phones are listed once adb finds them. Off: they are ignored."
+                                       Style="{StaticResource CaptionTextBlockStyle}" TextWrapping="Wrap"
+                                       Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                        </StackPanel>
+                        <ToggleSwitch x:Name="AndroidSwitch" Grid.Column="1" MinWidth="0" OnContent="" OffContent=""
+                                      AutomationProperties.Name="Android support" />
+                    </Grid>
+                </Border>
+            </StackPanel>
 
-            <TextBlock Text="Paired phones" Style="{StaticResource BodyStrongTextBlockStyle}" Margin="0,16,0,0" />
-            <TextBlock Text="Every phone this PC holds a pairing for, attached or not. Forget one you no longer use."
-                       Style="{StaticResource CaptionTextBlockStyle}" TextWrapping="Wrap"
-                       Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
-            <Border x:Name="NoPairingsText" Style="{StaticResource PtCardStyle}" Padding="16,14" Visibility="Collapsed">
-                <TextBlock Text="No phone is paired with this PC." Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
-            </Border>
-            <ItemsControl ItemsSource="{x:Bind Paired}">
-                <ItemsControl.ItemsPanel>
-                    <ItemsPanelTemplate>
-                        <StackPanel Spacing="8" />
-                    </ItemsPanelTemplate>
-                </ItemsControl.ItemsPanel>
-                <ItemsControl.ItemTemplate>
-                    <DataTemplate x:DataType="local:PairedPhoneRow">
-                        <Border Style="{StaticResource PtCardStyle}" Padding="16,12">
-                            <Grid ColumnSpacing="12">
-                                <Grid.ColumnDefinitions>
-                                    <ColumnDefinition Width="Auto" />
-                                    <ColumnDefinition Width="*" />
-                                    <ColumnDefinition Width="Auto" />
-                                </Grid.ColumnDefinitions>
-                                <Grid Width="32" Height="32">
-                                    <Ellipse Fill="{ThemeResource ControlFillColorSecondaryBrush}" />
-                                    <FontIcon Glyph="{x:Bind Glyph}" FontSize="15" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
-                                </Grid>
-                                <StackPanel Grid.Column="1" VerticalAlignment="Center">
-                                    <TextBlock Text="{x:Bind Title}" TextTrimming="CharacterEllipsis" />
-                                    <TextBlock Text="{x:Bind Detail}" Style="{StaticResource CaptionTextBlockStyle}"
-                                               Foreground="{ThemeResource TextFillColorSecondaryBrush}" TextTrimming="CharacterEllipsis" />
+            <!-- Remote access: the switch, the screen, staying awake, and one row per phone -->
+            <StackPanel x:Name="RemotePanel" Spacing="8" Visibility="Collapsed">
+                <Border Style="{StaticResource PtCardStyle}" Padding="16,12">
+                    <StackPanel Spacing="8">
+                        <Grid ColumnSpacing="12">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="Auto" />
+                            </Grid.ColumnDefinitions>
+                            <StackPanel VerticalAlignment="Center">
+                                <TextBlock Text="Use this PC's shell from your phones" />
+                                <TextBlock x:Name="RemoteStatusText" Style="{StaticResource CaptionTextBlockStyle}" TextWrapping="Wrap"
+                                           Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                           AutomationProperties.LiveSetting="Polite" />
+                            </StackPanel>
+                            <ToggleSwitch x:Name="RemoteSwitch" Grid.Column="1" MinWidth="0" OnContent="" OffContent=""
+                                          AutomationProperties.Name="Use this PC's shell from your phones" />
+                        </Grid>
+                        <CheckBox x:Name="ScreenWithTurnOn" Visibility="Collapsed" IsChecked="True"
+                                  Content="Set up the screen too (Remote Desktop, kept closed to the network)"
+                                  ToolTipService.ToolTip="The same administrator prompt also sets up Remote Desktop for Passthrough only. Needs Windows Pro or better." />
+                    </StackPanel>
+                </Border>
+                <TextBlock x:Name="ShellsText" Style="{StaticResource CaptionTextBlockStyle}" TextWrapping="Wrap"
+                           Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                <Border Style="{StaticResource PtCardStyle}" Padding="16,12">
+                    <Grid ColumnSpacing="12">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="Auto" />
+                        </Grid.ColumnDefinitions>
+                        <StackPanel VerticalAlignment="Center">
+                            <TextBlock Text="Screen, through Remote Desktop" />
+                            <TextBlock x:Name="ScreenText" Style="{StaticResource CaptionTextBlockStyle}" TextWrapping="Wrap"
+                                       Foreground="{ThemeResource TextFillColorSecondaryBrush}" AutomationProperties.LiveSetting="Polite"
+                                       Text="Turn Remote access on first." />
+                        </StackPanel>
+                        <Button x:Name="ScreenButton" Grid.Column="1" Visibility="Collapsed" Click="OnScreenActionClick" />
+                    </Grid>
+                </Border>
+                <Border x:Name="AwakeCard" Style="{StaticResource PtCardStyle}" Padding="16,12" Visibility="Collapsed">
+                    <Grid ColumnSpacing="12">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="Auto" />
+                        </Grid.ColumnDefinitions>
+                        <StackPanel VerticalAlignment="Center">
+                            <TextBlock Text="Stay awake on mains power" />
+                            <TextBlock x:Name="AwakeText" Style="{StaticResource CaptionTextBlockStyle}" TextWrapping="Wrap"
+                                       Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                       AutomationProperties.LiveSetting="Polite" />
+                        </StackPanel>
+                        <ToggleSwitch x:Name="AwakeSwitch" Grid.Column="1" MinWidth="0" OnContent="" OffContent=""
+                                      AutomationProperties.Name="Stay awake on mains power" Toggled="OnAwakeToggled" />
+                    </Grid>
+                </Border>
+
+                <TextBlock Text="Phones" Style="{StaticResource BodyStrongTextBlockStyle}" Margin="0,16,0,0" AutomationProperties.HeadingLevel="Level1" />
+                <TextBlock Text="Every phone paired with this PC. Plug a paired phone in once with Remote access on to give it the shell. Screen lets it see this PC's screen too, and the screen of any computer it shares this PC with. A Mac shows a PC's screen; the iPhone and iPad apps do only with their developer setting on, for now."
+                           Style="{StaticResource CaptionTextBlockStyle}" TextWrapping="Wrap"
+                           Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                <Border x:Name="NoPhonesText" Style="{StaticResource PtCardStyle}" Padding="16,14" Visibility="Collapsed">
+                    <TextBlock Text="No phone is paired with this PC. Plug one in and type the code it shows in the tray's flyout."
+                               TextWrapping="Wrap" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                </Border>
+                <ItemsControl ItemsSource="{x:Bind Phones}">
+                    <ItemsControl.ItemsPanel>
+                        <ItemsPanelTemplate>
+                            <StackPanel Spacing="8" />
+                        </ItemsPanelTemplate>
+                    </ItemsControl.ItemsPanel>
+                    <ItemsControl.ItemTemplate>
+                        <DataTemplate x:DataType="local:PhoneSettingsRow">
+                            <Border Style="{StaticResource PtCardStyle}" Padding="16,12">
+                                <StackPanel Spacing="8">
+                                    <Grid ColumnSpacing="10">
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition Width="Auto" />
+                                            <ColumnDefinition Width="*" />
+                                        </Grid.ColumnDefinitions>
+                                        <Grid Width="32" Height="32">
+                                            <Ellipse Fill="{ThemeResource ControlFillColorSecondaryBrush}" />
+                                            <FontIcon Glyph="{x:Bind Glyph}" FontSize="15" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                                        </Grid>
+                                        <StackPanel Grid.Column="1" VerticalAlignment="Center">
+                                            <TextBlock Text="{x:Bind Title}" TextTrimming="CharacterEllipsis" />
+                                            <TextBlock Text="{x:Bind Detail}" Style="{StaticResource CaptionTextBlockStyle}" TextWrapping="Wrap"
+                                                       Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                                        </StackPanel>
+                                    </Grid>
+                                    <StackPanel Orientation="Horizontal" Spacing="8">
+                                        <CheckBox Content="Screen" MinWidth="0" IsChecked="{x:Bind Screen}" IsEnabled="{x:Bind ScreenSwitchEnabled}"
+                                                  Visibility="{x:Bind AccessVisibility}" Click="OnScreenClick" AutomationProperties.Name="{x:Bind ScreenName}"
+                                                  ToolTipService.ToolTip="{x:Bind ScreenTip}" />
+                                        <CheckBox Content="Share" MinWidth="0" IsChecked="{x:Bind Share}"
+                                                  Visibility="{x:Bind AccessVisibility}" Click="OnShareClick" AutomationProperties.Name="{x:Bind ShareName}"
+                                                  ToolTipService.ToolTip="Let it give your other computers access to this PC, from Share with another computer on the phone. A computer's screen still waits for you to allow it here." />
+                                        <Button Content="Stop" Click="OnStopClick" IsEnabled="{x:Bind CanStop}" Visibility="{x:Bind AccessVisibility}"
+                                                AutomationProperties.Name="{x:Bind StopName}"
+                                                ToolTipService.ToolTip="Ends its shells and any view of the screen now. It keeps its access and can connect again." />
+                                        <Button Content="Revoke…" Click="OnRevokeClick" Visibility="{x:Bind AccessVisibility}"
+                                                AutomationProperties.Name="{x:Bind RevokeName}" />
+                                        <Button Content="Forget…" Click="OnForgetClick" Visibility="{x:Bind ForgetVisibility}"
+                                                AutomationProperties.Name="{x:Bind ForgetName}" />
+                                    </StackPanel>
                                 </StackPanel>
-                                <Button Grid.Column="2" Content="Forget pairing" Click="OnForgetClick" />
-                            </Grid>
-                        </Border>
-                    </DataTemplate>
-                </ItemsControl.ItemTemplate>
-            </ItemsControl>
+                            </Border>
+                        </DataTemplate>
+                    </ItemsControl.ItemTemplate>
+                </ItemsControl>
+            </StackPanel>
+
+            <!-- Computers with access: the ones a phone let in here (the ones this PC reaches are the tray's Your computers) -->
+            <StackPanel x:Name="ComputersPanel" Spacing="8" Visibility="Collapsed">
+                <TextBlock Text="Computers with access" Style="{StaticResource BodyStrongTextBlockStyle}" AutomationProperties.HeadingLevel="Level1" />
+                <TextBlock Text="Your other computers a phone gave access to this PC. A computer's screen waits for you to allow it here."
+                           Style="{StaticResource CaptionTextBlockStyle}" TextWrapping="Wrap"
+                           Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                <Border x:Name="NoComputersText" Style="{StaticResource PtCardStyle}" Padding="16,14">
+                    <TextBlock Text="No computer has access to this PC. On a phone with Share ticked under Remote access, open this PC and tap Share with another computer."
+                               TextWrapping="Wrap" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                </Border>
+                <ItemsControl ItemsSource="{x:Bind ComputersWithAccess}">
+                    <ItemsControl.ItemsPanel>
+                        <ItemsPanelTemplate>
+                            <StackPanel Spacing="8" />
+                        </ItemsPanelTemplate>
+                    </ItemsControl.ItemsPanel>
+                    <ItemsControl.ItemTemplate>
+                        <DataTemplate x:DataType="local:ComputerAccessRow">
+                            <Border Style="{StaticResource PtCardStyle}" Padding="16,12">
+                                <Grid ColumnSpacing="8">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="Auto" />
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="Auto" />
+                                        <ColumnDefinition Width="Auto" />
+                                    </Grid.ColumnDefinitions>
+                                    <Grid Width="32" Height="32">
+                                        <Ellipse Fill="{ThemeResource ControlFillColorSecondaryBrush}" />
+                                        <FontIcon Glyph="{x:Bind Glyph}" FontSize="15" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                                    </Grid>
+                                    <StackPanel Grid.Column="1" VerticalAlignment="Center" Margin="4,0,0,0">
+                                        <TextBlock Text="{x:Bind Title}" TextTrimming="CharacterEllipsis" />
+                                        <TextBlock Text="{x:Bind Detail}" Style="{StaticResource CaptionTextBlockStyle}" TextWrapping="Wrap"
+                                                   Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                                    </StackPanel>
+                                    <Button Grid.Column="2" Content="{x:Bind ScreenAction}" Visibility="{x:Bind ScreenActionVisibility}"
+                                            Click="OnComputerScreenClick" AutomationProperties.Name="{x:Bind ScreenActionName}"
+                                            ToolTipService.ToolTip="{x:Bind ScreenTip}" />
+                                    <Button Grid.Column="3" Content="Revoke…" Click="OnComputerRevokeClick" AutomationProperties.Name="{x:Bind RevokeName}"
+                                            ToolTipService.ToolTip="Its shells and any view of the screen close, and it loses access to this PC." />
+                                </Grid>
+                            </Border>
+                        </DataTemplate>
+                    </ItemsControl.ItemTemplate>
+                </ItemsControl>
+                <TextBlock Text="Computers this PC can reach are in the tray: Remote ▸ Your computers."
+                           Style="{StaticResource CaptionTextBlockStyle}" TextWrapping="Wrap" Margin="0,12,0,0"
+                           Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+            </StackPanel>
+
+            <!-- Advanced: history, the relay, this PC's identity -->
+            <StackPanel x:Name="AdvancedPanel" Spacing="8" Visibility="Collapsed">
+                <Border Style="{StaticResource PtCardStyle}" Padding="16,12">
+                    <Grid ColumnSpacing="12">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="Auto" />
+                        </Grid.ColumnDefinitions>
+                        <StackPanel VerticalAlignment="Center">
+                            <TextBlock Text="Logs" />
+                            <TextBlock Text="What Passthrough did on this PC, for when something didn't work. They hold no keys, tokens or passwords."
+                                       Style="{StaticResource CaptionTextBlockStyle}" TextWrapping="Wrap"
+                                       Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                        </StackPanel>
+                        <Button Grid.Column="1" Content="Open the log folder" VerticalAlignment="Center" Click="OnOpenLogClick" />
+                    </Grid>
+                </Border>
+                <Border Style="{StaticResource PtCardStyle}" Padding="16,12">
+                    <Grid ColumnSpacing="12" RowSpacing="8">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="Auto" />
+                        </Grid.ColumnDefinitions>
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="Auto" />
+                        </Grid.RowDefinitions>
+                        <StackPanel VerticalAlignment="Center">
+                            <TextBlock Text="Keep shell history" />
+                            <TextBlock Text="What phones' shells showed, kept on this PC for you to look back at. Only your Windows account can open it."
+                                       Style="{StaticResource CaptionTextBlockStyle}" TextWrapping="Wrap"
+                                       Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                        </StackPanel>
+                        <ComboBox x:Name="HistoryChoice" Grid.Column="1" VerticalAlignment="Center" MinWidth="120"
+                                  AutomationProperties.Name="Keep shell history" />
+                        <HyperlinkButton x:Name="DeleteHistoryButton" Grid.Row="1" Grid.ColumnSpan="2" Content="Delete shell history…" Padding="0"
+                                         Click="OnDeleteHistoryClick" />
+                    </Grid>
+                </Border>
+                <Border Style="{StaticResource PtCardStyle}" Padding="16,12">
+                    <StackPanel Spacing="8">
+                        <TextBlock Text="Relay" />
+                        <TextBlock x:Name="RelayText" Style="{StaticResource CaptionTextBlockStyle}" TextWrapping="Wrap"
+                                   Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                        <TextBox x:Name="RelayUrlBox" PlaceholderText="https://relay.example.com (empty: the public relays)"
+                                 AutomationProperties.Name="Relay address" />
+                        <PasswordBox x:Name="RelayTokenBox" PlaceholderText="Token, if your relay needs one"
+                                     AutomationProperties.Name="Relay token" />
+                        <Button Content="Use this relay" Click="OnRelayClick" />
+                        <TextBlock Text="Changing the relay asks for an administrator, since every account on this PC shares it."
+                                   Style="{StaticResource CaptionTextBlockStyle}" TextWrapping="Wrap"
+                                   Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                    </StackPanel>
+                </Border>
+                <Border Style="{StaticResource PtCardStyle}" Padding="16,12">
+                    <Grid ColumnSpacing="12">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="Auto" />
+                        </Grid.ColumnDefinitions>
+                        <StackPanel VerticalAlignment="Center">
+                            <TextBlock Text="This PC's identity" />
+                            <TextBlock Text="A new identity takes every phone's access away; plug each one in again to give it back. Asks for an administrator."
+                                       Style="{StaticResource CaptionTextBlockStyle}" TextWrapping="Wrap"
+                                       Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                        </StackPanel>
+                        <Button Grid.Column="1" Content="Reset…" Click="OnResetIdentityClick" AutomationProperties.Name="Reset this PC's identity" />
+                    </Grid>
+                </Border>
+            </StackPanel>
         </StackPanel>
     </ScrollViewer>
+    </NavigationView>
     </Grid>
 </Window>

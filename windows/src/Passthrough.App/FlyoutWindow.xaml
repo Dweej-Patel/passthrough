@@ -4,13 +4,13 @@
     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
     xmlns:local="using:Passthrough.App">
 
-    <!-- Read top to bottom, as the Mac's panel is: what the PC is doing with the phone, the phones, what needs doing,
-         then Settings and Quit. No background of its own: the window's acrylic shows through. -->
-    <Grid x:Name="Root" Padding="14">
+    <!-- Above the tabs, always: what Remote access is doing, the notices, and anyone viewing the screen (never hidden
+         behind a tab). Then two tabs: This PC (the phones on the cable, Stay awake) and Remote (who can reach this PC,
+         who is on it now, your computers). No background of its own: the window's acrylic shows through. -->
+    <Grid x:Name="Root" Padding="14" KeyDown="OnRootKeyDown">
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto" />
             <RowDefinition Height="*" />
-            <RowDefinition Height="Auto" />
             <RowDefinition Height="Auto" />
         </Grid.RowDefinitions>
 
@@ -19,7 +19,11 @@
             <Grid.ColumnDefinitions>
                 <ColumnDefinition Width="Auto" />
                 <ColumnDefinition Width="*" />
+                <ColumnDefinition Width="Auto" />
             </Grid.ColumnDefinitions>
+            <Button Grid.Column="2" Content="{x:Bind ViewModel.HeaderActionText, Mode=OneWay}" VerticalAlignment="Center"
+                    Visibility="{x:Bind ViewModel.HeaderActionVisibility, Mode=OneWay}" Click="OnReachClick"
+                    ToolTipService.ToolTip="Opens Settings ▸ Remote access" />
             <Grid Width="38" Height="38" Visibility="{x:Bind ViewModel.HeaderIdleVisibility, Mode=OneWay}">
                 <Ellipse Fill="{ThemeResource ControlFillColorSecondaryBrush}" />
                 <FontIcon Glyph="{x:Bind ViewModel.HeaderGlyph, Mode=OneWay}" FontSize="18"
@@ -30,117 +34,293 @@
                 <FontIcon Glyph="{x:Bind ViewModel.HeaderGlyph, Mode=OneWay}" FontSize="18"
                           Foreground="{StaticResource PtOnTintBrush}" />
             </Grid>
+            <Grid Width="38" Height="38" Visibility="{x:Bind ViewModel.HeaderAttentionVisibility, Mode=OneWay}">
+                <Ellipse Fill="{ThemeResource SystemFillColorCautionBackgroundBrush}" />
+                <FontIcon Glyph="&#xE7BA;" FontSize="18" Foreground="{ThemeResource SystemFillColorCautionBrush}" />
+            </Grid>
             <StackPanel Grid.Column="1" VerticalAlignment="Center" Spacing="1">
                 <TextBlock Text="{x:Bind ViewModel.HeaderTitle, Mode=OneWay}" Style="{StaticResource BodyStrongTextBlockStyle}"
-                           FontSize="15" TextTrimming="CharacterEllipsis" TextWrapping="NoWrap" />
+                           FontSize="15" TextTrimming="CharacterEllipsis" TextWrapping="NoWrap" AutomationProperties.LiveSetting="Polite" />
                 <TextBlock Text="{x:Bind ViewModel.HeaderSubtitle, Mode=OneWay}" Style="{StaticResource CaptionTextBlockStyle}"
                            Foreground="{ThemeResource TextFillColorSecondaryBrush}"
                            TextTrimming="CharacterEllipsis" TextWrapping="NoWrap" />
             </StackPanel>
         </Grid>
 
-        <!-- The phones, one card each -->
-        <ScrollViewer Grid.Row="1" Margin="0,12,0,0" VerticalScrollBarVisibility="Auto"
-                      Visibility="{x:Bind ViewModel.RowsVisibility, Mode=OneWay}">
-            <ItemsControl x:Name="Body" ItemsSource="{x:Bind ViewModel.Rows}">
+        <ScrollViewer Grid.Row="1" Margin="0,12,0,0" VerticalScrollBarVisibility="Auto">
+          <StackPanel x:Name="Scrolled" Spacing="8">
+            <!-- Remote access's notices, each until answered -->
+            <ItemsControl ItemsSource="{x:Bind ViewModel.Notices}">
                 <ItemsControl.ItemsPanel>
                     <ItemsPanelTemplate>
                         <StackPanel Spacing="8" />
                     </ItemsPanelTemplate>
                 </ItemsControl.ItemsPanel>
                 <ItemsControl.ItemTemplate>
-                    <DataTemplate x:DataType="local:PhoneRow">
+                    <DataTemplate x:DataType="local:NoticeRow">
                         <Border Style="{StaticResource PtCardStyle}">
-                            <StackPanel Spacing="10">
+                            <StackPanel Spacing="8">
+                                <TextBlock Text="{x:Bind Text}" TextWrapping="Wrap" AutomationProperties.LiveSetting="Polite" />
+                                <StackPanel Orientation="Horizontal" Spacing="8" HorizontalAlignment="Right">
+                                    <Button Content="{x:Bind ActionText}" Visibility="{x:Bind ActionVisibility}" Click="OnNoticeAction" />
+                                    <Button Content="{x:Bind DismissText}" Visibility="{x:Bind DismissVisibility}" Click="OnNoticeOk" />
+                                </StackPanel>
+                            </StackPanel>
+                        </Border>
+                    </DataTemplate>
+                </ItemsControl.ItemTemplate>
+            </ItemsControl>
+
+            <!-- Anyone viewing the screen, with Stop: above the tabs, so it is never out of sight -->
+            <ItemsControl ItemsSource="{x:Bind ViewModel.Viewers}" Visibility="{x:Bind ViewModel.ViewersVisibility, Mode=OneWay}">
+                <ItemsControl.ItemsPanel>
+                    <ItemsPanelTemplate>
+                        <StackPanel Spacing="8" />
+                    </ItemsPanelTemplate>
+                </ItemsControl.ItemsPanel>
+                <ItemsControl.ItemTemplate>
+                    <DataTemplate x:DataType="local:ViewerRow">
+                        <Border Style="{StaticResource PtCardStyle}">
+                            <Grid ColumnSpacing="10">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="Auto" />
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="Auto" />
+                                </Grid.ColumnDefinitions>
+                                <FontIcon Glyph="&#xE7B3;" FontSize="16" VerticalAlignment="Center" />
+                                <TextBlock Grid.Column="1" Text="{x:Bind Text}" TextWrapping="Wrap" VerticalAlignment="Center"
+                                           AutomationProperties.LiveSetting="Assertive" />
+                                <Button Grid.Column="2" Content="Stop" Click="OnStopViewClick" AutomationProperties.Name="{x:Bind StopName}"
+                                        ToolTipService.ToolTip="Ends the view of the screen now. Its shells keep running." />
+                            </Grid>
+                        </Border>
+                    </DataTemplate>
+                </ItemsControl.ItemTemplate>
+            </ItemsControl>
+
+            <SelectorBar x:Name="Tabs" Visibility="{x:Bind ViewModel.TabsVisibility, Mode=OneWay}" SelectionChanged="OnTabChanged">
+                <SelectorBarItem x:Name="ThisPcTab" Text="{x:Bind ViewModel.ThisPcTabTitle, Mode=OneWay}" />
+                <SelectorBarItem x:Name="RemoteTab" Text="{x:Bind ViewModel.RemoteTabTitle, Mode=OneWay}" />
+            </SelectorBar>
+
+            <!-- This PC: the phones on the cable, then Stay awake -->
+            <StackPanel x:Name="ThisPcPanel" Spacing="8" Visibility="{x:Bind ViewModel.ThisPcVisibility, Mode=OneWay}">
+                <Border Style="{StaticResource PtCardStyle}" Visibility="{x:Bind ViewModel.NoRowsVisibility, Mode=OneWay}">
+                    <TextBlock Text="No phone is on the cable. Plug in an iPhone or Android phone to pair it or see its status."
+                               TextWrapping="Wrap" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                </Border>
+                <ItemsControl x:Name="Body" ItemsSource="{x:Bind ViewModel.Rows}" Visibility="{x:Bind ViewModel.RowsVisibility, Mode=OneWay}">
+                    <ItemsControl.ItemsPanel>
+                        <ItemsPanelTemplate>
+                            <StackPanel Spacing="8" />
+                        </ItemsPanelTemplate>
+                    </ItemsControl.ItemsPanel>
+                    <ItemsControl.ItemTemplate>
+                        <DataTemplate x:DataType="local:PhoneRow">
+                            <Border Style="{StaticResource PtCardStyle}">
+                                <StackPanel Spacing="10">
+                                    <Grid ColumnSpacing="10">
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition Width="Auto" />
+                                            <ColumnDefinition Width="*" />
+                                            <ColumnDefinition Width="Auto" />
+                                        </Grid.ColumnDefinitions>
+                                        <Grid Width="32" Height="32" Visibility="{x:Bind InactiveVisibility, Mode=OneWay}">
+                                            <Ellipse Fill="{ThemeResource ControlFillColorSecondaryBrush}" />
+                                            <FontIcon Glyph="{x:Bind Glyph, Mode=OneWay}" FontSize="15"
+                                                      Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                                        </Grid>
+                                        <Grid Width="32" Height="32" Visibility="{x:Bind ActiveVisibility, Mode=OneWay}">
+                                            <Ellipse Fill="{StaticResource PtTintBrush}" />
+                                            <FontIcon Glyph="{x:Bind Glyph, Mode=OneWay}" FontSize="15"
+                                                      Foreground="{StaticResource PtOnTintBrush}" />
+                                        </Grid>
+                                        <StackPanel Grid.Column="1" VerticalAlignment="Center">
+                                            <TextBlock Text="{x:Bind Title, Mode=OneWay}" Style="{StaticResource BodyStrongTextBlockStyle}"
+                                                       TextTrimming="CharacterEllipsis" TextWrapping="NoWrap" />
+                                            <TextBlock Text="{x:Bind Detail, Mode=OneWay}" Style="{StaticResource CaptionTextBlockStyle}"
+                                                       Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                                       TextTrimming="CharacterEllipsis" TextWrapping="NoWrap" />
+                                        </StackPanel>
+                                        <StackPanel Grid.Column="2" Orientation="Horizontal" Spacing="6" VerticalAlignment="Center">
+                                            <ProgressRing Width="14" Height="14" MinWidth="14" MinHeight="14" IsActive="True"
+                                                          AutomationProperties.Name="Working"
+                                                          Visibility="{x:Bind BusyVisibility, Mode=OneWay}" />
+                                            <Ellipse Width="8" Height="8" Fill="{x:Bind Dot, Mode=OneWay}"
+                                                     Visibility="{x:Bind DotVisibility, Mode=OneWay}" />
+                                            <TextBlock Text="{x:Bind StateText, Mode=OneWay}" Style="{StaticResource CaptionTextBlockStyle}"
+                                                       Foreground="{ThemeResource TextFillColorSecondaryBrush}" VerticalAlignment="Center" />
+                                        </StackPanel>
+                                    </Grid>
+
+                                    <TextBlock Text="{x:Bind StatusLine, Mode=OneWay}" TextWrapping="Wrap"
+                                               Visibility="{x:Bind StatusVisibility, Mode=OneWay}" />
+                                    <TextBlock Text="{x:Bind ActivityLine, Mode=OneWay}" Style="{StaticResource CaptionTextBlockStyle}"
+                                               Margin="0,-6,0,0" Visibility="{x:Bind ActivityVisibility, Mode=OneWay}"
+                                               Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+
+                                    <Border Background="{StaticResource PtAttentionFillBrush}" CornerRadius="6" Padding="10,8"
+                                            Visibility="{x:Bind MessageVisibility, Mode=OneWay}">
+                                        <TextBlock Text="{x:Bind Message, Mode=OneWay}" Style="{StaticResource CaptionTextBlockStyle}"
+                                                   TextWrapping="Wrap" />
+                                    </Border>
+
+                                    <Grid ColumnSpacing="8" Visibility="{x:Bind PairVisibility, Mode=OneWay}">
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition Width="*" />
+                                            <ColumnDefinition Width="Auto" />
+                                        </Grid.ColumnDefinitions>
+                                        <TextBox MaxLength="12" PlaceholderText="Six-digit code" FontSize="16" CharacterSpacing="80"
+                                                 Text="{x:Bind Code, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                                                 AutomationProperties.Name="{x:Bind CodeName, Mode=OneWay}"
+                                                 InputScope="Number" KeyDown="OnCodeKeyDown" />
+                                        <Button Grid.Column="1" Content="Pair" MinWidth="72" VerticalAlignment="Stretch"
+                                                Style="{StaticResource AccentButtonStyle}" AutomationProperties.Name="{x:Bind PairName, Mode=OneWay}"
+                                                IsEnabled="{x:Bind CanPair, Mode=OneWay}" Click="OnPairClick" />
+                                    </Grid>
+                                    <TextBlock Text="{x:Bind CodeProblem, Mode=OneWay}" Style="{StaticResource CaptionTextBlockStyle}"
+                                               Foreground="{ThemeResource SystemFillColorCautionBrush}"
+                                               Visibility="{x:Bind CodeProblemVisibility, Mode=OneWay}" TextWrapping="Wrap" />
+
+                                    <Button Content="Try again" HorizontalAlignment="Stretch" Style="{StaticResource AccentButtonStyle}"
+                                            AutomationProperties.Name="{x:Bind RetryName, Mode=OneWay}"
+                                            Visibility="{x:Bind RetryVisibility, Mode=OneWay}" Click="OnRetryClick" />
+                                    <Button Content="Use this phone" HorizontalAlignment="Stretch" AutomationProperties.Name="{x:Bind UseName, Mode=OneWay}"
+                                            Visibility="{x:Bind UseVisibility, Mode=OneWay}" Click="OnUseClick" />
+                                </StackPanel>
+                            </Border>
+                        </DataTemplate>
+                    </ItemsControl.ItemTemplate>
+                </ItemsControl>
+
+                <!-- What the user should do: install Apple Devices, allow USB debugging, ... -->
+                <Border x:Name="HintsBox" Style="{StaticResource PtCardStyle}" Visibility="{x:Bind ViewModel.HintsVisibility, Mode=OneWay}">
+                    <Grid ColumnSpacing="10">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="Auto" />
+                            <ColumnDefinition Width="*" />
+                        </Grid.ColumnDefinitions>
+                        <FontIcon Glyph="&#xE946;" FontSize="14" VerticalAlignment="Top" Margin="0,1,0,0"
+                                  Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                        <TextBlock Grid.Column="1" Text="{x:Bind ViewModel.Hints, Mode=OneWay}" Style="{StaticResource CaptionTextBlockStyle}"
+                                   Foreground="{ThemeResource TextFillColorSecondaryBrush}" TextWrapping="Wrap" />
+                    </Grid>
+                </Border>
+
+                <Border Style="{StaticResource PtCardStyle}" Visibility="{x:Bind ViewModel.StayAwakeVisibility, Mode=OneWay}">
+                    <Grid ColumnSpacing="10">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="Auto" />
+                        </Grid.ColumnDefinitions>
+                        <StackPanel VerticalAlignment="Center">
+                            <TextBlock Text="Stay awake on mains power" />
+                            <TextBlock Text="A sleeping PC can't answer your phones." Style="{StaticResource CaptionTextBlockStyle}"
+                                       Foreground="{ThemeResource TextFillColorSecondaryBrush}" TextWrapping="Wrap" />
+                        </StackPanel>
+                        <ToggleSwitch x:Name="AwakeSwitch" Grid.Column="1" MinWidth="0" OnContent="" OffContent=""
+                                      IsOn="{x:Bind ViewModel.StayAwake, Mode=OneWay}" Toggled="OnAwakeToggled"
+                                      AutomationProperties.Name="Stay awake on mains power" />
+                    </Grid>
+                </Border>
+            </StackPanel>
+
+            <!-- Remote: who can reach this PC, who is on it now, and your computers -->
+            <StackPanel x:Name="RemotePanel" Spacing="8" Visibility="{x:Bind ViewModel.RemoteVisibility, Mode=OneWay}">
+                <Button HorizontalAlignment="Stretch" HorizontalContentAlignment="Stretch" Click="OnReachClick"
+                        AutomationProperties.Name="{x:Bind ViewModel.ReachLine, Mode=OneWay}"
+                        ToolTipService.ToolTip="Opens Settings ▸ Remote access">
+                    <Grid ColumnSpacing="8">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="Auto" />
+                        </Grid.ColumnDefinitions>
+                        <TextBlock Text="{x:Bind ViewModel.ReachLine, Mode=OneWay}" TextWrapping="Wrap" />
+                        <FontIcon Grid.Column="1" Glyph="&#xE76C;" FontSize="12" />
+                    </Grid>
+                </Button>
+
+                <TextBlock Text="On this PC now" Style="{StaticResource BodyStrongTextBlockStyle}" Margin="2,6,0,0" AutomationProperties.HeadingLevel="Level1" />
+                <TextBlock Text="Nobody is on this PC now." Style="{StaticResource CaptionTextBlockStyle}" Margin="2,0,0,0"
+                           Foreground="{ThemeResource TextFillColorSecondaryBrush}" Visibility="{x:Bind ViewModel.NobodyHereVisibility, Mode=OneWay}" />
+                <ItemsControl ItemsSource="{x:Bind ViewModel.OnThisPc}" Visibility="{x:Bind ViewModel.OnThisPcVisibility, Mode=OneWay}">
+                    <ItemsControl.ItemsPanel>
+                        <ItemsPanelTemplate>
+                            <StackPanel Spacing="8" />
+                        </ItemsPanelTemplate>
+                    </ItemsControl.ItemsPanel>
+                    <ItemsControl.ItemTemplate>
+                        <DataTemplate x:DataType="local:OnThisPcRow">
+                            <Border Style="{StaticResource PtCardStyle}">
                                 <Grid ColumnSpacing="10">
                                     <Grid.ColumnDefinitions>
                                         <ColumnDefinition Width="Auto" />
                                         <ColumnDefinition Width="*" />
                                         <ColumnDefinition Width="Auto" />
                                     </Grid.ColumnDefinitions>
-                                    <Grid Width="32" Height="32" Visibility="{x:Bind InactiveVisibility, Mode=OneWay}">
+                                    <Grid Width="32" Height="32">
                                         <Ellipse Fill="{ThemeResource ControlFillColorSecondaryBrush}" />
-                                        <FontIcon Glyph="{x:Bind Glyph, Mode=OneWay}" FontSize="15"
-                                                  Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
-                                    </Grid>
-                                    <Grid Width="32" Height="32" Visibility="{x:Bind ActiveVisibility, Mode=OneWay}">
-                                        <Ellipse Fill="{StaticResource PtTintBrush}" />
-                                        <FontIcon Glyph="{x:Bind Glyph, Mode=OneWay}" FontSize="15"
-                                                  Foreground="{StaticResource PtOnTintBrush}" />
+                                        <FontIcon Glyph="{x:Bind Glyph}" FontSize="15" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
                                     </Grid>
                                     <StackPanel Grid.Column="1" VerticalAlignment="Center">
-                                        <TextBlock Text="{x:Bind Title, Mode=OneWay}" Style="{StaticResource BodyStrongTextBlockStyle}"
-                                                   TextTrimming="CharacterEllipsis" TextWrapping="NoWrap" />
-                                        <TextBlock Text="{x:Bind Detail, Mode=OneWay}" Style="{StaticResource CaptionTextBlockStyle}"
-                                                   Foreground="{ThemeResource TextFillColorSecondaryBrush}"
-                                                   TextTrimming="CharacterEllipsis" TextWrapping="NoWrap" />
+                                        <TextBlock Text="{x:Bind Title}" Style="{StaticResource BodyStrongTextBlockStyle}" TextTrimming="CharacterEllipsis" />
+                                        <TextBlock Text="{x:Bind Detail}" Style="{StaticResource CaptionTextBlockStyle}"
+                                                   Foreground="{ThemeResource TextFillColorSecondaryBrush}" TextTrimming="CharacterEllipsis" />
                                     </StackPanel>
-                                    <StackPanel Grid.Column="2" Orientation="Horizontal" Spacing="6" VerticalAlignment="Center">
-                                        <ProgressRing Width="14" Height="14" MinWidth="14" MinHeight="14" IsActive="True"
-                                                      Visibility="{x:Bind BusyVisibility, Mode=OneWay}" />
-                                        <Ellipse Width="8" Height="8" Fill="{x:Bind Dot, Mode=OneWay}"
-                                                 Visibility="{x:Bind DotVisibility, Mode=OneWay}" />
-                                        <TextBlock Text="{x:Bind StateText, Mode=OneWay}" Style="{StaticResource CaptionTextBlockStyle}"
-                                                   Foreground="{ThemeResource TextFillColorSecondaryBrush}" VerticalAlignment="Center" />
-                                    </StackPanel>
+                                    <Button Grid.Column="2" Content="Stop" Click="OnStopClick" VerticalAlignment="Center"
+                                            AutomationProperties.Name="{x:Bind StopName}" ToolTipService.ToolTip="{x:Bind StopTip}" />
                                 </Grid>
+                            </Border>
+                        </DataTemplate>
+                    </ItemsControl.ItemTemplate>
+                </ItemsControl>
 
-                                <TextBlock Text="{x:Bind StatusLine, Mode=OneWay}" TextWrapping="Wrap"
-                                           Visibility="{x:Bind StatusVisibility, Mode=OneWay}" />
-                                <TextBlock Text="{x:Bind ActivityLine, Mode=OneWay}" Style="{StaticResource CaptionTextBlockStyle}"
-                                           Margin="0,-6,0,0" Visibility="{x:Bind ActivityVisibility, Mode=OneWay}"
-                                           Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
-
-                                <Border Background="{StaticResource PtAttentionFillBrush}" CornerRadius="6" Padding="10,8"
-                                        Visibility="{x:Bind MessageVisibility, Mode=OneWay}">
-                                    <TextBlock Text="{x:Bind Message, Mode=OneWay}" Style="{StaticResource CaptionTextBlockStyle}"
-                                               TextWrapping="Wrap" />
-                                </Border>
-
-                                <Grid ColumnSpacing="8" Visibility="{x:Bind PairVisibility, Mode=OneWay}">
+                <TextBlock Text="Your computers" Style="{StaticResource BodyStrongTextBlockStyle}" Margin="2,6,0,0" AutomationProperties.HeadingLevel="Level1" />
+                <Button Content="Show your computers" HorizontalAlignment="Stretch" Click="OnShowComputers"
+                        Visibility="{x:Bind ViewModel.ShowComputersVisibility, Mode=OneWay}"
+                        ToolTipService.ToolTip="Other computers this PC can reach. Windows asks for your PIN or fingerprint." />
+                <TextBlock Text="{x:Bind ViewModel.ComputersNote, Mode=OneWay}" Style="{StaticResource CaptionTextBlockStyle}" Margin="2,0,0,0"
+                           TextWrapping="Wrap" Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                           Visibility="{x:Bind ViewModel.ComputersNoteVisibility, Mode=OneWay}" AutomationProperties.LiveSetting="Polite" />
+                <ItemsControl ItemsSource="{x:Bind ViewModel.Computers}" Visibility="{x:Bind ViewModel.ComputersVisibility, Mode=OneWay}">
+                    <ItemsControl.ItemsPanel>
+                        <ItemsPanelTemplate>
+                            <StackPanel Spacing="8" />
+                        </ItemsPanelTemplate>
+                    </ItemsControl.ItemsPanel>
+                    <ItemsControl.ItemTemplate>
+                        <DataTemplate x:DataType="local:ComputerRow">
+                            <Border Style="{StaticResource PtCardStyle}">
+                                <Grid ColumnSpacing="10">
                                     <Grid.ColumnDefinitions>
                                         <ColumnDefinition Width="*" />
                                         <ColumnDefinition Width="Auto" />
                                     </Grid.ColumnDefinitions>
-                                    <TextBox MaxLength="12" PlaceholderText="Six-digit code" FontSize="16" CharacterSpacing="80"
-                                             Text="{x:Bind Code, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
-                                             InputScope="Number" KeyDown="OnCodeKeyDown" />
-                                    <Button Grid.Column="1" Content="Pair" MinWidth="72" VerticalAlignment="Stretch"
-                                            Style="{StaticResource AccentButtonStyle}"
-                                            IsEnabled="{x:Bind CanPair, Mode=OneWay}" Click="OnPairClick" />
+                                    <StackPanel VerticalAlignment="Center">
+                                        <TextBlock Text="{x:Bind Title}" Style="{StaticResource BodyStrongTextBlockStyle}" TextTrimming="CharacterEllipsis" />
+                                        <TextBlock Text="{x:Bind Detail}" Style="{StaticResource CaptionTextBlockStyle}"
+                                                   Foreground="{ThemeResource TextFillColorSecondaryBrush}" TextTrimming="CharacterEllipsis" />
+                                        <HyperlinkButton Content="Remove…" Padding="0" FontSize="12" Click="OnRemoveComputer"
+                                                         AutomationProperties.Name="{x:Bind RemoveName}" />
+                                    </StackPanel>
+                                    <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="6">
+                                        <Button Content="Screen" Visibility="{x:Bind ScreenVisibility}" Click="OnScreen"
+                                                AutomationProperties.Name="{x:Bind ScreenName}"
+                                                ToolTipService.ToolTip="Shows its screen in a window. Windows asks for your PIN or fingerprint." />
+                                        <Button Content="New shell" IsEnabled="{x:Bind CanOpenShell}" Click="OnNewShell"
+                                                AutomationProperties.Name="{x:Bind ShellName}" />
+                                    </StackPanel>
                                 </Grid>
-                                <TextBlock Text="{x:Bind CodeProblem, Mode=OneWay}" Style="{StaticResource CaptionTextBlockStyle}"
-                                           Foreground="{ThemeResource SystemFillColorCautionBrush}"
-                                           Visibility="{x:Bind CodeProblemVisibility, Mode=OneWay}" TextWrapping="Wrap" />
-
-                                <Button Content="Try again" HorizontalAlignment="Stretch" Style="{StaticResource AccentButtonStyle}"
-                                        Visibility="{x:Bind RetryVisibility, Mode=OneWay}" Click="OnRetryClick" />
-                                <Button Content="Use this phone" HorizontalAlignment="Stretch"
-                                        Visibility="{x:Bind UseVisibility, Mode=OneWay}" Click="OnUseClick" />
-                            </StackPanel>
-                        </Border>
-                    </DataTemplate>
-                </ItemsControl.ItemTemplate>
-            </ItemsControl>
+                            </Border>
+                        </DataTemplate>
+                    </ItemsControl.ItemTemplate>
+                </ItemsControl>
+            </StackPanel>
+          </StackPanel>
         </ScrollViewer>
 
-        <!-- What the user should do: install Apple Devices, allow USB debugging, ... -->
-        <Border x:Name="HintsBox" Grid.Row="2" Margin="0,12,0,0" Style="{StaticResource PtCardStyle}"
-                Visibility="{x:Bind ViewModel.HintsVisibility, Mode=OneWay}">
-            <Grid ColumnSpacing="10">
-                <Grid.ColumnDefinitions>
-                    <ColumnDefinition Width="Auto" />
-                    <ColumnDefinition Width="*" />
-                </Grid.ColumnDefinitions>
-                <FontIcon Glyph="&#xE946;" FontSize="14" VerticalAlignment="Top" Margin="0,1,0,0"
-                          Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
-                <TextBlock Grid.Column="1" Text="{x:Bind ViewModel.Hints, Mode=OneWay}" Style="{StaticResource CaptionTextBlockStyle}"
-                           Foreground="{ThemeResource TextFillColorSecondaryBrush}" TextWrapping="Wrap" />
-            </Grid>
-        </Border>
-
         <!-- Footer -->
-        <Grid Grid.Row="3" Margin="0,12,0,0" BorderBrush="{ThemeResource DividerStrokeColorDefaultBrush}" BorderThickness="0,1,0,0" Padding="2,8,0,0">
+        <Grid Grid.Row="2" Margin="0,12,0,0" BorderBrush="{ThemeResource DividerStrokeColorDefaultBrush}" BorderThickness="0,1,0,0" Padding="2,8,0,0">
             <TextBlock Text="Passthrough" Style="{StaticResource CaptionTextBlockStyle}" VerticalAlignment="Center"
                        Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
             <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" Spacing="2">

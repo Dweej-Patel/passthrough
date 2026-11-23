@@ -68,6 +68,8 @@ import dev.dpatel.passthrough.ui.LocalPT
 import dev.dpatel.passthrough.ui.PT
 import dev.dpatel.passthrough.ui.PTCard
 import dev.dpatel.passthrough.ui.tabInsets
+import dev.dpatel.passthrough.core.HostWords
+import dev.dpatel.passthrough.ui.shell.HostCopy
 import dev.dpatel.passthrough.ui.shell.ShellReach
 import dev.dpatel.passthrough.ui.shell.ShellViewModel
 import java.text.DateFormat
@@ -85,6 +87,8 @@ fun ActivityScreen(shell: ShellViewModel, onOpenTerminal: (String) -> Unit, onHi
     val unsupported by shell.timelineUnsupported.collectAsStateWithLifecycle()
     val sessions by shell.sessions.collectAsStateWithLifecycle()
     val state by shell.macState.collectAsStateWithLifecycle()
+    val kind by shell.selectedKind.collectAsStateWithLifecycle()
+    val w = HostWords(kind, null)
     val since = System.currentTimeMillis() / 1000.0 - 86_400
     LaunchedEffect(reach) { if (reach == ShellReach.READY) shell.loadTimeline(since) }
 
@@ -99,14 +103,17 @@ fun ActivityScreen(shell: ShellViewModel, onOpenTerminal: (String) -> Unit, onHi
     ) {
         Text("Activity", style = PT.display(30.sp), color = c.primary, modifier = Modifier.padding(top = 6.dp))
         val t = timeline
+        val noTimeline = HostCopy.noTimeline(w)
         when {
-            unsupported -> Notice("Update Passthrough on your Mac to see what happened on it.")
+            // A PC keeps none (it answers with an empty list): say so rather than "nothing happened".
+            noTimeline != null -> Notice(noTimeline)
+            unsupported -> Notice("Update Passthrough on ${w.your} to see what happened on it.")
             t != null -> {
                 Summary(t)
                 if (t.battery.size > 1) BatteryChart(t.battery, state?.batteryFloor)
-                if (reach != ShellReach.READY) Text("As of ${time(t.loadedAt)}. Your Mac can't be reached right now.",
+                if (reach != ShellReach.READY) Text("As of ${time(t.loadedAt)}. ${w.Your} can't be reached right now.",
                     style = PT.display(13.sp, FontWeight.Normal), color = c.secondary)
-                if (t.events.isEmpty()) Notice("Nothing happened on your Mac in this time.")
+                if (t.events.isEmpty()) Notice("Nothing happened on ${w.your} in this time.")
                 else PTCard(padding = 6.dp) {
                     val newestFirst = t.events.reversed()
                     newestFirst.forEachIndexed { i, e ->
@@ -119,7 +126,7 @@ fun ActivityScreen(shell: ShellViewModel, onOpenTerminal: (String) -> Unit, onHi
                 }
             }
             reach == ShellReach.READY -> Box(Modifier.fillMaxWidth().height(120.dp), contentAlignment = Alignment.Center) { CircularProgressIndicator(color = c.tint) }
-            else -> Notice("Your Mac's timeline shows up here once this phone can reach it.")
+            else -> Notice("${w.Your}'s timeline shows up here once this phone can reach it.")
         }
     }
 }
