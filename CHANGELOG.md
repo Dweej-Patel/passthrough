@@ -382,6 +382,7 @@ these steps as written and check each one before building.
   public address, so hole punching had nothing to aim at. Measured: before,
   the phone on cellular offered only 192.0.0.x and its IPv6 addresses and
   stayed on the relay with both the Mac and the PC.
+  Android had the same gap and has the same fix.
 
 * **A PC's screen on the iPhone stays on.** The developer switch
   (`-PTWindowsScreen YES`, what `./passthrough iphone install --pc-screen`
