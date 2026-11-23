@@ -132,6 +132,25 @@ final class HostCopyTests: XCTestCase {
         XCTAssertEqual(HostCopy.noActivity(pc), "Office-PC doesn't record activity yet.")
     }
 
+    /// A computer given access that can't take it says why, when its `host` does; a Mac's sentence is the old one.
+    func testCantTakeAccess() {
+        XCTAssertEqual(HostCopy.cantTakeAccess(HostInfo(kind: "windows", signedIn: false, app: false), pc),
+                       "Sign in to Office-PC and open Passthrough there, then try again.")
+        XCTAssertEqual(HostCopy.cantTakeAccess(HostInfo(kind: "windows", signedIn: true, app: false), pc),
+                       "Open Passthrough on Office-PC, then try again.")
+        XCTAssertEqual(HostCopy.cantTakeAccess(HostInfo(kind: "windows", signedIn: true, app: true), pc),
+                       "Office-PC needs the latest Passthrough to use other computers.")
+        XCTAssertEqual(HostCopy.cantTakeAccess(HostInfo(kind: "mac"), mac),
+                       "MacBook Pro needs the latest Passthrough to use other computers.")
+        XCTAssertEqual(HostCopy.cantTakeAccess(nil, mac), "MacBook Pro needs the latest Passthrough to use other computers.")
+    }
+
+    /// A PC confirms keeping access on its own screen, so the phone says to look there; a Mac keeps it as before.
+    func testHandingOver() {
+        XCTAssertEqual(HostCopy.handingOver(pc), "Confirm on Office-PC when it asks (Windows Hello or the account's password)…")
+        XCTAssertEqual(HostCopy.handingOver(mac), "Handing it to MacBook Pro…")
+    }
+
     func testSwitcherKindPrefix() {
         let now = Date()
         XCTAssertEqual(MacProfiles.statusText(.connected(shells: 0), now: now, kind: .windows, showKind: true), "PC · Connected")

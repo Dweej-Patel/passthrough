@@ -175,6 +175,23 @@ public enum HostCopy {
         "Its screen, with another of your Macs. To share its shell or share with a PC, " + lowercasedFirst(shareOff(w))
     }
 
+    /// Why the computer being given access can't take it: its `host` came without an identity key. A PC
+    /// sends none while no one is signed in or its Passthrough isn't open; otherwise it's an older build.
+    public static func cantTakeAccess(_ host: HostInfo?, _ w: HostWords) -> String {
+        if host?.signedIn == false { return "Sign in to \(w.name) and open Passthrough there, then try again." }
+        if host?.app == false { return "Open Passthrough on \(w.name), then try again." }
+        return "\(w.name) needs the latest Passthrough to use other computers."
+    }
+
+    /// While the computer being given access keeps it. A PC asks its owner first (Windows Hello or the
+    /// account's password), and has about half a minute for it, so the phone says to look there.
+    public static func handingOver(_ w: HostWords) -> String {
+        switch w.kind {
+        case .windows: "Confirm on \(w.name) when it asks (Windows Hello or the account's password)…"
+        case .mac, .other, nil: "Handing it to \(w.name)…"
+        }
+    }
+
     /// The Activity tab for a computer whose Passthrough keeps no timeline (a PC answers with none).
     public static func noActivity(_ w: HostWords) -> String { "\(w.name) doesn't record activity yet." }
 
