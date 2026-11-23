@@ -110,7 +110,7 @@ struct RemoteShellCard: View {
                         Image(systemName: "display").foregroundStyle(PTColor.tintText)
                         VStack(alignment: .leading, spacing: 2) {
                             Text("See and control the screen").foregroundStyle(.primary)
-                            if page.screen != .available, let why = HostCopy.screen(page.screen, shell.words) {
+                            if page.screen != .available, let why = PCScreen.copy(page.screen, shell.words) {
                                 Text(why).font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                             }
                         }

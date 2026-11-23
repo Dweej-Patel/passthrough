@@ -374,7 +374,7 @@ final class ScreenModel: ObservableObject {
         stop()
         let words = HostWords(kind: kind, name: name, device: ThisDevice.name)
         let state = id == shell.selectedMacID ? shell.page.screen : .notInThisVersion
-        phase = .failed(HostCopy.screen(state == .available || state == .noRow ? .notInThisVersion : state, words)
+        phase = .failed(PCScreen.copy(state == .available || state == .noRow ? .notInThisVersion : state, words)
                         ?? "\(words.name)'s screen isn't in this version of Passthrough yet.")
         return true
     }
@@ -479,7 +479,7 @@ final class ScreenModel: ObservableObject {
         case let .host(info) where HostKind(wire: info.kind) != .mac:
             // Told only now that this isn't a Mac: its screen path ends before anything more is asked.
             stop()
-            phase = .failed(HostCopy.screen(.notInThisVersion, HostWords(kind: HostKind(wire: info.kind), name: macName, device: ThisDevice.name))
+            phase = .failed(PCScreen.copy(.notInThisVersion, HostWords(kind: HostKind(wire: info.kind), name: macName, device: ThisDevice.name))
                             ?? "Choose a computer first.")
         default:
             break

@@ -13,12 +13,13 @@ Verbs
   devices             The iPhones and iPads this Mac can reach (no simulators).
   doctor              Xcode, signing, the engine, and a connected, unlocked device.
   build               Builds the Passthrough scheme (Debug, as you install it) into build/dd-ios.
-  install [--device ID|NAME] [--pc-screen] [--no-build] [--force]
+  install [--device ID|NAME] [--pc-screen|--no-pc-screen] [--no-build] [--force]
                       Builds, installs on the device and opens the app. With one device
                       it's used; with several, name one. Pairings and keys stay.
-                      --pc-screen opens it with -PTWindowsScreen YES (a PC's screen),
-                      for that launch only.
-  update [--pull] [--device …] [--pc-screen] [--force] [--no-engine]
+                      --pc-screen turns a PC's screen on (-PTWindowsScreen YES) and
+                      --no-pc-screen turns it off; the app keeps it, also when opened
+                      from the home screen. Without either it stays as it was.
+  update [--pull] [--device …] [--pc-screen|--no-pc-screen] [--force] [--no-engine]
                       --pull runs git pull --ff-only first; then as install.
   remove --device ID|NAME [--yes]
                       Deletes the app from the device, with its saved keys and pairings.
@@ -44,6 +45,7 @@ while [ $# -gt 0 ]; do
     --yes|-y) YES=1 ;;
     --device) [ $# -ge 2 ] || die "--device needs a UDID or a name (see ./passthrough iphone devices)"; DEVICE_ARG="$2"; shift ;;
     --pc-screen) PC_SCREEN=1 ;;
+    --no-pc-screen) PC_SCREEN=off ;;
     --pull) PULL=1 ;;
     --no-build) NO_BUILD=1 ;;
     --no-engine) NO_ENGINE=1 ;;
@@ -216,7 +218,10 @@ do_install() {
   run xcrun devicectl device install app --device "$udid" "$BUILT_APP"
   if [ "$PC_SCREEN" = 1 ]; then
     run xcrun devicectl device process launch --device "$udid" --terminate-existing "$(bundle_id)" -- -PTWindowsScreen YES
-    info "A PC's screen is on for this launch only: opening the app from the home screen later starts it without -PTWindowsScreen."
+    info "A PC's screen is on and stays on, also when the app is opened from the home screen (--no-pc-screen turns it off)."
+  elif [ "$PC_SCREEN" = off ]; then
+    run xcrun devicectl device process launch --device "$udid" --terminate-existing "$(bundle_id)" -- -PTWindowsScreen NO
+    info "A PC's screen is off on this device (--pc-screen turns it on)."
   else
     run xcrun devicectl device process launch --device "$udid" --terminate-existing "$(bundle_id)"
   fi

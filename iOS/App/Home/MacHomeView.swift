@@ -178,7 +178,7 @@ struct MacHomeView: View {
     /// The iPad Screen card's line: a Mac's as always; a PC's from its page, never the Mac's sentence.
     private var screenCardDetail: String {
         guard !isMac else { return ScreenCard.macDetail }
-        return HostCopy.screen(shell.page.screen, shell.words) ?? HostCopy.screen(.notInThisVersion, shell.words) ?? ""
+        return PCScreen.copy(shell.page.screen, shell.words) ?? PCScreen.copy(.notInThisVersion, shell.words) ?? ""
     }
 
     private func runAfterSwitcher() {
@@ -478,7 +478,7 @@ struct MacHomeView: View {
                 SwitchIcon(symbol: "display", on: false, warning: false)
                 VStack(alignment: .leading, spacing: 2) {
                     Text("Screen").font(.body.weight(.semibold))
-                    Text(HostCopy.screen(shell.page.screen, shell.words) ?? "")
+                    Text(PCScreen.copy(shell.page.screen, shell.words) ?? "")
                         .font(.subheadline).foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
                 }

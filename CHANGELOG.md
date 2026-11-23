@@ -375,6 +375,12 @@ these steps as written and check each one before building.
 
 ### Fixed (iPhone and Mac, from the security and code review)
 
+* **A PC's screen on the iPhone stays on.** The developer switch
+  (`-PTWindowsScreen YES`, what `./passthrough iphone install --pc-screen`
+  passes) is saved, so the app keeps a PC's screen after it's closed and
+  opened from the home screen; `--no-pc-screen` turns it off. With the switch
+  off, a PC's Screen row says so instead of "isn't in this version yet".
+
 * **Saved Windows logins follow the PC, not just its id.** A login saved on
   the iPhone or the Mac is used only while the PC's credential has the same
   certificate and iroh id, so a host that later claimed the same id with its
