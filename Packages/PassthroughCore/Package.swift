@@ -23,6 +23,8 @@ let package = Package(
         .library(name: "IrohTransport", targets: ["IrohTransport"]),
         .library(name: "ScreenClient", targets: ["ScreenClient"]),
         .library(name: "ScreenHost", targets: ["ScreenHost"]),
+        // Clipboard and file sync between computers viewing each other's screens.
+        .library(name: "ClipSync", targets: ["ClipSync"]),
         // Remote Desktop to a PC. App only: never link it into an extension.
         .library(name: "RemoteDesktop", targets: ["RemoteDesktop"]),
         // Between the Mac app and its sandboxed engine helper: the XPC interface, the byte splice, the limits.
@@ -71,6 +73,8 @@ let package = Package(
         .target(name: "CVirtualDisplay", linkerSettings: [.linkedFramework("CoreGraphics")]),
         // Mac-only: streams the Mac's screen to a phone as H.264 and posts its input.
         .target(name: "ScreenHost", dependencies: ["PassthroughCore", "ShellHost", "CVirtualDisplay"]),
+        // Mac-only: the transfers (Foundation only, tested) and the Mac's clipboard and drops (AppKit).
+        .target(name: "ClipSync", dependencies: ["PassthroughCore", "ShellHost"]),
         .executableTarget(name: "passthrough-devserver", dependencies: ["PassthroughCore"]),
         // Mac-only: what a terminal window runs to show one of the app's sessions
         // (the app's own copy is built by the Xcode project from the same source).
@@ -88,6 +92,7 @@ let package = Package(
             .product(name: "IrohLib", package: "iroh-ffi"),
         ]),
         .testTarget(name: "RemoteDesktopTests", dependencies: ["RemoteDesktop", "ScreenClient", "PassthroughCore"]),
+        .testTarget(name: "ClipSyncTests", dependencies: ["ClipSync", "PassthroughCore", "TestSupport"]),
         .testTarget(name: "ScreenEngineTests", dependencies: ["ScreenEngine", "ScreenClient", "PassthroughCore"]),
     ]
 )

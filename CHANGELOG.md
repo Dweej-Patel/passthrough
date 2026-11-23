@@ -136,6 +136,16 @@ these steps as written and check each one before building.
 
 ### Added
 
+* **Two Macs share a clipboard while one views the other's screen.** Copy on
+  either and paste on the other: text, images and files (up to 500 MB a
+  copy). Drag files onto the window and the other Mac drops them right where
+  you let go: a folder, the desktop, an app. **Sync Clipboard** in the
+  window's toolbar turns it off; the shared Mac has a switch under Settings ▸
+  Remote Shell ▸ *Computers with access*. Passwords from password managers
+  never go across, and phones keep their Copy and Paste buttons. Both Macs
+  need this build (an older one answers that it can't sync). A PC's side,
+  viewing a Mac or being viewed, comes with the Windows app.
+
 * **The Mac's menu-bar panel, in two tabs.**
   - Above the tabs, always: the header, shells waiting on a question, and anyone viewing this Mac's screen (with **Stop**).
   - *This Mac*: pairing, the three switches and Details (the flow map, speeds, top apps), as before.

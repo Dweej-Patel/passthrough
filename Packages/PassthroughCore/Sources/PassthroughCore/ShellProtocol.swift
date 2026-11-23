@@ -133,6 +133,9 @@ public struct ShellEnvelope: Codable, Equatable, Sendable {
     /// The Mac's own H.264 stream of its screen (`ScreenVideoWire`), rather than Screen Sharing.
     public static let screenVideo = "screenVideo"
     public static let screenVideoReady = "screenVideoReady"
+    /// Clipboard sync between computers (`ClipSyncWire`), on a connection of its own while the asker views the screen.
+    public static let clipSync = "clipSync"
+    public static let clipSyncReady = "clipSyncReady"
     /// The Mac's state (`MacState`), after `ready` and whenever it changes.
     public static let macState = "macState"
     /// A phone turning Keep awake or the VPN on or off (`on`).
@@ -366,6 +369,12 @@ public enum ShellError: String, Error, Sendable, CaseIterable {
     case vpnNotSetUp = "vpn_not_set_up"
     /// A screen-only pass asked for something other than the screen.
     case screenOnly = "screen_only"
+    /// `clipSync` from a device that isn't viewing the screen right now.
+    case noScreenView = "no_screen_view"
+    /// The host's owner turned clipboard sync off.
+    case clipSyncOff = "clip_sync_off"
+    /// The host can't sync its clipboard now (no access to it, or not the account being viewed).
+    case clipSyncUnavailable = "clip_sync_unavailable"
     /// The Mac couldn't save a pass (granted or handed to it).
     case passNotSaved = "pass_not_saved"
     /// No shell can start: the account that granted this device isn't signed in to

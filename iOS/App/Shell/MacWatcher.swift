@@ -131,10 +131,10 @@ final class MacWatcher: ObservableObject {
             // nil: this side hung up (`end` already dropped the watch).
             guard error != nil, watches[id]?.refused == false else { return }
             scheduleRedial(id)
-        case let .screen(stream, _), let .rdp(stream, _, _):
+        case let .screen(stream, _), let .rdp(stream, _, _), let .clipSync(stream, _):
             // A watch never asks for the screen.
             stream.cancel()
-        case .rdpRefused, .screenEnded, .macInfo, .host, .goingAway, .events, .pushState, .screenGranted, .screenPassSaved, .screenRevoked,
+        case .rdpRefused, .clipSyncRefused, .screenEnded, .macInfo, .host, .goingAway, .events, .pushState, .screenGranted, .screenPassSaved, .screenRevoked,
              .computerGranted, .computerPassSaved, .computerRevoked, .computerList, .opened, .openedDetached, .openFailed, .output, .replaying, .attached,
              .ended, .detached, .history, .transcript, .transcriptResize, .failed:
             // Nothing a watch asks for (`ended` is followed by a fresh `sessions`).

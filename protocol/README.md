@@ -896,7 +896,7 @@ path, dialing the pass's addresses and any Bonjour result named as the
 Mac. Any `viewer.` id is screen-only, whatever else the Mac knows of it. A
 Mac sends a pass's connection only `ready`: no `macInfo`,
 `macState` or `sessions`, then or later. It accepts only `screenVideo`,
-`ping` and `pong` from it; anything else, `screen` (the tunnel to macOS
+`clipSync` ([Clipboard sync](#clipboard-sync)), `ping` and `pong` from it; anything else, `screen` (the tunnel to macOS
 Screen Sharing) included, is answered `error` `screen_only`. On the stream,
 a pass's view sends pointer, keys, text and the clipboard like a phone's,
 but its `curtain` is refused (answered `curtained` false) and its Use Here
@@ -928,6 +928,118 @@ iroh), so a copied credential opens nothing. It may use what its scopes say
 and nothing else: no Keep awake or VPN, no history, no lock, no onward grant
 (`not_allowed`), and `listComputers` from a computer is `not_allowed` too.
 Removing the phone that gave it removes it.
+
+### Clipboard sync
+
+Two computers sync their clipboards while one views the other's screen
+(text, formatted text, images and files), and files dropped on the viewer's
+window land where they were dropped on the host. Phones never do: their
+screen views keep Copy and Paste (`copy`, `clipboard` above).
+
+The viewer sends `clipSync` on a connection of its own, beside the screen's.
+A screen pass (`viewer.`) or a computer with the `screen` scope may ask; a
+phone is answered `not_allowed`, a computer without the scope
+`screen_not_allowed`. The host must be showing its screen to that same id
+now (a live `screenVideo` from it; on a PC host, a live `rdp` view from it),
+or it answers `no_screen_view`; the viewer asks once its view is live, and
+again a moment later after that answer. `clip_sync_off`: the host's owner
+turned sync off. `clip_sync_unavailable`: the host can't sync now (a PC
+without its tray app for that account, or that account's session isn't the
+one being viewed). A refused `clipSync` leaves a shell connection. One per
+id: a new one replaces the old, which closes.
+
+Otherwise the answer is `clipSyncReady`, and from the byte after that line
+both directions carry binary messages, framed as the screen stream's: a type
+byte, a 4-byte big-endian payload length, the payload, at most 1 MiB + 64
+bytes either way (a larger one closes the connection). Unknown types are
+skipped. Numbers are big-endian. The host closes the connection within a
+second of that id's last screen view ending; the viewer closes it when its
+window closes or the user turns sync off.
+
+A copy or a drop is a **transfer**: an `offer`, then for each item an `item`
+and its `data`, then `done`. The messages mean the same both ways. `offer`,
+`item`, `data`, `done` and `abandon` carry the sending side's own transfer
+number; `decline` and `result` carry the number of a transfer the other side
+sent.
+
+- `1` hello: version u8 (1), flags u8 (0). Each side sends it first. A higher
+  version reads as 1.
+- `2` offer: transfer u32 (the sender's counter, from 1, only ever going up),
+  kind u8 (0 clipboard, 1 drop), x u16, y u16 (a drop's point, 0…65535 across
+  the stream as `pointer`'s, or across the session's virtual desktop on an
+  `rdp` view; 0 for the clipboard), count u32, total u64 (the items' sizes
+  added up).
+- `8` item: transfer u32, index u32 (from 0, in order), format u8, size u64,
+  name length u16, name (UTF-8). Sent just before the item's data. Formats:
+  1 text (UTF-8), 2 RTF, 3 HTML (UTF-8, plain HTML: a Windows side strips or
+  adds the CF_HTML header), 4 PNG, 16 file, 17 folder (size 0, made empty, so
+  empty folders come along). Names are for files and folders only: a
+  relative path, `/`-separated, every part non-empty, not `.` or `..`, with no
+  NUL, `\`, `:` or control characters, at most 255 UTF-8 bytes each and 1024
+  in all, sent precomposed (NFC); a folder comes before anything in it. A
+  transfer with files holds files and folders only; otherwise it holds at
+  most one each of 1–4. An item of a format the receiver doesn't know has its
+  bytes skipped.
+- `3` data: transfer u32, item u32, then 1…262,144 bytes. Each item's bytes
+  in order, items in order, with no gaps; a size-0 item has none. The sender
+  sends exactly `size` bytes or abandons the transfer, never padding or
+  cutting short a file that changed meanwhile. Data of different transfers
+  may interleave (a copy needn't wait behind a long drop).
+- `4` done: transfer u32. The receiver checks that `count` items came, their
+  sizes adding up to `total`, the last one whole; otherwise it declines.
+- `5` abandon: transfer u32. The sender stopped (a newer copy replaced it, a
+  file couldn't be read); the receiver throws away what it got. A new
+  clipboard offer abandons the sender's unfinished clipboard transfer, never
+  a drop.
+- `6` decline: transfer u32, reason u8 (1 too large, 2 no room, 3 sync off,
+  4 bad offer, 5 failed). Stop sending it.
+- `7` result: transfer u32, status u8: what became of a finished transfer.
+  0 placed (on the clipboard, or dropped where asked), 1 saved to Downloads
+  instead (nothing at the drop point took it), 2 failed.
+
+The receiver checks each `item` as it comes and declines (4) at the first one
+out of order, past the total, named twice (as a case-insensitive file system
+sees it), inside a folder not yet sent, or mixing files with other formats.
+It silently skips `item`, `data`, `done` and `abandon` for a transfer it
+declined, finished or never saw: bytes in flight still arrive after a
+decline. Clipboard transfers hold at most 10,000 items, text, RTF and HTML
+16 MiB each, PNG 64 MiB, files and folders 500,000,000 bytes in all; the
+sender doesn't offer what's over them (counting stops at the first byte or
+item over), and the receiver declines it (1). A drop has no limit of its own:
+the receiver declines one it hasn't room for (2), or with more items than it
+takes (1; a Mac takes 200,000). Inline formats are held to the clipboard's
+sizes whatever the kind. Neither side buffers a transfer without bound: the
+sender writes only as fast as the stream takes it (a Mac keeps about 1 MiB in
+flight), and files are written to disk as they arrive.
+
+**What syncs.** A change to the sender's clipboard after the connection
+starts; the viewer also offers its clipboard as it is at the start, unless
+that's files. Never contents marked secret or fleeting (on a Mac
+`org.nspasteboard.ConcealedType`, `TransientType`, `AutoGeneratedType`, and
+`com.apple.is-remote-clipboard`, the iPhone's Universal Clipboard; on
+Windows `ExcludeClipboardContentFromMonitorProcessing`,
+`CanIncludeInClipboardHistory` 0, `CanUploadToCloudClipboard` 0 and
+`Clipboard Viewer Ignore`), and never what the side itself put there from
+the stream: a Mac marks that `dev.dpatel.passthrough.synced`, Windows with a
+registered `Passthrough Synced` format and `CanUploadToCloudClipboard` 0.
+Only file paths go: not a Mac's file promises nor Windows' virtual files
+(FileGroupDescriptorW). Text, line endings included, goes as it is. An image
+goes as PNG (Windows converts its DIB; a receiving Windows side sets both
+PNG and CF_DIBV5). The receiver puts a finished clipboard transfer on its
+clipboard; files land in a folder of its own (on a Mac under
+`~/Library/Caches/Passthrough/Received/`, on Windows
+`%LOCALAPPDATA%\Passthrough\Received\`), the clipboard pointing at them, the
+last 3 kept. A host passes a viewer's copy on to its other `clipSync`
+viewers.
+
+**Drops.** Once a drop is done, the host drags the files from where it put
+them to the point, as its own drag-and-drop would (offering copy only), so
+whatever is there takes them its own way: a Finder or Explorer folder, the
+desktop, a mail or chat window. On a Mac a tiny window of Passthrough's
+starts the drag and the pointer's events are posted to the point (it needs
+Accessibility, as the screen's input does); on a PC the tray app in the
+viewed session does it. If nothing there takes them, they're moved to
+Downloads and shown, answered `result` 1.
 
 ### Address policy
 

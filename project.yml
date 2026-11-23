@@ -244,6 +244,8 @@ targets:
       - package: PassthroughCore
         product: ScreenHost
       - package: PassthroughCore
+        product: ClipSync
+      - package: PassthroughCore
         product: ScreenClient
       - package: PassthroughCore
         product: ScreenEngine

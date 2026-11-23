@@ -1,4 +1,5 @@
 import AppKit
+import ClipSync
 import Foundation
 import Combine
 import IrohTransport
@@ -12,6 +13,8 @@ import ShellHost
 /// The engine is `ShellHost`; this only wires it up and publishes its state.
 @MainActor
 final class RemoteShellController: ObservableObject {
+    /// Clipboard sync with the computers viewing this Mac's screen (both listeners').
+    let clipSync = ClipSyncHost { id, x, y in ScreenStreamDisplays.point(x: x, y: y, for: id) }
     @Published private(set) var sessions: [ShellSessionInfo] = []
     /// The running sessions with who is looking at each: a phone, a terminal window on this Mac, or both.
     @Published private(set) var terminals: [ShellSessionDetail] = []
@@ -311,6 +314,8 @@ final class RemoteShellController: ObservableObject {
         listener.hostInfo = { Self.hostInfo(for: $0, store: store, idKey: computerIdentity.get()?.publicKeyHex) }
         listener.screenSharingVerified = screenSharingVerifier()
         listener.screenVideo = Self.screenVideoSource
+        let clipSync = self.clipSync
+        listener.clipSync = { clipSync.source(for: $0, label: $1) }
         listener.screenViews = screenViews
         listener.onScreenViewer = screenViewerHandler()
         listener.macState = macStateProvider()
@@ -389,6 +394,7 @@ final class RemoteShellController: ObservableObject {
         lifecycle.async(execute: work)
         if wait { manager?.closeAll() }
         screenViewers = []
+        clipSync.endAll()
     }
 
     // MARK: Reach from anywhere (iroh)
@@ -411,7 +417,7 @@ final class RemoteShellController: ObservableObject {
         iroh = run
         irohStatus = IrohStatus(state: .starting)
         let store = self.store, reach = self.reach, relay = self.relay, onScreenViewer = screenViewerHandler()
-        let screenViews = self.screenViews
+        let screenViews = self.screenViews, clipSync = self.clipSync
         let macState = macStateProvider(), onMacControl = macControlHandler(), macEvents = macEventsProvider()
         let onPushRegistration = notifications.registrationHandler()
         let screenSharingVerified = screenSharingVerifier()
@@ -456,6 +462,7 @@ final class RemoteShellController: ObservableObject {
             listener.hostInfo = { Self.hostInfo(for: $0, store: store, idKey: computerIdentity.get()?.publicKeyHex) }
             listener.screenSharingVerified = screenSharingVerified
             listener.screenVideo = Self.screenVideoSource
+            listener.clipSync = { clipSync.source(for: $0, label: $1) }
             listener.screenViews = screenViews
             listener.onScreenViewer = onScreenViewer
             listener.macState = macState
@@ -1471,6 +1478,7 @@ final class RemoteShellController: ObservableObject {
             viewers.append(ScreenViewer(phoneID: phoneID, label: label, connections: 1))
         }
         screenViewers = viewers
+        clipSync.viewer(phoneID, viewing: viewers.contains { $0.phoneID == phoneID })
     }
 
     // MARK: History

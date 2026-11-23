@@ -999,10 +999,10 @@ final class ShellModel: ObservableObject {
                 redialsMade = nil
                 reach = .unreachable
             }
-        case let .screen(stream, _), let .rdp(stream, _, _):
+        case let .screen(stream, _), let .rdp(stream, _, _), let .clipSync(stream, _):
             // The screen has its own client (`ScreenModel`); this one never asks.
             stream.cancel()
-        case .rdpRefused:
+        case .rdpRefused, .clipSyncRefused:
             break
         case let .screenEnded(reason):
             // Why a PC's screen view ended, for the view whose relay just closed (`ScreenModel`).

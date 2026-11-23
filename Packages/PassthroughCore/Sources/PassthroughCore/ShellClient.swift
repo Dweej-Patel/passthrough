@@ -171,6 +171,11 @@ public final class ShellClient: @unchecked Sendable {
         /// Desktop's bytes, starting with `initialBytes`, from a server whose leaf certificate
         /// must hash to `certSHA256` (64 lowercase hex). Handed over as `.screen` is.
         case rdp(any ByteStream, initialBytes: Data, certSHA256: String)
+        /// The host answered `requestClipSync` with `clipSyncReady`: the stream now carries
+        /// `ClipSyncWire`'s messages, starting with `initialBytes`. Handed over as `.screen` is.
+        case clipSync(any ByteStream, initialBytes: Data)
+        /// The host refused `requestClipSync`. The connection stays a shell connection.
+        case clipSyncRefused(ShellError)
         /// The host refused `requestRDP`: `detail` says why for `rdpUnavailable`, `retryAfter`
         /// (seconds) when to try again for `tryLater`. The connection stays a shell connection.
         case rdpRefused(ShellError, detail: String?, retryAfter: Int?)
@@ -288,6 +293,8 @@ public final class ShellClient: @unchecked Sendable {
     private var screenRequested = false
     /// `requestRDP` was called and not yet answered: an `error` now is its refusal.
     private var rdpRequested = false
+    /// `requestClipSync` was called and not yet answered: an `error` now is its refusal.
+    private var clipRequested = false
     /// When the winner last delivered anything.
     private var lastHeard = DispatchTime.now()
     /// A ping is out because the winner's path failed; cleared by anything heard.
@@ -499,6 +506,18 @@ public final class ShellClient: @unchecked Sendable {
             screenRequested = true
             rdpRequested = true
             enqueue(ShellEnvelope(t: ShellEnvelope.rdp))
+        }
+    }
+
+    /// Asks a host whose screen this device is viewing to sync clipboards (protocol/README.md,
+    /// "Clipboard sync"): `.clipSync` when it hands the connection over, or `.clipSyncRefused`.
+    /// Use a client of its own for it, never one with a session.
+    public func requestClipSync() {
+        work.async { [self] in
+            guard active else { return }
+            screenRequested = true
+            clipRequested = true
+            enqueue(ShellEnvelope(t: ShellEnvelope.clipSync))
         }
     }
 
@@ -891,6 +910,10 @@ public final class ShellClient: @unchecked Sendable {
                 emit(.transcriptResize(session: id, cols: cols, rows: rows))
             }
             emit(.transcript(session: id, data, done: message.done ?? false))
+        case ShellEnvelope.error where clipRequested && message.ref == nil && message.session == nil:
+            clipRequested = false
+            screenRequested = false
+            emit(.clipSyncRefused(ShellError(rawValue: message.reason ?? "") ?? .badRequest))
         case ShellEnvelope.error where rdpRequested && message.ref == nil && message.session == nil:
             // The answer to `rdp`: nothing was handed over, and lines are lines again.
             rdpRequested = false
@@ -940,7 +963,11 @@ public final class ShellClient: @unchecked Sendable {
             emit(.screenRevoked)
         case ShellEnvelope.ping:
             send(ShellEnvelope(t: ShellEnvelope.pong))
-        case ShellEnvelope.screenReady where rdpRequested, ShellEnvelope.screenVideoReady where rdpRequested:
+        case ShellEnvelope.clipSyncReady where clipRequested:
+            clipRequested = false
+            handOver(id, clip: true)
+        case ShellEnvelope.screenReady where rdpRequested || clipRequested, ShellEnvelope.screenVideoReady where rdpRequested || clipRequested,
+             ShellEnvelope.clipSyncReady where screenRequested:
             // Asked for Remote Desktop, answered with something else: nothing is handed over.
             return attemptEnded(id, ConnectError.protocolViolation)
         case ShellEnvelope.screenReady where screenRequested, ShellEnvelope.screenVideoReady where screenRequested:
@@ -972,6 +999,7 @@ public final class ShellClient: @unchecked Sendable {
     private static func isScreenReady(_ line: Data) -> Bool {
         let type = (try? ShellEnvelope.decode(line))?.t
         return type == ShellEnvelope.screenReady || type == ShellEnvelope.screenVideoReady || type == ShellEnvelope.rdpReady
+            || type == ShellEnvelope.clipSyncReady
     }
 
     /// `rdpReady.certSHA256`: 64 lowercase hex digits.
@@ -981,7 +1009,7 @@ public final class ShellClient: @unchecked Sendable {
 
     /// Gives the winning stream to the screen viewer and steps aside: no
     /// more reads, sends or events, and no `disconnected`.
-    private func handOver(_ id: Int, certSHA256: String? = nil) {
+    private func handOver(_ id: Int, certSHA256: String? = nil, clip: Bool = false) {
         guard let attempt = attempts.removeValue(forKey: id), let stream = attempt.stream else { return }
         stream.onTerminated = nil
         let rest = attempt.lines.takePending()
@@ -990,7 +1018,9 @@ public final class ShellClient: @unchecked Sendable {
         winner = nil
         ready = false
         queued = []
-        if let certSHA256 {
+        if clip {
+            emit(.clipSync(stream, initialBytes: rest))
+        } else if let certSHA256 {
             emit(.rdp(stream, initialBytes: rest, certSHA256: certSHA256))
         } else {
             emit(.screen(stream, initialBytes: rest))

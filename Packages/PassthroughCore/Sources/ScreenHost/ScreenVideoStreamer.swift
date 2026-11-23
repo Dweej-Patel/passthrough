@@ -680,6 +680,7 @@ public final class ScreenVideoStreamer: ScreenVideoSource, @unchecked Sendable {
         shownGeneration = generation
         self.fit = fit
         displayRect = display
+        if let viewer { ScreenStreamDisplays.set(display, for: viewer.phoneID) }
         fullPixels = Double(width * height) / (scale * scale)
         updateMaxBitRate()
         let bitRate = pacer.bitRate
