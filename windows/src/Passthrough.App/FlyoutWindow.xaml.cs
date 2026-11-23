@@ -99,8 +99,15 @@ public sealed partial class FlyoutWindow : Window
         finally
         {
             _confirming = false;
-            // Focus comes back here, so the flyout closes on the next click elsewhere as it always does.
+            // Focus comes back here, so the flyout closes on the next click elsewhere as it always does. When it
+            // didn't (the prompt was left for another app), the flyout closes now: nothing else would close it, and
+            // taking the focus from that app isn't ours to do.
             if (AppWindow.IsVisible) Activate();
+            if (AppWindow.IsVisible && !Platform.NativeMethods.IsInFront(Microsoft.UI.Win32Interop.GetWindowFromWindowId(AppWindow.Id)))
+            {
+                AppWindow.Hide();
+                _toggle.HiddenByDeactivation();
+            }
         }
     }
 

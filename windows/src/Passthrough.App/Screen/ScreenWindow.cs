@@ -80,6 +80,15 @@ internal sealed class ScreenWindow : Window, IScreenView
     private (int Width, int Height, int HotX, int HotY)? _shape;
     private DispatcherQueueTimerWrapper? _pinchEnd;
     private DispatcherQueueTimerWrapper? _refit;
+    private DispatcherQueueTimerWrapper? _fitRefused;
+    private ScreenFit? _lastFitted;
+    private (int Width, int Height, int Space)? _lastFit;
+
+    /// <summary>
+    /// How long the Mac's own display must stay the answer before a fitted one counts as refused: the Mac says
+    /// <c>fitted</c> for every capture it starts, so an answer to an earlier ask can come just after Fit to window is clicked.
+    /// </summary>
+    private static readonly TimeSpan RefusedAfter = TimeSpan.FromSeconds(2);
     private bool _pinching;
     private bool _fit;
     private readonly Passthrough.Core.Storage.ISettingsStore? _settings;
@@ -145,7 +154,7 @@ internal sealed class ScreenWindow : Window, IScreenView
         {
             _fit = _fitButton.IsChecked == true;
             try { _settings?.Set(FitKey, _fit ? "true" : "false"); }
-            catch (Exception e) when (e is IOException or UnauthorizedAccessException) { LogFile.Error(e); }
+            catch (Exception e) when (e is IOException or UnauthorizedAccessException or InvalidOperationException) { LogFile.Error(e); } // not remembered, still done
             _client?.Relayout(Layout());
             _typing.Focus(FocusState.Programmatic);
         };
@@ -289,10 +298,13 @@ internal sealed class ScreenWindow : Window, IScreenView
 
     private ScreenVideoClient.Layout Layout()
     {
-        if (_fit && _stage.ActualWidth >= 1 && _stage.ActualHeight >= 1)
+        if (_fit)
         {
-            var (width, height, space) = ScreenFrame.Fitted(_stage.ActualWidth, _stage.ActualHeight, _stage.XamlRoot?.RasterizationScale ?? 1);
-            return new ScreenVideoClient.Layout(width, height, ScreenFit.Device, _minimized ? 15 : 60, Space: space);
+            // Minimised or not laid out yet, the stage has no size: the last shape is kept, so only the rate changes.
+            if (!_minimized && _stage.ActualWidth >= 1 && _stage.ActualHeight >= 1)
+                _lastFit = ScreenFrame.Fitted(_stage.ActualWidth, _stage.ActualHeight, _stage.XamlRoot?.RasterizationScale ?? 1);
+            if (_lastFit is var (width, height, space))
+                return new ScreenVideoClient.Layout(width, height, ScreenFit.Device, _minimized ? 15 : 60, Space: space);
         }
         // By index, never enumerated: the list DisplayArea.FindAll returns can't be cast to IEnumerable by the WinRT
         // projection (InvalidCastException, E_NOINTERFACE), so foreach or LINQ over it throws.
@@ -490,12 +502,20 @@ internal sealed class ScreenWindow : Window, IScreenView
 
     public void Fitted(ScreenFit fit)
     {
+        _lastFitted = fit;
         if (!_fit || fit == ScreenFit.Device) return;
-        // Asked for a display in this window's shape and got the Mac's own: another view has the one it can make, or
-        // macOS wouldn't. The choice is kept for next time; this view shows what it was given.
-        _fit = false;
-        _fitButton.IsChecked = false;
-        Toast($"{_name} couldn't make a display for this window. Showing its own.");
+        // Asked for a display in this window's shape and told the Mac's own: a refusal (another view has the one it can
+        // make, or macOS wouldn't) only if that is still the answer in a moment, not the answer to an earlier ask.
+        _fitRefused ??= new DispatcherQueueTimerWrapper(_ui, RefusedAfter, () =>
+        {
+            if (!_fit || _lastFitted != ScreenFit.Mac || _phase != Phase.Live) return;
+            // The choice is kept for next time; this view shows what it was given, and asks for it at full size.
+            _fit = false;
+            _fitButton.IsChecked = false;
+            _client?.Relayout(Layout());
+            Toast($"{_name} couldn't make a display for this window. Showing its own.");
+        });
+        _fitRefused.Restart();
     }
 
     public void MovedAway(string to)

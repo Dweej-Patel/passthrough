@@ -406,6 +406,7 @@ public sealed class RemoteAccess : IAccessAdmin, IDisposable
 
     private readonly Passthrough.Windows.Trust.PasswordSigner _password;
     private Passthrough.Windows.Trust.CngComputerIdentity? _identity;
+    private readonly Lock _identityLock = new();
 
     /// <summary>The computers this PC can reach (stage 7 a.5), sealed behind Windows Hello, or the Windows password on a PC without it.</summary>
     public Passthrough.Core.Trust.ComputerReachStore Reach { get; }
@@ -413,7 +414,9 @@ public sealed class RemoteAccess : IAccessAdmin, IDisposable
     /// <summary>This account's identity key as a viewer, made on first need.</summary>
     public Passthrough.Core.Trust.IComputerIdentity? Identity()
     {
-        try { return _identity ??= Passthrough.Windows.Trust.CngComputerIdentity.LoadOrCreate(); }
+        // Asked from the pipe's thread and the display timer's: made once, or two could each make a key in a different
+        // provider and a phone be told one this PC doesn't load next time.
+        try { lock (_identityLock) return _identity ??= Passthrough.Windows.Trust.CngComputerIdentity.LoadOrCreate(); }
         catch (System.Security.Cryptography.CryptographicException e) { _log?.Invoke($"trust: no identity key ({e.HResult:X8})"); return null; }
     }
 

@@ -95,9 +95,8 @@ public sealed class ComputerReachStore(ISecretStore secrets, IHelloSigner hello,
             if (_open is not null) return true;
             var stored = secrets.Get(Slot) is { } text ? JsonSerializer.Deserialize<Sealed>(text, Json) : null;
             var helloHere = await hello.IsAvailableAsync().ConfigureAwait(false);
-            // Sealed with Hello on a PC that no longer has it: Hello's key went with it, so nothing in there can be
-            // opened again. With a fallback the store starts empty (the slot is replaced by the next save).
-            if (stored is not null && (stored.By ?? ByHello) == ByHello && !helloHere && fallback is not null) stored = null;
+            // Sealed with Hello on a PC that doesn't have it now: nothing opens, and nothing is replaced. Hello can be
+            // away for a while (it isn't offered in a Remote Desktop session), and a save would overwrite the slot.
             var by = stored is not null ? stored.By ?? ByHello : helloHere ? ByHello : ByFallback;
             var signer = by == ByHello ? (helloHere ? hello : null) : by == ByFallback ? fallback : null;
             if (signer is null || !await signer.IsAvailableAsync().ConfigureAwait(false)) return false;

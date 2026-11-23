@@ -78,20 +78,23 @@ public sealed class ComputerVaultTests
     }
 
     [Fact]
-    public async Task HelloIsPreferred_AndAStoreItSealedStartsEmptyOnceHelloIsGone()
+    public async Task HelloIsPreferred_AndAStoreItSealedIsLeftAloneWhileHelloIsAway()
     {
         var secrets = new MemorySecretStore();
         var (hello, password) = (new FakeHello([1]), new FakeHello([9]));
         Assert.Equal(ComputerReachStore.SaveResult.Saved, await new ComputerReachStore(secrets, hello, password).SaveAsync(Computer()));
         Assert.Equal((1, 0), (hello.Prompts, password.Prompts));
         var kept = secrets.Get(ComputerReachStore.Slot);
-        // Hello removed: its key is gone with it. The list opens empty behind the password; the old slot stays until a save.
+        // Hello away (a Remote Desktop session, say): the password doesn't open it, and a hand-over doesn't replace it.
         var without = new ComputerReachStore(secrets, new FakeHello([1], available: false), password);
-        Assert.True(await without.UnlockAsync());
-        Assert.Empty(without.Computers!);
+        Assert.False(await without.UnlockAsync());
+        Assert.Equal(ComputerReachStore.SaveResult.Locked, await without.SaveAsync(Computer("mac-2")));
         Assert.Equal(kept, secrets.Get(ComputerReachStore.Slot));
-        Assert.Equal(ComputerReachStore.SaveResult.Saved, await without.SaveAsync(Computer("mac-2")));
-        Assert.Equal("mac-2", without.Computers!.Single().HostId);
+        Assert.Equal(0, password.Prompts);
+        // Hello back: everything is still there.
+        var back = new ComputerReachStore(secrets, hello, password);
+        Assert.True(await back.UnlockAsync());
+        Assert.Equal("mac-1", back.Computers!.Single().HostId);
     }
 
     [Fact]

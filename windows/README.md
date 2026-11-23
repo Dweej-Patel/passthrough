@@ -32,7 +32,7 @@ windows/
   - None of these limits apply to the shell.
 - **For iPhones: Apple Devices** (Microsoft Store), which brings Apple Mobile Device Service.
 - **For Android: platform-tools** (`adb.exe`), found in `ANDROID_HOME`, `ANDROID_SDK_ROOT`, `%LOCALAPPDATA%\Android\Sdk` or `PATH`.
-- **For Your computers: nothing to set up.** Access to your other computers is kept behind Windows Hello (a PIN is enough) when this PC has it, and behind your Windows password when it doesn't.
+- **For Your computers: nothing to set up.** Access to your other computers is kept behind Windows Hello (a PIN is enough) when this PC has it, and behind your Windows password when it doesn't. An account with neither a PIN nor a password can't confirm, so it can't keep any: add one of them.
 
 ## Build
 

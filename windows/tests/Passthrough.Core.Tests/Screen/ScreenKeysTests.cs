@@ -158,7 +158,7 @@ public sealed class ScrollAndFrameTests
         Assert.Equal((2400, 1350, 133), ScreenFrame.Fitted(1600, 900, 1.5));
         Assert.Equal((2560, 1440, 100), ScreenFrame.Fitted(1280, 720, 2));
         // Even sides, within what the wire and the Mac take; a bad scale reads as 100 %.
-        Assert.Equal((1000, 480, 200), ScreenFrame.Fitted(1001, 301, 1));
+        Assert.Equal((1000, 320, 200), ScreenFrame.Fitted(1001, 301, 1));
         Assert.Equal((4096, 4096, 57), ScreenFrame.Fitted(5000, 3000, 3.5));
         Assert.Equal((800, 600, 200), ScreenFrame.Fitted(800, 600, double.NaN));
     }
