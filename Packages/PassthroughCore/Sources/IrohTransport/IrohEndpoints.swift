@@ -61,7 +61,6 @@ public final class IrohEndpointHost: @unchecked Sendable {
     let endpoint: Endpoint
     private let lock = NSLock()
     private var alpns: [Data]
-    private var watches: [WatchHandle] = []
 
     /// A fresh 32-byte endpoint secret key, for the Mac to store.
     public static func newSecretKey() -> Data {
@@ -110,33 +109,9 @@ public final class IrohEndpointHost: @unchecked Sendable {
         return IrohIncoming(incoming: incoming, alpn: wanted)
     }
 
-    /// Calls `onHomeRelay` whenever the relay this endpoint is reachable
-    /// through changes (nil: none right now), and `onNetworkChange` when the
-    /// machine's network does. Phones dial the relay they were last told, so
-    /// a move has to reach them. Watched until `shutdown`.
-    public func watch(onHomeRelay: @escaping @Sendable (String?) -> Void, onNetworkChange: @escaping @Sendable () -> Void) {
-        let handles = [endpoint.watchHomeRelay(callback: HomeRelayWatcher(onHomeRelay)),
-                       endpoint.watchNetworkChange(callback: NetworkChangeWatcher(onNetworkChange))]
-        lock.withLock { watches += handles }
-    }
-
     public func shutdown() async {
-        let handles = lock.withLock { defer { watches = [] }; return watches }
-        for handle in handles { await handle.stop() }
         try? await endpoint.close()
     }
-}
-
-private final class HomeRelayWatcher: HomeRelayCallback, @unchecked Sendable {
-    private let handler: @Sendable (String?) -> Void
-    init(_ handler: @escaping @Sendable (String?) -> Void) { self.handler = handler }
-    func onChange(relayUrls: [String]) async throws { handler(relayUrls.first) }
-}
-
-private final class NetworkChangeWatcher: NetworkChangeCallback, @unchecked Sendable {
-    private let handler: @Sendable () -> Void
-    init(_ handler: @escaping @Sendable () -> Void) { self.handler = handler }
-    func onChange() async throws { handler() }
 }
 
 /// An incoming connection attempt, not yet handshaken.
