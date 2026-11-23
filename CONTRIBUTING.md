@@ -20,11 +20,43 @@ You need Xcode 15+, [XcodeGen](https://github.com/yonaskolb/XcodeGen) and an
 Apple Developer account (the Network Extension and keychain entitlements need
 a real Team ID).
 
+The quickest way is the scripts, from the repository's folder:
+
+```
+./passthrough mac doctor     # what's missing, with the fix for each
+./passthrough mac deps       # xcodegen, cmake, ninja, the Metal toolchain, Signing.xcconfig, the engine
+./passthrough mac build      # or: ./passthrough iphone build, ./passthrough android build
+```
+
+`./passthrough mac install`, `./passthrough iphone install` and
+`./passthrough android install` put your build on the Mac and the phones; every
+verb takes `--dry-run` and `--help`. The scripts are `scripts/mac.sh`,
+`scripts/iphone.sh` and `scripts/android.sh` (Bash 3.2, as macOS ships it,
+sharing `scripts/lib/common.sh`). If you change how the apps are built or
+installed, change them too.
+
+By hand:
+
 ```
 brew install xcodegen
 cp Config/Signing.xcconfig.example Config/Signing.xcconfig   # then set DEVELOPMENT_TEAM
 xcodegen generate
 open Passthrough.xcodeproj
+```
+
+`Config/Signing.xcconfig` is where your Team ID goes (`DEVELOPMENT_TEAM`), and
+optionally your own bundle ID base (`PASSTHROUGH_ID`), a separate paid team for
+the iPhone (`DEVELOPMENT_TEAM[sdk=iphoneos*]`) and a push key; the example file
+explains each. Everyday Mac installs must be Release builds: a Release root
+helper refuses an app that carries `get-task-allow`, as every Debug build does
+(see *Setup* in [docs/GUIDE.md](docs/GUIDE.md#setup)).
+
+To work on a PC's screen, build the Remote Desktop engine once, before opening
+the project (it isn't committed yet; see *Vendored binaries* below):
+
+```
+brew install cmake ninja
+bash scripts/build-freerdp.sh
 ```
 
 The Mac and iPhone apps use SwiftTerm, which compiles a Metal shader. Newer Xcodes ship the Metal Toolchain separately, so install it once with `xcodebuild -downloadComponent MetalToolchain` (CI does this).
@@ -76,6 +108,9 @@ dotnet test windows/tests/Passthrough.Core.Tests
 dotnet build windows/src/Passthrough.App -c Release
 ```
 
+An installable PC build, with Remote access's service and the iroh bridge
+(which needs Rust), comes from `scripts/build-windows.ps1`.
+
 The Swift, Kotlin and C# sides speak the same wire protocol, described in
 [protocol/README.md](protocol/README.md). The three test suites check
 themselves against `protocol/fixtures.json`: if you change a message, a port
@@ -98,7 +133,15 @@ or the pairing rules, update the fixtures first, then make all three pass.
   and uploads the result. A rebuild PR bumps the constants at the top of the
   script and commits the xcframework with the new `SOURCES.lock` and `SIZE.md`;
   a reviewer runs the script and compares them. Until it is committed, the
-  iPhone app builds without it (the PC screen is then not in the build).
+  iPhone app and the Mac's sandboxed engine helper (`macOS/ScreenEngine`)
+  build without it, and neither shows a PC's screen. With it in place,
+  `swift test --filter RemoteDesktopTests` in `Packages/PassthroughCore`
+  exercises the engine (macOS slice). The engine runs on the Mac only inside
+  that helper; keep it out of the app itself and out of every extension.
+* **For now, the Mac, the phones and the PC update together.** A protocol
+  change doesn't need to keep older builds working on the other side, so no
+  compatibility shims; say what must be rebuilt under *Before you rebuild* in
+  [CHANGELOG.md](CHANGELOG.md).
 * **No secrets, ever.** Do not commit API keys, VPN credentials, `.ovpn` files
   with embedded keys, screenshots with your device name, or anything from your
   keychain. The repository is scanned, but please do not make us rely on that.
@@ -110,8 +153,8 @@ or the pairing rules, update the fixtures first, then make all three pass.
 * [ ] `./gradlew testDebugUnitTest lintDebug` passes in `android/` (if you touched it)
 * [ ] `dotnet test windows/tests/Passthrough.Core.Tests` passes (if you touched `windows/` or `protocol/`),
       and any package change comes with its updated `packages.lock.json`
-* [ ] Both apps build (`xcodegen generate`, then build the `Passthrough` and
-      `PassthroughMac` schemes)
+* [ ] Both apps build (`./passthrough mac build` and `./passthrough iphone build`,
+      or `xcodegen generate`, then build the `Passthrough` and `PassthroughMac` schemes)
 * [ ] README and docs/GUIDE.md updated if behaviour or setup changed
 * [ ] No personal identifiers or credentials in the diff
 

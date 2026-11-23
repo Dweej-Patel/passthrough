@@ -38,7 +38,7 @@ the **Before you rebuild** notes first. The Mac and phone apps update together.
   Authentication, and caps quick sign-in attempts below Windows' own lockout.
   Removing Passthrough puts back every Remote Desktop setting it changed and
   nothing else.
-* **Windows: Stay awake while plugged in**, and phones are told when the PC
+* **Windows: Stay awake on mains power**, and phones are told when the PC
   goes to sleep, shuts down or has Remote access turned off. A connected phone
   keeps the idle timer off for as long as it is connected and a minute after.
 * **Windows: after `--update`, restart the tray app.** Quit Passthrough from
@@ -50,6 +50,22 @@ the **Before you rebuild** notes first. The Mac and phone apps update together.
   administrator prompt, and it doesn't yet check who else can change that
   folder. `D:\` and other second drives let every account change files by
   default (windows/README.md, SECURITY.md).
+
+* **Update the Mac, the phones and the PC together.** Sharing a computer
+  (`computerGrant`, `computerPass`, `listComputers`) and the PC's screen need
+  this build on every side; there are no compatibility shims. Install the Mac
+  app as a Release build (docs/GUIDE.md › Setup): the Release helper refuses a
+  Debug app.
+* **Saved Windows logins: type the PC's password once more**, on the iPhone
+  and on the Mac. A saved login is now kept with the PC's keys (the certificate
+  and iroh id its shell connection proves) and used only while they are the same;
+  logins saved before this aren't used.
+* **A PC's screen needs the Remote Desktop engine, built by hand.** It isn't
+  committed yet. Run `brew install cmake ninja`, then
+  `bash scripts/build-freerdp.sh`, before you open the project in Xcode; it
+  writes `Vendor/FreeRDP/FreeRDP.xcframework`. Without it the Mac and iPhone
+  apps build and work as before, and the PC's screen is left out (the Mac's PC
+  Screen window says it isn't in this build).
 
 * **Phone notifications now take their push key from the build, not from
   Settings.** The *Team ID*, *Key ID* and *Choose .p8* fields in
@@ -120,6 +136,26 @@ these steps as written and check each one before building.
 
 ### Added
 
+* **The Mac's menu-bar panel, in two tabs.**
+  - Above the tabs, always: the header, shells waiting on a question, and anyone viewing this Mac's screen (with **Stop**).
+  - *This Mac*: pairing, the three switches and Details (the flow map, speeds, top apps), as before.
+  - *Remote · N*:
+    - *Who can reach this Mac*, one row that opens Settings ▸ Remote Shell;
+    - *On this Mac now*, which was *From your phone*: each session says who opened it (*From \<phone or computer\>*), with **Open here** or **Stop Showing Here**, and **End Session…** in the row's menu;
+    - *Your computers*: other Macs' screen passes and PCs in one list, each with its state.
+  - The panel remembers the last tab. A phone waiting for its pairing code brings *This Mac* forward.
+* **The Mac lists the computers it let in, and the ones it can reach.** Settings ▸ Remote Shell:
+  - *Computers with access* (new): each computer a phone gave access to this Mac, which phone shared it and when, and what it may do and has open. **Stop** ends what it has open now; **Revoke…** takes its access away, whichever phone shared it. The notice for a new computer points here. Other Macs' screen passes are listed here too (*Mac · screen pass*, with **Remove…**), in place of *Macs that can see this screen*.
+  - *Computers this Mac can reach* replaces *Other Macs' screens*. It lists PCs and other Macs' screen passes, with **View**, **Forget Saved Sign-In** and **Remove…**. **Remove…** also clears an older copy of a computer that blocks sharing it again.
+* **iPhone and iPad: one Share row, and a computer switcher on Shells and Activity.**
+  - **Share with another computer…** replaces *Share screen with a Mac* and *Share with another computer*. Where the host doesn't let this phone share, the row stays, greyed out, with the switch to turn on. A Mac with sharing off still offers its screen to your other Macs, as the screen pass did before.
+  - The sheet offers each computer only what it can open: a PC the shell, and the screen only from a Mac; a Mac another Mac's screen as a screen pass, or a PC's screen. A Mac isn't offered shells.
+  - With two or more computers, the *Shells* and *Activity* titles are a computer switcher.
+  - A PC is called a PC everywhere, and its Activity tab says it doesn't record activity yet.
+* **One command for each job on the Mac, iPhone and Android.** `./passthrough mac|iphone|android doctor | deps | build | install | update | remove` (and `rollback` on the Mac).
+  - `doctor` changes nothing; `--dry-run` shows what any command would do.
+  - Before it replaces the Mac app, `install` and `update` refuse (unless `--force`) a Debug build, a lost push key, a Mac online through the phone right now, or phones' shells still running. The app it replaced is kept for `rollback`.
+  - `remove` takes the helper, the microphone driver and the login item with it; `--purge` also deletes settings and history.
 * **Windows: one command for each job.** `scripts/windows.ps1 doctor | deps | build | install | update | reinstall | off | remove`.
   - `update` restarts the tray app by itself.
   - `doctor` changes nothing.
@@ -130,7 +166,7 @@ these steps as written and check each one before building.
   - Notices and anyone viewing the screen (with **Stop**) sit above two tabs, which the flyout remembers:
     - *This PC*: the phones on the cable and Stay awake;
     - *Remote · N*: who can reach the PC, who is on it now (each with **Stop**) and Your computers.
-  - Settings has four pages: General, Remote access, Your computers and Advanced.
+  - Settings has four pages: General, Remote access, Computers with access and Advanced.
     - Each phone has one row: Screen, Share, Stop, Revoke… and Forget…. Before, a phone was listed once for its pairing and again for its access.
     - Computers with access get **Allow screen** and **Revoke…**.
   - The first Turn on can set up the screen in the same administrator prompt.
@@ -146,11 +182,41 @@ these steps as written and check each one before building.
   (`listComputers` / `computerList`, protocol/README.md *Computers*), and tells
   it again whenever that changes: what each may do now, what waits for the
   host's owner, and whether it is connected. A phone can take any of them back
-  at any time. The PC answers in this build; the Mac and the iPhone's Share
-  sheet use it in theirs.
+  at any time. The PC and the Mac answer it (each lists only the computers the
+  asking phone shared), and the iPhone's Share sheet shows the list with
+  **Remove Access**. An older host doesn't answer, and the sheet goes by what the
+  phone remembers sharing.
+* **Share with another computer** (iPhone and iPad). Open a computer, tap
+  *Share with another computer…*, pick *Screen only* or *Shell and screen*,
+  pick the computer that should use it and confirm with Face ID. That computer
+  then uses it from anywhere, without the phone. Shown only where the host
+  allows this phone to share: on a Mac, *Settings › Remote Shell › Phones with
+  access › May share access with other computers* (new, off at first); on a
+  PC, its *Share* tick. A Mac grants at once and leaves a notice with
+  *Revoke*. A PC gives the shell at once and holds the screen until its owner
+  clicks *Allow screen* on the PC's notice or in *Computers with access*. The
+  access lasts while the sharing phone keeps its own. Take it back from the
+  phone's Share sheet, or on the host in *Computers with access*. Not on
+  Android.
+* **A PC's screen on the Mac.** A Mac given a PC's screen lists it under
+  *Your computers* in the menu-bar panel; *View …'s screen* opens a *PC
+  Screen* window after Touch ID, then asks for the Windows account's password
+  (not the PIN), which *Remember on this Mac* keeps behind Touch ID. It asks
+  first when someone is using the PC, sizes the PC's desktop to the window,
+  reconnects by itself up to three times after a drop, and has a *Windows* menu
+  in the menu bar (Ctrl+Alt+Del, Start, Task View, Alt+Tab, Show Desktop,
+  Close Window, *Send Clipboard*, *Copy from PC*, *Forget Saved Sign-In*).
+  The Remote Desktop engine runs in a sandboxed helper inside the app
+  (`macOS/ScreenEngine`), never in the app; it needs Remote shell on on the
+  Mac.
+* **A PC's screen on the iPhone and iPad, behind a developer switch.** Not in
+  normal builds yet: a DEBUG build with the engine built in, launched with
+  `-PTWindowsScreen YES`. It signs in with the Windows password (remembered
+  behind Face ID if you choose), with a Windows menu, the Windows key and
+  Windows' three-finger swipes, and the desktop takes the device's shape.
 * **The iPhone and iPad app knows a PC from a Mac.** A paired PC shows as a
-  PC: its own words, only the rows a PC has (no Internet, Keep awake, VPN or
-  Share screen), its Lock when it allows it, its own setup steps, why its
+  PC: its own words, only the rows a PC has (no Internet, Keep awake or VPN),
+  its Lock when it allows it, its own setup steps, why its
   shell can't start (nobody signed in, someone else signed in, Passthrough
   not open there, Shell off for this phone), and why it can't be reached
   when it said so (asleep, Remote access turned off, shut down). New shell
@@ -186,9 +252,9 @@ these steps as written and check each one before building.
   [windows/README.md](windows/README.md).
 
 * **One Mac can see and control another's screen.** On the iPhone, open a
-  Mac and tap *Share screen with a Mac*, pick your other Mac and confirm with
-  Face ID. That Mac gets a screen-only pass and opens the screen from
-  Passthrough's menu (*Other Macs*), on the local network or from anywhere
+  Mac and tap *Share with another computer…*, pick your other Mac and confirm
+  with Face ID. That Mac gets a screen-only pass and opens the screen from
+  Passthrough's menu (*Remote* ▸ *Your computers*), on the local network or from anywhere
   over iroh, without the phone, after Touch ID or the password on that Mac.
   Controlling the screen means typing into any app on it, Terminal included,
   but the pass can't open Passthrough's shells, hide the shared Mac's
@@ -307,6 +373,87 @@ these steps as written and check each one before building.
 * The notice for a computer given only the screen no longer says it was given
   the shell.
 
+### Fixed (iPhone and Mac, from the security and code review)
+
+* **Connections from anywhere can go direct again instead of staying on the
+  relay.** The phone (and a Mac opening a PC's screen) dialled with the
+  computer's relay but without its QUIC port, which turned off iroh's address
+  discovery: on cellular, with no port mapping, the phone never learned its
+  public address, so hole punching had nothing to aim at. Measured: before,
+  the phone on cellular offered only 192.0.0.x and its IPv6 addresses and
+  stayed on the relay with both the Mac and the PC.
+  Android had the same gap and has the same fix.
+
+* **A PC's screen on the iPhone stays on.** The developer switch
+  (`-PTWindowsScreen YES`, what `./passthrough iphone install --pc-screen`
+  passes) is saved, so the app keeps a PC's screen after it's closed and
+  opened from the home screen; `--no-pc-screen` turns it off. With the switch
+  off, a PC's Screen row says so instead of "isn't in this version yet".
+
+* **Saved Windows logins follow the PC, not just its id.** A login saved on
+  the iPhone or the Mac is used only while the PC's credential has the same
+  certificate and iroh id, so a host that later claimed the same id with its
+  own keys is never signed in to with it. Forgetting a computer on the
+  iPhone deletes its saved logins; on the Mac, the logins for computers a
+  revoked phone handed over go with them.
+* **The Mac's clipboard is written only when you ask.** After Copy from PC,
+  the PC's answer is taken within 3 seconds and only while the copy waits; a
+  PC that held its answer back could otherwise replace the Mac's clipboard
+  later. A paste offer is no longer withdrawn once you've copied something
+  on the PC itself (that emptied the PC's clipboard).
+* **The Mac's PC Screen window ends a session for the right reason.** Someone
+  signing in at the PC now says so instead of reconnecting and taking the
+  console back from them; a wrong password goes back to the sign-in form at
+  once and isn't sent again. Locked, disabled or expired accounts aren't
+  re-sent, reconnecting makes three tries (1, 4 and 10 seconds) that a
+  network still coming back doesn't cut short, and moving the window to a
+  display with another scale asks Windows for the right size.
+* Hardening: a host's `retryAfter` is capped (a huge one crashed the app), a
+  PC desktop past 16384 pixels a side or 50 million pixels isn't drawn on the
+  iPhone, a Remote Desktop request answered with a screen hand-over is
+  refused, and a shared computer's name loses control and format characters.
+* **Sharing a computer again never breaks the access it has.** On a Mac or a
+  PC, the earlier grant keeps working until the computer first uses the new
+  one, so a hand-over that fails leaves it what it had; revoking takes both.
+  A PC Screen window that is open takes up the new access when its PC is
+  shared again (only with the same certificate and iroh id). On the iPhone,
+  a computer that drops after the access was sent keeps it, and the phone
+  says to share again if the host isn't under *Your computers* there.
+* **Who is viewing the Mac's screen is plain.** A computer reads
+  *(a computer)* and a Mac with a pass *(a Mac with a pass)*, each with its
+  own icon, so neither can pass for one of your phones. Computers' names are
+  stored without control, bidi or zero-width characters, and the phone's
+  *connected now* counts a computer on either path (local and Tailscale, or
+  the built-in connection).
+* **The Mac's Stop, End and Quit say what they do.**
+  - The panel's session **Stop** is **Stop Showing Here**; **End Session…**
+    (it asks first) is in the row's **⋯** menu.
+  - The power button and ⌘Q ask first while phones' or computers' shells run
+    or someone is viewing the screen. Logging out, shutting down and the
+    install script don't ask.
+  - *Who can reach this Mac* says *Remote shell is on* (it said Remote
+    access), and the *Remote* tab has an amber dot while Remote shell isn't
+    running. *Your computers* says how to add one when it has none.
+  - Settings ▸ Remote Shell: screen passes are listed under *Computers with
+    access* (*Mac · screen pass*); *Macs that can see this screen* is gone.
+    Each phone in *Phones with access* has **Stop…**, which ends what it has
+    open and keeps its access.
+  - The PC Screen window says *Turn on Remote Shell on this Mac first*
+    before asking for Touch ID, and *Screen is off for this Mac* also names
+    the PC's Settings (*Computers with access*).
+* **iPhone: copy that names real controls.**
+  - The Share sheet's button is **Remove Access**: it takes the access away
+    on the host, unlike **Remove…** on a Mac or PC, which only forgets a copy
+    there.
+  - Sharing a PC with your PCs starts on *Shell and screen*, the only choice
+    they can take.
+  - A host that doesn't let this phone open shells no longer says to turn on
+    a switch that doesn't exist: it says to plug the phone in with Remote
+    shell (Mac) or Remote access (PC) on. Setup steps name the switch you see
+    on each host.
+  - An unreachable computer's card says each thing once, and the Lock button
+    is at least 44 pt tall.
+
 ### Fixed (Windows, from the second review)
 
 * One Windows account's phones could use up the 16 computers a PC lets in, for
@@ -403,8 +550,9 @@ these steps as written and check each one before building.
   the phone in use, so two phones on two cables both pair and both show live
   status, and an iPad pairs with its code like a phone. *Use this phone* only
   marks which phone the PC will go online through; it no longer closes the
-  other phone's channel, and it is never offered for an iPad. *Try again*
-  works on any row that failed.
+  other phone's channel, and it is never offered for an iPad (for now it is
+  hidden, until the PC can go online through a phone). *Try again* works on
+  any row that failed.
 * Windows: each paired phone whose cable connection checks out is offered a
   shell key while Remote access has something to hand out, and the key is kept
   once the phone confirms it; an unanswered grant is tried again with the Mac's

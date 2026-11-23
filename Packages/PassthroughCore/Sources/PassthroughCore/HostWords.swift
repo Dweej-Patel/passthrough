@@ -41,12 +41,13 @@ public struct HostWords: Equatable, Sendable {
     /// The host's name, else "Your Mac".
     public var name: String { hostName ?? Your }
 
-    /// Where its own settings for this device are.
-    public var settingsPlace: String {
+    /// The page of Passthrough's settings that holds its switches for each phone (Screen, Share): named, since
+    /// the PC's settings have four pages.
+    public var settingsPage: String {
         switch kind {
-        case .mac: "Passthrough's Remote Shell settings on \(your)"
-        case .windows: "Passthrough's settings on the PC"
-        case .other, nil: "Passthrough's settings on \(the)"
+        case .mac: "Passthrough's Settings \u{25B8} Remote Shell"
+        case .windows: "Passthrough's Settings \u{25B8} Remote access"
+        case .other, nil: "Passthrough's settings"
         }
     }
 

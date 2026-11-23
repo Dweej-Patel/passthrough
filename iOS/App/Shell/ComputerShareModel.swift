@@ -112,11 +112,21 @@ final class ComputerShareModel: ObservableObject {
                 case .failed(.badRequest, _):
                     self.failed(self.granted == nil ? "Couldn't ask \(viewerHost.macName). Try again." : tooOld)
                 case .failed(.passConflict, _):
-                    self.failed("\(viewerHost.macName) already has access to a computer called \(sharedHost.macName) with different details. Remove it under Other computers on \(viewerHost.macName), then try again.")
+                    let v = viewerHost.macName, h = sharedHost.macName
+                    // Where the viewer forgets its older copy of the host: the PC's Your computers, the Mac's reach list.
+                    self.failed(shell.kind(of: viewerHost.macID) == .windows
+                        ? "\(v) already has different access to \(h). On \(v), click Passthrough's tray icon ▸ Remote ▸ Show your computers, remove \(h), then share again."
+                        : "\(v) already has different access to \(h). On \(v), remove \(h) in Settings ▸ Remote Shell ▸ Computers this Mac can reach, then share again.")
                 case let .failed(error, _):
                     self.failed(error.message ?? "\(viewerHost.macName) refused the access.")
                 case .disconnected:
-                    self.failed("Couldn't reach \(viewerHost.macName). Check that it's awake and Passthrough is on.")
+                    if self.passSent {
+                        // As the timeout: V may have kept the pass before it went, so the access stays on H.
+                        self.failed("Lost \(viewerHost.macName) while handing it over. If \(sharedHost.macName) isn't under Your computers there, share again.",
+                                    keepGrant: true)
+                    } else {
+                        self.failed("Couldn't reach \(viewerHost.macName). Check that it's awake and Passthrough is on.")
+                    }
                 case let .screen(stream, _):
                     stream.cancel()
                 default:
@@ -161,7 +171,8 @@ final class ComputerShareModel: ObservableObject {
                     self.viewer?.client.giveComputerPass(pass, scopes: grantedScopes, pending: pending)
                 case let .failed(error, _):
                     guard self.granted == nil else { return }   // the hand-over's outcome decides
-                    self.failed(Self.grantMessage(error, shared: sharedHost.macName))
+                    self.failed(Self.grantMessage(error, words: HostWords(kind: shell.kind(of: sharedHost.macID), name: sharedHost.macName,
+                                                                          device: ThisDevice.name)))
                 case .disconnected:
                     guard self.granted == nil else { return }
                     self.failed("Couldn't reach \(sharedHost.macName). Check that it's awake and Passthrough is on.")
@@ -183,6 +194,9 @@ final class ComputerShareModel: ObservableObject {
         let v = viewerHost.macName, h = sharedHost.macName
         let shell = grantedScopes.scopes.contains(Computers.scopeShell)
         let screen = grantedScopes.scopes.contains(Computers.scopeScreen)
+        // Remembered here, so the sheet says this computer already has access the next time it opens.
+        SharedComputers.record(shared: sharedHost.macID, viewer: viewerHost.macID,
+                               shell: shell || grantedScopes.pending.contains(Computers.scopeShell))
         if grantedScopes.pending.contains(Computers.scopeScreen) && !shell {
             phase = .done("\(v) can see \(h)'s screen once you allow it in Passthrough on \(h). Until then it can't use \(h).")
         } else if grantedScopes.pending.contains(Computers.scopeScreen) {
@@ -196,10 +210,11 @@ final class ComputerShareModel: ObservableObject {
         }
     }
 
-    private static func grantMessage(_ error: ShellError, shared: String) -> String {
-        switch error {
+    private static func grantMessage(_ error: ShellError, words: HostWords) -> String {
+        let shared = words.name
+        return switch error {
         case .notAllowed:
-            "\(shared) doesn't let this \(ThisDevice.name) share access. Turn on May share access with other computers for it in Passthrough's settings on \(shared)."
+            "\(shared) doesn't let this \(ThisDevice.name) share access. " + HostCopy.shareOff(words)
         case .tooManyComputers:
             "\(shared) already lets as many computers in as it allows. Remove one in its settings first."
         case .screenNotAllowed:
@@ -249,5 +264,140 @@ final class ComputerShareModel: ObservableObject {
         shared?.dialer?.shutdown()
         shared = nil
         granted = nil
+    }
+}
+
+/// What this phone has shared: which of its computers it gave access to which other, and when. Only this phone's
+/// memory of what it did, so the Share sheet can say "already has access" and ask before doing it again. The
+/// computer that was shared is the one that decides: access removed there stays listed here until shared again or
+/// forgotten here.
+enum SharedComputers {
+    struct Entry: Codable, Equatable {
+        /// Shell and screen (true), or screen only.
+        var shell: Bool
+        var at: Date
+    }
+
+    private static let key = "sharedComputers"
+
+    private static var all: [String: [String: Entry]] {
+        get {
+            guard let data = UserDefaults.standard.data(forKey: key) else { return [:] }
+            return (try? JSONDecoder().decode([String: [String: Entry]].self, from: data)) ?? [:]
+        }
+        set { UserDefaults.standard.set(try? JSONEncoder().encode(newValue), forKey: key) }
+    }
+
+    /// What `viewer` was given on `shared`, if this phone shared it.
+    static func entry(shared: String, viewer: String) -> Entry? { all[shared]?[viewer] }
+
+    /// Everything `shared` was shared with, by viewer: the Share row's caption, without a connection.
+    static func entries(shared: String) -> [String: Entry] { all[shared] ?? [:] }
+
+    static func record(shared: String, viewer: String, shell: Bool) {
+        var stored = all
+        stored[shared, default: [:]][viewer] = Entry(shell: shell, at: Date())
+        all = stored
+    }
+
+    static func forget(shared: String, viewer: String) {
+        var stored = all
+        stored[shared]?[viewer] = nil
+        all = stored
+    }
+}
+
+extension SharedComputers {
+    /// The shared computer listed what this phone gave it (`computerList`): that is what holds, so this phone's
+    /// memory for it becomes exactly that.
+    static func sync(shared: String, with list: [ComputerAccess]) {
+        var stored = all
+        var entries: [String: Entry] = [:]
+        for computer in list {
+            guard let viewer = computer.viewer else { continue }
+            let shell = (computer.scopes + (computer.pending ?? [])).contains(Computers.scopeShell)
+            entries[viewer] = Entry(shell: shell, at: Date(timeIntervalSince1970: TimeInterval(computer.grantedAt)))
+        }
+        stored[shared] = entries.isEmpty ? nil : entries
+        all = stored
+    }
+}
+
+/// What the computer being shared says about the computers this phone gave access to it (`computerList`),
+/// asked on a connection of its own while the Share sheet is open, which also takes access back
+/// (`computerRevoke`). `list` stays nil until the computer answers: an older one never does, and the
+/// sheet then goes by this phone's own memory (`SharedComputers`).
+@MainActor
+final class HostComputersModel: ObservableObject {
+    @Published private(set) var list: [ComputerAccess]?
+    /// The computer whose access is being taken back, until the host answers.
+    @Published private(set) var removing: String?
+    @Published private(set) var error: String?
+
+    private var connection: (client: ShellClient, dialer: IrohShellDialer?)?
+    private var hostName = ""
+    private var generation = 0
+
+    /// Asks `host` for its list, and keeps hearing it change until `stop`.
+    func watch(_ host: ShellCredential, shell: ShellModel) {
+        stop()
+        generation += 1
+        let gen = generation
+        hostName = host.macName
+        connection = shell.oneOffConnection(to: host) { [weak self] event in
+            MainActor.assumeIsolated {
+                guard let self, gen == self.generation else {
+                    switch event {
+                    case let .screen(stream, _), let .rdp(stream, _, _): stream.cancel()
+                    default: break
+                    }
+                    return
+                }
+                switch event {
+                case .ready:
+                    self.connection?.client.listComputers()
+                case let .computerList(list):
+                    self.list = list
+                    SharedComputers.sync(shared: host.macID, with: list)
+                case .computerRevoked:
+                    // The list that follows shows it gone.
+                    self.removing = nil
+                case let .failed(error, _):
+                    // Without a removal under way, this is an older computer refusing `listComputers`: the sheet keeps its memory.
+                    guard self.removing != nil else { return }
+                    self.removing = nil
+                    self.error = error.message ?? "\(self.hostName) didn't remove it. Try again."
+                case .disconnected:
+                    if self.removing != nil {
+                        self.removing = nil
+                        self.error = "Couldn't reach \(self.hostName) to remove it. Try again when it's awake."
+                    }
+                    self.connection = nil
+                case let .screen(stream, _), let .rdp(stream, _, _):
+                    stream.cancel()
+                default:
+                    break
+                }
+            }
+        }
+    }
+
+    /// Takes back `computer`'s access to the host: it can't use it until it is shared again, and what it has open there ends.
+    func remove(_ computer: ComputerAccess) {
+        guard removing == nil, let client = connection?.client else {
+            error = "Couldn't reach \(hostName) to remove it. Try again when it's awake."
+            return
+        }
+        error = nil
+        removing = computer.phoneID
+        client.revokeComputer(computer.phoneID)
+    }
+
+    func stop() {
+        generation += 1
+        connection?.client.disconnect()
+        connection?.dialer?.shutdown()
+        connection = nil
+        removing = nil
     }
 }

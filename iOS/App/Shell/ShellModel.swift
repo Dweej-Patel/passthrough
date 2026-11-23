@@ -351,6 +351,9 @@ final class ShellModel: ObservableObject {
         }
     }
 
+    /// What to check while it can't be reached, for a page that already says so and when it was last heard.
+    var unreachableAdvice: String? { HostCopy.unreachableAdvice(words, fromAnywhere: clientTriesIroh) }
+
     /// "30 minutes" for a `sleepAfter` in seconds; nil for never.
     private static func sleepsAfter(_ seconds: Int) -> String? {
         guard seconds > 0 else { return nil }
@@ -542,6 +545,8 @@ final class ShellModel: ObservableObject {
     /// The phone forgot this Mac: drop its key, address, tabs and any connection to it.
     func forget(macID: String) {
         ShellKeyVault.delete(macID: macID, context: lock?.isUnlocked == true ? lock?.context : nil)
+        // Its screen logins too: a computer paired later under the same id is never signed in with them.
+        ScreenLoginStore.deleteAll(hostID: macID)
         UserDefaults.standard.removeObject(forKey: Self.manualAddressPrefix + macID)
         granted[macID] = nil
         if clientMacID == macID { dropConnection(); resetSessions() }
@@ -579,6 +584,7 @@ final class ShellModel: ObservableObject {
 
     func forgetAll() {
         ShellKeyVault.deleteAll()
+        for id in Set(macs.map(\.macID) + granted.keys + paired.map(\.id)) { ScreenLoginStore.deleteAll(hostID: id) }
         for id in macs.map(\.macID) + granted.keys {
             UserDefaults.standard.removeObject(forKey: Self.manualAddressPrefix + id)
         }
@@ -1001,7 +1007,7 @@ final class ShellModel: ObservableObject {
             // Why a PC's screen view ended, for the view whose relay just closed (`ScreenModel`).
             guard let mac = clientMacID else { return }
             screenEnded = (mac, reason, Date())
-        case .screenGranted, .screenPassSaved, .screenRevoked, .computerGranted, .computerPassSaved, .computerRevoked:
+        case .screenGranted, .screenPassSaved, .screenRevoked, .computerGranted, .computerPassSaved, .computerRevoked, .computerList:
             // Screen passes and computers' access have their own clients (`ScreenShareModel`, `ComputerShareModel`); this one never asks.
             break
         case let .host(info):

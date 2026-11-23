@@ -107,11 +107,19 @@ class IrohShellDialer : ShellIrohDialing {
             cleanup.launch { runCatching { endpoint.shutdown() } }
         }
 
+        /**
+         * The QUIC port iroh relays answer address discovery (QAD) on. Without it a
+         * custom map has no QAD: on cellular (no port mapping) the phone never learns
+         * its public address, hole punching has nothing to aim at, and every
+         * connection stays on the relay. A relay without QUIC leaves the probe unanswered.
+         */
+        private const val RELAY_QUIC_PORT: UShort = 7842u
+
         /** A custom relay (with its token) as a single-relay map, or n0's defaults. */
         private fun relayMode(url: String?, token: String?): RelayMode {
             if (url == null) return RelayMode.defaultMode()
             val map = RelayMap.empty()
-            map.insert(RelayConfig(url = url, authToken = token))
+            map.insert(RelayConfig(url = url, quicPort = RELAY_QUIC_PORT, authToken = token))
             return RelayMode.custom(map)
         }
     }

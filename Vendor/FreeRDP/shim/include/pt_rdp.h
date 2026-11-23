@@ -9,8 +9,10 @@
  * and drained by the app from the stream its own connection handed over
  * after `rdpReady`.
  *
- * Threads: pt_rdp_run makes every FreeRDP call, on the thread that calls it
- * (the engine thread); every callback below runs there. Functions marked
+ * Threads: pt_rdp_run runs the session on the thread that calls it (the
+ * engine thread). Callbacks come from it, or from the thread FreeRDP keeps
+ * for dynamic channels (the graphics pipeline paints there): one at a time
+ * for any one callback, never after pt_rdp_run returned. Functions marked
  * "any thread" may be called from anywhere, at any time before pt_rdp_free.
  */
 #ifndef PT_RDP_H
@@ -79,7 +81,23 @@ typedef struct {
     uint32_t desktop_scale, device_scale;
     /** 0: no H.264 (the fallback when it is slower than the progressive codec). */
     int allow_h264;
+    /** 1: tell Windows not to wait for each frame's acknowledgement (GFX queueDepth = SUSPEND). Over a relay
+        every acknowledgement is a full round trip, and Windows idles waiting for them ("skipped for client"). */
+    int suspend_frame_acks;
+    /** 1: network auto-detect on (patch 0002), so Windows measures the link's bandwidth and round trip and fits its
+        H.264 to it, as Microsoft's own clients let it. For a relay, where a drag's frames otherwise pile up. */
+    int detect_network;
+    /** 1: H.264 in its 4:2:0 form only (no AVC444): about half the data a frame, for a slow link (a relay). */
+    int avc420_only;
 } pt_rdp_config;
+
+/** The desktop's shape, as display control takes it. */
+typedef struct {
+    /** Pixels: even, 200 to 8192. */
+    uint32_t width, height;
+    /** Windows' scale factors: desktop 100 to 500, device 100, 140 or 180. */
+    uint32_t desktop_scale, device_scale;
+} pt_rdp_layout_request;
 
 typedef struct {
     void *user;
@@ -99,7 +117,25 @@ typedef struct {
     void (*outbox_ready)(void *user);
     /** The inbox has room again after it was full: feed more. */
     void (*inbox_space)(void *user);
+    /** The PC's clipboard changed; `has_text`: it holds Unicode text. Nothing is fetched until asked. May be NULL. */
+    void (*clipboard_offered)(void *user, int has_text);
+    /** The PC took (1) or refused (0) what pt_rdp_clipboard_offer announced. May be NULL. */
+    void (*clipboard_announced)(void *user, int accepted);
+    /** The answer to pt_rdp_clipboard_fetch: `units` UTF-16 units (valid only during the call) when `result` is PT_CLIPBOARD_TEXT. May be NULL. */
+    void (*clipboard_text)(void *user, const uint16_t *utf16, size_t units, int result);
 } pt_rdp_callbacks;
+
+/** `clipboard_text`'s result. */
+enum {
+    PT_CLIPBOARD_TEXT = 0,
+    /** The PC had no text after all, or the clipboard channel isn't open. */
+    PT_CLIPBOARD_FAILED = 1,
+    /** More than PT_RDP_CLIPBOARD_BYTES. */
+    PT_CLIPBOARD_TOO_LONG = 2,
+};
+
+/** The most text taken from, or offered to, the PC's clipboard: 1 MiB of UTF-16. */
+#define PT_RDP_CLIPBOARD_BYTES (1u << 20)
 
 /** The inbox's size: never more than this is held from the network. */
 #define PT_RDP_INBOX_BYTES (4u << 20)
@@ -136,6 +172,18 @@ void pt_rdp_pointer(pt_rdp *rdp, uint16_t x, uint16_t y, uint8_t buttons);
 void pt_rdp_wheel(pt_rdp *rdp, uint16_t x, uint16_t y, int16_t rotation, int horizontal);
 /** Stops (1) or restarts (0) the pictures, as when the app is in the background. */
 void pt_rdp_suppress_output(pt_rdp *rdp, int suppress);
+
+/* The clipboard, any thread: Unicode text only. */
+
+/** Offers `units` UTF-16 units to the PC's clipboard (copied; `clipboard_announced` follows), replacing any earlier
+    offer. NULL or 0 units withdraws it: the PC is told this side has nothing, and later requests are refused. */
+void pt_rdp_clipboard_offer(pt_rdp *rdp, const uint16_t *utf16, size_t units);
+/** Asks the PC for its clipboard's text; `clipboard_text` answers. */
+void pt_rdp_clipboard_fetch(pt_rdp *rdp);
+
+/** Asks Windows for a desktop of this shape (a `desktop` callback follows if it agrees). The newest request
+    replaces one not yet sent; before display control has opened it waits, and goes if it opens. */
+void pt_rdp_layout(pt_rdp *rdp, const pt_rdp_layout_request *request);
 
 /** FreeRDP's and OpenSSL's versions, and whether VideoToolbox H.264 is compiled in. */
 const char *pt_rdp_freerdp_version(void);

@@ -13,6 +13,25 @@ final class ComputerReachStoreTests: XCTestCase {
         return ReachableComputer(credential: credential, scopes: ["shell"], from: "iPhone", fromPhoneID: from, receivedAt: Date())
     }
 
+    /// The hand-over recorded "waiting for its owner"; the PC saying it's allowed now (or not) moves the screen.
+    func testTheScreenFollowsWhatThePCSays() {
+        let store = ComputerReachStore(secrets: InMemorySecrets())
+        var waiting = reachable()
+        waiting.pending = ["screen"]
+        XCTAssertEqual(store.save(waiting), .saved(replaced: nil))
+        XCTAssertTrue(store.noteScreen(allowed: true, hostID: "pc-1"))
+        XCTAssertEqual(store.computers.first?.scopes, ["shell", "screen"])
+        XCTAssertNil(store.computers.first?.pending)
+        XCTAssertFalse(store.noteScreen(allowed: true, hostID: "pc-1"), "already so: nothing written")
+        XCTAssertTrue(store.noteScreen(allowed: false, hostID: "pc-1"))
+        XCTAssertEqual(store.computers.first?.scopes, ["shell"])
+        XCTAssertEqual(store.computers.first?.pending, ["screen"])
+        // A host whose screen was never shared, or one not kept, is left alone.
+        XCTAssertEqual(store.save(reachable("pc-2")), .saved(replaced: nil))
+        XCTAssertFalse(store.noteScreen(allowed: true, hostID: "pc-2"))
+        XCTAssertFalse(store.noteScreen(allowed: true, hostID: "nobody"))
+    }
+
     func testANewerOneWithTheSameDetailsReplaces() {
         let store = ComputerReachStore(secrets: InMemorySecrets())
         let first = reachable(iroh: String(repeating: "b", count: 64))

@@ -17,13 +17,14 @@ enum ScreenLoginStore {
     private static let windowsService = "\(PassthroughProtocol.identifier).screen-login.windows"
     private static let log = Logger(subsystem: "app.passthrough", category: "ScreenLoginStore")
 
-    private struct Stored: Codable { var username: String; var password: String }
+    /// `pin`: a Windows login's computer (`ShellCredential.loginPin`); one saved for other keys isn't used.
+    private struct Stored: Codable { var username: String; var password: String; var pin: String? }
 
     private static func query(service: String, account: String) -> [CFString: Any] {
         [kSecClass: kSecClassGenericPassword, kSecAttrService: service, kSecAttrAccount: account, kSecUseDataProtectionKeychain: true]
     }
 
-    private static func read(service: String, account: String, context: LAContext) -> ScreenLogin? {
+    private static func read(service: String, account: String, context: LAContext, pin: String? = nil) -> ScreenLogin? {
         context.interactionNotAllowed = true
         var q = query(service: service, account: account)
         q[kSecReturnData] = true
@@ -36,13 +37,17 @@ enum ScreenLoginStore {
             if status != errSecItemNotFound && status != errSecSuccess { log.info("Screen login not read (\(status, privacy: .public))") }
             return nil
         }
+        if let pin, stored.pin != pin {
+            log.info("A saved Windows login was for other keys; not used")
+            return nil
+        }
         return ScreenLogin(username: stored.username, password: stored.password)
     }
 
-    private static func save(_ login: ScreenLogin, service: String, account: String, context: LAContext) -> Bool {
+    private static func save(_ login: ScreenLogin, service: String, account: String, context: LAContext, pin: String? = nil) -> Bool {
         var error: Unmanaged<CFError>?
         guard let access = SecAccessControlCreateWithFlags(nil, kSecAttrAccessibleWhenPasscodeSetThisDeviceOnly, .userPresence, &error),
-              let data = try? JSONEncoder().encode(Stored(username: login.username, password: login.password)) else { return false }
+              let data = try? JSONEncoder().encode(Stored(username: login.username, password: login.password, pin: pin)) else { return false }
         SecItemDelete(query(service: service, account: account) as CFDictionary)
         context.interactionNotAllowed = true
         var add = query(service: service, account: account)
@@ -96,16 +101,18 @@ enum ScreenLoginStore {
         UserDefaults.standard.set(account.trimmingCharacters(in: .whitespaces), forKey: lastKey(hostID))
     }
 
-    /// Nil when none is saved for that account or the context can't vouch for the user (no prompt is shown).
-    static func readWindows(hostID: String, account: String, context: LAContext) -> ScreenLogin? {
+    /// Nil when none is saved for that account, it was saved for other keys than `pin` (the PC's credential now), or
+    /// the context can't vouch for the user (no prompt is shown).
+    static func readWindows(hostID: String, account: String, pin: String, context: LAContext) -> ScreenLogin? {
         guard savedAccounts(hostID: hostID).contains(accountKey(account)) else { return nil }
-        return read(service: windowsService, account: windowsAccount(hostID: hostID, account: account), context: context)
+        return read(service: windowsService, account: windowsAccount(hostID: hostID, account: account), context: context, pin: pin)
     }
 
-    /// Replaces any saved login for this PC and the login's account.
+    /// Replaces any saved login for this PC and the login's account, kept with the PC's keys (`pin`).
     @discardableResult
-    static func saveWindows(_ login: ScreenLogin, hostID: String, context: LAContext) -> Bool {
-        guard save(login, service: windowsService, account: windowsAccount(hostID: hostID, account: login.username), context: context) else {
+    static func saveWindows(_ login: ScreenLogin, hostID: String, pin: String, context: LAContext) -> Bool {
+        guard save(login, service: windowsService, account: windowsAccount(hostID: hostID, account: login.username), context: context,
+                   pin: pin) else {
             return false
         }
         var accounts = savedAccounts(hostID: hostID)

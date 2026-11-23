@@ -301,5 +301,18 @@ final class ShellProtocolTests: XCTestCase {
         XCTAssertTrue(ScreenPass.isUsable(pass))
         XCTAssertFalse(ScreenPass.isUsable(mac), "a phone's own credential isn't a pass")
         XCTAssertEqual(ScreenPass.cleanName(String(repeating: "a", count: 100)).count, ScreenPass.maxName)
+        // Tabs, bidi overrides and zero-width marks go: a name shows as what it is everywhere it lands.
+        XCTAssertEqual(ScreenPass.cleanName("Bob's\tMac\u{202E}x\u{200B}"), "Bob's Mac x")
+    }
+
+    func testAComputerListArrivesCleaned() throws {
+        let line = #"{"t":"computerList","computers":[{"phoneID":"computer.b","viewer":"mac-2","name":"Mac\u202e","kind":"toaster","scopes":["screen","root","shell"],"pending":["screen"],"connected":false,"grantedAt":20},{"phoneID":"phone-9","name":"x","scopes":[],"connected":true,"grantedAt":1},{"phoneID":"computer.a","name":"PC","kind":"windows","scopes":[],"pending":["screen"],"connected":true,"grantedAt":10}]}"#
+        let message = try ShellEnvelope.decode(Data(line.utf8))
+        XCTAssertEqual(message.t, ShellEnvelope.computerList)
+        // Computer ids only, oldest first, known scopes and kinds only, nothing pending that is already allowed.
+        XCTAssertEqual(ComputerAccess.cleaned(message.computers ?? []), [
+            ComputerAccess(phoneID: "computer.a", name: "PC", kind: HostInfo.kindWindows, scopes: [], pending: ["screen"], connected: true, grantedAt: 10),
+            ComputerAccess(phoneID: "computer.b", viewer: "mac-2", name: "Mac", scopes: ["shell", "screen"], connected: false, grantedAt: 20),
+        ])
     }
 }

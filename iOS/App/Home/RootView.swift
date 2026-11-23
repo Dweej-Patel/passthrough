@@ -382,6 +382,7 @@ struct ShellsTab: View {
             }
             .background(PTColor.background)
             .navigationTitle("Shells")
+            .computerTitleMenu(shell)
             .toolbar {
                 if shell.reach == .ready {
                     ToolbarItem(placement: .topBarTrailing) {

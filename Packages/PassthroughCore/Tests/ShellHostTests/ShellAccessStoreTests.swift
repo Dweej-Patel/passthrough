@@ -798,14 +798,98 @@ final class ShellAccessStoreTests: XCTestCase {
         }
         guard case .failure(.tooManyComputers) = grant(store, viewer: "m-new", scopes: ["shell"]) else { return XCTFail() }
         XCTAssertNotNil(store.computerKey(try XCTUnwrap(first)), "refused, never the oldest dropped")
-        // Granting one of them again replaces it, and doesn't count.
+        // Granting one of them again replaces it, and doesn't count: the earlier grant still works
+        // until the new one is used, but it is neither listed nor counted meanwhile.
         let again = try grant(store, viewer: "m0", scopes: ["shell"]).get()
-        XCTAssertEqual(again.replaced, [try XCTUnwrap(first)])
+        XCTAssertEqual(again.replaced, [])
+        XCTAssertNotNil(store.computerKey(try XCTUnwrap(first)))
+        XCTAssertEqual(store.waitingComputerIDs, [try XCTUnwrap(first)])
+        XCTAssertEqual(store.computers(grantedBy: "phone").count, Computers.maxPerGranter)
+        XCTAssertFalse(store.computers(grantedBy: "phone").contains { $0.phoneID == first })
+        XCTAssertNotNil(try? grant(store, viewer: "m1", scopes: ["shell"]).get(), "another one again, while the first waits")
+        guard case .failure(.tooManyComputers) = grant(store, viewer: "m-new", scopes: ["shell"]) else { return XCTFail() }
+        XCTAssertEqual(store.retireComputers(supersededBy: again.id).map(\.phoneID), [try XCTUnwrap(first)])
         XCTAssertNil(store.computerKey(try XCTUnwrap(first)))
-        XCTAssertEqual(store.phones.filter(\.isComputer).count, Computers.maxPerGranter)
         // A pass never pushes a computer out.
+        let computers = store.phones.filter(\.isComputer).count
         for n in 0..<(ScreenPass.maxPerGranter + 1) { _ = try store.grantViewer(by: "phone", name: "Mac \(n)", viewer: "m\(n)").get() }
-        XCTAssertEqual(store.phones.filter(\.isComputer).count, Computers.maxPerGranter)
+        XCTAssertEqual(store.phones.filter(\.isComputer).count, computers)
+    }
+
+    /// Sharing a computer again keeps the grant it has until it uses the new one: the hand-over to it may still fail.
+    func testAnEarlierGrantStaysUntilTheNewOneIsUsed() throws {
+        let secrets = InMemorySecrets()
+        let store = ShellAccessStore(secrets: secrets)
+        sharer(store)
+        let a = try grant(store).get()
+        let b = try grant(store).get()
+        XCTAssertEqual(b.replaced, [], "kept, not replaced at grant time")
+        XCTAssertEqual(store.computerKey(a.id), identityKey)
+        XCTAssertEqual(store.scopes(of: a.id), ["shell", "screen"])
+        XCTAssertEqual(store.candidateKeys(forPhone: a.id), [a.key])
+        XCTAssertEqual(store.waitingComputerIDs, [a.id])
+        XCTAssertEqual(store.computers(grantedBy: "phone").map(\.phoneID), [b.id], "one row a computer")
+        XCTAssertEqual(Set(store.sameComputer(as: b.id)), [a.id, b.id])
+        XCTAssertEqual(ShellAccessStore(secrets: secrets).waitingComputerIDs, [a.id], "kept across a relaunch")
+
+        // The old grant connecting again retires nothing: only a newer one stands for it.
+        XCTAssertTrue(store.retireComputers(supersededBy: a.id).isEmpty)
+        XCTAssertTrue(store.retireComputers(supersededBy: "computer.nothing").isEmpty)
+
+        // A third grant before either was used: only the newest earlier one is kept, as for passes.
+        let c = try grant(store).get()
+        XCTAssertEqual(c.replaced, [a.id])
+        XCTAssertNil(store.computerKey(a.id))
+        XCTAssertEqual(store.waitingComputerIDs, [b.id])
+
+        // Used: the earlier one goes, and only for that computer.
+        let other = try grant(store, viewer: "mac-3", scopes: ["shell"]).get()
+        XCTAssertEqual(store.retireComputers(supersededBy: c.id).map(\.phoneID), [b.id])
+        XCTAssertNil(store.computerKey(b.id))
+        XCTAssertTrue(store.waitingComputerIDs.isEmpty)
+        XCTAssertNotNil(store.computerKey(other.id))
+        XCTAssertEqual(stored(secrets, Self.computersItem)?.map(\.phoneID), [c.id, other.id])
+        XCTAssertTrue(store.retireComputers(supersededBy: c.id).isEmpty, "nothing left to retire")
+    }
+
+    /// The phone takes the new grant back (it couldn't hand it over): the one the computer has keeps working.
+    func testTakingBackTheNewGrantLeavesTheEarlierOne() throws {
+        let store = ShellAccessStore(secrets: InMemorySecrets())
+        sharer(store)
+        let a = try grant(store).get()
+        let b = try grant(store).get()
+        XCTAssertEqual(store.revokeComputer(b.id, grantedBy: "phone").removed.map(\.phoneID), [b.id])
+        XCTAssertEqual(store.computerKey(a.id), identityKey)
+        XCTAssertTrue(store.waitingComputerIDs.isEmpty)
+        XCTAssertEqual(store.computers(grantedBy: "phone").map(\.phoneID), [a.id], "listed again, so it can be taken back too")
+    }
+
+    /// The owner sees one computer and takes it all away, a grant still waiting to be retired included.
+    func testTheOwnerRevokesAComputersWaitingGrantToo() throws {
+        let store = ShellAccessStore(secrets: InMemorySecrets())
+        sharer(store)
+        let a = try grant(store).get()
+        let b = try grant(store).get()
+        let other = try grant(store, viewer: "mac-3", scopes: ["shell"]).get()
+        XCTAssertEqual(Set(store.revokeComputer(b.id).removed.map(\.phoneID)), [a.id, b.id])
+        XCTAssertNil(store.computerKey(a.id))
+        XCTAssertNil(store.computerKey(b.id))
+        XCTAssertNotNil(store.computerKey(other.id))
+    }
+
+    /// Names are stored as they're shown: one line, no tabs, bidi or zero-width marks.
+    func testGrantedNamesAreStoredClean() throws {
+        let store = ShellAccessStore(secrets: InMemorySecrets())
+        sharer(store)
+        let computer = try store.grantComputer(by: "phone", name: "Office\tPC\u{202E}", viewer: "mac-2", kind: nil,
+                                               identityKey: identityKey, scopes: ["shell"]).get()
+        XCTAssertEqual(store.phones.first { $0.phoneID == computer.id }?.label, "Office PC")
+        let pass = try store.grantViewer(by: "phone", name: "\u{200B}Lab Mac\u{200F}", viewer: "mac-3").get()
+        XCTAssertEqual(store.phones.first { $0.phoneID == pass.id }?.label, "Lab Mac")
+        // Nothing left once cleaned: refused, as an empty name is.
+        guard case .failure(.badRequest) = store.grantComputer(by: "phone", name: "\u{200B}\u{200F}", viewer: "mac-4", kind: nil,
+                                                                identityKey: identityKey, scopes: ["shell"]) else { return XCTFail() }
+        guard case .failure(.badRequest) = store.grantViewer(by: "phone", name: "\u{200B}", viewer: "mac-5") else { return XCTFail() }
     }
 
     /// A computer may see the screen only while the phone that gave it access may.
@@ -829,6 +913,19 @@ final class ShellAccessStoreTests: XCTestCase {
         XCTAssertEqual(store.revokeComputer(granted.id, grantedBy: "phone").removed.map(\.phoneID), [granted.id])
         XCTAssertNil(store.computerKey(granted.id))
         XCTAssertNotNil(store.key(forPhone: "phone"))
+    }
+
+    /// The owner takes a computer back whichever phone gave it; only that computer goes.
+    func testTheOwnerTakesAComputerBack() throws {
+        let store = ShellAccessStore(secrets: InMemorySecrets())
+        sharer(store)
+        let granted = try grant(store).get()
+        XCTAssertTrue(store.revokeComputer("computer.nothing").removed.isEmpty)
+        XCTAssertTrue(store.revokeComputer("phone").removed.isEmpty, "never a phone, by this path")
+        XCTAssertEqual(store.revokeComputer(granted.id).removed.map(\.phoneID), [granted.id])
+        XCTAssertNil(store.computerKey(granted.id))
+        XCTAssertNotNil(store.key(forPhone: "phone"))
+        XCTAssertTrue(store.computers(grantedBy: "phone").isEmpty)
     }
 
     /// Turning sharing off holds in memory when it can't be saved, and the switch survives a re-grant.

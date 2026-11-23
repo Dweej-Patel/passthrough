@@ -43,6 +43,8 @@ final class HostCopyTests: XCTestCase {
         let steps = HostCopy.setupSteps(mac, paired: true, isPad: false, cableLinkOn: true, needsVPNPrompt: false)
         XCTAssertEqual(steps.map(\.title), ["Pair this iPhone with your Mac", "Turn on Remote shell on your Mac", "Connect over USB once"])
         XCTAssertEqual(steps[0].detail, "Done.")
+        // The Mac's switch shows no label of its own: the step names where it is.
+        XCTAssertEqual(steps[1].detail, "On the Mac, open Passthrough and turn on the switch at the top of Settings \u{25B8} Remote Shell.")
         XCTAssertEqual(steps[2].detail, "With sharing on, plug this iPhone into the Mac. Its shells then show up on the Mac and Shells tabs by themselves.")
         XCTAssertTrue(steps.allSatisfy { $0.action == nil })
     }
@@ -52,6 +54,8 @@ final class HostCopyTests: XCTestCase {
         XCTAssertEqual(HostCopy.unreachable(pc, fromAnywhere: true, lastHeard: "14:02"),
                        "Can't reach Office-PC. It may be asleep, off, or offline. Last heard 14:02.")
         XCTAssertEqual(HostCopy.unreachable(pc, fromAnywhere: true), "Can't reach Office-PC. It may be asleep, off, or offline.")
+        XCTAssertEqual(HostCopy.unreachable(pc, fromAnywhere: false, lastHeard: "14:02"),
+                       "Can't reach Office-PC. Use the same Wi-Fi, or turn on Tailscale on both devices.")
         XCTAssertEqual(HostCopy.wentToSleep(pc, at: "14:02", sleepsAfter: "30 minutes"),
                        "Office-PC went to sleep at 14:02. It sleeps after 30 minutes; turn on Stay awake in Passthrough on the PC.")
         XCTAssertEqual(HostCopy.turnedOff(pc, at: "14:02"), "Remote access was turned off on Office-PC at 14:02. Turn it on there.")
@@ -60,10 +64,18 @@ final class HostCopyTests: XCTestCase {
         XCTAssertEqual(HostCopy.shell(.nobodySignedIn, pc), "Sign in to Office-PC to use its shell.")
         XCTAssertEqual(HostCopy.shell(.someoneElseSignedIn, pc), "Someone else is signed in to Office-PC. Its shell starts when you sign in.")
         XCTAssertEqual(HostCopy.shell(.appNotOpen, pc), "Passthrough isn't open on Office-PC. Open it there.")
+        // Neither host has a per-phone Shell switch: the sentence names what gives the shell back.
         XCTAssertEqual(HostCopy.shell(.switchedOff, pc),
-                       "Office-PC doesn't let this iPhone open shells. Turn on Shell for it in Passthrough's settings on the PC.")
+                       "Office-PC doesn't let this iPhone open shells. Plug this iPhone into the PC with Remote access on to get access again.")
+        XCTAssertEqual(HostCopy.shell(.switchedOff, mac),
+                       "MacBook Pro doesn't let this iPhone open shells. Plug this iPhone into the Mac with Remote shell on to get access again.")
+        XCTAssertEqual(HostCopy.error(.notAllowed, pc), HostCopy.shell(.switchedOff, pc))
         XCTAssertNil(HostCopy.shell(.available, pc))
         XCTAssertEqual(HostCopy.screen(.notInThisVersion, pc), "Office-PC's screen isn't in this version of Passthrough yet. Its shell works.")
+        XCTAssertEqual(HostCopy.screen(.switchedOff, pc),
+                       "Screen is off for this iPhone. On Office-PC, open Passthrough's Settings \u{25B8} Remote access and turn on Screen for it.")
+        XCTAssertEqual(HostCopy.screen(.remoteDesktopOff, pc),
+                       "Remote Desktop is off on Office-PC. Turn it on in Passthrough's Settings \u{25B8} Remote access there.")
         XCTAssertEqual(HostCopy.screen(.windowsHome, pc), "Office-PC runs Windows Home, which has no Remote Desktop. The shell works.")
         XCTAssertNil(HostCopy.screen(.noRow, pc))
         XCTAssertEqual(HostCopy.error(.signedOut, pc), HostCopy.shell(.appNotOpen, pc))
@@ -75,6 +87,9 @@ final class HostCopyTests: XCTestCase {
     func testPCSetupSteps() {
         let off = HostCopy.setupSteps(pc, paired: true, isPad: false, cableLinkOn: false, needsVPNPrompt: true)
         XCTAssertEqual(off.map(\.title), ["Pair this iPhone with your PC", "Turn on Remote access on your PC", "Plug this iPhone in once"])
+        // The PC's switch, by the sentence beside it, on the page it's on.
+        XCTAssertEqual(off[1].detail,
+                       "On the PC, open Passthrough and turn on Use this PC's shell from your phones in Settings \u{25B8} Remote access. Windows asks for an administrator once.")
         XCTAssertEqual(off[2].action, .turnOnCableLink)
         XCTAssertEqual(off[2].note, "iOS asks to add a VPN configuration. That is how the cable link works; no traffic is sent through it for a PC.")
         XCTAssertNil(HostCopy.setupSteps(pc, paired: true, isPad: false, cableLinkOn: false, needsVPNPrompt: false)[2].note)
@@ -88,6 +103,33 @@ final class HostCopyTests: XCTestCase {
         let none = HostCopy.setupSteps(.generic(device: "iPhone"), paired: false, isPad: false, cableLinkOn: false, needsVPNPrompt: false)
         XCTAssertEqual(none[0].title, "Pair this iPhone with your Mac or PC")
         XCTAssertFalse(none[0].done)
+        XCTAssertEqual(none[1].detail,
+                       "On a Mac, open Passthrough and turn on the switch at the top of Settings \u{25B8} Remote Shell. On a PC, open Passthrough and turn on Use this PC's shell from your phones in Settings \u{25B8} Remote access.")
+    }
+
+    /// The hero says "Can't reach it" and when it was last heard itself: its advice repeats neither.
+    func testUnreachableAdvice() {
+        XCTAssertNil(HostCopy.unreachableAdvice(pc, fromAnywhere: true))
+        XCTAssertEqual(HostCopy.unreachableAdvice(pc, fromAnywhere: false), "Use the same Wi-Fi, or turn on Tailscale on both devices.")
+        XCTAssertEqual(HostCopy.unreachableAdvice(mac, fromAnywhere: true), "Check that Remote shell is on and the Mac is awake.")
+        for w in [mac, pc] {
+            for fromAnywhere in [true, false] {
+                let advice = HostCopy.unreachableAdvice(w, fromAnywhere: fromAnywhere) ?? ""
+                XCTAssertFalse(advice.contains("Can't reach") || advice.contains("Last heard") || advice.contains(HostCopy.mayBeAsleep))
+                // The full sentence is the hero's two lines' worth: nothing else is lost.
+                XCTAssertTrue(HostCopy.unreachable(w, fromAnywhere: fromAnywhere).contains(advice.isEmpty ? HostCopy.mayBeAsleep : advice))
+            }
+        }
+    }
+
+    /// The Share row names the switch as each computer's settings call it.
+    func testShareSentences() {
+        XCTAssertEqual(HostCopy.shareOff(mac),
+                       "Turn on May share access with other computers for this iPhone in Passthrough's settings on MacBook Pro.")
+        XCTAssertEqual(HostCopy.shareOff(pc), "Turn on Share for this iPhone in Passthrough's Settings \u{25B8} Remote access on Office-PC.")
+        XCTAssertEqual(HostCopy.shareScreenOnly(mac),
+                       "Its screen, with another of your Macs. To share its shell or share with a PC, turn on May share access with other computers for this iPhone in Passthrough's settings on MacBook Pro.")
+        XCTAssertEqual(HostCopy.noActivity(pc), "Office-PC doesn't record activity yet.")
     }
 
     func testSwitcherKindPrefix() {

@@ -109,6 +109,8 @@ final class ScreenModel: ObservableObject {
     private var shell: ShellModel?
     private var context: LAContext?
     private var macID: String?
+    /// The PC's keys as its credential says now: a Windows login is saved with them and read only while they match.
+    private var windowsPin: String?
     private var client: ShellClient?
     private var dialer: IrohShellDialer?
     /// What shows the screen now: the Mac's own stream or Screen Sharing.
@@ -121,7 +123,20 @@ final class ScreenModel: ObservableObject {
     /// Screen Sharing shows the screen (the stream is tried again meanwhile).
     private var onScreenSharing: Bool { backend is ScreenSharingBackend }
     /// This view shows a PC (through its Remote Desktop), not a Mac.
-    private var windowsView = false
+    @Published private(set) var windowsView = false
+    /// The user's choices for this PC, remembered per computer: the desktop's shape, and Windows' text size on it.
+    @Published private(set) var windowsShapeChoice = WindowsDisplay.Shape.fit
+    @Published private(set) var windowsSpace = 100
+    /// The shape Windows was last asked for (the first desktop, then every change), and when (uptime).
+    private var windowsAsked: ScreenShape?
+    private var windowsAskedAt: TimeInterval?
+    private var windowsLayoutTask: Task<Void, Never>?
+    private var windowsResizeWatch: Task<Void, Never>?
+    /// "…kept its screen as it was" is said once a view.
+    private var saidKeptShape = false
+    /// A hardware keyboard's ⌘ on a PC: Control (the default), or the Windows key. Kept for every PC.
+    @Published private(set) var commandIsWindows = UserDefaults.standard.bool(forKey: ScreenModel.commandIsWindowsKey)
+    private static let commandIsWindowsKey = "screenCommandIsWindows"
     /// How the sign-in sheet asks: a Mac's account, or a PC's Windows account (the last used here, else the one the PC named).
     var loginStyle: ScreenLoginForm.Style {
         guard windowsView else { return .mac }
@@ -129,7 +144,8 @@ final class ScreenModel: ObservableObject {
     }
     /// The login this PC view signed in with, kept while the view is open so a dropped
     /// view (or one back from the background) reconnects without asking again.
-    private var windowsLogin: (login: ScreenLogin, remember: Bool)?
+    /// The login this view signed in with, and the PC it is for (its id and keys): reused only for that PC.
+    private var windowsLogin: (login: ScreenLogin, remember: Bool, host: String, pin: String)?
     /// The connection is asking for the Mac's own stream (not Screen Sharing).
     private var wantsVideo = false
     /// Where the Mac last heard the pointer was, in screen pixels.
@@ -358,7 +374,7 @@ final class ScreenModel: ObservableObject {
         stop()
         let words = HostWords(kind: kind, name: name, device: ThisDevice.name)
         let state = id == shell.selectedMacID ? shell.page.screen : .notInThisVersion
-        phase = .failed(HostCopy.screen(state == .available || state == .noRow ? .notInThisVersion : state, words)
+        phase = .failed(PCScreen.copy(state == .available || state == .noRow ? .notInThisVersion : state, words)
                         ?? "\(words.name)'s screen isn't in this version of Passthrough yet.")
         return true
     }
@@ -393,6 +409,10 @@ final class ScreenModel: ObservableObject {
         connectionPath = nil
         upgradeStream = nil
         relayoutTask?.cancel()
+        windowsLayoutTask?.cancel()
+        windowsResizeWatch?.cancel()
+        windowsAsked = nil
+        windowsAskedAt = nil
         stopMicrophone()
         stopSound()
         backend?.close()
@@ -459,7 +479,7 @@ final class ScreenModel: ObservableObject {
         case let .host(info) where HostKind(wire: info.kind) != .mac:
             // Told only now that this isn't a Mac: its screen path ends before anything more is asked.
             stop()
-            phase = .failed(HostCopy.screen(.notInThisVersion, HostWords(kind: HostKind(wire: info.kind), name: macName, device: ThisDevice.name))
+            phase = .failed(PCScreen.copy(.notInThisVersion, HostWords(kind: HostKind(wire: info.kind), name: macName, device: ThisDevice.name))
                             ?? "Choose a computer first.")
         default:
             break
@@ -475,6 +495,8 @@ final class ScreenModel: ObservableObject {
             screenSize = CGSize(width: width, height: height)
             phase = .live
             if windowsView {
+                // The answer to a change of shape (or the first desktop): nothing is waited for now.
+                windowsResizeWatch?.cancel()
                 if liveSince == nil {
                     liveSince = ProcessInfo.processInfo.systemUptime
                     windowsSignedIn()
@@ -643,15 +665,25 @@ final class ScreenModel: ObservableObject {
         windowsView = true
         macID = pc.macID
         macName = pc.macName
+        windowsPin = pc.loginPin
+        windowsShapeChoice = UserDefaults.standard.string(forKey: Self.windowsShapeKey(pc.macID)).flatMap(WindowsDisplay.Shape.init) ?? .fit
+        let space = UserDefaults.standard.integer(forKey: Self.windowsSpaceKey(pc.macID))
+        windowsSpace = WindowsDisplay.spaces.contains(space) ? space : 100
+        saidKeptShape = false
         slowReason = nil
         saidRelay = false
         observeApp()
         reconnects = 0
-        if let held = windowsLogin { return connectWindows(held.login, remember: held.remember) }
+        // Held for this PC and these keys only: another computer (or this id with other keys) never gets it.
+        if let held = windowsLogin, held.host == pc.macID, held.pin == pc.loginPin {
+            return connectWindows(held.login, remember: held.remember)
+        }
+        windowsLogin = nil
         // The account last used here, else the one the PC says Remote Desktop takes; its saved
         // login is read with the app lock's context, so it never prompts.
         let account = ScreenLoginStore.lastAccount(hostID: pc.macID) ?? shell?.factsByMac[pc.macID]?.user
-        if let account, let context, let saved = ScreenLoginStore.readWindows(hostID: pc.macID, account: account, context: context) {
+        if let account, let context,
+           let saved = ScreenLoginStore.readWindows(hostID: pc.macID, account: account, pin: pc.loginPin, context: context) {
             return connectWindows(saved, remember: true)
         }
         stop()
@@ -661,7 +693,7 @@ final class ScreenModel: ObservableObject {
     private func connectWindows(_ login: ScreenLogin, remember: Bool) {
         stop()
         // Kept for as long as the view is open, so a dropped view reconnects with it.
-        windowsLogin = (login, remember)
+        windowsLogin = (login, remember, macID ?? "", windowsPin ?? "")
         guard let shell else { return }
         generation += 1
         let gen = generation
@@ -709,9 +741,11 @@ final class ScreenModel: ObservableObject {
             backendToken += 1
             let token = backendToken
             let shape = windowsShape()
+            windowsAsked = shape
             let made = RemoteDesktop.backend(stream: stream, initialBytes: initialBytes, certSHA256: certSHA256, login: login,
                                              width: shape.width, height: shape.height, desktopScale: shape.desktopScale,
-                                             deviceScale: shape.deviceScale, clientName: ThisDevice.name) { [weak self] event in
+                                             deviceScale: shape.deviceScale, clientName: ThisDevice.name,
+                                             slowLink: readyPath == .relay) { [weak self] event in
                 MainActor.assumeIsolated { self?.handle(event, generation: gen, token: token) }
             }
             guard let made else {
@@ -746,8 +780,8 @@ final class ScreenModel: ObservableObject {
         ScreenLoginStore.setLastAccount(held.login.username, hostID: macID)
         if !held.remember {
             ScreenLoginStore.deleteWindows(hostID: macID, account: held.login.username)
-        } else if let context {
-            ScreenLoginStore.saveWindows(held.login, hostID: macID, context: context)
+        } else if let context, let windowsPin {
+            ScreenLoginStore.saveWindows(held.login, hostID: macID, pin: windowsPin, context: context)
         }
     }
 
@@ -800,20 +834,66 @@ final class ScreenModel: ObservableObject {
         phase = .failed(WindowsScreenCopy.ending(end, words)?.sentence ?? "The connection to \(macName) was lost.")
     }
 
-    /// The first desktop: the view's own pixels (even, at most 4096 on the longer side and
-    /// 8.3 million in all), with Windows' text at the default size for this device.
-    private func windowsShape() -> (width: Int, height: Int, desktopScale: Int, deviceScale: Int) {
+    // MARK: A PC's shape
+
+    private static func windowsShapeKey(_ hostID: String) -> String { "screenShape.\(hostID)" }
+    private static func windowsSpaceKey(_ hostID: String) -> String { "screenSpace.\(hostID)" }
+
+    /// The desktop to ask Windows for: the view's own pixels as the device is held (the whole
+    /// screen until it's laid out) or the standard 16:10, with Windows' text at the chosen size.
+    private func windowsShape() -> ScreenShape {
         let screen = UIScreen.main
-        var pixels = viewPixels ?? CGSize(width: screen.bounds.width * screen.scale, height: screen.bounds.height * screen.scale)
-        let cap = min(1, 4096 / max(pixels.width, pixels.height), (8_300_000 / max(pixels.width * pixels.height, 1)).squareRoot())
-        pixels = CGSize(width: pixels.width * cap, height: pixels.height * cap)
-        let short = min(pixels.width, pixels.height)
-        // Windows points on the short side: 600 on a phone, 1000 on an iPad.
-        let target: CGFloat = UIDevice.current.userInterfaceIdiom == .pad ? 1000 : 600
-        let steps = [100, 125, 150, 175, 200, 225, 250, 300, 350, 400, 450, 500]
-        let scale = steps.last { CGFloat($0) <= short / target * 100 } ?? 100
-        let device = scale < 150 ? 100 : scale <= 225 ? 140 : 180
-        return (Int(pixels.width) & ~1, Int(pixels.height) & ~1, scale, device)
+        let pixels = viewPixels ?? CGSize(width: screen.bounds.width * screen.scale, height: screen.bounds.height * screen.scale)
+        return WindowsDisplay.shape(windowsShapeChoice, device: UIDevice.current.userInterfaceIdiom == .pad ? .pad : .phone,
+                                    viewPixels: pixels, space: windowsSpace, host: windowsHostDisplay)
+    }
+
+    /// The PC's own monitor, when it said: the session keeps its scale, and "the PC's own size" is its pixels.
+    var windowsHostDisplay: HostDisplay? { macID.flatMap { shell?.factsByMac[$0]?.display } }
+
+    /// Fit to this device, the standard 16:10, or the PC's own size; kept for this PC.
+    func setWindowsShape(_ shape: WindowsDisplay.Shape) {
+        guard shape != windowsShapeChoice else { return }
+        windowsShapeChoice = shape
+        if let macID { UserDefaults.standard.set(shape.rawValue, forKey: Self.windowsShapeKey(macID)) }
+        windowsShapeChanged()
+    }
+
+    /// How large things are on the PC's desktop here (80 larger text, 100, 125 more space): fewer or more pixels asked
+    /// for, never another Windows scale. Kept for this PC.
+    func setWindowsSpace(_ space: Int) {
+        guard space != windowsSpace, WindowsDisplay.spaces.contains(space) else { return }
+        windowsSpace = space
+        if let macID { UserDefaults.standard.set(space, forKey: Self.windowsSpaceKey(macID)) }
+        windowsShapeChanged()
+    }
+
+    /// The view turned, or a choice changed: a second after the last change, and at most once every two,
+    /// Windows is asked for the new shape. A newer change replaces one that is waiting.
+    private func windowsShapeChanged() {
+        guard windowsView, backend != nil else { return }
+        windowsLayoutTask?.cancel()
+        let wait = WindowsDisplay.wait(now: ProcessInfo.processInfo.systemUptime, lastAsked: windowsAskedAt)
+        let gen = generation
+        windowsLayoutTask = Task { [weak self] in
+            try? await Task.sleep(for: .milliseconds(Int(wait * 1000)))
+            guard !Task.isCancelled, let self, gen == self.generation, let backend = self.backend else { return }
+            let shape = self.windowsShape()
+            // A few percent either way isn't worth rearranging the PC's desktop for.
+            guard WindowsDisplay.worthAsking(shape, current: self.windowsAsked) else { return }
+            let resizes = shape.width != Int(self.screenSize.width) || shape.height != Int(self.screenSize.height)
+            self.windowsAsked = shape
+            self.windowsAskedAt = ProcessInfo.processInfo.systemUptime
+            backend.reshape(shape)
+            self.windowsResizeWatch?.cancel()
+            guard resizes else { return }
+            self.windowsResizeWatch = Task { [weak self] in
+                try? await Task.sleep(for: .seconds(3))
+                guard !Task.isCancelled, let self, gen == self.generation, self.phase == .live, !self.saidKeptShape else { return }
+                self.saidKeptShape = true
+                self.show("\(self.macName) kept its screen as it was.")
+            }
+        }
     }
 
     // MARK: Back to the stream
@@ -966,15 +1046,21 @@ final class ScreenModel: ObservableObject {
 
     func scrollEnded() { backend?.scrollEnded() }
 
+    /// The modifiers as the far computer takes them: a PC gets ⌘ as Control, or as the Windows key if the user chose that.
+    private func farModifiers(_ modifiers: [UInt32]) -> ScreenModifiers {
+        let held = ScreenModifiers(keysyms: modifiers)
+        return windowsView ? WindowsShortcut.modifiers(held, commandIsWindows: commandIsWindows) : held
+    }
+
     /// A key with modifiers held around it.
     func key(_ keysym: UInt32, modifiers: [UInt32] = []) {
-        backend?.key(keysym, modifiers: ScreenModifiers(keysyms: modifiers))
+        backend?.key(keysym, modifiers: farModifiers(modifiers))
     }
 
     func type(_ text: String, modifiers: [UInt32] = []) {
         guard let backend else { return }
         if modifiers.isEmpty { return backend.text(text) }
-        let held = ScreenModifiers(keysyms: modifiers)
+        let held = farModifiers(modifiers)
         for character in text {
             if let keysym = RFBKeys.keysym(for: character) { backend.key(keysym, modifiers: held) }
         }
@@ -994,6 +1080,15 @@ final class ScreenModel: ObservableObject {
     var onCaretMayMove: (() -> Void)?
 
     func perform(_ action: SpaceAction) {
+        // A PC: the same swipes and menu rows mean Windows' own (virtual desktops, Task View, Show desktop).
+        if windowsView {
+            switch action {
+            case .previousDesktop: return windows(.previousDesktop)
+            case .nextDesktop: return windows(.nextDesktop)
+            case .missionControl: return windows(.taskView)
+            case .appWindows, .showDesktop: return windows(.showDesktop)
+            }
+        }
         onCaretMayMove?()
         switch action {
         case .previousDesktop: key(RFBKeys.left, modifiers: [RFBKeys.control])
@@ -1003,6 +1098,21 @@ final class ScreenModel: ObservableObject {
         case .showDesktop: key(RFBKeys.function(11))
         }
         UIImpactFeedbackGenerator(style: .light).impactOccurred()
+    }
+
+    /// A Windows shortcut (the Windows menu, a three-finger swipe), as scan codes.
+    func windows(_ shortcut: WindowsShortcut) {
+        guard windowsView, let backend else { return }
+        onCaretMayMove?()
+        let chord = shortcut.chord
+        backend.key(chord.key, modifiers: chord.modifiers)
+        UIImpactFeedbackGenerator(style: .light).impactOccurred()
+    }
+
+    /// What a hardware keyboard's ⌘ is on a PC; kept for every PC.
+    func setCommandIsWindows(_ on: Bool) {
+        commandIsWindows = on
+        UserDefaults.standard.set(on, forKey: Self.commandIsWindowsKey)
     }
 
     /// Puts the phone's clipboard on the Mac's and pastes it there.
@@ -1028,7 +1138,8 @@ final class ScreenModel: ObservableObject {
         copyTimeout?.cancel()
         // The stream's ⌘C may wait for typing to finish on the Mac.
         let answers = backend.macStream != nil
-        let wait: Duration = answers ? .seconds(5) : .seconds(2)
+        // A PC answers within its own two-second window, then the text has to come over.
+        let wait: Duration = answers ? .seconds(5) : windowsView ? .seconds(6) : .seconds(2)
         copyTimeout = Task { [weak self] in
             try? await Task.sleep(for: wait)
             guard !Task.isCancelled, let self, self.copying else { return }
@@ -1266,8 +1377,16 @@ final class ScreenModel: ObservableObject {
         guard start != .local, let dialer else { return }
         pathTask = Task { [weak self, stream] in
             var relayFor = 0
+            var ticks = 0
+            var lastReport: String?
             while !Task.isCancelled {
                 let path = dialer.path(of: stream)
+                // Why a path stays on the relay: every path iroh has, ours, hole-punch counters (on change, else every 30 s).
+                if let report = dialer.pathReport(of: stream), report != lastReport || ticks % 10 == 0 {
+                    lastReport = report
+                    ptLog(.info, "screen: iroh paths: \(report)")
+                }
+                ticks += 1
                 guard let self else { return }
                 if path != .unknown, path != self.connectionPath { self.connectionPath = path }
                 relayFor = path == .relay ? relayFor + 1 : 0
@@ -1344,6 +1463,8 @@ final class ScreenModel: ObservableObject {
         } else {
             viewPixels = size
         }
+        // A PC's desktop follows the view when it fits this device (the standard shape stays as it is).
+        if windowsView { return windowsShapeChanged() }
         guard fitsDevice else { return }
         // Once the turn has settled: each change remakes the Mac's display.
         relayoutTask?.cancel()

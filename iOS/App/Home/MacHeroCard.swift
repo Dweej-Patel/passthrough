@@ -98,23 +98,21 @@ struct MacHeroCard: View {
             switch shell.reach {
             case .unreachable:
                 VStack(alignment: .leading, spacing: 4) {
-                    if !isMac {
-                        // A PC says why it left, when it did: the sentence carries it.
-                        if shell.page.state == .unreachable {
-                            Text("It may be asleep, off, or offline").font(.subheadline.weight(.semibold)).foregroundStyle(PTColor.attentionText)
-                        }
-                        if let message = shell.reachMessage {
-                            Text(message).font(.subheadline).fixedSize(horizontal: false, vertical: true)
-                        }
-                    } else if shell.macState?.awakeStopped == MacState.stoppedBattery {
+                    if isMac, shell.macState?.awakeStopped == MacState.stoppedBattery {
                         Text("It most likely went to sleep").font(.subheadline.weight(.semibold)).foregroundStyle(PTColor.attentionText)
                         Text("Its battery reached your \(MacFormat.percent(shell.macState?.batteryFloor ?? 0.2)) limit, so Keep awake let it sleep. Plug it in and it wakes for the next connection.")
                             .font(.subheadline).fixedSize(horizontal: false, vertical: true)
-                    } else {
-                        Text("It may be asleep, off, or offline").font(.subheadline.weight(.semibold)).foregroundStyle(PTColor.attentionText)
-                        if let message = shell.reachMessage {
-                            Text(message).font(.subheadline).fixedSize(horizontal: false, vertical: true)
+                    } else if isMac || shell.page.state == .unreachable {
+                        // Cause unknown: the title says it can't be reached and the line under it when it was last
+                        // heard, so only the likely reason and what to check, not the full sentence the other
+                        // screens show.
+                        Text(HostCopy.mayBeAsleep).font(.subheadline.weight(.semibold)).foregroundStyle(PTColor.attentionText)
+                        if let advice = shell.unreachableAdvice {
+                            Text(advice).font(.subheadline).fixedSize(horizontal: false, vertical: true)
                         }
+                    } else if let message = shell.reachMessage {
+                        // A PC said why it left (or its relay is silent): the sentence carries it.
+                        Text(message).font(.subheadline).fixedSize(horizontal: false, vertical: true)
                     }
                 }
                 .padding(12)

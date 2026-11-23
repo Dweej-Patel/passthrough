@@ -68,7 +68,15 @@ final class ScreenCanvasView: UIView, UIScrollViewDelegate, UITextInput, UIGestu
     /// Where the Mac's pointer is, in screen pixels.
     private var cursorPoint = CGPoint.zero
     private var lastDragLocation = CGPoint.zero
-    private lazy var keyRow = ScreenKeyRow(canvas: self)
+    private lazy var keyRow = ScreenKeyRow(canvas: self, windows: windowsKeys)
+    /// A PC: the key row has ctrl, alt and the Windows key in place of the Mac's, and a hardware keyboard's F keys go through.
+    var windowsKeys = false {
+        didSet {
+            guard windowsKeys != oldValue else { return }
+            heldModifiers = []
+            keyRow.rebuild(windows: windowsKeys)
+        }
+    }
     /// Modifiers the key row holds for the next key.
     var heldModifiers: [UInt32] = []
 
@@ -952,7 +960,7 @@ final class ScreenCanvasView: UIView, UIScrollViewDelegate, UITextInput, UIGestu
                 .keyboardDeleteForward: RFBKeys.delete, .keyboardPageUp: RFBKeys.pageUp, .keyboardPageDown: RFBKeys.pageDown,
                 .keyboardHome: RFBKeys.home, .keyboardEnd: RFBKeys.end,
             ]
-            if let keysym = special[key.keyCode] {
+            if let keysym = special[key.keyCode] ?? (windowsKeys ? Self.windowsSpecial[key.keyCode] : nil) {
                 forgetTyped()
                 onKey?(keysym, modifiers)
                 handled = true
@@ -967,6 +975,17 @@ final class ScreenCanvasView: UIView, UIScrollViewDelegate, UITextInput, UIGestu
     }
 }
 
+extension ScreenCanvasView {
+    /// A hardware keyboard's keys a PC takes beyond the ones every computer does: F1 to F12, and F13 as Print Screen.
+    static let windowsSpecial: [UIKeyboardHIDUsage: UInt32] = [
+        .keyboardF1: RFBKeys.function(1), .keyboardF2: RFBKeys.function(2), .keyboardF3: RFBKeys.function(3),
+        .keyboardF4: RFBKeys.function(4), .keyboardF5: RFBKeys.function(5), .keyboardF6: RFBKeys.function(6),
+        .keyboardF7: RFBKeys.function(7), .keyboardF8: RFBKeys.function(8), .keyboardF9: RFBKeys.function(9),
+        .keyboardF10: RFBKeys.function(10), .keyboardF11: RFBKeys.function(11), .keyboardF12: RFBKeys.function(12),
+        .keyboardF13: RFBKeys.printScreen, .keyboardInsert: RFBKeys.insert,
+    ]
+}
+
 private extension CGFloat {
     func clamped(_ low: CGFloat, _ high: CGFloat) -> CGFloat { Swift.min(Swift.max(self, low), Swift.max(low, high)) }
 }
@@ -977,12 +996,36 @@ final class ScreenKeyRow: UIInputView {
     private weak var canvas: ScreenCanvasView?
     private var modifierButtons: [(UInt32, UIButton)] = []
 
-    init(canvas: ScreenCanvasView) {
+    private let stack = UIStackView()
+    /// When the Windows key was armed: a second tap soon after sends it alone (Start).
+    private var windowsArmedAt: TimeInterval = 0
+    /// How soon a second tap on the Windows key must come to open Start.
+    private static let doubleTap: TimeInterval = 0.35
+
+    init(canvas: ScreenCanvasView, windows: Bool = false) {
         self.canvas = canvas
         super.init(frame: CGRect(x: 0, y: 0, width: 0, height: 46), inputViewStyle: .keyboard)
         allowsSelfSizing = true
         autoresizingMask = .flexibleWidth
-        build()
+        stack.axis = .horizontal
+        stack.distribution = .fillEqually
+        stack.spacing = 4
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(stack)
+        NSLayoutConstraint.activate([
+            stack.leadingAnchor.constraint(equalTo: safeAreaLayoutGuide.leadingAnchor, constant: 4),
+            stack.trailingAnchor.constraint(equalTo: safeAreaLayoutGuide.trailingAnchor, constant: -4),
+            stack.topAnchor.constraint(equalTo: topAnchor, constant: 6),
+            stack.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -6),
+        ])
+        build(Self.keys(windows: windows), windows: windows)
+    }
+
+    /// The row for a Mac, or for a PC.
+    func rebuild(windows: Bool) {
+        stack.arrangedSubviews.forEach { $0.removeFromSuperview() }
+        modifierButtons = []
+        build(Self.keys(windows: windows), windows: windows)
     }
 
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
@@ -995,37 +1038,29 @@ final class ScreenKeyRow: UIInputView {
         case modifier(String, UInt32, accessibility: String)
         /// The Mac's Fn (globe) key: down while it's touched, as a real key.
         case function
+        /// A PC's Windows key: a tap holds it for the next key; a second tap right after opens Start.
+        case windowsKey
         case copy
         case paste
     }
 
-    private func build() {
-        let keys: [Key] = [
-            .keysym("esc", RFBKeys.escape, accessibility: "Escape"),
-            .keysym("tab", RFBKeys.tab, accessibility: "Tab"),
-            .modifier("⌃", RFBKeys.control, accessibility: "Control"),
-            .modifier("⌥", RFBKeys.option, accessibility: "Option"),
-            .modifier("⌘", RFBKeys.command, accessibility: "Command"),
-            .function,
+    private static func keys(windows: Bool) -> [Key] {
+        let arrows: [Key] = [
             .symbol("arrow.left", RFBKeys.left, accessibility: "Left arrow"),
             .symbol("arrow.up", RFBKeys.up, accessibility: "Up arrow"),
             .symbol("arrow.down", RFBKeys.down, accessibility: "Down arrow"),
             .symbol("arrow.right", RFBKeys.right, accessibility: "Right arrow"),
-            .copy,
-            .paste,
         ]
-        let stack = UIStackView()
-        stack.axis = .horizontal
-        stack.distribution = .fillEqually
-        stack.spacing = 4
-        stack.translatesAutoresizingMaskIntoConstraints = false
-        addSubview(stack)
-        NSLayoutConstraint.activate([
-            stack.leadingAnchor.constraint(equalTo: safeAreaLayoutGuide.leadingAnchor, constant: 4),
-            stack.trailingAnchor.constraint(equalTo: safeAreaLayoutGuide.trailingAnchor, constant: -4),
-            stack.topAnchor.constraint(equalTo: topAnchor, constant: 6),
-            stack.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -6),
-        ])
+        let first: [Key] = [.keysym("esc", RFBKeys.escape, accessibility: "Escape"), .keysym("tab", RFBKeys.tab, accessibility: "Tab")]
+        let modifiers: [Key] = windows
+            ? [.modifier("ctrl", RFBKeys.control, accessibility: "Control"), .modifier("alt", RFBKeys.alt, accessibility: "Alt"), .windowsKey]
+            : [.modifier("⌃", RFBKeys.control, accessibility: "Control"), .modifier("⌥", RFBKeys.option, accessibility: "Option"),
+               .modifier("⌘", RFBKeys.command, accessibility: "Command"), .function]
+        return first + modifiers + arrows + [.copy, .paste]
+    }
+
+    private func build(_ keys: [Key], windows: Bool) {
+        let host = windows ? "the PC" : "the Mac"
         for key in keys {
             let button = UIButton(configuration: Self.configuration(key, selected: false))
             switch key {
@@ -1058,11 +1093,32 @@ final class ScreenKeyRow: UIInputView {
                 }, for: .touchDown)
                 button.addAction(UIAction { [weak self] _ in self?.canvas?.onFunction?(false) },
                                  for: [.touchUpInside, .touchUpOutside, .touchCancel])
+            case .windowsKey:
+                button.accessibilityLabel = "Windows key"
+                button.accessibilityHint = "Held for the next key. Double-tap for Start."
+                modifierButtons.append((RFBKeys.windows, button))
+                button.addAction(UIAction { [weak self] _ in
+                    guard let self, let canvas = self.canvas else { return }
+                    let now = ProcessInfo.processInfo.systemUptime
+                    if let index = canvas.heldModifiers.firstIndex(of: RFBKeys.windows) {
+                        canvas.heldModifiers.remove(at: index)
+                        // Right after arming it: the key alone, which opens Start. Later: only let go.
+                        if now - self.windowsArmedAt <= Self.doubleTap {
+                            UIDevice.current.playInputClick()
+                            canvas.forgetTyped()
+                            canvas.onKey?(RFBKeys.windows, [])
+                        }
+                    } else {
+                        canvas.heldModifiers.append(RFBKeys.windows)
+                        self.windowsArmedAt = now
+                    }
+                    self.update()
+                }, for: .touchUpInside)
             case .copy:
-                button.accessibilityLabel = "Copy from the Mac to this \(ThisDevice.name)"
+                button.accessibilityLabel = "Copy from \(host) to this \(ThisDevice.name)"
                 button.addAction(UIAction { [weak self] _ in self?.canvas?.onCopy?() }, for: .touchUpInside)
             case .paste:
-                button.accessibilityLabel = "Paste on the Mac"
+                button.accessibilityLabel = "Paste on \(host)"
                 button.addAction(UIAction { [weak self] _ in
                     self?.canvas?.forgetTyped()
                     self?.canvas?.onPaste?()
@@ -1076,6 +1132,10 @@ final class ScreenKeyRow: UIInputView {
     func update() {
         let held = canvas?.heldModifiers ?? []
         for (keysym, button) in modifierButtons {
+            if keysym == RFBKeys.windows {
+                button.configuration = Self.configuration(.windowsKey, selected: held.contains(keysym))
+                continue
+            }
             guard let title = button.configuration?.title else { continue }
             button.configuration = Self.configuration(.modifier(title, keysym, accessibility: ""), selected: held.contains(keysym))
         }
@@ -1104,6 +1164,7 @@ final class ScreenKeyRow: UIInputView {
         case let .keysym(text, _, _), let .modifier(text, _, _): title(text)
         case let .symbol(name, _, _): symbol(name)
         case .function: title("fn")
+        case .windowsKey: title("⊞")
         case .copy: symbol("doc.on.doc")
         case .paste: symbol("doc.on.clipboard")
         }
@@ -1162,6 +1223,7 @@ struct ScreenCanvas: UIViewRepresentable {
         model.onPointerShape = { [weak view] image, size, hotSpot in view?.setPointerShape(image, size: size, hotSpot: hotSpot) }
         // What the Mac said before this canvas was made: the pointer's look comes once, as the view starts.
         view.show(model.image, size: model.screenSize)
+        view.windowsKeys = model.windowsView
         if let shape = model.pointerShape { view.setPointerShape(shape.image, size: shape.size, hotSpot: shape.hotSpot) }
         if let pointer = model.macPointer { view.macPointer(at: pointer.point, onScreen: pointer.onScreen) }
         model.onFrame = { [weak view] image in view?.show(image, size: CGSize(width: image.width, height: image.height)) }
@@ -1172,6 +1234,7 @@ struct ScreenCanvas: UIViewRepresentable {
         view.show(model.image, size: model.screenSize)
         if view.mode != mode { view.mode = mode }
         view.pinchToMac = model.pinchesMac
+        if view.windowsKeys != model.windowsView { view.windowsKeys = model.windowsView }
         guard keyboard != view.isFirstResponder else { return }
         // After this update, not inside it: changing the first responder makes SwiftUI read
         // its graph again (focus), and doing that mid-update hung the app in landscape.

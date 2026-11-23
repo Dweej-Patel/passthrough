@@ -22,7 +22,7 @@ struct RemoteShellSettings: View {
             if session.remoteShellEnabled {
                 setup
                 PhonesSection()
-                if !shell.screenGuests.isEmpty { ScreenGuestsSection() }
+                ComputersWithAccessSection()
                 OpenSessionsSection()
                 MacTerminalsSection()
                 PhoneNotificationsSection()
@@ -32,8 +32,8 @@ struct RemoteShellSettings: View {
                 // Whatever is still running when the setting was just turned off.
                 if shell.sessions.contains(where: \.running) { OpenSessionsSection() }
             }
-            // Viewing another Mac doesn't need this Mac's own remote shell.
-            if !shell.screenPasses.isEmpty { OtherMacScreensSection() }
+            // Reaching another computer doesn't need this Mac's own remote shell.
+            if !shell.screenPasses.isEmpty || !shell.reachableComputers.isEmpty { ReachableComputersSection() }
             // Recorded history stays reachable (to read or delete) with the setting off.
             if session.remoteShellEnabled || !shell.history.isEmpty { HistorySection() }
         }
@@ -345,89 +345,373 @@ private struct NotificationsContent: View {
     }
 }
 
-/// Other Macs a phone let see this screen (screen-only passes): each can
-/// only view and control the screen, and goes when removed here or when the
-/// phone that let it in loses access.
-private struct ScreenGuestsSection: View {
+/// Another Mac a phone let see this screen (a screen-only pass), listed among the computers with
+/// access: it can only view and control the screen, and goes when removed here or when the phone
+/// that let it in loses access.
+private struct ScreenGuestRow: View {
     @EnvironmentObject private var shell: RemoteShellController
-    @State private var removing: ShellPhone?
+    let guest: ShellPhone
+    let remove: () -> Void
 
     var body: some View {
-        Section {
-            ForEach(shell.screenGuests, id: \.phoneID) { guest in
-                HStack(spacing: 12) {
-                    Image(systemName: "desktopcomputer")
-                        .font(.system(size: 17))
-                        .foregroundStyle(.secondary)
-                        .frame(width: 22)
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text(guest.label)
-                        Text(detail(for: guest)).font(.caption).foregroundStyle(.secondary)
-                    }
-                    Spacer()
-                    Button("Remove…") { removing = guest }
-                }
-                .padding(.vertical, 1)
+        HStack(spacing: 12) {
+            Image(systemName: "display")
+                .font(.system(size: 17))
+                .foregroundStyle(.secondary)
+                .frame(width: 22)
+                .accessibilityHidden(true)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(guest.label)
+                Text(detail).font(.caption).foregroundStyle(.secondary)
+                Text("May see and control the screen only").font(.caption).foregroundStyle(.secondary)
             }
-        } header: {
-            Text("Macs that can see this screen")
-        } footer: {
-            Text("Let in from a phone. They can see and control this screen, so they can type into any app open on it, but can't open Passthrough's shells, switches or history.")
-                .font(.caption).foregroundStyle(.secondary)
+            Spacer()
+            Button("Remove…", action: remove)
+                .accessibilityLabel("Remove \(guest.label)'s screen pass")
         }
-        .confirmationDialog("Stop \(removing?.label ?? "this Mac") from seeing this screen?",
-                            isPresented: Binding(get: { removing != nil }, set: { if !$0 { removing = nil } }),
-                            presenting: removing) { guest in
-            Button("Remove", role: .destructive) { shell.revoke(guest.phoneID) }
-        } message: { _ in
-            Text("Any view it has open closes and its pass stops working. A phone can let it in again.")
-        }
+        .padding(.vertical, 1)
     }
 
-    private func detail(for guest: ShellPhone) -> String {
-        var parts = ["Added \(guest.grantedAt.formatted(date: .abbreviated, time: .omitted))"]
+    /// "Mac · screen pass · through Dweej's iPhone · Nov 20, 2026 · viewing the screen".
+    private var detail: String {
+        var parts = ["Mac · screen pass"]
         if let by = shell.granterLabel(of: guest) { parts.append("through \(by)") }
+        parts.append(guest.grantedAt.formatted(date: .abbreviated, time: .omitted))
         if shell.screenViewers.contains(where: { $0.phoneID == guest.phoneID }) { parts.append("viewing the screen") }
         return parts.joined(separator: " · ")
     }
 }
 
-/// Other Macs' screens this Mac may view, with passes handed over by a phone.
-private struct OtherMacScreensSection: View {
+/// The computers this Mac can reach, each handed over by a phone: access to a
+/// PC (or another computer), and passes to other Macs' screens. Removing one
+/// only forgets it here.
+private struct ReachableComputersSection: View {
     @EnvironmentObject private var shell: RemoteShellController
-    @Environment(\.openWindow) private var openWindow
+    @State private var removing: Removal?
+    /// PCs with a Windows login saved, read when this shows and as the list changes (no prompt: it isn't read).
+    @State private var savedSignIns: Set<String> = []
+
+    enum Removal: Identifiable {
+        case computer(ReachableComputer)
+        case pass(ReceivedScreenPass)
+
+        var id: String {
+            switch self {
+            case .computer(let computer): "computer \(computer.id)"
+            case .pass(let pass): "pass \(pass.id)"
+            }
+        }
+
+        var name: String {
+            switch self {
+            case .computer(let computer): computer.credential.macName
+            case .pass(let pass): pass.macName
+            }
+        }
+    }
 
     var body: some View {
         Section {
+            ForEach(shell.reachableComputers) { computer in
+                ReachableComputerRow(computer: computer, hasSavedSignIn: savedSignIns.contains(computer.id),
+                                     forgetSignIn: { forgetSignIn(computer.id) },
+                                     remove: { removing = .computer(computer) })
+            }
             ForEach(shell.screenPasses) { pass in
-                HStack(spacing: 12) {
-                    Image(systemName: "display")
-                        .font(.system(size: 17))
-                        .foregroundStyle(.secondary)
-                        .frame(width: 22)
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text(pass.macName)
-                        Text("From \(pass.from) · \(pass.receivedAt.formatted(date: .abbreviated, time: .omitted))")
-                            .font(.caption).foregroundStyle(.secondary)
-                    }
-                    Spacer()
-                    Button("View") { openWindow(id: RemoteScreenWindow.id, value: pass.id) }
-                    Button("Remove") { shell.removeScreenPass(pass.id) }
-                }
-                .padding(.vertical, 1)
+                ScreenPassRow(pass: pass, remove: { removing = .pass(pass) })
             }
         } header: {
-            Text("Other Macs' screens")
+            Text("Computers this Mac can reach")
         } footer: {
-            Text("A phone with access to both Macs handed these over. Removing one here only forgets it on this Mac; the other Mac can remove it too.")
+            Text("A phone with access to both handed these over. Removing one only forgets it on this Mac; the other computer can remove this Mac too. A saved sign-in is the Windows login a PC's screen window remembered, in this Mac's Keychain.")
                 .font(.caption).foregroundStyle(.secondary)
         }
+        .confirmationDialog("Remove \(removing?.name ?? "this computer") from this Mac?",
+                            isPresented: Binding(get: { removing != nil }, set: { if !$0 { removing = nil } }),
+                            presenting: removing) { removal in
+            Button("Remove", role: .destructive) { remove(removal) }
+        } message: { removal in
+            switch removal {
+            case .computer:
+                Text("This Mac can no longer reach it, and its saved sign-in is deleted. A view of it open here ends. A phone can hand it over again.")
+            case .pass:
+                Text("This Mac can no longer view its screen. A view of it open here ends. A phone can hand it over again.")
+            }
+        }
+        .onAppear(perform: refreshSignIns)
+        .onChange(of: shell.reachableComputers) { refreshSignIns() }
     }
+
+    private func remove(_ removal: Removal) {
+        switch removal {
+        case .computer(let computer): shell.removeReachableComputer(computer.id)
+        case .pass(let pass): shell.removeScreenPass(pass.id)
+        }
+        refreshSignIns()
+    }
+
+    private func forgetSignIn(_ hostID: String) {
+        WindowsLoginStore.delete(hostID: hostID)
+        refreshSignIns()
+    }
+
+    private func refreshSignIns() {
+        savedSignIns = Set(shell.reachableComputers.map(\.id).filter { WindowsLoginStore.has(hostID: $0) })
+    }
+}
+
+/// Access to another computer: what it is, which phone handed it over, what
+/// this Mac may do there, and View, Forget Saved Sign-In and Remove.
+private struct ReachableComputerRow: View {
+    @Environment(\.openWindow) private var openWindow
+    let computer: ReachableComputer
+    let hasSavedSignIn: Bool
+    let forgetSignIn: () -> Void
+    let remove: () -> Void
+
+    var body: some View {
+        HStack(spacing: 12) {
+            Image(systemName: computer.credential.hostKind == HostInfo.kindWindows ? "pc" : "desktopcomputer")
+                .font(.system(size: 17))
+                .foregroundStyle(.secondary)
+                .frame(width: 22)
+                .accessibilityHidden(true)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(computer.credential.macName)
+                Text(detail).font(.caption).foregroundStyle(.secondary)
+                Text(access).font(.caption)
+                    .foregroundStyle(computer.screenWaitsForOwner ? PTColor.attentionText : .secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                if hasSavedSignIn {
+                    Button("Forget Saved Sign-In", action: forgetSignIn)
+                        .buttonStyle(.link)
+                        .font(.caption)
+                        .help("Delete the Windows login saved for \(computer.credential.macName). Its screen window asks for one again.")
+                        .accessibilityLabel("Forget the saved sign-in for \(computer.credential.macName)")
+                }
+            }
+            Spacer()
+            if computer.mayAskForScreen {
+                Button("View") { openWindow(id: PCScreenWindow.id, value: computer.id) }
+                    .accessibilityLabel("View \(computer.credential.macName)'s screen")
+            }
+            Button("Remove…", action: remove)
+                .accessibilityLabel("Remove \(computer.credential.macName)")
+        }
+        .padding(.vertical, 1)
+    }
+
+    /// "PC · from Dweej's iPhone · Nov 20, 2026".
+    private var detail: String {
+        var parts = [computer.kindName]
+        if let from = computer.from { parts.append("from \(from)") }
+        parts.append(computer.receivedAt.formatted(date: .abbreviated, time: .omitted))
+        return parts.joined(separator: " · ")
+    }
+
+    /// What this Mac may do there, as the hand-over said: "Shell and screen", "Shell · the screen waits for its owner to allow it".
+    private var access: String {
+        var may: [String] = []
+        if computer.scopes.contains(Computers.scopeShell) { may.append("shell") }
+        if computer.scopes.contains(Computers.scopeScreen) { may.append("screen") }
+        var parts = may.isEmpty ? [] : [may.joined(separator: " and ").capitalizedFirst]
+        if computer.screenWaitsForOwner { parts.append(parts.isEmpty ? "Waits for its owner to allow the screen" : "waits for its owner to allow the screen") }
+        return parts.isEmpty ? "Nothing yet" : parts.joined(separator: " · ")
+    }
+}
+
+/// A pass to another Mac's screen: View and Remove.
+private struct ScreenPassRow: View {
+    @Environment(\.openWindow) private var openWindow
+    let pass: ReceivedScreenPass
+    let remove: () -> Void
+
+    var body: some View {
+        HStack(spacing: 12) {
+            Image(systemName: "display")
+                .font(.system(size: 17))
+                .foregroundStyle(.secondary)
+                .frame(width: 22)
+                .accessibilityHidden(true)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(pass.macName)
+                Text("Mac · screen pass · from \(pass.from) · \(pass.receivedAt.formatted(date: .abbreviated, time: .omitted))")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            Spacer()
+            Button("View") { openWindow(id: RemoteScreenWindow.id, value: pass.id) }
+                .accessibilityLabel("View \(pass.macName)'s screen")
+            Button("Remove…", action: remove)
+                .accessibilityLabel("Remove the pass to \(pass.macName)'s screen")
+        }
+        .padding(.vertical, 1)
+    }
+}
+
+/// Computers a phone gave access to this Mac (`Computers`): what each is and
+/// may do, which phone shared it, and Stop (end what it has open now) or
+/// Revoke (take its access away). Other Macs a phone gave a screen pass are
+/// here too, marked so, with Remove.
+private struct ComputersWithAccessSection: View {
+    @EnvironmentObject private var shell: RemoteShellController
+    @State private var removing: Removal?
+
+    /// One question for either kind of row.
+    enum Removal: Identifiable {
+        case computer(ShellPhone)
+        case pass(ShellPhone)
+
+        var entry: ShellPhone {
+            switch self {
+            case .computer(let entry), .pass(let entry): entry
+            }
+        }
+
+        var id: String { entry.phoneID }
+    }
+
+    var body: some View {
+        Section {
+            if shell.computerGuests.isEmpty && shell.screenGuests.isEmpty {
+                Text("No computers yet.").foregroundStyle(.secondary)
+            }
+            ForEach(shell.computerGuests, id: \.phoneID) { computer in
+                ComputerGuestRow(computer: computer, revoke: { removing = .computer(computer) })
+            }
+            ForEach(shell.screenGuests, id: \.phoneID) { guest in
+                ScreenGuestRow(guest: guest, remove: { removing = .pass(guest) })
+            }
+        } header: {
+            Text("Computers with access")
+        } footer: {
+            Text(footer)
+        }
+        .confirmationDialog(title, isPresented: Binding(get: { removing != nil }, set: { if !$0 { removing = nil } }),
+                            presenting: removing) { removal in
+            switch removal {
+            case .computer(let computer):
+                Button("Revoke Access", role: .destructive) { shell.revokeComputer(computer.phoneID) }
+            case .pass(let guest):
+                Button("Remove", role: .destructive) { shell.revoke(guest.phoneID) }
+            }
+        } message: { removal in
+            switch removal {
+            case .computer:
+                Text("Its shells and any view of the screen close, and its key stops working. A phone you let share access can give it access again.")
+            case .pass:
+                Text("Any view it has open closes and its pass stops working. A phone can let it in again.")
+            }
+        }
+    }
+
+    private var title: String {
+        switch removing {
+        case .computer(let computer)?: "Revoke \(computer.label)'s access?"
+        case .pass(let guest)?: "Stop \(guest.label) from seeing this screen?"
+        case nil: ""
+        }
+    }
+
+    private var footer: String {
+        var text = "A phone you let share access with other computers gave these access. Stop ends a computer's shells and its view of the screen now; it can connect again. Revoke takes its access away."
+        if !shell.screenGuests.isEmpty {
+            text += " A Mac with a screen pass was let in from a phone: it can see and control this screen, so it can type into any app open on it, but can't open Passthrough's shells, switches or history."
+        }
+        return text
+    }
+}
+
+/// One computer with access: its name and kind, which phone shared it and
+/// when, what it may do now, and what it has open here.
+private struct ComputerGuestRow: View {
+    @EnvironmentObject private var shell: RemoteShellController
+    let computer: ShellPhone
+    let revoke: () -> Void
+
+    var body: some View {
+        HStack(spacing: 12) {
+            Image(systemName: computer.kind == HostInfo.kindWindows ? "pc" : "desktopcomputer")
+                .font(.system(size: 17))
+                .foregroundStyle(.secondary)
+                .frame(width: 22)
+                .accessibilityHidden(true)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(computer.label)
+                Text(detail).font(.caption).foregroundStyle(.secondary)
+                Text(mayDo).font(.caption).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            Spacer()
+            Button("Stop") { shell.disconnectComputer(computer.phoneID) }
+                .help("End \(computer.label)'s shells and its view of the screen now. It keeps its access and can connect again.")
+                .accessibilityLabel("Stop \(computer.label)'s connections")
+            Button("Revoke…", action: revoke)
+                .accessibilityLabel("Revoke \(computer.label)'s access")
+        }
+        .padding(.vertical, 1)
+    }
+
+    private var kindName: String {
+        switch computer.kind {
+        case HostInfo.kindWindows: "PC"
+        case HostInfo.kindMac: "Mac"
+        default: "Computer"
+        }
+    }
+
+    /// "PC · shared by Dweej's iPhone 2 days ago".
+    private var detail: String {
+        let when = computer.grantedAt.formatted(.relative(presentation: .named))
+        if let by = shell.granterLabel(of: computer) { return "\(kindName) · shared by \(by) \(when)" }
+        return "\(kindName) · shared \(when)"
+    }
+
+    /// What it may do now, as each of its requests is checked, then what it has open here.
+    private var mayDo: String {
+        let scopes = shell.computerScopes(computer.phoneID)
+        var may: [String] = []
+        if scopes.contains(Computers.scopeShell) { may.append("open shells as you") }
+        if scopes.contains(Computers.scopeScreen) { may.append("see and control the screen") }
+        var parts = [may.isEmpty ? "May do nothing for now" : "May " + may.joined(separator: " and ")]
+        // Given the screen, but the phone that shared it may no longer see it: neither may the computer.
+        if computer.screen == true, !scopes.contains(Computers.scopeScreen) {
+            parts.append("the screen is off while \(shell.granterLabel(of: computer) ?? "its phone") may not see it")
+        }
+        parts += live
+        return parts.joined(separator: " · ")
+    }
+
+    /// What it has open here that this Mac knows of: its view of the screen, a connection from anywhere, its shells.
+    private var live: [String] {
+        var parts: [String] = []
+        if shell.screenViewers.contains(where: { $0.phoneID == computer.phoneID }) { parts.append("viewing the screen") }
+        switch shell.irohStatus.paths[computer.phoneID] {
+        case .direct?: parts.append("connected from anywhere, directly")
+        case .relay?: parts.append("connected from anywhere, through a relay")
+        case .unknown?: parts.append("connecting")
+        case nil: break
+        }
+        // By the id it opened with; by name only for a session from before ids were kept, as a phone
+        // and a computer, or two computers, may share a name.
+        let shells = shell.terminals.filter { terminal in
+            guard terminal.origin == .phone else { return false }
+            if let id = terminal.openedBy { return id == computer.phoneID }
+            return shell.opener(of: terminal).map { $0.name == computer.label && $0.isComputer != false } ?? false
+        }.count
+        if shells > 0 { parts.append(shells == 1 ? "1 shell open" : "\(shells) shells open") }
+        return parts
+    }
+}
+
+private extension String {
+    /// "Shell and screen", for the start of a line.
+    var capitalizedFirst: String { prefix(1).uppercased() + dropFirst() }
 }
 
 private struct PhonesSection: View {
     @EnvironmentObject private var shell: RemoteShellController
     @State private var revoking: ShellPhone?
+    @State private var stopping: ShellPhone?
 
     var body: some View {
         Section {
@@ -446,6 +730,9 @@ private struct PhonesSection: View {
                             Text(detail(for: phone)).font(.caption).foregroundStyle(.secondary)
                         }
                         Spacer()
+                        Button("Stop…") { stopping = phone }
+                            .help("End \(phone.label)'s connections, its view of the screen and the shells it opened, now. It keeps its access and can connect again.")
+                            .accessibilityLabel("Stop \(phone.label)'s connections")
                         Button("Revoke…") { revoking = phone }
                     }
                     // What else this phone may do, under its name so long details don't squeeze it.
@@ -471,6 +758,14 @@ private struct PhonesSection: View {
             if !shell.phones.isEmpty {
                 Text("May share access with other computers lets that phone give another of your computers access to this Mac, from anywhere. Turning it off stops new sharing; computers it already let in stay until you remove them.")
             }
+        }
+        // A phone's own shells may be what you're working in, so this asks first.
+        .confirmationDialog("End what \(stopping?.label ?? "this phone") has open?",
+                            isPresented: Binding(get: { stopping != nil }, set: { if !$0 { stopping = nil } }),
+                            presenting: stopping) { phone in
+            Button("End Shells and Connections", role: .destructive) { shell.disconnectPhone(phone.phoneID) }
+        } message: { _ in
+            Text("The shells it opened close, as when you close a Terminal window, and its view of the screen ends. Their recordings are kept. It keeps its access and can connect again.")
         }
         .confirmationDialog("Revoke \(revoking?.label ?? "this phone")'s access?",
                             isPresented: Binding(get: { revoking != nil }, set: { if !$0 { revoking = nil } }),
@@ -531,7 +826,8 @@ private struct OpenSessionsSection: View {
                         .frame(width: 22)
                     VStack(alignment: .leading, spacing: 2) {
                         Text(terminal.info.title).lineLimit(1).truncationMode(.middle)
-                        Text(SessionWording.detail(terminal))
+                        Text(SessionWording.detail(terminal, opener: shell.opener(of: terminal)?.name,
+                                                   someone: shell.computerGuests.isEmpty ? "a phone" : "a phone or computer"))
                             .font(.caption).foregroundStyle(.secondary)
                     }
                     Spacer()
@@ -561,16 +857,20 @@ private struct OpenSessionsSection: View {
 
 /// How a session's row says where it is and who is looking at it.
 enum SessionWording {
-    /// "In a terminal here · a phone is attached", "From a phone · started 5 minutes ago".
-    static func detail(_ terminal: ShellSessionDetail, now: Date = Date()) -> String {
+    /// "In a terminal here · a phone is attached", "From Office PC · started 5 minutes ago".
+    /// `opener` is who opened it, by name (`RemoteShellController.opener(of:)`); `someone` is who
+    /// that may be while it isn't known, and who may be attached: "a phone", or "a phone or
+    /// computer" once a computer has access.
+    static func detail(_ terminal: ShellSessionDetail, opener: String? = nil, someone: String = "a phone", now: Date = Date()) -> String {
         var parts: [String] = []
+        let from = "From \(opener ?? someone)"
         switch (terminal.origin, terminal.macViewers > 0) {
         case (.mac, true): parts.append("In a terminal here")
         case (.mac, false): parts.append("Started in a terminal here")
-        case (.phone, true): parts.append("From a phone · open in a terminal here")
-        case (.phone, false): parts.append("From a phone")
+        case (.phone, true): parts.append(from + " · open in a terminal here")
+        case (.phone, false): parts.append(from)
         }
-        if terminal.phoneAttached { parts.append("a phone is attached") }
+        if terminal.phoneAttached { parts.append("\(someone) is attached") }
         parts.append("started " + Date(timeIntervalSince1970: terminal.info.startedAt).formatted(.relative(presentation: .named)))
         return parts.joined(separator: " · ")
     }

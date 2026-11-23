@@ -29,6 +29,13 @@ public struct ShellCredential: Codable, Equatable, Sendable {
     }
 }
 
+extension ShellCredential {
+    /// What proves it is this computer and no other: its certificate and its iroh id. A login saved for a computer
+    /// is kept with this and used only while the credential still says the same, so a host that later claims the
+    /// same id with its own keys is never sent it.
+    public var loginPin: String { certSHA256.lowercased() + "/" + (irohID ?? "") }
+}
+
 /// Printing a credential never shows its secrets: the shell key is left out
 /// and the relay token only said to be there.
 extension ShellCredential: CustomStringConvertible, CustomDebugStringConvertible {
@@ -80,9 +87,16 @@ public protocol ShellIrohDialing: AnyObject, Sendable {
     func connect(irohID: String, relayURL: String?, relayToken: String?, addresses: [String]) async throws -> any ByteStream
     /// How a stream `connect` returned is carried right now.
     func path(of stream: any ByteStream) -> ShellPath
+    /// For the log: every path the stream's connection has (the selected one
+    /// marked), this side's own direct addresses and its hole-punch counters.
+    func pathReport(of stream: any ByteStream) -> String?
     /// Ends every dial in progress and closes the endpoint and its streams.
     /// A later `connect` starts afresh.
     func shutdown()
+}
+
+public extension ShellIrohDialing {
+    func pathReport(of stream: any ByteStream) -> String? { nil }
 }
 
 /// The phone's side of the remote shell (protocol/README.md, "Remote shell"):
@@ -170,6 +184,8 @@ public final class ShellClient: @unchecked Sendable {
         case computerPassSaved
         /// The answer to `revokeComputer`: the computer's access is gone.
         case computerRevoked
+        /// `computerList`: the computers this device gave access to the host, cleaned (`ComputerAccess.cleaned`).
+        case computerList([ComputerAccess])
     }
 
     public enum ConnectError: Error, Sendable {
@@ -535,12 +551,18 @@ public final class ShellClient: @unchecked Sendable {
         command(m)
     }
 
-    /// Takes back access `grantComputer` got (`computerID`) that couldn't be handed over;
+    /// Takes back access `grantComputer` got (`computerID`), whether or not it was handed over;
     /// `.computerRevoked` answers, or `.failed`.
     public func revokeComputer(_ computerID: String) {
         var m = ShellEnvelope(t: ShellEnvelope.computerRevoke)
         m.phoneID = computerID
         command(m)
+    }
+
+    /// Asks for the computers this device gave access to the host: `.computerList` answers, and again
+    /// whenever the list changes while this connection lasts. An older host answers `.failed(.badRequest)`.
+    public func listComputers() {
+        command(ShellEnvelope(t: ShellEnvelope.listComputers))
     }
 
     public func requestTranscript(_ session: String) {
@@ -886,12 +908,17 @@ public final class ShellClient: @unchecked Sendable {
             emit(.computerPassSaved)
         case ShellEnvelope.computerRevoked:
             emit(.computerRevoked)
+        case ShellEnvelope.computerList:
+            emit(.computerList(ComputerAccess.cleaned(message.computers ?? [])))
         case ShellEnvelope.screenPassSaved:
             emit(.screenPassSaved)
         case ShellEnvelope.screenRevoked:
             emit(.screenRevoked)
         case ShellEnvelope.ping:
             send(ShellEnvelope(t: ShellEnvelope.pong))
+        case ShellEnvelope.screenReady where rdpRequested, ShellEnvelope.screenVideoReady where rdpRequested:
+            // Asked for Remote Desktop, answered with something else: nothing is handed over.
+            return attemptEnded(id, ConnectError.protocolViolation)
         case ShellEnvelope.screenReady where screenRequested, ShellEnvelope.screenVideoReady where screenRequested:
             handOver(id)
         case ShellEnvelope.rdpReady where rdpRequested:

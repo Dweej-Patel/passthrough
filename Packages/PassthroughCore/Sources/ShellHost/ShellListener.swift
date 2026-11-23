@@ -200,6 +200,29 @@ public final class ShellListener: @unchecked Sendable {
         set { gate.computerScopesLookup.set(newValue) }
     }
 
+    /// The computers a phone gave access here (`computerList`), oldest first; `computerPresence` says which are connected.
+    public var computerList: (@Sendable (String) -> [ComputerAccess])? {
+        get { gate.computerListProvider.get() }
+        set { gate.computerListProvider.set(newValue) }
+    }
+
+    /// Which computers are connected, for phones' lists: give both listeners the same one, so a
+    /// computer on either shows as connected on both, and both push the lists when one comes or
+    /// goes. Set before `start`. Unset: this listener's own.
+    public var computerPresence: ComputerPresence {
+        get { gate.computerPresence }
+        set { gate.useComputerPresence(newValue) }
+    }
+
+    /// A computer proved its key and connected (so it has that grant). Called off the listener's queue.
+    public var onComputerUsed: (@Sendable (_ computerID: String) -> Void)? {
+        get { gate.computerUsed.get() }
+        set { gate.computerUsed.set(newValue) }
+    }
+
+    /// Sends the computer list again to every phone that asked for it on its connection (a grant changed).
+    public func pushComputerLists() { gate.pushComputerLists() }
+
     /// A phone asking this Mac to give another computer access: the new id and key and the scopes
     /// granted, or why not. Run off the listener's queue (it writes the Keychain). Unset: `bad_request`.
     public var onComputerGrant: (@Sendable (_ phoneID: String, _ label: String, _ request: ComputerGrantRequest) -> Result<(id: String, key: Data, scopes: [String]), ShellError>)? {
@@ -445,6 +468,61 @@ public final class ScreenViewLimit: @unchecked Sendable {
     var count: Int { lock.lock(); defer { lock.unlock() }; return open.values.reduce(0, +) }
 }
 
+/// The computers with a connection open, counted across the listeners that share it, so a phone's
+/// `computerList` says connected whichever path the computer came in on. When one comes or goes,
+/// every listener sharing it sends its phones the list again.
+public final class ComputerPresence: @unchecked Sendable {
+    private struct Watcher {
+        weak var gate: ShellGate?
+    }
+
+    private let lock = NSLock()
+    private var open: [String: Int] = [:]
+    private var watchers: [Watcher] = []
+
+    public init() {}
+
+    /// Whether the computer has a connection open on any listener sharing this.
+    public func isConnected(_ id: String) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        return open[id] != nil
+    }
+
+    func watch(_ gate: ShellGate) {
+        lock.lock(); defer { lock.unlock() }
+        watchers.removeAll { $0.gate == nil || $0.gate === gate }
+        watchers.append(Watcher(gate: gate))
+    }
+
+    func unwatch(_ gate: ShellGate) {
+        lock.lock(); defer { lock.unlock() }
+        watchers.removeAll { $0.gate == nil || $0.gate === gate }
+    }
+
+    func opened(_ id: String) {
+        lock.lock()
+        open[id, default: 0] += 1
+        let first = open[id] == 1
+        lock.unlock()
+        if first { changed() }
+    }
+
+    func closed(_ id: String) {
+        lock.lock()
+        let left = (open[id] ?? 1) - 1
+        open[id] = left > 0 ? left : nil
+        let last = left <= 0
+        lock.unlock()
+        if last { changed() }
+    }
+
+    /// Never under the lock: each gate hops onto its own queue.
+    private func changed() {
+        lock.lock(); let gates = watchers.compactMap(\.gate); lock.unlock()
+        gates.forEach { $0.pushComputerLists() }
+    }
+}
+
 /// What both shell listeners share once a stream is open: pre-auth slots,
 /// the handshake (an optional `hello` line, challenge, proof, `ready`,
 /// `macInfo`), and the authorized connections it admits to the sessions in
@@ -485,9 +563,20 @@ final class ShellGate: @unchecked Sendable {
     let screenPassUsed = Locked<(@Sendable (_ viewerID: String) -> Void)?>(nil)
     let computerKeyLookup = Locked<(@Sendable (String) -> Data?)?>(nil)
     let computerScopesLookup = Locked<(@Sendable (String) -> Set<String>)?>(nil)
+    let computerListProvider = Locked<(@Sendable (String) -> [ComputerAccess])?>(nil)
     let computerGrant = Locked<(@Sendable (_ phoneID: String, _ label: String, _ request: ComputerGrantRequest) -> Result<(id: String, key: Data, scopes: [String]), ShellError>)?>(nil)
     let computerPass = Locked<(@Sendable (_ phoneID: String, _ label: String, _ pass: ShellCredential, _ scopes: [String], _ pending: [String]) -> ShellError?)?>(nil)
     let computerRevoke = Locked<(@Sendable (_ phoneID: String, _ computerID: String) -> Bool)?>(nil)
+    let computerUsed = Locked<(@Sendable (_ computerID: String) -> Void)?>(nil)
+    /// `ShellListener.computerPresence`: its own until the app gives both listeners one.
+    private let presence = Locked(ComputerPresence())
+    var computerPresence: ComputerPresence { presence.get() }
+
+    func useComputerPresence(_ shared: ComputerPresence) {
+        presence.get().unwatch(self)
+        presence.set(shared)
+        shared.watch(self)
+    }
 
     /// Which listener this gate serves, and what a computer's signature must be bound to there:
     /// the SHA-256 of the certificate on TLS, the endpoint id on iroh (32 raw bytes).
@@ -555,6 +644,7 @@ final class ShellGate: @unchecked Sendable {
         self.keyConfirmed = keyConfirmed
         self.phoneLabel = phoneLabel
         self.macInfo = macInfo
+        presence.get().watch(self)
     }
 
     /// Handshakes holding a slot now. On the queue.
@@ -694,10 +784,18 @@ final class ShellGate: @unchecked Sendable {
         let connection = ShellConnection(gate: self, stream: stream, phoneID: phoneID, label: label, role: role)
         let key = ObjectIdentifier(connection)
         connections[key] = connection
-        connection.onClose = { [weak self] in self?.connections[key] = nil }
+        // Whether it is connected is in its phone's list, on every listener sharing the presence
+        // (which pushes the lists). The one it opened with is the one it leaves.
+        let presence = role == .computer ? computerPresence : nil
+        connection.onClose = { [weak self] in
+            self?.connections[key] = nil
+            presence?.closed(phoneID)
+        }
+        presence?.opened(phoneID)
         ptLog(.info, screenOnly ? "shell: a screen pass connected" : role == .computer ? "shell: a computer connected" : "shell: a phone connected")
         // Told off this queue: it may write the Keychain.
         if screenOnly, let used = screenPassUsed.get() { DispatchQueue.global(qos: .utility).async { used(phoneID) } }
+        if role == .computer, let used = computerUsed.get() { DispatchQueue.global(qos: .utility).async { used(phoneID) } }
         connection.start(initialBytes: rest, macInfo: macInfo(), host: screenOnly ? nil : hostInfoProvider.get()?(phoneID))
     }
 
@@ -756,6 +854,23 @@ final class ShellGate: @unchecked Sendable {
     func pushMacState() {
         queue.async { [self] in
             connections.values.filter { !$0.isScreen }.forEach { $0.sendMacState() }
+        }
+    }
+
+    /// On the queue: `phoneID`'s computers, each marked connected while it has a connection on a
+    /// listener sharing this one's presence.
+    func computerList(for phoneID: String) -> [ComputerAccess] {
+        let presence = computerPresence
+        return (computerListProvider.get()?(phoneID) ?? []).prefix(Computers.maxTotal).map {
+            var entry = $0
+            entry.connected = presence.isConnected(entry.phoneID)
+            return entry
+        }
+    }
+
+    func pushComputerLists() {
+        queue.async { [self] in
+            connections.values.forEach { $0.sendComputerList() }
         }
     }
 
@@ -880,6 +995,17 @@ final class ShellConnection: ShellAttachment, @unchecked Sendable {
             reply.events = Array((reply.events ?? []).dropFirst(max(1, (reply.events?.count ?? 0) / 10)))
         }
         send(reply)
+    }
+
+    /// Asked for `computerList` on this connection: it is sent again whenever it changes.
+    private var listsComputers = false
+
+    /// On the queue: this phone's computers, if it asked for them on this connection.
+    func sendComputerList() {
+        guard !closed, listsComputers, role == .phone, let gate else { return }
+        var message = ShellEnvelope(t: ShellEnvelope.computerList)
+        message.computers = gate.computerList(for: phoneID)
+        send(message)
     }
 
     /// On the queue: the session list, unasked.
@@ -1121,6 +1247,11 @@ final class ShellConnection: ShellAttachment, @unchecked Sendable {
         case ShellEnvelope.computerRevoke:
             guard let computerID = message.phoneID, Computers.isComputerID(computerID) else { return fail(.badRequest) }
             revokeComputer(computerID)
+        case ShellEnvelope.listComputers:
+            // Computers are refused it above (`computerRefusal`), passes before that.
+            guard role == .phone else { return fail(.notAllowed) }
+            listsComputers = true
+            sendComputerList()
         case ShellEnvelope.ping:
             send(ShellEnvelope(t: ShellEnvelope.pong))
         case ShellEnvelope.pong:

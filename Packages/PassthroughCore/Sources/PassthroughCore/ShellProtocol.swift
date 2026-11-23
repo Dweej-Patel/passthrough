@@ -101,6 +101,8 @@ public struct ShellEnvelope: Codable, Equatable, Sendable {
     public var kind: String?
     /// proof from a `computer.` id: the identity key's signature (`ComputerProof`, raw r ‖ s, base64).
     public var sig: String?
+    /// computerList: the computers this phone gave access to the host (`ComputerAccess`).
+    public var computers: [ComputerAccess]?
 
     public init(t: String) { self.t = t }
 
@@ -179,13 +181,17 @@ public struct ShellEnvelope: Codable, Equatable, Sendable {
     public static let screenEnded = "screenEnded"
     /// Computers (`Computers`): a phone gives another of its computers access (`computerGrant`, answered
     /// `computerGranted`), hands it over (`computerPass`, answered `computerPassSaved`), or takes back one
-    /// it couldn't hand over (`computerRevoke`, answered `computerRevoked`).
+    /// it gave, at any time (`computerRevoke`, answered `computerRevoked`).
     public static let computerGrant = "computerGrant"
     public static let computerGranted = "computerGranted"
     public static let computerPass = "computerPass"
     public static let computerPassSaved = "computerPassSaved"
     public static let computerRevoke = "computerRevoke"
     public static let computerRevoked = "computerRevoked"
+    /// The computers this phone gave access to the host: asked once with `listComputers`, then the host
+    /// sends `computerList` again on that connection whenever it changes.
+    public static let listComputers = "listComputers"
+    public static let computerList = "computerList"
 
     public func encodedLine() throws -> Data {
         var data = try JSONEncoder().encode(self)
@@ -367,10 +373,17 @@ public enum ScreenPass {
     /// Whether an id is one a Mac minted for a pass.
     public static func isViewerID(_ id: String) -> Bool { id.hasPrefix(idPrefix) }
 
-    /// A device's name as a pass may carry it: one line, at most `maxName` characters.
+    /// A device's name as a pass may carry it: one line with no control or format characters (tabs, bidi and
+    /// zero-width marks), at most `maxName` characters.
     public static func cleanName(_ name: String) -> String {
-        let line = name.split(whereSeparator: \.isNewline).joined(separator: " ").trimmingCharacters(in: .whitespaces)
-        return String(line.prefix(maxName))
+        let line = name.split(whereSeparator: \.isNewline).joined(separator: " ")
+        let visible = String(String.UnicodeScalarView(line.unicodeScalars.map {
+            switch $0.properties.generalCategory {
+            case .control, .format: " "
+            default: $0
+            }
+        }))
+        return String(visible.trimmingCharacters(in: .whitespaces).prefix(maxName))
     }
 
     public static func isValidName(_ name: String) -> Bool {
@@ -438,6 +451,50 @@ public enum Computers {
             && !pass.macID.isEmpty && pass.macID.count <= 128 && ScreenPass.isValidName(pass.macName)
             && pass.addresses.count <= IrohInfo.maxAddresses
             && (pass.irohID == nil || IrohInfo.areValid(id: pass.irohID, relay: pass.irohRelay, token: pass.relayToken))
+    }
+}
+
+/// One computer a phone gave access to a host, as the host lists it (`computerList`): only the
+/// asking phone's own grants, oldest first.
+public struct ComputerAccess: Codable, Equatable, Sendable {
+    /// The computer's id on that host (`computer.` …): what `computerRevoke` names.
+    public var phoneID: String
+    /// The id the phone named it by in `computerGrant` (its own id for that computer); nil if the host kept none.
+    public var viewer: String?
+    public var name: String
+    /// `HostInfo.kindMac`, `kindWindows`; nil when the host doesn't know.
+    public var kind: String?
+    /// What it may do now.
+    public var scopes: [String]
+    /// What waits for the host's owner (`screen` on a PC); nil when nothing does.
+    public var pending: [String]?
+    /// It has a connection open to the host right now.
+    public var connected: Bool
+    /// When it was given access (Unix seconds, a whole number on the wire).
+    public var grantedAt: Int64
+
+    public init(phoneID: String, viewer: String? = nil, name: String, kind: String? = nil, scopes: [String], pending: [String]? = nil,
+                connected: Bool, grantedAt: Int64) {
+        self.phoneID = phoneID; self.viewer = viewer; self.name = name; self.kind = kind; self.scopes = scopes
+        self.pending = pending; self.connected = connected; self.grantedAt = grantedAt
+    }
+
+    /// A host's list as this device keeps it: computer ids only, known scopes only, names cleaned as a
+    /// pass's, at most `Computers.maxTotal`, oldest first.
+    public static func cleaned(_ list: [ComputerAccess]) -> [ComputerAccess] {
+        let kept: [ComputerAccess] = list.compactMap { entry in
+            guard Computers.isComputerID(entry.phoneID), entry.phoneID.count <= 128 else { return nil }
+            var entry = entry
+            if let viewer = entry.viewer, viewer.isEmpty || viewer.count > 128 { entry.viewer = nil }
+            entry.name = ScreenPass.cleanName(entry.name)
+            guard !entry.name.isEmpty else { return nil }
+            entry.scopes = Computers.allScopes.filter(entry.scopes.contains)
+            let pending = Computers.allScopes.filter { (entry.pending ?? []).contains($0) && !entry.scopes.contains($0) }
+            entry.pending = pending.isEmpty ? nil : pending
+            if let kind = entry.kind, kind != HostInfo.kindMac, kind != HostInfo.kindWindows { entry.kind = nil }
+            return entry
+        }
+        return Array(kept.sorted { $0.grantedAt < $1.grantedAt }.prefix(Computers.maxTotal))
     }
 }
 
