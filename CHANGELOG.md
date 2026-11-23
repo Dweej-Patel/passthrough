@@ -404,6 +404,14 @@ these steps as written and check each one before building.
   opened from the home screen; `--no-pc-screen` turns it off. With the switch
   off, a PC's Screen row says so instead of "isn't in this version yet".
 
+* **Sharing a computer with a PC says what to do on the PC.** When the PC
+  can't take the access because no one is signed in or Passthrough isn't open
+  there, the iPhone and iPad say so (*Sign in to … and open Passthrough there*,
+  *Open Passthrough on …*). Before, they said the PC "needs the latest
+  Passthrough". While the PC keeps the access, the sheet says *Confirm on …
+  when it asks (Windows Hello or the account's password)*, because the PC
+  waits only about half a minute for that.
+
 * **Saved Windows logins follow the PC, not just its id.** A login saved on
   the iPhone or the Mac is used only while the PC's credential has the same
   certificate and iroh id, so a host that later claimed the same id with its
