@@ -129,10 +129,15 @@ public sealed class IrohTests : IDisposable
         await Assert.ThrowsAsync<IrohException>(() => Task.Run(() => viewer.Connect(host.Id, null, host.LoopbackAddresses)).WaitAsync(Patience));
         await turnedAway.WaitAsync(Patience);
 
-        var waiting = Task.Run(() => host.Accept());
+        // The dial tried both loopback families: the attempt over the other one may still arrive, and is turned away too.
+        var waiting = Task.Run(() =>
+        {
+            while (host.Accept() is { } late) { late.Cancel(); late.Dispose(); }
+            return true;
+        });
         await Task.Delay(200);
         host.Close();
-        Assert.Null(await waiting.WaitAsync(Patience));
+        Assert.True(await waiting.WaitAsync(Patience));
     }
 
     [Fact]
