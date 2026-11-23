@@ -120,6 +120,30 @@ public sealed unsafe class IrohEndpoint : IDisposable
     }
 
     /// <summary>Closes the endpoint: a pending <see cref="Accept"/> returns null, handshakes and dials fail.</summary>
+    /// <summary>
+    /// Diagnostics: this endpoint's own addresses (the public one once the relay told it), its relay and the socket's
+    /// hole-punching and path counters, as one line. It names addresses: logged only when diagnostics are on.
+    /// </summary>
+    public string Report()
+    {
+        try { return IrohNative.Text((b, c) => IrohNative.pt_iroh_endpoint_report(_handle, b, c)); }
+        catch (Exception e) when (e is EntryPointNotFoundException or IrohException) { return ""; }
+    }
+
+    /// <summary>
+    /// Diagnostics: iroh's own events matching <paramref name="filter"/> go to <paramref name="file"/> from now on
+    /// (once per process). False when it couldn't start (an older bridge, the file, or a second call).
+    /// </summary>
+    public static bool StartTrace(string file, string filter)
+    {
+        var (p, f) = (System.Text.Encoding.UTF8.GetBytes(file), System.Text.Encoding.UTF8.GetBytes(filter));
+        try
+        {
+            fixed (byte* pp = p, fp = f) return IrohNative.pt_iroh_trace_start(pp, (nuint)p.Length, fp, (nuint)f.Length) == IrohNative.Ok;
+        }
+        catch (EntryPointNotFoundException) { return false; }
+    }
+
     public void Close() => IrohNative.pt_iroh_endpoint_close(_handle);
 
     public void Dispose()
@@ -206,6 +230,13 @@ public sealed class IrohStream : Stream, Passthrough.Core.Shell.Serving.IStreamP
             }
             catch (EntryPointNotFoundException) { return null; }
         }
+    }
+
+    /// <summary>Diagnostics: every path with its address and round trip, "; " between them, the selected one starred. Names the peer's addresses.</summary>
+    public unsafe string DescribePaths()
+    {
+        try { return IrohNative.Text((b, c) => IrohNative.pt_iroh_stream_paths(_handle, b, c)).Replace("\n", "; "); }
+        catch (Exception e) when (e is EntryPointNotFoundException or IrohException or ObjectDisposedException) { return ""; }
     }
 
     /// <summary>The selected path's QUIC numbers (round trip, window, loss), or empty with an older bridge.</summary>

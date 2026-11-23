@@ -67,7 +67,12 @@ internal sealed class BackgroundService
             : null;
         if (tls is null) Log("tls: this Windows has no TLS 1.3 server; phones use the built-in connection only");
         Remote = new ServiceRemote(store, _installed.InstallFolder, Trays!, () => _state.Relay.Url, Log, tls: tls, screenSetup: () => _state.Rdp,
-            allowedAccounts: () => _state.AllowedAccounts);
+            allowedAccounts: () => _state.AllowedAccounts)
+        {
+            // An administrator's switch for one test (only they can write the data folder): a file named
+            // iroh-diagnostics there, read when the service starts.
+            IrohDiagnostics = () => File.Exists(Path.Combine(_machine.DataFolder, "iroh-diagnostics")) ? Path.Combine(_machine.LogsFolder, "iroh-trace.log") : null,
+        };
         Trays!.Admin = Remote.Admin.Handle;
         Remote.Start();
     }

@@ -346,6 +346,12 @@ these steps as written and check each one before building.
   0.6 s (never more than 1.5 s at a time, and never the viewer's input). Each
   view's log lines say its path, and every 5 s the round trip, loss, how long
   writes waited and how long they were held back.
+* For finding out why a phone stays on a relay: with a file named
+  `iroh-diagnostics` in `%ProgramData%\Passthrough` (only an administrator can
+  put it there) the service, from its next start, logs each iroh connection's
+  paths with their addresses, its own addresses and its hole-punching counters,
+  and writes iroh's own events to `logs\iroh-trace.log`. Without the file the
+  log names no addresses, as before. Delete the file after the test.
 
 ### Changed (Windows, from the second review)
 

@@ -62,6 +62,9 @@ internal static unsafe class IrohNative
     [DllImport(LibraryName)] public static extern int pt_iroh_stream_wait_closed(ulong handle, int* kind, ulong* code);
     [DllImport(LibraryName)] public static extern int pt_iroh_stream_remote_id(ulong handle, byte* buffer, nuint capacity);
     [DllImport(LibraryName)] public static extern int pt_iroh_stream_path(ulong handle, int* path, byte* buffer, nuint capacity);
+    [DllImport(LibraryName)] public static extern int pt_iroh_stream_paths(ulong handle, byte* buffer, nuint capacity);
+    [DllImport(LibraryName)] public static extern int pt_iroh_endpoint_report(ulong handle, byte* buffer, nuint capacity);
+    [DllImport(LibraryName)] public static extern int pt_iroh_trace_start(byte* path, nuint pathLength, byte* filter, nuint filterLength);
     [DllImport(LibraryName)] public static extern int pt_iroh_stream_rtt(ulong handle, uint* rttMs, int* relayed);
     [DllImport(LibraryName)] public static extern int pt_iroh_stream_stats(ulong handle, byte* buffer, nuint capacity);
     [DllImport(LibraryName)] public static extern int pt_iroh_free(ulong handle);

@@ -208,6 +208,12 @@ public sealed class ServiceRemote : IDisposable
         else foreach (var host in _trays.Hosts) host.CloseSessions(phoneId);
     }
 
+    /// <summary>
+    /// Diagnostics for "why is this through a relay": when it returns a file path, iroh's own events are written there
+    /// and each connection's paths, with addresses, go to the log. Null (the default) keeps addresses out of both.
+    /// </summary>
+    public Func<string?>? IrohDiagnostics { get; init; }
+
     public void Start()
     {
         StartTls();
@@ -221,7 +227,22 @@ public sealed class ServiceRemote : IDisposable
             var relay = _relayOverride ?? (_relayUrl() is { Length: > 0 } url ? new IrohRelay(url, _secrets.Get(RelayTokenSlot)) : IrohRelay.N0);
             if (_secrets.Get(RelayTokenSlot) is { Length: > 0 } token) Passthrough.Core.Logging.LogText.Register(token);
             _endpoint = IrohEndpoint.Bind(SecretKey(), relay, IrohEndpoint.ShellAlpn);
-            _listener = new IrohShellListener(_endpoint, Gate, _log);
+            var diagnostics = IrohDiagnostics?.Invoke();
+            if (diagnostics is not null)
+            {
+                var tracing = IrohEndpoint.StartTrace(diagnostics, "iroh::_events=debug,iroh::socket::remote_map=debug,iroh::net_report=debug");
+                _log($"iroh diagnostics: on (the log and {Path.GetFileName(diagnostics)} name network addresses until it is turned off){(tracing ? "" : "; iroh's own events couldn't be started")}");
+            }
+            _listener = new IrohShellListener(_endpoint, Gate, _log) { Diagnostics = diagnostics is not null };
+            if (diagnostics is not null)
+            {
+                var watched = _endpoint;
+                _ = Task.Run(() =>
+                {
+                    watched.WaitOnline(TimeSpan.FromSeconds(30));
+                    _log($"iroh diagnostics: online; {watched.Report()}");
+                });
+            }
             _listener.Failed += _ => _log("iroh: the listener stopped");
             _listener.Start();
             var endpoint = _endpoint;

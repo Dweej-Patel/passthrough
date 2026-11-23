@@ -2172,6 +2172,7 @@ dependencies = [
  "iroh",
  "tokio",
  "tokio-util",
+ "tracing-subscriber",
 ]
 
 [[package]]

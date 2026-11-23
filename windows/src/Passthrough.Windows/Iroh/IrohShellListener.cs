@@ -21,6 +21,39 @@ public sealed class IrohShellListener : IDisposable
     private Thread? _loop;
     private volatile bool _stopped;
 
+    /// <summary>
+    /// Diagnostics, off unless an administrator asked (see ServiceRemote): each connection's paths with their addresses
+    /// and the endpoint's own addresses and hole-punching counters go to the log, on every change and every 30 s.
+    /// </summary>
+    public bool Diagnostics { get; init; }
+
+    private static readonly TimeSpan DiagnosticsLook = TimeSpan.FromSeconds(2);
+    private static readonly TimeSpan DiagnosticsEvery = TimeSpan.FromSeconds(30);
+
+    private async Task WatchPathsAsync(IrohStream stream)
+    {
+        var (last, at, number) = ("", DateTime.MinValue, Interlocked.Increment(ref _watched));
+        while (!stream.Closed.IsCompleted && !_stopped)
+        {
+            var paths = stream.DescribePaths();
+            if (paths.Length > 0 && (paths != last || DateTime.UtcNow - at >= DiagnosticsEvery))
+            {
+                // Round trips move all the time: a change is a path added, gone or selected.
+                var shape = System.Text.RegularExpressions.Regex.Replace(paths, @"rtt \d+ ms", "");
+                if (shape != System.Text.RegularExpressions.Regex.Replace(last, @"rtt \d+ ms", "") || DateTime.UtcNow - at >= DiagnosticsEvery)
+                {
+                    _log?.Invoke($"iroh diagnostics: connection {number} paths: {paths}; {_endpoint.Report()}");
+                    at = DateTime.UtcNow;
+                }
+                last = paths;
+            }
+            await Task.WhenAny(stream.Closed, Task.Delay(DiagnosticsLook)).ConfigureAwait(false);
+        }
+        _log?.Invoke($"iroh diagnostics: connection {number} ended; {_endpoint.Report()}");
+    }
+
+    private int _watched;
+
     public IrohShellListener(IrohEndpoint endpoint, ShellGate gate, Action<string>? log = null)
     {
         _endpoint = endpoint;
@@ -93,6 +126,7 @@ public sealed class IrohShellListener : IDisposable
             }
             stream = incoming.AcceptStream();
             stream.HomeRelay = () => _endpoint.HomeRelay;
+            if (Diagnostics) _ = WatchPathsAsync(stream);
         }
         catch (IrohException)
         {

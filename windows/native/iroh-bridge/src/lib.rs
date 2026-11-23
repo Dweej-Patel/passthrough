@@ -764,6 +764,107 @@ pub unsafe extern "C" fn pt_iroh_stream_path(handle: u64, path: *mut i32, buffer
     })
 }
 
+/// Diagnostics: every path of the connection, one per line, as "relay <url> rtt N ms" or "ip <addr:port> rtt N ms",
+/// the selected one ending in " *". Unlike the other exports this names the peer's addresses: the host logs it only
+/// when an administrator turned diagnostics on.
+///
+/// # Safety
+/// `buffer` is valid for `capacity` bytes.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn pt_iroh_stream_paths(handle: u64, buffer: *mut u8, capacity: usize) -> i32 {
+    guard(|| {
+        let object = stream(handle)?;
+        let paths = object.connection.paths();
+        let lines: Vec<String> = paths
+            .iter()
+            .map(|p| {
+                let address = match p.remote_addr() {
+                    TransportAddr::Relay(url) => format!("relay {url}"),
+                    TransportAddr::Ip(address) => format!("ip {address}"),
+                    other => format!("{other:?}"),
+                };
+                format!("{address} rtt {} ms{}", p.rtt().as_millis(), if p.is_selected() { " *" } else { "" })
+            })
+            .collect();
+        Ok(unsafe { text_out(&lines.join("\n"), buffer, capacity) })
+    })
+}
+
+/// Diagnostics: what the endpoint knows of itself, as one line: its direct addresses (with the public one once the
+/// relay's address discovery answered), its home relay, and the socket's counters for hole punching, paths and bytes
+/// per transport.
+///
+/// # Safety
+/// `buffer` is valid for `capacity` bytes.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn pt_iroh_endpoint_report(handle: u64, buffer: *mut u8, capacity: usize) -> i32 {
+    guard(|| {
+        let object = endpoint(handle)?;
+        let address = object.endpoint.addr();
+        let direct: Vec<String> = address.ip_addrs().map(|a| a.to_string()).collect();
+        let bound: Vec<String> = object.endpoint.bound_sockets().iter().map(|a| a.to_string()).collect();
+        let metrics = object.endpoint.metrics();
+        let (s, n) = (&metrics.socket, &metrics.net_report);
+        let text = format!(
+            "mine: [{}]; bound [{}]; relay {}; holepunch attempts {}, paths direct {} relay {}, conns opened {} direct {} closed {}, \
+             ip paths added {} removed {}, sent ipv4 {} ipv6 {} relay {} B, received ipv4 {} ipv6 {} relay {} B, \
+             net reports {} (full {}), portmap attempts {}, link changes {}",
+            direct.join(", "),
+            bound.join(", "),
+            address.relay_urls().next().map(|u| u.to_string()).unwrap_or_else(|| "none".into()),
+            s.holepunch_attempts.get(),
+            s.paths_direct.get(),
+            s.paths_relay.get(),
+            s.num_conns_opened.get(),
+            s.num_conns_direct.get(),
+            s.num_conns_closed.get(),
+            s.transport_ip_paths_added.get(),
+            s.transport_ip_paths_removed.get(),
+            s.send_ipv4.get(),
+            s.send_ipv6.get(),
+            s.send_relay.get(),
+            s.recv_data_ipv4.get(),
+            s.recv_data_ipv6.get(),
+            s.recv_data_relay.get(),
+            n.reports.get(),
+            n.reports_full.get(),
+            n.portmap_attempts.get(),
+            s.actor_link_change.get(),
+        );
+        Ok(unsafe { text_out(&text, buffer, capacity) })
+    })
+}
+
+/// Diagnostics: from now on iroh's own events matching `filter` (tracing directives, as
+/// "iroh::_events=debug,iroh::socket::remote_map=debug") are appended to the file at `path`. Once per process; a
+/// second call fails with `PT_ERR_ARGUMENT`. The file names addresses, so the host calls this only when an
+/// administrator turned diagnostics on.
+///
+/// # Safety
+/// Each pointer is valid for its length.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn pt_iroh_trace_start(path: *const u8, path_len: usize, filter: *const u8, filter_len: usize) -> i32 {
+    guard(|| {
+        use tracing_subscriber::layer::SubscriberExt;
+        use tracing_subscriber::util::SubscriberInitExt;
+        let path = unsafe { text_in(path, path_len)? };
+        let filter: tracing_subscriber::EnvFilter = unsafe { text_in(filter, filter_len)? }
+            .parse()
+            .map_err(|e| Failure::new(PT_ERR_ARGUMENT, format!("trace filter: {e}")))?;
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+            .map_err(|e| Failure::new(PT_ERR_ARGUMENT, format!("trace file: {e}")))?;
+        tracing_subscriber::registry()
+            .with(filter)
+            .with(tracing_subscriber::fmt::layer().with_ansi(false).with_writer(Mutex::new(file)))
+            .try_init()
+            .map_err(|e| Failure::new(PT_ERR_ARGUMENT, format!("trace: {e}")))?;
+        Ok(PT_OK)
+    })
+}
+
 /// The selected path's round trip in milliseconds and whether it is a relay (`*relayed` 1 or 0); `*rtt_ms` is
 /// `u32::MAX` when no path is selected yet.
 ///

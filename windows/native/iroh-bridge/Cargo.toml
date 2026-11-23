@@ -16,6 +16,8 @@ crate-type = ["cdylib", "rlib"]
 iroh = "=1.0.2"
 tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "macros"] }
 tokio-util = "0.7"
+# Only for `pt_iroh_trace_start`: iroh's own events to a file, when an administrator asks for diagnostics.
+tracing-subscriber = { version = "0.3", default-features = false, features = ["std", "fmt", "env-filter"] }
 
 [profile.release]
 lto = true
