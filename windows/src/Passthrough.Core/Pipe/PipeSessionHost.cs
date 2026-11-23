@@ -193,7 +193,7 @@ public sealed class PipeSessionHost : ISessionHost
 
     // MARK: Requests
 
-    private Task<PipeMessage> AskAsync(byte kind, Func<uint, PipeMessage> message, TimeSpan limit)
+    private Task<PipeMessage> AskAsync(byte kind, Func<uint, PipeMessage> message, TimeSpan limit, bool mayGoUnanswered = false)
     {
         PipeLink? link;
         uint id;
@@ -210,10 +210,10 @@ public sealed class PipeSessionHost : ISessionHost
             lock (_lock) _pending.Remove(id);
             throw new ShellException(ShellError.SignedOut);
         }
-        return WaitAsync(id, pending, link, limit);
+        return WaitAsync(id, pending, link, limit, mayGoUnanswered);
     }
 
-    private async Task<PipeMessage> WaitAsync(uint id, Pending pending, PipeLink link, TimeSpan limit)
+    private async Task<PipeMessage> WaitAsync(uint id, Pending pending, PipeLink link, TimeSpan limit, bool mayGoUnanswered)
     {
         try
         {
@@ -228,7 +228,8 @@ public sealed class PipeSessionHost : ISessionHost
             lock (_lock)
             {
                 _pending.Remove(id);
-                drop = ++_timeouts >= TimeoutsBeforeDrop;
+                // A request an older tray app doesn't know goes unanswered: that is no reason to drop its shells.
+                drop = !mayGoUnanswered && ++_timeouts >= TimeoutsBeforeDrop;
             }
             _log?.Invoke("pipe: the tray app didn't answer in time");
             if (drop) Unlink(link);
@@ -372,6 +373,21 @@ public sealed class PipeSessionHost : ISessionHost
             return null;
         }
         catch (ShellException e) { return e.Error; }
+    }
+
+    /// <summary>
+    /// Asks the tray app to sync its clipboard with a device viewing the screen: it answers, then opens a pipe of its
+    /// own saying <paramref name="token"/>. Null when it will, else why not (it is off there, this isn't the session
+    /// being viewed, or the tray app is older or gone).
+    /// </summary>
+    public async Task<ShellError?> OpenClipAsync(string phone, string label, string token)
+    {
+        try
+        {
+            await AskAsync(PipeKind.ClipOpen, id => new PipeMessage { Id = id, Phone = phone, Label = label, Token = token }, ReplyLimit, mayGoUnanswered: true).ConfigureAwait(false);
+            return null;
+        }
+        catch (ShellException e) { return e.Error == ShellError.ClipSyncOff ? ShellError.ClipSyncOff : ShellError.ClipSyncUnavailable; }
     }
 
     /// <summary>Asks the tray app to lock its Windows session; null when asked, else why not.</summary>

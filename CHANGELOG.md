@@ -143,8 +143,16 @@ these steps as written and check each one before building.
   window's toolbar turns it off; the shared Mac has a switch under Settings ▸
   Remote Shell ▸ *Computers with access*. Passwords from password managers
   never go across, and phones keep their Copy and Paste buttons. Both Macs
-  need this build (an older one answers that it can't sync). A PC's side,
-  viewing a Mac or being viewed, comes with the Windows app.
+  need this build (an older one answers that it can't sync).
+
+* **A PC shares a clipboard with a Mac too (Windows).** While a Mac's screen
+  is open in a window on the PC, copy on either and paste on the other, and
+  drag files from Explorer onto the picture to drop them on the Mac.
+  **Sync clipboard** in the window's toolbar turns it off. A PC being viewed
+  syncs its clipboard with the computer viewing it and takes the files it
+  drops, once that computer's build asks for it; the switch is under
+  Settings ▸ *Computers with access*. What a password manager marks as secret
+  never goes across.
 
 * **The Mac's menu-bar panel, in two tabs.**
   - Above the tabs, always: the header, shells waiting on a question, and anyone viewing this Mac's screen (with **Stop**).

@@ -681,5 +681,592 @@
         "allowed": false
       }
     ]
+  },
+  "clipSync": {
+    "_comment": "Clipboard sync between computers (protocol/README.md, Clipboard sync). messages: each message's exact bytes, as hex. validNames and invalidNames: file and folder names a receiver takes or declines (4); checked over code points, so a combining mark after / doesn't hide it. offers: what a receiver answers to an offer's header with unlimited room (null: taken; else the decline reason). transfers: the items of one transfer in order and what a receiver answers to each (null: taken; nothing follows a decline), then whether done finds it complete.",
+    "errors": [
+      "no_screen_view",
+      "clip_sync_off",
+      "clip_sync_unavailable"
+    ],
+    "maxPayload": 1048640,
+    "maxChunk": 262144,
+    "maxOpenTransfers": 4,
+    "messages": [
+      {
+        "name": "hello",
+        "version": 1,
+        "hex": "01000000020100"
+      },
+      {
+        "name": "offer",
+        "transfer": 7,
+        "kind": 1,
+        "x": 4660,
+        "y": 43981,
+        "count": 3,
+        "total": 4294967298,
+        "hex": "020000001500000007011234abcd000000030000000100000002"
+      },
+      {
+        "name": "item",
+        "transfer": 7,
+        "index": 2,
+        "format": 16,
+        "size": 5,
+        "itemName": "a/\u00e9.txt",
+        "hex": "080000001b00000007000000021000000000000000050008612fc3a92e747874"
+      },
+      {
+        "name": "data",
+        "transfer": 7,
+        "item": 2,
+        "bytes": "68656c6c6f",
+        "hex": "030000000d000000070000000268656c6c6f"
+      },
+      {
+        "name": "done",
+        "transfer": 7,
+        "hex": "040000000400000007"
+      },
+      {
+        "name": "abandon",
+        "transfer": 7,
+        "hex": "050000000400000007"
+      },
+      {
+        "name": "decline",
+        "transfer": 7,
+        "reason": 2,
+        "hex": "06000000050000000702"
+      },
+      {
+        "name": "result",
+        "transfer": 7,
+        "status": 1,
+        "hex": "07000000050000000701"
+      }
+    ],
+    "validNames": [
+      "a",
+      "a.txt",
+      "folder/a.txt",
+      "a/b/c/d",
+      "What?.txt",
+      "trailing. ",
+      " leading",
+      "CON",
+      "\u00e9t\u00e9/\u65e5\u672c\u8a9e.txt",
+      "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+      "ddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd/ddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd/ddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd/eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee/fffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+    ],
+    "invalidNames": [
+      "",
+      "/",
+      "a/",
+      "/a",
+      "a//b",
+      ".",
+      "..",
+      "a/..",
+      "../a",
+      "a/./b",
+      "a\\b",
+      "a:b",
+      "a\u0000b",
+      "a\u0001b",
+      "a\u007fb",
+      "a\u0085b",
+      "../\u0301x",
+      "../\u200dx",
+      "a/\u0301/../b",
+      "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+      "ddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd/ddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd/ddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd/eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee/ffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+    ],
+    "offers": [
+      {
+        "kind": 0,
+        "count": 1,
+        "total": 5,
+        "decline": null
+      },
+      {
+        "kind": 0,
+        "count": 0,
+        "total": 0,
+        "decline": 4
+      },
+      {
+        "kind": 0,
+        "count": 10000,
+        "total": 0,
+        "decline": null
+      },
+      {
+        "kind": 0,
+        "count": 10001,
+        "total": 0,
+        "decline": 1
+      },
+      {
+        "kind": 0,
+        "count": 1,
+        "total": 600663296,
+        "decline": null
+      },
+      {
+        "kind": 0,
+        "count": 1,
+        "total": 600663297,
+        "decline": 1
+      },
+      {
+        "kind": 1,
+        "count": 10001,
+        "total": 5000000000000,
+        "decline": null
+      },
+      {
+        "kind": 1,
+        "count": 200000,
+        "total": 0,
+        "decline": null
+      },
+      {
+        "kind": 1,
+        "count": 200001,
+        "total": 0,
+        "decline": 1
+      }
+    ],
+    "transfers": [
+      {
+        "name": "text and an image",
+        "kind": 0,
+        "count": 2,
+        "total": 10,
+        "items": [
+          {
+            "index": 0,
+            "format": 1,
+            "size": 4,
+            "name": "",
+            "decline": null
+          },
+          {
+            "index": 1,
+            "format": 4,
+            "size": 6,
+            "name": "",
+            "decline": null
+          }
+        ],
+        "complete": true
+      },
+      {
+        "name": "a folder, then the things in it",
+        "kind": 1,
+        "count": 3,
+        "total": 7,
+        "items": [
+          {
+            "index": 0,
+            "format": 17,
+            "size": 0,
+            "name": "Docs",
+            "decline": null
+          },
+          {
+            "index": 1,
+            "format": 16,
+            "size": 7,
+            "name": "Docs/a.txt",
+            "decline": null
+          },
+          {
+            "index": 2,
+            "format": 17,
+            "size": 0,
+            "name": "Docs/Empty",
+            "decline": null
+          }
+        ],
+        "complete": true
+      },
+      {
+        "name": "out of order",
+        "kind": 0,
+        "count": 2,
+        "total": 2,
+        "items": [
+          {
+            "index": 1,
+            "format": 1,
+            "size": 1,
+            "name": "",
+            "decline": 4
+          }
+        ],
+        "complete": false
+      },
+      {
+        "name": "past the count",
+        "kind": 0,
+        "count": 1,
+        "total": 2,
+        "items": [
+          {
+            "index": 0,
+            "format": 1,
+            "size": 1,
+            "name": "",
+            "decline": null
+          },
+          {
+            "index": 1,
+            "format": 2,
+            "size": 1,
+            "name": "",
+            "decline": 4
+          }
+        ],
+        "complete": false
+      },
+      {
+        "name": "past the total",
+        "kind": 0,
+        "count": 2,
+        "total": 5,
+        "items": [
+          {
+            "index": 0,
+            "format": 1,
+            "size": 4,
+            "name": "",
+            "decline": null
+          },
+          {
+            "index": 1,
+            "format": 2,
+            "size": 2,
+            "name": "",
+            "decline": 4
+          }
+        ],
+        "complete": false
+      },
+      {
+        "name": "fewer bytes than the total",
+        "kind": 0,
+        "count": 1,
+        "total": 5,
+        "items": [
+          {
+            "index": 0,
+            "format": 1,
+            "size": 4,
+            "name": "",
+            "decline": null
+          }
+        ],
+        "complete": false
+      },
+      {
+        "name": "the same format twice",
+        "kind": 0,
+        "count": 2,
+        "total": 2,
+        "items": [
+          {
+            "index": 0,
+            "format": 1,
+            "size": 1,
+            "name": "",
+            "decline": null
+          },
+          {
+            "index": 1,
+            "format": 1,
+            "size": 1,
+            "name": "",
+            "decline": 4
+          }
+        ],
+        "complete": false
+      },
+      {
+        "name": "a file among other formats",
+        "kind": 0,
+        "count": 2,
+        "total": 2,
+        "items": [
+          {
+            "index": 0,
+            "format": 1,
+            "size": 1,
+            "name": "",
+            "decline": null
+          },
+          {
+            "index": 1,
+            "format": 16,
+            "size": 1,
+            "name": "a",
+            "decline": 4
+          }
+        ],
+        "complete": false
+      },
+      {
+        "name": "text among files",
+        "kind": 1,
+        "count": 2,
+        "total": 2,
+        "items": [
+          {
+            "index": 0,
+            "format": 16,
+            "size": 1,
+            "name": "a",
+            "decline": null
+          },
+          {
+            "index": 1,
+            "format": 1,
+            "size": 1,
+            "name": "",
+            "decline": 4
+          }
+        ],
+        "complete": false
+      },
+      {
+        "name": "a name on text",
+        "kind": 0,
+        "count": 1,
+        "total": 1,
+        "items": [
+          {
+            "index": 0,
+            "format": 1,
+            "size": 1,
+            "name": "a",
+            "decline": 4
+          }
+        ],
+        "complete": false
+      },
+      {
+        "name": "a file before its folder",
+        "kind": 1,
+        "count": 2,
+        "total": 1,
+        "items": [
+          {
+            "index": 0,
+            "format": 16,
+            "size": 1,
+            "name": "Docs/a.txt",
+            "decline": 4
+          }
+        ],
+        "complete": false
+      },
+      {
+        "name": "a file inside a file",
+        "kind": 1,
+        "count": 2,
+        "total": 2,
+        "items": [
+          {
+            "index": 0,
+            "format": 16,
+            "size": 1,
+            "name": "a",
+            "decline": null
+          },
+          {
+            "index": 1,
+            "format": 16,
+            "size": 1,
+            "name": "a/b",
+            "decline": 4
+          }
+        ],
+        "complete": false
+      },
+      {
+        "name": "the same name in another case",
+        "kind": 1,
+        "count": 2,
+        "total": 2,
+        "items": [
+          {
+            "index": 0,
+            "format": 16,
+            "size": 1,
+            "name": "Readme.TXT",
+            "decline": null
+          },
+          {
+            "index": 1,
+            "format": 16,
+            "size": 1,
+            "name": "readme.txt",
+            "decline": 4
+          }
+        ],
+        "complete": false
+      },
+      {
+        "name": "the same name composed differently",
+        "kind": 1,
+        "count": 2,
+        "total": 2,
+        "items": [
+          {
+            "index": 0,
+            "format": 16,
+            "size": 1,
+            "name": "\u00e9",
+            "decline": null
+          },
+          {
+            "index": 1,
+            "format": 16,
+            "size": 1,
+            "name": "e\u0301",
+            "decline": 4
+          }
+        ],
+        "complete": false
+      },
+      {
+        "name": "a folder with a size",
+        "kind": 1,
+        "count": 1,
+        "total": 1,
+        "items": [
+          {
+            "index": 0,
+            "format": 17,
+            "size": 1,
+            "name": "Docs",
+            "decline": 4
+          }
+        ],
+        "complete": false
+      },
+      {
+        "name": "a name that leaves the folder",
+        "kind": 1,
+        "count": 1,
+        "total": 1,
+        "items": [
+          {
+            "index": 0,
+            "format": 16,
+            "size": 1,
+            "name": "../\u0301x",
+            "decline": 4
+          }
+        ],
+        "complete": false
+      },
+      {
+        "name": "an unknown format is skipped",
+        "kind": 0,
+        "count": 2,
+        "total": 9,
+        "items": [
+          {
+            "index": 0,
+            "format": 9,
+            "size": 5,
+            "name": "",
+            "decline": null
+          },
+          {
+            "index": 1,
+            "format": 1,
+            "size": 4,
+            "name": "",
+            "decline": null
+          }
+        ],
+        "complete": true
+      },
+      {
+        "name": "copied text over its limit",
+        "kind": 0,
+        "count": 1,
+        "total": 16777217,
+        "items": [
+          {
+            "index": 0,
+            "format": 1,
+            "size": 16777217,
+            "name": "",
+            "decline": 1
+          }
+        ],
+        "complete": false
+      },
+      {
+        "name": "a copied image at its limit",
+        "kind": 0,
+        "count": 1,
+        "total": 67108864,
+        "items": [
+          {
+            "index": 0,
+            "format": 4,
+            "size": 67108864,
+            "name": "",
+            "decline": null
+          }
+        ],
+        "complete": true
+      },
+      {
+        "name": "copied files over their limit",
+        "kind": 0,
+        "count": 2,
+        "total": 500000001,
+        "items": [
+          {
+            "index": 0,
+            "format": 16,
+            "size": 500000000,
+            "name": "a",
+            "decline": null
+          },
+          {
+            "index": 1,
+            "format": 16,
+            "size": 1,
+            "name": "b",
+            "decline": 1
+          }
+        ],
+        "complete": false
+      },
+      {
+        "name": "dropped files have no limit",
+        "kind": 1,
+        "count": 1,
+        "total": 500000000000,
+        "items": [
+          {
+            "index": 0,
+            "format": 16,
+            "size": 500000000000,
+            "name": "a",
+            "decline": null
+          }
+        ],
+        "complete": true
+      }
+    ]
   }
 }

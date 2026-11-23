@@ -64,6 +64,14 @@ public abstract record ShellClientEvent
     /// more, not even <see cref="Disconnected"/>; the receiver disposes the stream.
     /// </summary>
     public sealed record Screen(IShellStream Stream, ReadOnlyMemory<byte> InitialBytes) : ShellClientEvent;
+    /// <summary>
+    /// The host answered <see cref="ShellClient.RequestClipSync"/> with <c>clipSyncReady</c>: the stream now carries
+    /// clipboard sync's messages (<see cref="ClipSync.ClipSyncWire"/>), starting with <paramref name="InitialBytes"/>.
+    /// Handed over as <see cref="Screen"/> is.
+    /// </summary>
+    public sealed record ClipSync(IShellStream Stream, ReadOnlyMemory<byte> InitialBytes) : ShellClientEvent;
+    /// <summary>The host refused <see cref="ShellClient.RequestClipSync"/>. The connection stays a shell connection.</summary>
+    public sealed record ClipSyncRefused(ShellError Reason) : ShellClientEvent;
 }
 
 /// <summary>The host stopped answering pings (15 s of silence).</summary>
@@ -108,6 +116,7 @@ public sealed class ShellClient : IAsyncDisposable
     private long _lastHeard;
     private int _connected;
     private volatile bool _screenRequested;
+    private volatile bool _clipRequested;
     private volatile bool _handedOver;
 
     public ShellClient(ShellCredential credential, IPinnedTlsDialer? tls, IShellIrohDialer? iroh, Action<ShellClientEvent> onEvent,
@@ -182,6 +191,18 @@ public sealed class ShellClient : IAsyncDisposable
             while (await reader.ReadLineAsync(_closing.Token).ConfigureAwait(false) is { } line)
             {
                 Interlocked.Exchange(ref _lastHeard, _time.GetTimestamp());
+                if (_clipRequested && TypeOf(line) is ShellEnvelope.ClipSyncReady or ShellEnvelope.ScreenReady or ShellEnvelope.ScreenVideoReady or ShellEnvelope.RdpReady)
+                {
+                    // Asked for clipboard sync. A screen's answer instead is no answer to it, and nothing after it is lines: the connection ends.
+                    if (TypeOf(line) != ShellEnvelope.ClipSyncReady) throw new IOException("The computer answered clipboard sync with a screen.");
+                    // Past clipSyncReady the bytes are clipboard sync's: nothing more is read, sent or reported.
+                    _handedOver = true;
+                    _outgoing.Writer.TryComplete();
+                    await writer.ConfigureAwait(false);
+                    lock (_lock) _winner = null;
+                    Emit(new ShellClientEvent.ClipSync(stream, reader.TakePending()));
+                    return;
+                }
                 if (_screenRequested && IsScreenReady(line))
                 {
                     // Past screenReady the bytes are the screen's, not lines: nothing more is read, sent or reported.
@@ -357,6 +378,11 @@ public sealed class ShellClient : IAsyncDisposable
                 break;
             case ShellEnvelope.GoingAway: Emit(new ShellClientEvent.GoingAway(m.Reason ?? "")); break;
             case ShellEnvelope.Ping: Send(new ShellEnvelope(ShellEnvelope.Pong)); break;
+            case ShellEnvelope.Error when _clipRequested && m.Ref is null && m.Session is null:
+                // The answer to clipSync: nothing was handed over, and lines are lines again.
+                _clipRequested = false;
+                Emit(new ShellClientEvent.ClipSyncRefused(Reason(m.Reason)));
+                break;
             case ShellEnvelope.Error:
                 var reason = Reason(m.Reason);
                 bool wasOpen;
@@ -418,6 +444,23 @@ public sealed class ShellClient : IAsyncDisposable
     {
         _screenRequested = true;
         Send(new ShellEnvelope(video ? ShellEnvelope.ScreenVideo : ShellEnvelope.Screen));
+    }
+
+    /// <summary>
+    /// Asks a host whose screen this computer is viewing to sync clipboards (protocol/README.md, "Clipboard sync"):
+    /// <see cref="ShellClientEvent.ClipSync"/> when it hands the connection over, or
+    /// <see cref="ShellClientEvent.ClipSyncRefused"/>. Use a client of its own for it, never one with a session.
+    /// </summary>
+    public void RequestClipSync()
+    {
+        _clipRequested = true;
+        Send(new ShellEnvelope(ShellEnvelope.ClipSync));
+    }
+
+    private static string? TypeOf(byte[] line)
+    {
+        try { return ShellEnvelope.Decode(line).T; }
+        catch (Protocol.ProtocolException) { return null; }
     }
 
     private static bool IsScreenReady(byte[] line)

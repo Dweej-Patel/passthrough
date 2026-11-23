@@ -449,6 +449,10 @@ public sealed class ServiceRemote : IDisposable
             }, c.Id);
         },
         Event = e => _log($"shell: {e}"),
+        // The clipboard is the account's, in its own Windows session: its tray app syncs it, over a pipe of its own.
+        ClipSync = (phone, label, cancel) => Directory.Owner(phone) is { } owner
+            ? _trays.OpenClipAsync(owner, phone, label, cancel)
+            : Task.FromResult<(Stream?, ShellError?)>((null, ShellError.ClipSyncUnavailable)),
     };
 
     private void ViewLog(Passthrough.Core.Screen.RelayRecord v) => _log($"screen: \"{v.Label}\" ({Short(v.PhoneId)}) account …{Tail(v.Account)} view ended after {(v.End - v.Start)?.ToString(@"h\:mm\:ss")}; {v.BytesOut / 1e6:F1} MB out, {v.BytesIn / 1e6:F1} MB in; ended by {v.EndedBy}");

@@ -11,6 +11,13 @@ public interface ITrayHosts
 
     void TellAll(PipeAdminEvent e);
 
+    /// <summary>
+    /// A stream to <paramref name="account"/>'s tray app for one device's clipboard sync (a pipe of its own, never the
+    /// link the shells share), or why there is none.
+    /// </summary>
+    Task<(Stream? Stream, Shell.ShellError? Error)> OpenClipAsync(string account, string phone, string label, CancellationToken cancel) =>
+        Task.FromResult<(Stream?, Shell.ShellError?)>((null, Shell.ShellError.ClipSyncUnavailable));
+
     /// <summary>Every account's shells known so far.</summary>
     IReadOnlyList<PipeSessionHost> Hosts { get; }
 

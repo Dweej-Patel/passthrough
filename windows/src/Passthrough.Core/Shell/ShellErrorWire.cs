@@ -22,6 +22,9 @@ public static class ShellErrorWire
         (ShellError.TryLater, "try_later"),
         (ShellError.TooManyComputers, "too_many_computers"),
         (ShellError.PassConflict, "pass_conflict"),
+        (ShellError.NoScreenView, "no_screen_view"),
+        (ShellError.ClipSyncOff, "clip_sync_off"),
+        (ShellError.ClipSyncUnavailable, "clip_sync_unavailable"),
     ];
 
     /// <summary>Every wire name, in declaration order.</summary>

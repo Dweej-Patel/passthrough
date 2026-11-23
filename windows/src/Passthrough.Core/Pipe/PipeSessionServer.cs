@@ -39,6 +39,12 @@ public sealed class PipeSessionServer
     /// <summary>Keeps a pass a phone handed this account (stage 7); returns an error's wire name, or null when kept.</summary>
     public Func<PipeMessage, Task<string?>>? SavePass { get; set; }
 
+    /// <summary>
+    /// A device viewing this account's screen asked to sync clipboards (<c>Phone</c>, <c>Label</c>, <c>Token</c>): an
+    /// error's wire name, or null when this end will open the pipe for it. Unset: unavailable.
+    /// </summary>
+    public Func<PipeMessage, Task<string?>>? ClipOpen { get; set; }
+
     /// <summary>Frames this end doesn't serve itself (the answers to the tray app's own requests: <see cref="PipeAccessAdmin"/>).</summary>
     public event Action<PipeFrame>? OtherFrame;
 
@@ -121,7 +127,7 @@ public sealed class PipeSessionServer
             return ValueTask.CompletedTask;
         }
         if (frame.Kind is not (PipeKind.Open or PipeKind.Attach or PipeKind.Detach or PipeKind.Resize or PipeKind.Close or PipeKind.SetViewing
-            or PipeKind.History or PipeKind.Transcript or PipeKind.Lock or PipeKind.SavePass or PipeKind.ConnClosed or PipeKind.PhoneGone))
+            or PipeKind.History or PipeKind.Transcript or PipeKind.Lock or PipeKind.SavePass or PipeKind.ConnClosed or PipeKind.PhoneGone or PipeKind.ClipOpen))
             return ValueTask.CompletedTask; // a kind this build doesn't know
         if (frame.Read<PipeMessage>() is not { } m) return ValueTask.CompletedTask;
         switch (frame.Kind)
@@ -173,6 +179,9 @@ public sealed class PipeSessionServer
             case PipeKind.SavePass:
                 _ = SavePassAsync(m);
                 break;
+            case PipeKind.ClipOpen:
+                _ = ClipOpenAsync(m);
+                break;
             case PipeKind.ConnClosed:
                 if (m.Conn is { } closed)
                 {
@@ -202,6 +211,14 @@ public sealed class PipeSessionServer
     private async Task SavePassAsync(PipeMessage m)
     {
         var error = SavePass is { } save ? await save(m).ConfigureAwait(false) : ShellError.PassNotSaved.ToWire();
+        Reply(new PipeMessage { Id = m.Id, Error = error });
+    }
+
+    private async Task ClipOpenAsync(PipeMessage m)
+    {
+        string? error;
+        try { error = ClipOpen is { } open && m.Phone is not null && m.Token is not null ? await open(m).ConfigureAwait(false) : ShellError.ClipSyncUnavailable.ToWire(); }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException or InvalidOperationException) { error = ShellError.ClipSyncUnavailable.ToWire(); }
         Reply(new PipeMessage { Id = m.Id, Error = error });
     }
 

@@ -6,6 +6,7 @@ A Windows PC as a full Passthrough computer:
 - **Remote access: this PC's shell and screen from your phones.** Shells (PowerShell, Windows PowerShell, Command Prompt, each WSL distro, Git Bash) open as you, never as administrator. The screen goes through Windows Remote Desktop, which Passthrough keeps closed to the network and relays itself. Phones reach the PC on the same network or Tailscale, and from anywhere through iroh.
 - **Your computers: this PC reaching your Mac.** Once a phone hands this PC access to a Mac, the tray opens the Mac's shell in Windows Terminal and its screen in a window.
 - **Sharing this PC with your Mac.** A phone gives the Mac access to this PC's shell and, once you allow it here, its screen.
+- **One clipboard with a computer you're viewing, or that views this PC.** Copy on either and paste on the other (text, formatted text, pictures, files), and drop files on the window to put them where you let go.
 
 ```
 windows/
@@ -157,7 +158,7 @@ The tray icon gets an amber dot, and Windows shows a notification titled with wh
   - *Screen, through Remote Desktop*: its state in one sentence, and the one button that fixes it: **Set up…**, **Turn on**, **Close it**, **Require it** or **Try again**.
   - *Stay awake on mains power*: a PC that sleeps can't answer. While a phone is connected the PC stays awake anyway.
   - *Phones*: one row per phone paired with this PC. Each row has *Screen* (may see the screen), *Share* (may give your other computers access here), **Stop**, **Revoke…** (takes its access away; it stays paired) and **Forget…** (forgets the pairing and the access).
-- **Computers with access:** the computers a phone gave access to this PC. Each has **Allow screen** while its screen waits for you (**Turn off screen** once it may see it) and **Revoke…**.
+- **Computers with access:** the computers a phone gave access to this PC. Each has **Allow screen** while its screen waits for you (**Turn off screen** once it may see it) and **Revoke…**. *Sync the clipboard with computers viewing this screen* (on unless you turn it off) is here too.
 - **Advanced:**
   - *Keep shell history*: what phones' shells showed, kept for you to look back at. Only your Windows account can open it. You can also delete it.
   - *Relay*: your own iroh relay and its token, or empty for the public relays.
@@ -174,6 +175,15 @@ While a phone views the screen, the PC's own screen shows the lock screen, and i
 - **New shell** opens the other computer's shell in a new Windows Terminal tab, or a console window without Windows Terminal.
 - **Remove…** forgets this PC's copy of that computer, after asking. Use it for a computer you no longer use, or one that changed its keys: a phone can then share it again.
 - **Screen** opens a Mac's screen in a window. The keys go to the Mac: Alt acts as ⌘, Ctrl as ⌃ and the Windows key as ⌥. A setting swaps Alt and Ctrl, so Ctrl acts as ⌘. Alt+Tab, Alt+F4, screenshots and the media keys stay with this PC.
+
+**Clipboard and files between two computers.** While a Mac's screen is open in a window, this PC and the Mac share a clipboard: copy on either and paste on the other.
+- **What goes across:** text (with its formatting), pictures and files. Files are copied across in the background as soon as you copy them, up to 500 MB in all; a bigger copy says *Too large to sync* and stays where it is.
+- **Dropping files:** drag them from Explorer onto the picture and let go where you want them on the Mac: a Finder window, the desktop, an app. If nothing there takes them, they go to the Mac's Downloads folder. Only real files and folders can be dropped, not items from a zip folder or an email.
+- **Turning it off:** **Sync clipboard** in the window's toolbar, for this window and ones opened later. *Send clipboard* and *Copy from Mac* come back while it's off, or when the Mac can't sync (an older build, or sync turned off there).
+- **What never goes across:** anything an app marks as secret or not to leave this PC, as password managers do. What arrives from the other computer is kept out of Windows' cloud clipboard.
+- **Where received files are:** `%LOCALAPPDATA%\Passthrough\Received`, emptied each time Passthrough starts. The last three copies stay there so paste still finds them.
+
+The same works the other way when a Mac views this PC's screen, once the Mac's build can ask for it: what you copy here is on its clipboard, and files it drops land where they were dropped. It happens only while this account's session is the one being viewed, and *Sync the clipboard with computers viewing this screen* (Settings ▸ Computers with access) turns it off. Files dropped by the viewer that nothing takes go to your Downloads folder and are shown. Passthrough runs as you, not as administrator, so a window of a program running as administrator can't take a drop. Phones aren't part of this: their screen view keeps Copy and Paste.
 
 The PC's own logs:
 - the tray app: `%LOCALAPPDATA%\Passthrough\passthrough.log`;

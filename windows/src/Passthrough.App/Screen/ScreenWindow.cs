@@ -14,6 +14,7 @@ using Passthrough.Core.Client;
 using Passthrough.Core.Screen;
 using Passthrough.Core.Trust;
 using Passthrough.Media;
+using Passthrough.Windows.ClipSync;
 using Passthrough.Windows.Iroh;
 using Windows.ApplicationModel.DataTransfer;
 using Windows.Graphics;
@@ -27,8 +28,11 @@ namespace Passthrough.App.Screen;
 /// client, signed with this PC's identity), <c>screenVideo</c>, and the stream decoded by <see cref="ScreenPipeline"/>.
 /// The picture keeps its shape in any window size; the pointer is drawn over it, not in it. Pointer, wheel (Ctrl+wheel
 /// pinches), keys (the table in <see cref="ScreenKeys"/>, through XAML key events: the Windows key stays on this PC),
-/// committed text through a hidden text box (so dead keys and input methods compose here), Send clipboard and Copy
-/// from Mac, full screen. A lost connection dims the last picture and redials at 0, 2 and 5 s without asking again.
+/// committed text through a hidden text box (so dead keys and input methods compose here), full screen. While the
+/// picture is live the two clipboards sync on a connection of their own (<see cref="ClipSyncViewer"/>: Ctrl+C here,
+/// ⌘V there and back, files included) and files dropped on the picture land at that point on the Mac; with Sync
+/// clipboard off, or a Mac that can't, Send clipboard and Copy from Mac take its place. A lost connection dims the last
+/// picture and redials at 0, 2 and 5 s without asking again.
 /// </summary>
 internal sealed class ScreenWindow : Window, IScreenView
 {
@@ -100,11 +104,27 @@ internal sealed class ScreenWindow : Window, IScreenView
     private string FitKey => "screen.fit." + _computer.HostId;
     private int _toastId;
 
+    // Clipboard sync (a connection of its own beside the screen's, while the picture is live)
+    internal const string ClipSyncKey = "screen.clipSync";
+    private static readonly TimeSpan ClipRetryNoView = TimeSpan.FromSeconds(1.5), ClipRetry = TimeSpan.FromSeconds(3), ClipSettled = TimeSpan.FromSeconds(10);
+    private const int ClipTriesInARow = 5;
+    private readonly Microsoft.UI.Xaml.Controls.Primitives.ToggleButton _clipButton = new() { Content = "Sync clipboard" };
+    private Button? _sendButton, _copyButton;
+    private ClipSyncViewer? _clipViewer;
+    private ShellClient? _clipShell;
+    private bool _clipOn;
+    private bool _clipActive;
+    private int _clipTries;
+    private int _clipGeneration;
+    private Stopwatch? _clipSince;
+    private bool _clipHeld;
+
     public ScreenWindow(ReachableComputer computer, IComputerIdentity identity, Func<Task<bool>> confirm, Passthrough.Core.Storage.ISettingsStore? settings = null)
     {
         _computer = computer;
         _settings = settings;
         _fit = settings?.Get(FitKey) == "true";
+        _clipOn = settings?.Get(ClipSyncKey) != "false";
         _identity = identity;
         _confirm = confirm;
         _name = ScreenFrame.Clean(computer.Credential.MacName);
@@ -147,6 +167,19 @@ internal sealed class ScreenWindow : Window, IScreenView
         full.Click += (_, _) => ToggleFullScreen();
         _retry.Click += async (_, _) => await StartAsync();
         AutomationName(_retry, "Try again");
+        (_sendButton, _copyButton) = (send, copy);
+        _clipButton.IsChecked = _clipOn;
+        ToolTipService.SetToolTip(_clipButton, "What you copy here is on the Mac's clipboard and what's copied there is on this PC's: text, pictures and files. Drop files on the picture to put them where you let go. It applies to this window and to ones opened later.");
+        AutomationName(_clipButton, "Sync clipboard");
+        _clipButton.Click += (_, _) =>
+        {
+            _clipOn = _clipButton.IsChecked == true;
+            try { _settings?.Set(ClipSyncKey, _clipOn ? "true" : "false"); }
+            catch (Exception e) when (e is IOException or UnauthorizedAccessException or InvalidOperationException) { LogFile.Error(e); } // not remembered, still done
+            _clipTries = 0;
+            if (_clipOn) StartClipSync(); else StopClipSync(forget: true);
+            _typing.Focus(FocusState.Programmatic);
+        };
         _fitButton.IsChecked = _fit;
         ToolTipService.SetToolTip(_fitButton, "The Mac makes a display in this window's shape, so its picture fills the window. The Mac's own screen shows that display while you're here.");
         AutomationName(_fitButton, "Fit to window");
@@ -168,6 +201,7 @@ internal sealed class ScreenWindow : Window, IScreenView
         left.Children.Add(_toast);
         bar.Children.Add(left);
         var buttons = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 6 };
+        buttons.Children.Add(_clipButton);
         buttons.Children.Add(send);
         buttons.Children.Add(copy);
         buttons.Children.Add(_fitButton);
@@ -189,6 +223,9 @@ internal sealed class ScreenWindow : Window, IScreenView
         _stage.PointerCaptureLost += (_, _) => ReleaseButtons();
         _stage.PointerExited += (_, _) => { _localPointer = null; PlacePointer(); };
         _stage.PointerWheelChanged += OnWheel;
+        _stage.AllowDrop = true;
+        _stage.DragOver += OnDragOver;
+        _stage.Drop += OnDrop;
         _stage.SizeChanged += (_, _) =>
         {
             PlacePointer();
@@ -337,6 +374,8 @@ internal sealed class ScreenWindow : Window, IScreenView
         _picture.Opacity = 1;
         _typing.Focus(FocusState.Programmatic);
         ShowSubtitle();
+        _clipTries = 0;
+        StartClipSync();
     }
 
     /// <summary>
@@ -393,12 +432,177 @@ internal sealed class ScreenWindow : Window, IScreenView
         _shell?.Disconnect();
         _shell = null;
         _buttons = 0;
+        // Sync lasts only while the picture is live; what was received stays for pasting until the window closes.
+        StopClipSync(forget: false);
     }
 
     private void Stop(Phase phase)
     {
         StopStream();
         _phase = phase;
+        if (phase == Phase.Closed)
+        {
+            _clipViewer?.Dispose();
+            _clipViewer = null;
+        }
+    }
+
+    // MARK: Clipboard sync
+
+    /// <summary>Asks the Mac for clipboard sync on a connection of its own, once the picture is live.</summary>
+    private void StartClipSync()
+    {
+        if (!_clipOn || _phase != Phase.Live || _clipShell is not null || _clipActive) return;
+        _clipTries++;
+        var generation = ++_clipGeneration;
+        var c = _computer.Credential;
+        var credential = new ShellCredential(c.MacID, c.MacName, c.CertSHA256, Convert.FromBase64String(c.ShellKey), c.PhoneID, c.Port, c.Addresses,
+            c.IrohID, c.IrohRelay, c.RelayToken, _computer.HostKind);
+        var handed = false;
+        ShellClient? shell = null;
+        shell = new ShellClient(credential, new PinnedTlsDialer(), new IrohShellDialer(), e =>
+        {
+            switch (e)
+            {
+                case ShellClientEvent.Ready:
+                    shell!.RequestClipSync();
+                    break;
+                case ShellClientEvent.ClipSync sync:
+                    handed = true;
+                    OnUi(() => BeginClipSync(generation, sync));
+                    break;
+                case ShellClientEvent.ClipSyncRefused refused:
+                    shell!.Disconnect();
+                    OnUi(() => ClipSyncRefused(generation, refused.Reason));
+                    break;
+                case ShellClientEvent.Disconnected when !handed:
+                    OnUi(() =>
+                    {
+                        if (generation != _clipGeneration || _clipShell is null) return;
+                        _clipShell = null;
+                        RetryClipSync(ClipRetry);
+                    });
+                    break;
+            }
+        }, identity: _identity);
+        _clipShell = shell;
+        shell.Connect();
+    }
+
+    private void BeginClipSync(int generation, ShellClientEvent.ClipSync sync)
+    {
+        if (generation != _clipGeneration || !_clipOn || _phase != Phase.Live)
+        {
+            _ = sync.Stream.DisposeAsync().AsTask();
+            return;
+        }
+        _clipShell = null; // it let go of the stream
+        _clipViewer ??= new ClipSyncViewer(_name, (text, hold) => OnUi(() => ClipStatus(text, hold)), LogFile.Write);
+        _clipActive = true;
+        _clipSince = Stopwatch.StartNew();
+        ShowClipButtons();
+        _clipViewer.Start(sync.Stream.Stream, sync.InitialBytes, sync.Stream, ended: () => OnUi(() =>
+        {
+            if (generation != _clipGeneration) return;
+            _clipActive = false;
+            ShowClipButtons();
+            // The cap counts tries in a row that didn't get through: one that lasted a while starts the count again.
+            if (_clipSince is { } since && since.Elapsed >= ClipSettled) _clipTries = 0;
+            RetryClipSync(ClipRetry);
+        }));
+    }
+
+    private void ClipSyncRefused(int generation, Passthrough.Core.Shell.ShellError reason)
+    {
+        if (generation != _clipGeneration) return;
+        _clipShell = null;
+        switch (reason)
+        {
+            // The view's start hadn't reached it yet: ask again shortly.
+            case Passthrough.Core.Shell.ShellError.NoScreenView: RetryClipSync(ClipRetryNoView); break;
+            case Passthrough.Core.Shell.ShellError.ClipSyncOff:
+                Toast($"{_name} has clipboard sync turned off. Once it's on there, turn Sync clipboard off and on here.");
+                break;
+            default:
+                Toast($"{_name} can't sync the clipboard (update Passthrough there). Send clipboard and Copy from Mac still work.");
+                break;
+        }
+    }
+
+    private void RetryClipSync(TimeSpan after)
+    {
+        if (!_clipOn || _phase != Phase.Live) return;
+        if (_clipTries >= ClipTriesInARow)
+        {
+            Toast($"Clipboard sync with {_name} stopped. Turn Sync clipboard off and on to try again.");
+            return;
+        }
+        var generation = _clipGeneration;
+        _ = Task.Delay(after).ContinueWith(_ => OnUi(() => { if (generation == _clipGeneration) StartClipSync(); }), TaskScheduler.Default);
+    }
+
+    /// <summary>Ends the sync and its connection. With <paramref name="forget"/> (turned off) what was received goes too.</summary>
+    private void StopClipSync(bool forget)
+    {
+        _clipGeneration++;
+        _clipShell?.Disconnect();
+        _clipShell = null;
+        _clipViewer?.Stop(forget);
+        _clipActive = false;
+        ShowClipButtons();
+        if (_clipHeld) ClipStatus(null, false);
+    }
+
+    /// <summary>While sync runs, Ctrl+C and ⌘V do the work: the two buttons give way to it.</summary>
+    private void ShowClipButtons()
+    {
+        var visibility = _clipActive ? Visibility.Collapsed : Visibility.Visible;
+        if (_sendButton is not null) _sendButton.Visibility = visibility;
+        if (_copyButton is not null) _copyButton.Visibility = visibility;
+    }
+
+    /// <summary>What sync is doing, beside the subtitle: a line that stays until replaced, or one that goes after a few seconds.</summary>
+    private void ClipStatus(string? text, bool hold)
+    {
+        if (_phase == Phase.Closed) return;
+        if (text is null)
+        {
+            if (_clipHeld) { _toastId++; _toast.Text = ""; }
+            _clipHeld = false;
+            return;
+        }
+        _clipHeld = hold;
+        if (hold) { _toastId++; _toast.Text = text; }
+        else Toast(text);
+    }
+
+    private void OnDragOver(object sender, DragEventArgs e)
+    {
+        var point = e.GetPosition(_stage);
+        var inside = ScreenFrame.StreamPoint(point.X, point.Y, PictureRect()).Inside;
+        e.AcceptedOperation = _clipActive && _phase == Phase.Live && inside && e.DataView.Contains(StandardDataFormats.StorageItems)
+            ? DataPackageOperation.Copy : DataPackageOperation.None;
+        if (e.AcceptedOperation == DataPackageOperation.Copy) e.DragUIOverride.Caption = $"Drop on {_name}";
+        e.Handled = true;
+    }
+
+    private async void OnDrop(object sender, DragEventArgs e)
+    {
+        try
+        {
+            if (!_clipActive || _clipViewer is not { } viewer || !e.DataView.Contains(StandardDataFormats.StorageItems)) return;
+            var point = e.GetPosition(_stage);
+            var at = ScreenFrame.StreamPoint(point.X, point.Y, PictureRect());
+            if (!at.Inside) return;
+            var deferral = e.GetDeferral();
+            List<string> paths;
+            try { paths = [.. (await e.DataView.GetStorageItemsAsync()).Select(i => i.Path).Where(p => !string.IsNullOrEmpty(p))]; }
+            finally { deferral.Complete(); }
+            if (paths.Count == 0) { Toast("Those can't be sent: only files and folders on this PC."); return; }
+            viewer.Drop(paths, (ushort)Math.Round(Math.Clamp(at.X, 0, 1) * 65535), (ushort)Math.Round(Math.Clamp(at.Y, 0, 1) * 65535));
+        }
+        catch (Exception x) when (x is COMException or UnauthorizedAccessException or InvalidOperationException) { Toast("Those files couldn't be read."); }
+        catch (Exception x) when (x is not OutOfMemoryException) { LogFile.Error(x); LogFile.Flush(); } // async void: anything left here would end the app
     }
 
     private void Status(string text, bool retry, string retryText = "Try again")

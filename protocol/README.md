@@ -948,6 +948,21 @@ without its tray app for that account, or that account's session isn't the
 one being viewed). A refused `clipSync` leaves a shell connection. One per
 id: a new one replaces the old, which closes.
 
+On a PC host the clipboard belongs to a Windows account in its own session,
+so the service doesn't sync it itself: it hands the connection, as it is, to
+that account's tray app over a pipe of its own (never the one the shells
+share), and the tray app speaks the messages below. The account is the one
+that granted the asking computer, and its session must be the one Remote
+Desktop is showing now. The relay carries Remote Desktop's bytes unread, so
+the service can't tell which of that account's devices is in the session:
+two computers the same account let in aren't told apart. A screen pass
+can't view a PC, so its `clipSync` is answered `no_screen_view`.
+
+protocol/fixtures.json's `clipSync` section holds each message's bytes,
+names a receiver takes and declines, and offers and item sequences with the
+answer to each; the three reasons above are listed there, not under
+`shell.errors`, since no phone is ever told them.
+
 Otherwise the answer is `clipSyncReady`, and from the byte after that line
 both directions carry binary messages, framed as the screen stream's: a type
 byte, a 4-byte big-endian payload length, the payload, at most 1 MiB + 64
@@ -1056,8 +1071,15 @@ viewed session does it. If something else is there by then, or nothing
 there takes them, they're moved to Downloads and shown, answered `result` 1;
 if the drag gets no answer in time, they're copied there instead (whatever
 is at the point may still be taking them). A host keeps received drops a
-while (a Mac: the last 5, up to 2 GB) for an app that took them by
-reference, and holds its viewers' input for the moment of the drag.
+while (the last 5, up to 2 GB) for an app that took them by
+reference. A Mac holds its viewers' input for the moment of the drag; a PC
+can't (the viewer's input is Remote Desktop's own), so a click from the
+viewer in that half second can end the drag elsewhere. "The same thing" is
+the same top-level window: one that shows something else by then (another
+folder, another tab) still takes the drop. On a PC the tray app runs as the
+account, not elevated: a window of a program running as administrator
+doesn't take the drop, and nothing is dropped on the lock screen; both end
+in Downloads or `result` 2.
 
 ### Address policy
 

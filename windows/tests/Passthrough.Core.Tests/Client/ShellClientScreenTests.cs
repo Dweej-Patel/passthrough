@@ -80,6 +80,59 @@ public sealed class ShellClientScreenTests
     }
 
     [Fact]
+    public async Task ClipSyncReadyHandsOverTheStreamWithTheBytesAfterIt()
+    {
+        var (client, events, lines, host, link) = await ReadyAsync();
+        client.RequestClipSync();
+        Assert.Equal(ShellEnvelope.ClipSync, ShellEnvelope.Decode((await lines.ReadLineAsync().WaitAsync(Wait))!).T);
+        // The answer and the host's hello in one write.
+        byte[] hello = [1, 0, 0, 0, 2, 1, 0];
+        await host.WriteAsync((byte[])[.. new ShellEnvelope(ShellEnvelope.ClipSyncReady).EncodeLine(), .. hello]);
+        var sync = Assert.IsType<ShellClientEvent.ClipSync>(await events.Reader.ReadAsync().AsTask().WaitAsync(Wait));
+        Assert.Equal(hello, sync.InitialBytes.ToArray());
+        Assert.Same(link, sync.Stream);
+        Assert.False(link.Disposed, "the stream is the receiver's now");
+        client.List();
+        await Task.Delay(200);
+        Assert.False(events.Reader.TryRead(out _));
+        await client.DisposeAsync();
+        Assert.False(link.Disposed);
+    }
+
+    [Fact]
+    public async Task AClipSyncRefusalSaysWhy_AndLeavesTheConnectionUsable()
+    {
+        var (client, events, lines, host, _) = await ReadyAsync();
+        foreach (var (wire, reason) in new[] { ("no_screen_view", ShellError.NoScreenView), ("clip_sync_off", ShellError.ClipSyncOff), ("clip_sync_unavailable", ShellError.ClipSyncUnavailable) })
+        {
+            client.RequestClipSync();
+            await lines.ReadLineAsync().WaitAsync(Wait);
+            await host.WriteAsync(new ShellEnvelope(ShellEnvelope.Error) { Reason = wire }.EncodeLine());
+            Assert.Equal(reason, Assert.IsType<ShellClientEvent.ClipSyncRefused>(await events.Reader.ReadAsync().AsTask().WaitAsync(Wait)).Reason);
+        }
+        // An older host knows no clipSync: its bad_request is a refusal too.
+        client.RequestClipSync();
+        await lines.ReadLineAsync().WaitAsync(Wait);
+        await host.WriteAsync(new ShellEnvelope(ShellEnvelope.Error) { Reason = "bad_request" }.EncodeLine());
+        Assert.Equal(ShellError.BadRequest, Assert.IsType<ShellClientEvent.ClipSyncRefused>(await events.Reader.ReadAsync().AsTask().WaitAsync(Wait)).Reason);
+        client.List();
+        Assert.Equal(ShellEnvelope.List, ShellEnvelope.Decode((await lines.ReadLineAsync().WaitAsync(Wait))!).T);
+        await client.DisposeAsync();
+    }
+
+    [Fact]
+    public async Task AScreenAnsweredToClipSync_EndsTheConnection_NothingIsHandedOver()
+    {
+        var (client, events, lines, host, link) = await ReadyAsync();
+        client.RequestClipSync();
+        await lines.ReadLineAsync().WaitAsync(Wait);
+        await host.WriteAsync(new ShellEnvelope(ShellEnvelope.ScreenVideoReady).EncodeLine());
+        Assert.NotNull(Assert.IsType<ShellClientEvent.Disconnected>(await events.Reader.ReadAsync().AsTask().WaitAsync(Wait)).Error);
+        Assert.True(link.Disposed);
+        await client.DisposeAsync();
+    }
+
+    [Fact]
     public async Task AScreenReadyNobodyAskedForIsJustALine()
     {
         var (client, events, _, host, _) = await ReadyAsync();
