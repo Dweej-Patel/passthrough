@@ -213,7 +213,9 @@ public final class IrohDialer: @unchecked Sendable {
         let address = EndpointAddr(id: try EndpointId.fromString(s: id), relayUrl: relayURL, addresses: addresses)
         let connection = try await endpoint.connect(addr: address, alpn: Data(alpn.utf8))
         do {
-            return IrohByteStream(connection: connection, stream: try await connection.openBi())
+            let stream = IrohByteStream(connection: connection, stream: try await connection.openBi())
+            stream.dialerEndpoint = endpoint
+            return stream
         } catch {
             try? connection.close(errorCode: 0, reason: Data())
             throw error

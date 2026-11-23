@@ -87,9 +87,16 @@ public protocol ShellIrohDialing: AnyObject, Sendable {
     func connect(irohID: String, relayURL: String?, relayToken: String?, addresses: [String]) async throws -> any ByteStream
     /// How a stream `connect` returned is carried right now.
     func path(of stream: any ByteStream) -> ShellPath
+    /// For the log: every path the stream's connection has (the selected one
+    /// marked), this side's own direct addresses and its hole-punch counters.
+    func pathReport(of stream: any ByteStream) -> String?
     /// Ends every dial in progress and closes the endpoint and its streams.
     /// A later `connect` starts afresh.
     func shutdown()
+}
+
+public extension ShellIrohDialing {
+    func pathReport(of stream: any ByteStream) -> String? { nil }
 }
 
 /// The phone's side of the remote shell (protocol/README.md, "Remote shell"):

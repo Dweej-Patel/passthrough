@@ -1377,8 +1377,16 @@ final class ScreenModel: ObservableObject {
         guard start != .local, let dialer else { return }
         pathTask = Task { [weak self, stream] in
             var relayFor = 0
+            var ticks = 0
+            var lastReport: String?
             while !Task.isCancelled {
                 let path = dialer.path(of: stream)
+                // Why a path stays on the relay: every path iroh has, ours, hole-punch counters (on change, else every 30 s).
+                if let report = dialer.pathReport(of: stream), report != lastReport || ticks % 10 == 0 {
+                    lastReport = report
+                    ptLog(.info, "screen: iroh paths: \(report)")
+                }
+                ticks += 1
                 guard let self else { return }
                 if path != .unknown, path != self.connectionPath { self.connectionPath = path }
                 relayFor = path == .relay ? relayFor + 1 : 0
