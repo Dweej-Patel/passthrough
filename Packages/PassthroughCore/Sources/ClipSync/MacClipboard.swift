@@ -166,6 +166,9 @@ public final class ClipboardWatcher {
         guard !reading else { changedWhileReading = true; return }
         guard MacClipboard.maySync(NSPasteboard.general.types) else { return }
         reading = true
+        // Only those watching when the copy was made hear of it: a window that opened meanwhile mustn't
+        // send a copy from before it opened.
+        let watching = Set(watchers.keys)
         current { [weak self] snapshot in
             guard let self else { return }
             self.reading = false
@@ -176,7 +179,7 @@ public final class ClipboardWatcher {
                 return self.tick()
             }
             if case .nothing = snapshot { return }
-            for watcher in self.watchers.values { watcher(snapshot) }
+            for (id, watcher) in self.watchers where watching.contains(id) { watcher(snapshot) }
         }
     }
 }

@@ -6,20 +6,21 @@ import Foundation
 /// the stream lands at the same point on this display. The latest stream's.
 public enum ScreenStreamDisplays {
     private static let lock = NSLock()
-    nonisolated(unsafe) private static var rects: [String: CGRect] = [:]
+    nonisolated(unsafe) private static var rects: [String: (rect: CGRect, stream: ObjectIdentifier)] = [:]
 
-    static func set(_ rect: CGRect, for viewer: String) {
-        lock.lock(); rects[viewer] = rect; lock.unlock()
+    /// `stream` set it: only that stream's end removes it (a newer stream of the same display sets the same rect).
+    static func set(_ rect: CGRect, for viewer: String, by stream: AnyObject) {
+        lock.lock(); rects[viewer] = (rect, ObjectIdentifier(stream)); lock.unlock()
     }
 
-    /// A stream that showed `rect` ended: its entry goes, unless a newer stream of the viewer's set another.
-    static func remove(_ rect: CGRect, for viewer: String) {
-        lock.lock(); if rects[viewer] == rect { rects[viewer] = nil }; lock.unlock()
+    /// `stream` ended: its entry goes, unless a newer stream of the viewer's has set its own since.
+    static func remove(for viewer: String, by stream: AnyObject) {
+        lock.lock(); if rects[viewer]?.stream == ObjectIdentifier(stream) { rects[viewer] = nil }; lock.unlock()
     }
 
     public static func rect(for viewer: String) -> CGRect? {
         lock.lock(); defer { lock.unlock() }
-        return rects[viewer]
+        return rects[viewer]?.rect
     }
 
     /// The point (`x`, `y`), each 0…65535 across `viewer`'s stream, on this Mac.
@@ -30,10 +31,10 @@ public enum ScreenStreamDisplays {
 }
 
 /// While a drop is being dragged into place on this Mac (clipboard sync's
-/// drop), viewers' pointer, scroll, gesture, key and text input is dropped
-/// (not delayed), so a click or a move from a viewer doesn't end the drag
-/// somewhere else. Set from the press until the drag is let go (about half a
-/// second); otherwise nothing is held.
+/// drop), viewers' presses, moves, scrolls, keys and text are dropped (not
+/// delayed), so a click or a move from a viewer doesn't end the drag
+/// somewhere else; releases still go through. Set as the drop starts, until
+/// the drag is let go (well under a second); otherwise nothing is held.
 public enum ScreenInputHold {
     private static let lock = NSLock()
     nonisolated(unsafe) private static var held = false

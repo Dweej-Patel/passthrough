@@ -179,9 +179,11 @@ struct ClipStatusBadge: View {
                 .font(.callout)
                 .fixedSize(horizontal: false, vertical: true)
             ForEach(Array(status.actions.enumerated()), id: \.offset) { index, action in
+                // No Return or Escape for these: the picture has the keyboard, and a key meant for the other
+                // Mac mustn't answer Send for it.
                 Button(action.title) { action.run() }
                     .controlSize(.small)
-                    .keyboardShortcut(index == 0 ? .defaultAction : .cancelAction)
+                    .accessibilityHint(index == 0 ? status.text : "")
             }
         }
         .padding(.horizontal, 14)
@@ -191,7 +193,7 @@ struct ClipStatusBadge: View {
         .padding(.horizontal, 16)
         .transition(.opacity)
         .allowsHitTesting(!status.actions.isEmpty)
-        .accessibilityElement(children: .combine)
+        .accessibilityElement(children: .contain)
         .onAppear { announce() }
         .onChange(of: status.text) { announce() }
     }
@@ -621,18 +623,24 @@ final class RemoteScreenModel: ObservableObject {
     /// goes after `timed` seconds.
     private func showClipStatus(_ status: ClipStatus?) {
         clipStatusClear?.cancel()
+        clipStatusClear = nil
         clipStatus = status
     }
 
     private func showClipStatus(_ text: String, timed seconds: TimeInterval) {
         clipStatusClear?.cancel()
         clipStatus = ClipStatus(text)
-        let clear = DispatchWorkItem { [weak self] in self?.clipStatus = nil }
+        let clear = DispatchWorkItem { [weak self] in
+            self?.clipStatus = nil
+            self?.clipStatusClear = nil
+        }
         clipStatusClear = clear
         DispatchQueue.main.asyncAfter(deadline: .now() + seconds, execute: clear)
     }
 
     func dropRefused(outsidePicture: Bool) {
+        // Only over nothing, or over another of these timed lines: never over the viewer's (a question,
+        // a Stop button, a copy's progress).
         guard clipStatus == nil || clipStatusClear != nil else { return }
         if outsidePicture, clipActive {
             showClipStatus("Drop on the picture to put them there on \(macName).", timed: 3)

@@ -137,6 +137,8 @@ final class ClipSyncWireTests: XCTestCase {
 
 final class ClipSyncSessionTests: XCTestCase {
     private var dirs: [URL] = []
+    /// Room enough, whatever the disk the tests run on has free.
+    static let plenty: @Sendable (URL) -> UInt64? = { _ in 1 << 40 }
 
     override func tearDown() {
         for dir in dirs { try? FileManager.default.removeItem(at: dir) }
@@ -165,8 +167,8 @@ final class ClipSyncSessionTests: XCTestCase {
         let (sa, sb) = PipeStream.pair()
         let ra = Recorder(), rb = Recorder()
         let q = DispatchQueue(label: "events")
-        let a = ClipSyncSession(stream: sa, staging: try tempDir(), eventQueue: q) { ra.add($0) }
-        let b = ClipSyncSession(stream: sb, staging: try tempDir(), eventQueue: q) { rb.add($0) }
+        let a = ClipSyncSession(stream: sa, staging: try tempDir(), eventQueue: q, freeSpace: Self.plenty) { ra.add($0) }
+        let b = ClipSyncSession(stream: sb, staging: try tempDir(), eventQueue: q, freeSpace: Self.plenty) { rb.add($0) }
         a.start(); b.start()
         return (a, b, ra, rb)
     }
@@ -248,7 +250,7 @@ final class ClipSyncSessionTests: XCTestCase {
         let (sa, sb) = PipeStream.pair()
         let staging = try tempDir()
         let rb = Recorder()
-        let b = ClipSyncSession(stream: sb, staging: staging, eventQueue: .global()) { rb.add($0) }
+        let b = ClipSyncSession(stream: sb, staging: staging, eventQueue: .global(), freeSpace: Self.plenty) { rb.add($0) }
         b.start()
         let declined = expectation(description: "declined")
         let got = Locked(Data())
@@ -280,7 +282,7 @@ extension ClipSyncSessionTests {
     private func raw(_ messages: [ClipSyncWire.Message], acceptsDrops: Bool = true,
                      until done: @escaping ([ClipSyncWire.Message]) -> Bool) throws -> [ClipSyncWire.Message] {
         let (sa, sb) = PipeStream.pair()
-        let b = ClipSyncSession(stream: sb, staging: try tempDir(), acceptsDrops: acceptsDrops, eventQueue: .global()) { _ in }
+        let b = ClipSyncSession(stream: sb, staging: try tempDir(), acceptsDrops: acceptsDrops, eventQueue: .global(), freeSpace: Self.plenty) { _ in }
         b.start()
         defer { b.close() }
         let finished = expectation(description: "answers")
@@ -311,7 +313,7 @@ extension ClipSyncSessionTests {
 
         let (sa, sb) = PipeStream.pair()
         let rb = Recorder()
-        let b = ClipSyncSession(stream: sb, staging: try tempDir(), eventQueue: .global()) { rb.add($0) }
+        let b = ClipSyncSession(stream: sb, staging: try tempDir(), eventQueue: .global(), freeSpace: Self.plenty) { rb.add($0) }
         b.start()
         defer { b.close() }
         var wire = ClipSyncWire.encode(.offer(.init(transfer: 1, kind: .clipboard, count: 1, total: 2)))
@@ -380,10 +382,55 @@ extension ClipSyncSessionTests {
         try Data("key".utf8).write(to: secret)
         let file = src.appendingPathComponent("copied.txt")
         try Data("abc".utf8).write(to: file)
-        XCTAssertNotNil(ClipSyncSession.openRegularFile(file))
+        // As listing records it: every link in the path resolved.
+        let listed = ClipPayload.realPath(file)
+        XCTAssertNotNil(ClipSyncSession.openRegularFile(listed))
         try FileManager.default.removeItem(at: file)
         try FileManager.default.createSymbolicLink(at: file, withDestinationURL: secret)
-        XCTAssertNil(ClipSyncSession.openRegularFile(file))
+        XCTAssertNil(ClipSyncSession.openRegularFile(listed))
+    }
+
+    /// A folder above a listed file swapped for a link to another folder: not read through it either.
+    func testAFolderSwappedForALinkIsNotRead() throws {
+        let src = try tempDir()
+        let dir = src.appendingPathComponent("d", isDirectory: true)
+        let secrets = src.appendingPathComponent("secrets", isDirectory: true)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: secrets, withIntermediateDirectories: true)
+        try Data("abc".utf8).write(to: dir.appendingPathComponent("f"))
+        try Data("key".utf8).write(to: secrets.appendingPathComponent("f"))
+        let payload = try ClipPayload.files([dir]).get()
+        guard case let .file(listed)? = payload.items.first(where: { $0.format == .file })?.content else { return XCTFail("no file listed") }
+        XCTAssertNotNil(ClipSyncSession.openRegularFile(listed))
+        try FileManager.default.removeItem(at: dir)
+        try FileManager.default.createSymbolicLink(at: dir, withDestinationURL: secrets)
+        XCTAssertNil(ClipSyncSession.openRegularFile(listed))
+    }
+
+    /// With free space unknown a drop is refused; a copy is still taken.
+    func testUnknownRoomRefusesDropsOnly() throws {
+        let (sa, sb) = PipeStream.pair()
+        let b = ClipSyncSession(stream: sb, staging: try tempDir(), eventQueue: .global(), freeSpace: { _ in nil }) { _ in }
+        b.start()
+        defer { b.close() }
+        let got = Locked(Data())
+        let declined = expectation(description: "drop declined")
+        @Sendable func read() {
+            sa.receive(maximumLength: 1 << 16) { data, _, _ in
+                if let data { got.set(got.get() + data) }
+                var r = ClipSyncWire.Reader()
+                let all = (try? r.append(got.get())) ?? []
+                if all.contains(.decline(transfer: 2, reason: .noRoom)) { declined.fulfill(); return }
+                read()
+            }
+        }
+        read()
+        var wire = ClipSyncWire.encode(.offer(.init(transfer: 1, kind: .clipboard, count: 1, total: 1)))
+        wire.append(ClipSyncWire.encode(.offer(.init(transfer: 2, kind: .drop, count: 1, total: 1))))
+        sa.send(wire, isComplete: false) { _ in }
+        wait(for: [declined], timeout: 5)
+        var r = ClipSyncWire.Reader()
+        XCTAssertFalse(((try? r.append(got.get())) ?? []).contains { if case .decline(1, _) = $0 { true } else { false } })
     }
 }
 

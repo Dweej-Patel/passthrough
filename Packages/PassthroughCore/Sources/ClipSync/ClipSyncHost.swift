@@ -27,7 +27,7 @@ public final class ClipSyncHost {
     static let dropBytesKept: UInt64 = 2 << 30
     /// Viewers' names, by id, while they sync.
     private var labels: [String: String] = [:]
-    /// A viewer is dropping files here (its name, how many, where; nil: they go to Downloads), for a notice.
+    /// A viewer dropped files here (its name, how many, where; nil: they went to Downloads), for a notice.
     public var onDropNotice: ((String, Int, CGPoint?) -> Void)?
     /// Who syncs the clipboard now, by id, whenever that changes (for the panel's viewer rows).
     public var onSyncingChanged: ((Set<String>) -> Void)?
@@ -150,6 +150,7 @@ public final class ClipSyncHost {
     private func end(_ id: String) {
         guard let entry = sessions.removeValue(forKey: id) else { return }
         entry.session.close()
+        dropTargets = dropTargets.filter { !$0.key.hasPrefix(id + "#") }
         onSyncingChanged?(Set(sessions.keys))
         if sessions.isEmpty, let watch {
             ClipboardWatcher.shared.unwatch(watch)
@@ -209,7 +210,7 @@ public final class ClipSyncHost {
     private func keep(_ folder: URL) {
         clipboardFolders.append(folder)
         while clipboardFolders.count > 3 {
-            try? FileManager.default.removeItem(at: clipboardFolders.removeFirst())
+            ClipSyncStaging.remove(clipboardFolders.removeFirst())
         }
     }
 
@@ -222,12 +223,14 @@ public final class ClipSyncHost {
             dropFolders.append((folder, transfer.total))
             while dropFolders.count > Self.dropsKept
                     || (dropFolders.count > 1 && dropFolders.reduce(0, { $0 + $1.bytes }) > Self.dropBytesKept) {
-                try? FileManager.default.removeItem(at: dropFolders.removeFirst().url)
+                ClipSyncStaging.remove(dropFolders.removeFirst().url)
             }
         }
+        let viewer = labels[id] ?? "A computer"
         func toDownloads(copy: Bool = false) {
-            DropPerformer.saveToDownloads(files, copy: copy) { saved in
+            DropPerformer.saveToDownloads(files, copy: copy) { [weak self] saved in
                 session.result(transfer.transfer, saved ? .savedToDownloads : .failed)
+                if saved { self?.onDropNotice?(viewer, files.count, nil) }
                 cleanUp()
             }
         }
@@ -235,17 +238,16 @@ public final class ClipSyncHost {
             session.result(transfer.transfer, .failed)
             return cleanUp()
         }
-        let viewer = labels[id] ?? "A computer"
         // Unknown point, or something else there now (another window came up while the files came): Downloads.
+        // The notice comes after: shown before, it could cover the very spot the drag goes to.
         guard let point = dropPoint(id, transfer.x, transfer.y), let noted, DropPerformer.target(at: point) == noted else {
-            onDropNotice?(viewer, files.count, nil)
             return toDownloads()
         }
-        onDropNotice?(viewer, files.count, point)
-        DropPerformer.drop(files, at: point) { outcome in
+        DropPerformer.drop(files, at: point, expected: noted) { [weak self] outcome in
             switch outcome {
             case .dropped:
                 session.result(transfer.transfer, .placed)
+                self?.onDropNotice?(viewer, files.count, point)
                 cleanUp()
             case .notTaken: toDownloads()
             // Whatever is there may still be taking them: a copy in Downloads, the originals left as they are.

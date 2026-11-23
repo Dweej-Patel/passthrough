@@ -777,7 +777,9 @@ public final class ShellClient: @unchecked Sendable {
             guard let self, self.active, self.ready, gen == self.generation else { return }
             let quiet = self.secondsSinceHeard
             if quiet >= self.liveness.silence { return self.finish(ConnectError.stoppedAnswering) }
-            if quiet >= self.liveness.interval { self.send(ShellEnvelope(t: ShellEnvelope.ping)) }
+            // Not while `clipSync` waits for its answer: a ping still on its way when the host hands the
+            // connection over would reach clipboard sync as bytes it can't read.
+            if quiet >= self.liveness.interval, !self.clipRequested { self.send(ShellEnvelope(t: ShellEnvelope.ping)) }
             self.heartbeat(gen)
         }
     }

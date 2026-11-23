@@ -37,8 +37,10 @@ public final class DropPerformer: NSObject, NSDraggingSource {
 
     /// Drops `files` at `point`, in global display coordinates (the top-left of
     /// the main display at 0, 0, as CoreGraphics' events use), then calls `done`.
-    public static func drop(_ files: [URL], at point: CGPoint, done: @escaping (Outcome) -> Void) {
-        let run = { DropPerformer().start(files, at: point, done: done) }
+    /// Only on `expected` (what was there when the drop was offered): checked again
+    /// when its turn comes, as a drop may wait behind others.
+    public static func drop(_ files: [URL], at point: CGPoint, expected: Target?, done: @escaping (Outcome) -> Void) {
+        let run = { DropPerformer().start(files, at: point, expected: expected, done: done) }
         guard busy else { return run() }
         // A few may wait their turn; more aren't taken (so drops can't keep viewers' input held without end).
         guard queued.count < maxQueued else { return done(.notTaken) }
@@ -53,8 +55,8 @@ public final class DropPerformer: NSObject, NSDraggingSource {
         queued.removeFirst()()
     }
 
-    private func start(_ files: [URL], at point: CGPoint, done: @escaping (Outcome) -> Void) {
-        guard !files.isEmpty, CGPreflightPostEventAccess() else {
+    private func start(_ files: [URL], at point: CGPoint, expected: Target?, done: @escaping (Outcome) -> Void) {
+        guard !files.isEmpty, CGPreflightPostEventAccess(), Self.target(at: point) == expected else {
             done(.notTaken)
             return Self.next()
         }
@@ -77,7 +79,8 @@ public final class DropPerformer: NSObject, NSDraggingSource {
         // would land on (and drag) whatever is under it.
         panel.backgroundColor = NSColor(white: 0.5, alpha: 0.02)
         panel.hasShadow = false
-        panel.collectionBehavior = [.canJoinAllSpaces, .transient, .ignoresCycle]
+        // Over a full-screen app's space too, or the press would never find it.
+        panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .transient, .ignoresCycle]
         let view = SourceView(frame: NSRect(x: 0, y: 0, width: 20, height: 20))
         view.performer = self
         panel.contentView = view
@@ -85,9 +88,13 @@ public final class DropPerformer: NSObject, NSDraggingSource {
         window = panel
 
         let timeout = DispatchWorkItem { [weak self] in
-            // A drag still going after all this time is ended (Escape), so the next pointer move doesn't carry the files on.
-            for down in [true, false] {
-                CGEvent(keyboardEventSource: nil, virtualKey: 53, keyDown: down)?.post(tap: .cghidEventTap)
+            // A drag still going after all this time (the button still down) is ended with Escape, so the next
+            // pointer move doesn't carry the files on. Otherwise it's over: Escape would only answer whatever
+            // the target is asking.
+            if CGEventSource.buttonState(.combinedSessionState, button: .left) {
+                for down in [true, false] {
+                    CGEvent(keyboardEventSource: nil, virtualKey: 53, keyDown: down)?.post(tap: .cghidEventTap)
+                }
             }
             self?.finish(.timedOut)
         }
@@ -107,6 +114,11 @@ public final class DropPerformer: NSObject, NSDraggingSource {
             func end(_ outcome: Outcome) {
                 DispatchQueue.main.async { MainActor.assumeIsolated { self?.finish(outcome) } }
             }
+            // Someone's own drag or click on this Mac (a viewer's, through the screen) goes first: a press now
+            // would do nothing, and the release after it would end their drag here. Up to 4 s, then not at all.
+            var held = 0
+            while Self.anyButtonDown(), held < 4000 { usleep(20_000); held += 20 }
+            guard !Self.anyButtonDown() else { return end(.notTaken) }
             // Only press where our window is on top: otherwise the press would click whatever is there.
             guard Self.frontmostOwner(at: start) == me else { return end(.notTaken) }
             post(.mouseMoved, start); usleep(30_000)
@@ -132,6 +144,11 @@ public final class DropPerformer: NSObject, NSDraggingSource {
         }
     }
 
+    /// Whether any mouse button is down on this Mac now, by anyone.
+    nonisolated static func anyButtonDown() -> Bool {
+        [CGMouseButton.left, .right, .center].contains { CGEventSource.buttonState(.combinedSessionState, button: $0) }
+    }
+
     /// The owner of the frontmost window at a point (Passthrough's own included).
     nonisolated static func frontmostOwner(at point: CGPoint) -> pid_t? {
         guard let list = CGWindowListCopyWindowInfo([.optionOnScreenOnly], kCGNullWindowID) as? [[String: Any]] else { return nil }
@@ -145,6 +162,8 @@ public final class DropPerformer: NSObject, NSDraggingSource {
     }
 
     fileprivate func begin(from view: NSView, event: NSEvent) {
+        // A press that comes after the drop ended (it timed out) starts nothing.
+        guard done != nil else { return }
         pressed.set(true)
         let items = files.map { url -> NSDraggingItem in
             let item = NSDraggingItem(pasteboardWriter: url as NSURL)

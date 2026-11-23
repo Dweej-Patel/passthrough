@@ -569,7 +569,7 @@ struct ScreenViewerRows: View {
                             Text(Self.viewing(viewer))
                                 .font(.system(size: 12.5, weight: .medium)).lineLimit(1).truncationMode(.middle)
                             if shell.clipSyncing.contains(viewer.phoneID) {
-                                Text("Syncing the clipboard: copies here and there go to each other")
+                                Text("Sharing the clipboard")
                                     .font(.system(size: 11)).foregroundStyle(.secondary).lineLimit(1).truncationMode(.tail)
                             }
                         }

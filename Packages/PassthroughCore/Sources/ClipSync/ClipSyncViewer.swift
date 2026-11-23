@@ -18,9 +18,18 @@ public enum ClipSyncStaging {
         guard !cleared.get() else { return }
         cleared.set(true)
         let root = self.root
-        let aside = root.deletingLastPathComponent().appendingPathComponent("Received-old-\(UUID().uuidString)", isDirectory: true)
-        guard (try? FileManager.default.moveItem(at: root, to: aside)) != nil else { return }
-        DispatchQueue.global(qos: .utility).async { try? FileManager.default.removeItem(at: aside) }
+        let parent = root.deletingLastPathComponent()
+        let aside = parent.appendingPathComponent("Received-old-\(UUID().uuidString)", isDirectory: true)
+        try? FileManager.default.moveItem(at: root, to: aside)
+        // This one, and any an earlier run moved aside and didn't finish deleting (it quit meanwhile).
+        let old = ((try? FileManager.default.contentsOfDirectory(at: parent, includingPropertiesForKeys: nil)) ?? [])
+            .filter { $0.lastPathComponent.hasPrefix("Received-old-") }
+        for folder in old { remove(folder) }
+    }
+
+    /// Deletes received files off the main thread: a folder can hold tens of thousands.
+    public static func remove(_ url: URL) {
+        DispatchQueue.global(qos: .utility).async { try? FileManager.default.removeItem(at: url) }
     }
 }
 
@@ -118,7 +127,7 @@ public final class ClipSyncViewer {
         status(nil)
         let kept = MacClipboard.folders(within: staging)
         for folder in clipboardFolders where !kept.contains(folder.standardizedFileURL) {
-            try? FileManager.default.removeItem(at: folder)
+            ClipSyncStaging.remove(folder)
         }
         clipboardFolders = clipboardFolders.filter { kept.contains($0.standardizedFileURL) }
     }
@@ -139,7 +148,9 @@ public final class ClipSyncViewer {
     private func send(drop result: Result<ClipPayload, ClipPayload.FilesError>, count: Int, x: UInt16, y: UInt16) {
         guard let session else { return status(nil) }
         switch result {
-        case let .success(payload) where !payload.items.isEmpty:
+        case let .success(payload) where payload.items.isEmpty:
+            status("Only files and folders can be dropped; links and other items are left out.")
+        case let .success(payload):
             let id = session.send(payload, kind: .drop, x: x, y: y)
             drops[id] = count
             status("Sending \(Self.items(count, payload.total)) to \(hostName)…", hold: true)
@@ -166,8 +177,8 @@ public final class ClipSyncViewer {
         case let .tooLarge(files):
             waiting = nil
             status(files
-                ? "Too large to sync (files up to 500 MB). Drag them onto the window instead."
-                : "Too large to sync (text up to 16 MB, images up to 64 MB). Save it as a file and drag that onto the window.")
+                ? "Too large to sync (files up to \(Self.size(ClipSyncWire.maxClipboardFiles))). Drag them onto the window instead."
+                : "Too large to sync (text up to \(Self.size(ClipSyncWire.maxClipboardText)), images up to \(Self.size(ClipSyncWire.maxClipboardImage))). Save it as a file and drag that onto the window.")
         case .nothing:
             break
         }
@@ -202,14 +213,14 @@ public final class ClipSyncViewer {
                 if wasShown { copyingIn = nil }
                 if let folder = transfer.folder {
                     clipboardFolders.append(folder)
-                    while clipboardFolders.count > 3 { try? FileManager.default.removeItem(at: clipboardFolders.removeFirst()) }
+                    while clipboardFolders.count > 3 { ClipSyncStaging.remove(clipboardFolders.removeFirst()) }
                     status("Ready to paste: \(Self.items(transfer.topLevel.count, nil)) from \(hostName).")
                 } else if wasShown {
                     status("Ready to paste from \(hostName).")
                 }
             case .drop:
                 // Declined at the offer (`acceptsDrops`); never here.
-                if let folder = transfer.folder { try? FileManager.default.removeItem(at: folder) }
+                if let folder = transfer.folder { ClipSyncStaging.remove(folder) }
             }
         case let .incoming(transfer, kind, total, _, _) where kind == .clipboard && total > 20 << 20:
             copyingIn = transfer
@@ -234,8 +245,7 @@ public final class ClipSyncViewer {
             switch result {
             case .placed: status("Dropped \(Self.items(count, nil)) on \(hostName).")
             case .savedToDownloads:
-                status("\(they) went to \(hostName)'s Downloads instead: nothing took \(count == 1 ? "it" : "them") at that spot, or another window came up there.",
-                       linger: 8)
+                status("\(they) went to \(hostName)'s Downloads instead: \(count == 1 ? "it" : "they") couldn't be dropped at that spot.", linger: 8)
             case .failed: status("\(hostName) couldn't take \(count == 1 ? "that file" : "those files").")
             }
         case let .declined(transfer, reason):
@@ -244,7 +254,9 @@ public final class ClipSyncViewer {
             let those = count.map { $0 == 1 ? "That file" : "Those \($0) items" } ?? "That copy"
             let are = count.map { $0 == 1 ? "is" : "are" } ?? "is"
             switch reason {
-            case .tooLarge: status("\(those) \(are) too large for \(hostName).")
+            case .tooLarge: status(count.map { $0 > 1 } == true
+                ? "\(those) are too many or too large for \(hostName) to take at once."
+                : "\(those) \(are) too large for \(hostName).")
             case .noRoom: status("\(hostName) doesn't have room for \(those.prefix(1).lowercased() + those.dropFirst()) right now.")
             case .syncOff: status("\(hostName) has clipboard sync turned off.")
             case .badOffer, .failed: status("\(those) couldn't go to \(hostName).")

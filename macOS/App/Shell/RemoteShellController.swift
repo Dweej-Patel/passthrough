@@ -287,7 +287,7 @@ final class RemoteShellController: ObservableObject {
         clipSync.onSyncingChanged = { [weak self] ids in self?.clipSyncing = ids }
         clipSync.onDropNotice = { [weak self] viewer, count, point in
             let items = count == 1 ? "1 item" : "\(count) items"
-            self?.dropNotice.show(.quiet(title: point == nil ? "\(viewer) put \(items) in Downloads" : "\(viewer) is dropping \(items) here",
+            self?.dropNotice.show(.quiet(title: point == nil ? "\(viewer) put \(items) in Downloads" : "\(viewer) dropped \(items) here",
                                          detail: nil, symbol: "tray.and.arrow.down"))
         }
     }

@@ -60,7 +60,8 @@ public struct ClipPayload: Sendable {
                 let size = UInt64(max(values.fileSize ?? 0, 0))
                 total += size
                 if let maxBytes, total > maxBytes { return .tooLarge }
-                items.append(Item(format: .file, name: name, size: size, content: .file(url)))
+                // Where it really is, links in the folders above it followed now: what's opened later must be there.
+                items.append(Item(format: .file, name: name, size: size, content: .file(realPath(url))))
             } else {
                 return nil
             }
@@ -91,6 +92,13 @@ public struct ClipPayload: Sendable {
             }
         }
         return .success(ClipPayload(items: items))
+    }
+
+    /// Where a file really is, every link in its path followed (`realpath`: as the system names an open file).
+    static func realPath(_ url: URL) -> URL {
+        guard let resolved = realpath(url.path, nil) else { return url }
+        defer { free(resolved) }
+        return URL(fileURLWithPath: String(cString: resolved))
     }
 
     /// One part of a name as the other side can make it.
@@ -129,6 +137,8 @@ public struct ReceivedTransfer: Sendable {
         public var data: Data?
         /// A file or folder, where it was put.
         public var url: URL?
+        /// Its size, as offered (and received).
+        public var size: UInt64 = 0
     }
 
     public var transfer: UInt32
@@ -152,8 +162,7 @@ public struct ReceivedTransfer: Sendable {
             case .folder: return ClipPayload.Item(format: .folder, name: item.name, size: 0, content: .folder)
             case .file:
                 guard let url = item.url else { return nil }
-                let size = (try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize).flatMap { $0 }.map(UInt64.init) ?? 0
-                return ClipPayload.Item(format: .file, name: item.name, size: size, content: .file(url))
+                return ClipPayload.Item(format: .file, name: item.name, size: item.size, content: .file(ClipPayload.realPath(url)))
             default:
                 guard let data = item.data else { return nil }
                 return .data(item.format, data)

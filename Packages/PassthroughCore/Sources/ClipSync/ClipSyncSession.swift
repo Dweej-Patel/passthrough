@@ -59,9 +59,14 @@ public final class ClipSyncSession: @unchecked Sendable {
     private let acceptsDrops: Bool
 
     /// `staging`: where the other side's files go, one folder per transfer.
+    /// Free space where files go; the volume's, unless a test says otherwise.
+    private let freeSpace: @Sendable (URL) -> UInt64?
+
     public init(stream: any ByteStream, initialBytes: Data = Data(), staging: URL, acceptsDrops: Bool = true,
-                eventQueue: DispatchQueue = .main, onEvent: @escaping @Sendable (Event) -> Void) {
+                eventQueue: DispatchQueue = .main, freeSpace: (@Sendable (URL) -> UInt64?)? = nil,
+                onEvent: @escaping @Sendable (Event) -> Void) {
         self.acceptsDrops = acceptsDrops
+        self.freeSpace = freeSpace ?? ClipSyncSession.volumeFreeSpace
         self.stream = stream
         self.initialBytes = initialBytes
         self.staging = staging
@@ -95,10 +100,12 @@ public final class ClipSyncSession: @unchecked Sendable {
     /// transfer abandons this side's previous unfinished one.
     @discardableResult
     public func send(_ payload: ClipPayload, kind: ClipSyncWire.Kind, x: UInt16 = 0, y: UInt16 = 0) -> UInt32 {
+        // The number and the queueing under one lock, so transfers reach the queue (and the wire) in number
+        // order whichever threads send: a receiver ignores a number that went down.
         numbers.lock()
+        defer { numbers.unlock() }
         let id = nextTransfer
         nextTransfer &+= 1
-        numbers.unlock()
         // The rest on the queue: starting to send reads files, which mustn't hold up the caller (the main thread).
         queue.async { [self] in
             guard !closed, !payload.items.isEmpty else { return }
@@ -207,11 +214,15 @@ public final class ClipSyncSession: @unchecked Sendable {
 
     /// Opens a file to send without following a link: what was listed as a file may have been swapped for
     /// a link to something else (a key) since, and that mustn't be what's read.
+    /// `O_NOFOLLOW` covers the file itself; where the opened file really is (`F_GETPATH`) covers a folder
+    /// above it swapped for a link: it must be exactly `url`, as listed with every link resolved (`realpath`).
     static func openRegularFile(_ url: URL) -> FileHandle? {
         let fd = open(url.path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC)
         guard fd >= 0 else { return nil }
         var info = stat()
-        guard fstat(fd, &info) == 0, (info.st_mode & S_IFMT) == S_IFREG else { Darwin.close(fd); return nil }
+        var path = [CChar](repeating: 0, count: Int(MAXPATHLEN))
+        guard fstat(fd, &info) == 0, (info.st_mode & S_IFMT) == S_IFREG, fcntl(fd, F_GETPATH, &path) != -1,
+              String(cString: path) == url.path else { Darwin.close(fd); return nil }
         return FileHandle(fileDescriptor: fd, closeOnDealloc: true)
     }
 
@@ -353,6 +364,9 @@ public final class ClipSyncSession: @unchecked Sendable {
             .badOffer
         } else if incoming.count >= Self.maxOpenIncoming {
             .noRoom
+        } else if let limit = ClipSyncWire.refusal(of: offer, maxItems: Self.maxDropItems) {
+            // The limits before the room, as the Windows side answers.
+            limit
         } else if offer.kind == .drop, let room, need > room {
             .noRoom
         } else {
@@ -402,7 +416,7 @@ public final class ClipSyncSession: @unchecked Sendable {
             } catch {
                 return decline(t, .failed)
             }
-            t.items.append(ReceivedTransfer.Item(format: format, name: item.name, data: nil, url: url))
+            t.items.append(ReceivedTransfer.Item(format: format, name: item.name, data: nil, url: url, size: item.size))
         } else {
             // Inline formats are held in memory, so they're held to the clipboard's sizes whatever the kind.
             let cap = format == .png ? ClipSyncWire.maxClipboardImage : ClipSyncWire.maxClipboardText
@@ -445,9 +459,13 @@ public final class ClipSyncSession: @unchecked Sendable {
 
     private func room() -> UInt64? {
         try? FileManager.default.createDirectory(at: staging, withIntermediateDirectories: true)
-        guard let values = try? staging.resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey]),
+        return freeSpace(staging)
+    }
+
+    /// The volume's free space for important use, less 1 GiB left for everything else; nil when it can't be read.
+    static func volumeFreeSpace(_ url: URL) -> UInt64? {
+        guard let values = try? url.resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey]),
               let free = values.volumeAvailableCapacityForImportantUsage, free > 0 else { return nil }
-        // Leave some for everything else.
         let margin: Int64 = 1 << 30
         return UInt64(max(free - margin, 0))
     }
