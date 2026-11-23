@@ -147,10 +147,17 @@ public class ClipSyncWireTests
         Assert.Equal("_nul.txt", ClipNames.WindowsPart("nul.txt"));
         Assert.Equal("_COM1.tar.gz", ClipNames.WindowsPart("COM1.tar.gz"));
         Assert.Equal("CONSOLE", ClipNames.WindowsPart("CONSOLE"));
+        Assert.Equal("_COM².log", ClipNames.WindowsPart("COM².log"));
+        // What turns a name's letters around on screen: "photo<RLO>gpj.exe" would read "photoexe.jpg".
+        Assert.Equal("photo_gpj.exe", ClipNames.WindowsPart("photo‮gpj.exe"));
+        Assert.Equal("a_b_c", ClipNames.WindowsPart("a⁦b⁩c"));
         Assert.Equal("ordinary.txt", ClipNames.WindowsPart("ordinary.txt"));
         var longName = ClipNames.WindowsPart(new string('日', 300) + ".txt");
-        Assert.Equal(255, longName.Length);
+        Assert.Equal(ClipNames.MaxWindowsPart, longName.Length);
         Assert.EndsWith(".txt", longName);
+        // Numbered to be unique, it still fits in what Windows takes.
+        var numbered = new HashSet<string>(StringComparer.Ordinal);
+        for (var i = 0; i < 1200; i++) Assert.InRange(ClipNames.Unique(longName, numbered).Length, 1, 255);
     }
 
     [Fact]

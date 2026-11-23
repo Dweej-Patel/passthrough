@@ -58,7 +58,12 @@ public static class DropPerformer
     /// Drags <paramref name="paths"/> to (<paramref name="x"/>, <paramref name="y"/>) and lets go; blocks until the drop
     /// is over or <paramref name="limit"/> passes. One at a time: the pointer can only be in one place.
     /// </summary>
-    public static DropOutcome Drop(IReadOnlyList<string> paths, int x, int y, TimeSpan limit, Action<string>? log = null)
+    /// <param name="expected">
+    /// What must be at the point for the files to go there (the window noted when the drop was offered): checked once
+    /// this drop's turn has come, just before the press, and again as the button comes up. Anything else there, or the
+    /// pointer somewhere else by then, and nothing is dropped.
+    /// </param>
+    public static DropOutcome Drop(IReadOnlyList<string> paths, int x, int y, TimeSpan limit, Action<string>? log = null, Target? expected = null)
     {
         if (paths.Count == 0) return DropOutcome.NotTaken;
         if (Interlocked.Increment(ref _waiting) > MaxWaiting + 1)
@@ -67,11 +72,11 @@ public static class DropPerformer
             log?.Invoke("drop: too many drops are waiting; this one isn't dragged");
             return DropOutcome.NotTaken;
         }
-        try { return DropNow(paths, x, y, limit, log); }
+        try { return DropNow(paths, x, y, limit, log, expected); }
         finally { Interlocked.Decrement(ref _waiting); }
     }
 
-    private static DropOutcome DropNow(IReadOnlyList<string> paths, int x, int y, TimeSpan limit, Action<string>? log)
+    private static DropOutcome DropNow(IReadOnlyList<string> paths, int x, int y, TimeSpan limit, Action<string>? log, Target? expected)
     {
         lock (Busy)
         {
@@ -87,7 +92,13 @@ public static class DropPerformer
                 }
                 Thread.Sleep(50);
             }
-            var run = new Run(paths, x, y, limit, log);
+            // Its turn has come, perhaps a while after it was asked for: what is there now is what counts.
+            if (expected is { } wanted && At(x, y) != wanted)
+            {
+                log?.Invoke("drop: what was at the point has changed; the files aren't dragged");
+                return DropOutcome.NotTaken;
+            }
+            var run = new Run(paths, x, y, limit, log, expected);
             var thread = new Thread(run.Main) { IsBackground = true, Name = "Passthrough drop" };
             thread.SetApartmentState(ApartmentState.STA);
             thread.Start();
@@ -96,7 +107,7 @@ public static class DropPerformer
         }
     }
 
-    private sealed class Run(IReadOnlyList<string> paths, int x, int y, TimeSpan limit, Action<string>? log) : IDropSource
+    private sealed class Run(IReadOnlyList<string> paths, int x, int y, TimeSpan limit, Action<string>? log, Target? expected) : IDropSource
     {
         private readonly ManualResetEventSlim _pressed = new();
         private volatile bool _cancel;
@@ -160,6 +171,13 @@ public static class DropPerformer
             Thread.Sleep(30);
             Mouse(startX, startY, MouseMove);
             Thread.Sleep(30);
+            // Last look: only press where our own window is on top, or the press clicks whatever came up there.
+            if (WindowFromPoint(new Point { X = startX, Y = startY }) != _window)
+            {
+                log?.Invoke("drop: something came up over the window the drag starts from");
+                PostMessage(_window, WmClose, IntPtr.Zero, IntPtr.Zero);
+                return;
+            }
             Mouse(startX, startY, MouseMove | LeftDown);
             // If the press doesn't reach our window, it is let go where it is and nothing is dragged.
             if (!_pressed.Wait(TimeSpan.FromMilliseconds(500)))
@@ -237,7 +255,15 @@ public static class DropPerformer
         public int QueryContinueDrag(int escapePressed, int keyState)
         {
             if (_cancel || escapePressed != 0) return DragDropSCancel;
-            return (keyState & 0x1 /* MK_LBUTTON */) == 0 ? DragDropSDrop : 0;
+            if ((keyState & 0x1 /* MK_LBUTTON */) != 0) return 0;
+            // The button came up: the files go in only where they were meant to, on what was meant to take them. The
+            // viewer's own pointer keeps moving meanwhile, so the pointer may be somewhere else by now.
+            if (GetCursorPos(out var at) && (Math.Abs(at.X - x) > 2 || Math.Abs(at.Y - y) > 2) || expected is { } wanted && At(x, y) != wanted)
+            {
+                log?.Invoke("drop: the pointer or the window under it moved before the files were let go; not dropped");
+                return DragDropSCancel;
+            }
+            return DragDropSDrop;
         }
 
         public int GiveFeedback(int effect) => DragDropSUseDefaultCursors;
@@ -435,6 +461,7 @@ public static class DropPerformer
     [DllImport("user32.dll")] private static extern uint SendInput(uint count, ref Input inputs, int size);
     [DllImport("user32.dll")] private static extern int GetSystemMetrics(int index);
     [DllImport("user32.dll")] private static extern short GetAsyncKeyState(int key);
+    [DllImport("user32.dll")] private static extern bool GetCursorPos(out Point point);
     [DllImport("user32.dll")] private static extern IntPtr WindowFromPoint(Point point);
     [DllImport("user32.dll")] private static extern IntPtr GetAncestor(IntPtr window, uint flags);
     [DllImport("user32.dll")] private static extern uint GetWindowThreadProcessId(IntPtr window, out uint process);

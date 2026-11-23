@@ -36,15 +36,23 @@ public static class ClipStaging
 /// <summary>Whether this process's Windows session is being shown through Remote Desktop now.</summary>
 public static class RemoteSession
 {
+    /// <summary>
+    /// A Remote Desktop session with someone connected to it this moment: one left disconnected (still signed in, nobody
+    /// looking) is not being viewed, whatever it was opened through.
+    /// </summary>
     public static bool IsRemote()
     {
-        // WTSClientProtocolType: 0 the console, 2 Remote Desktop.
-        if (WTSQuerySessionInformation(IntPtr.Zero, -1 /* this session */, 16, out var buffer, out var bytes) && buffer != IntPtr.Zero)
-        {
-            try { if (bytes >= 2) return Marshal.ReadInt16(buffer) == 2; }
-            finally { WTSFreeMemory(buffer); }
-        }
-        return GetSystemMetrics(0x1000 /* SM_REMOTESESSION */) != 0;
+        // WTSConnectState: 0 is WTSActive (a user is connected). WTSClientProtocolType: 0 the console, 2 Remote Desktop.
+        if (Query(8, 4) is not { } state || state != 0) return false;
+        return Query(16, 2) is { } protocol ? protocol == 2 : GetSystemMetrics(0x1000 /* SM_REMOTESESSION */) != 0;
+    }
+
+    /// <summary>One number about this session, of <paramref name="size"/> bytes; null when Windows won't say.</summary>
+    private static int? Query(int infoClass, int size)
+    {
+        if (!WTSQuerySessionInformation(IntPtr.Zero, -1 /* this session */, infoClass, out var buffer, out var bytes) || buffer == IntPtr.Zero) return null;
+        try { return bytes < size ? null : size == 2 ? Marshal.ReadInt16(buffer) : Marshal.ReadInt32(buffer); }
+        finally { WTSFreeMemory(buffer); }
     }
 
     [DllImport("wtsapi32.dll", CharSet = CharSet.Unicode, EntryPoint = "WTSQuerySessionInformationW", SetLastError = true)]
@@ -244,13 +252,14 @@ public sealed class ClipSyncHost : IDisposable
         {
             if (files.Count == 0 || !_enabled()) return;
             // Still the same window there as when the files were let go, and still a session someone is looking at.
-            var same = noted.At is { } then && DropPerformer.At(noted.X, noted.Y) == then && _viewed();
+            // The performer checks, last thing before the press and again as it lets go, that the window noted when the
+            // files were let go on the viewer is still the one there. Still a session someone is looking at, too.
+            var outcome = noted.At is { } then && _viewed()
+                ? DropPerformer.Drop(files, noted.X, noted.Y, DropLimit, _log, expected: then)
+                : DropOutcome.NotTaken;
             var things = files.Count == 1 ? "1 item" : $"{files.Count} items";
-            // Someone at this PC sees its pointer move by itself: said as it happens.
-            if (same) Notice?.Invoke("Files dropped on this PC", $"{entry.Label} is dropping {things} here…");
-            var outcome = same ? DropPerformer.Drop(files, noted.X, noted.Y, DropLimit, _log) : DropOutcome.NotTaken;
-            if (!same) _log?.Invoke($"clipsync: what was at {entry.Label}'s drop point has changed; the files go to Downloads");
-            if (outcome != DropOutcome.Dropped) Notice?.Invoke("Files dropped on this PC", $"{entry.Label} dropped {things} into Downloads.");
+            // Said once it is over: a notification sliding in during the drag could cover where it starts or ends.
+            Notice?.Invoke("Files dropped on this PC", outcome == DropOutcome.Dropped ? $"{entry.Label} dropped {things} here." : $"{entry.Label} dropped {things} into Downloads.");
             status = outcome switch
             {
                 DropOutcome.Dropped => ClipResult.Placed,

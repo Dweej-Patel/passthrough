@@ -60,6 +60,8 @@ public static class ClipNames
     {
         "CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8", "COM9",
         "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9", "CONIN$", "CONOUT$",
+        // Windows takes the superscript digits for these too.
+        "COM\u00b9", "COM\u00b2", "COM\u00b3", "LPT\u00b9", "LPT\u00b2", "LPT\u00b3",
     };
 
     /// <summary>
@@ -103,23 +105,29 @@ public static class ClipNames
         return kept + ext;
     }
 
+    /// <summary>The longest part <see cref="WindowsPart"/> gives: under Windows' 255, so a number added to make it unique still fits.</summary>
+    public const int MaxWindowsPart = 240;
+
     /// <summary>
     /// One part of a received name as Windows can hold it: <c>&lt; &gt; " | ? *</c> replaced, no trailing dot or space,
-    /// not a device name (CON, NUL, COM1…), at most 255 UTF-16 units. A receiver renames such parts rather than decline.
+    /// not a device name (CON, NUL, COM1…), at most <see cref="MaxWindowsPart"/> UTF-16 units, and without the
+    /// characters that turn the order of a name's letters around on screen (so <c>exe.txt</c> can't be shown for
+    /// <c>txt.exe</c>). A receiver renames such parts rather than decline.
     /// </summary>
     public static string WindowsPart(string part)
     {
         var text = new StringBuilder(part.Length);
-        foreach (var c in part) text.Append(c is '<' or '>' or '"' or '|' or '?' or '*' or '/' or '\\' or ':' || c < 0x20 ? '_' : c);
+        foreach (var c in part)
+            text.Append(c is '<' or '>' or '"' or '|' or '?' or '*' or '/' or '\\' or ':' || c < 0x20 || c is >= '\u202A' and <= '\u202E' or >= '\u2066' and <= '\u2069' ? '_' : c);
         var clean = text.ToString().TrimEnd('.', ' ');
         if (clean.Length == 0) clean = "_";
         var stem = clean.IndexOf('.') is > 0 and var dot ? clean[..dot] : clean;
         if (Devices.Contains(stem.TrimEnd(' '))) clean = "_" + clean;
-        if (clean.Length > 255)
+        if (clean.Length > MaxWindowsPart)
         {
             var ext = Path.GetExtension(clean);
             if (ext.Length > 32) ext = "";
-            clean = clean[..(255 - ext.Length)].TrimEnd('.', ' ') + ext;
+            clean = clean[..(MaxWindowsPart - ext.Length)].TrimEnd('.', ' ') + ext;
             if (char.IsHighSurrogate(clean[^(ext.Length + 1)])) clean = clean.Remove(clean.Length - ext.Length - 1, 1);
         }
         return clean;
@@ -148,6 +156,12 @@ public static class ClipFiles
     /// name down, every folder before what's in it. Links and junctions are left out (nothing outside what was copied
     /// is read). Counting stops at the first byte over <paramref name="maxBytes"/> or item over <paramref name="maxItems"/>.
     /// </summary>
+    /// <summary>
+    /// A symbolic link or a junction: what it points at was not copied, so it is left out. Other reparse points (the
+    /// files of a cloud-synced folder, for one) are ordinary files to whoever reads them.
+    /// </summary>
+    private static bool IsLink(FileSystemInfo info) => info.Attributes.HasFlag(FileAttributes.ReparsePoint) && info.LinkTarget is not null;
+
     public static (ClipPayload? Payload, Failure? Failed) Collect(IReadOnlyList<string> paths, ulong? maxBytes = null, int maxItems = int.MaxValue,
         CancellationToken cancel = default)
     {
@@ -177,7 +191,7 @@ public static class ClipFiles
             foreach (var child in children.OrderBy(c => c.Name, StringComparer.Ordinal))
             {
                 cancel.ThrowIfCancellationRequested();
-                if (child.Attributes.HasFlag(FileAttributes.ReparsePoint)) continue;
+                if (IsLink(child)) continue;
                 var childName = name + "/" + ClipNames.Unique(ClipNames.WirePart(child.Name), taken);
                 if (Encoding.UTF8.GetByteCount(childName) > ClipSyncWire.MaxNameBytes) continue; // too deep to name: left out, with what's in it
                 if (Add(child, childName) is { } failed) return failed;
@@ -193,7 +207,7 @@ public static class ClipFiles
             {
                 info = Directory.Exists(path) ? new DirectoryInfo(path) : new FileInfo(path);
                 if (!info.Exists) return (null, Failure.Unreadable);
-                if (info.Attributes.HasFlag(FileAttributes.ReparsePoint)) continue;
+                if (IsLink(info)) continue;
                 var name = ClipNames.Unique(ClipNames.WirePart(info.Name.Length > 0 ? info.Name : "Drive"), top);
                 if (Add(info, name) is { } failed) return (null, failed);
                 if (info is DirectoryInfo folder && Walk(folder, name) is { } inside) return (null, inside);

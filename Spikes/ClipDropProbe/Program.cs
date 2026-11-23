@@ -47,7 +47,8 @@ try
     Console.WriteLine($"window {window:X} at ({rect.Left},{rect.Top})-({rect.Right},{rect.Bottom}); point ({x},{y}) is over {at?.Window:X} (pid {at?.Process})");
     if (at?.Window != window) { Console.WriteLine("FAIL: something else is over the Explorer window; not dragging"); return; }
     var clock = Stopwatch.StartNew();
-    var outcome = DropPerformer.Drop(paths, x, y, TimeSpan.FromSeconds(8), Console.WriteLine);
+    // As the product does: only on the window that is there now.
+    var outcome = DropPerformer.Drop(paths, x, y, TimeSpan.FromSeconds(8), Console.WriteLine, expected: at);
     Console.WriteLine($"outcome: {outcome} after {clock.ElapsedMilliseconds} ms");
     var arrived = false;
     for (var i = 0; i < 30 && !arrived; i++)

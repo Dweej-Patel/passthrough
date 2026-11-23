@@ -241,7 +241,9 @@ public sealed class ShellClient : IAsyncDisposable
             _silent = true;
             _closing.Cancel();
         }
-        else if (quiet >= PingAfter) Send(new ShellEnvelope(ShellEnvelope.Ping));
+        // Not once clipboard sync is asked for: the host may hand the connection over as the ping travels, and it would
+        // then be read as the first of clipboard sync's bytes. Silence is still counted, so a host that never answers is given up on.
+        else if (quiet >= PingAfter && !_clipRequested) Send(new ShellEnvelope(ShellEnvelope.Ping));
     }
 
     /// <summary>Every candidate on its schedule; the first to read <c>ready</c> wins and the rest are dropped.</summary>

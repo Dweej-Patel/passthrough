@@ -70,6 +70,7 @@ public sealed class ClipSyncViewer : IDisposable
     {
         ClipSyncSession? session;
         IAsyncDisposable? owner;
+        List<string> older = [];
         lock (_lock)
         {
             (session, _session) = (_session, null);
@@ -79,13 +80,17 @@ public sealed class ClipSyncViewer : IDisposable
             _drops.Clear();
             _copyingIn = _copyingOut = null;
             _asking = null;
-            if (forget) _clipboardFolders.Clear();
+            // The newest copy stays: this PC's clipboard may still point at its files, and paste should still find
+            // them. It goes when Passthrough next starts.
+            if (forget && _clipboardFolders.Count > 1)
+            {
+                older = _clipboardFolders[..^1];
+                _clipboardFolders.RemoveRange(0, _clipboardFolders.Count - 1);
+            }
         }
         session?.Close();
         if (owner is not null) _ = owner.DisposeAsync().AsTask();
-        if (!forget) return;
-        try { if (Directory.Exists(_staging)) Directory.Delete(_staging, recursive: true); }
-        catch (Exception e) when (e is IOException or UnauthorizedAccessException) { }
+        foreach (var folder in older) Delete(folder);
     }
 
     public void Dispose() => Stop();
@@ -108,9 +113,9 @@ public sealed class ClipSyncViewer : IDisposable
                 return;
             }
             if (payload is not { Items.Count: > 0 }) { Status("Those files couldn't be read."); return; }
-            var id = session.Send(payload, ClipKind.Drop, x, y);
-            lock (_lock) _drops[id] = paths.Count;
+            // Said and noted before the session can report on it, so its outcome never comes first and leaves this line up.
             Status($"Sending {Things(paths.Count, payload.Total)} to {_host}…", hold: true);
+            lock (_lock) _drops[session.Send(payload, ClipKind.Drop, x, y)] = paths.Count;
         });
     }
 

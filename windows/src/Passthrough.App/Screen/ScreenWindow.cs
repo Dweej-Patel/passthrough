@@ -527,7 +527,14 @@ internal sealed class ScreenWindow : Window, IScreenView
             case Passthrough.Core.Shell.ShellError.ClipSyncOff:
                 Toast($"{_name} has clipboard sync turned off. Once it's on there, turn Sync clipboard off and on here.");
                 break;
+            case Passthrough.Core.Shell.ShellError.ClipSyncUnavailable:
+                Toast($"{_name} can't share its clipboard right now. Send clipboard and Copy from Mac still work.");
+                break;
+            case Passthrough.Core.Shell.ShellError.NotAllowed or Passthrough.Core.Shell.ShellError.ScreenNotAllowed or Passthrough.Core.Shell.ShellError.ScreenOnly:
+                Toast($"{_name} doesn't let this PC share its clipboard. Send clipboard and Copy from Mac still work.");
+                break;
             default:
+                // An older build knows no clipSync and answers bad_request.
                 Toast($"{_name} can't sync the clipboard (update Passthrough there). Send clipboard and Copy from Mac still work.");
                 break;
         }
@@ -605,9 +612,10 @@ internal sealed class ScreenWindow : Window, IScreenView
     {
         var point = e.GetPosition(_stage);
         var inside = ScreenFrame.StreamPoint(point.X, point.Y, PictureRect()).Inside;
-        e.AcceptedOperation = _clipActive && _phase == Phase.Live && inside && e.DataView.Contains(StandardDataFormats.StorageItems)
+        // Taken whenever the picture is live, so a drop while sync isn't running can say why nothing went.
+        e.AcceptedOperation = _phase == Phase.Live && inside && e.DataView.Contains(StandardDataFormats.StorageItems)
             ? DataPackageOperation.Copy : DataPackageOperation.None;
-        if (e.AcceptedOperation == DataPackageOperation.Copy) e.DragUIOverride.Caption = $"Drop on {_name}";
+        if (e.AcceptedOperation == DataPackageOperation.Copy) e.DragUIOverride.Caption = _clipActive ? $"Drop on {_name}" : "Clipboard sync isn't running";
         e.Handled = true;
     }
 
@@ -615,7 +623,12 @@ internal sealed class ScreenWindow : Window, IScreenView
     {
         try
         {
-            if (!_clipActive || _clipViewer is not { } viewer || !e.DataView.Contains(StandardDataFormats.StorageItems)) return;
+            if (!e.DataView.Contains(StandardDataFormats.StorageItems)) return;
+            if (!_clipActive || _clipViewer is not { } viewer)
+            {
+                Toast(_clipOn ? $"Clipboard sync with {_name} isn't running, so files can't go there." : $"Turn on Sync clipboard to drop files on {_name}.");
+                return;
+            }
             var point = e.GetPosition(_stage);
             var at = ScreenFrame.StreamPoint(point.X, point.Y, PictureRect());
             if (!at.Inside) return;
