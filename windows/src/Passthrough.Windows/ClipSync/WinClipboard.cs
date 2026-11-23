@@ -12,8 +12,8 @@ namespace Passthrough.Windows.ClipSync;
 public abstract record ClipSnapshot
 {
     public sealed record Contents(ClipPayload Payload) : ClipSnapshot;
-    /// <summary>Over the clipboard's limits: drag it in instead.</summary>
-    public sealed record TooLarge : ClipSnapshot;
+    /// <summary>Over the clipboard's limits: files over 500 MB in all (drag them in instead), or text or a picture over its own.</summary>
+    public sealed record TooLarge(bool Files) : ClipSnapshot;
     /// <summary>Nothing that syncs (empty, marked secret or not to leave this PC, or put there by sync itself).</summary>
     public sealed record Nothing : ClipSnapshot;
 }
@@ -184,7 +184,7 @@ public sealed class WinClipboard
         if (raw.Files is { Count: > 0 } files)
         {
             var (payload, failed) = ClipFiles.Collect(files, ClipSyncWire.MaxClipboardFiles, ClipSyncWire.MaxItems, cancel);
-            if (failed == ClipFiles.Failure.TooLarge) return new ClipSnapshot.TooLarge();
+            if (failed == ClipFiles.Failure.TooLarge) return new ClipSnapshot.TooLarge(Files: true);
             return payload is { Items.Count: > 0 } ? new ClipSnapshot.Contents(payload) : new ClipSnapshot.Nothing();
         }
         var items = new List<ClipItem>();
@@ -199,7 +199,7 @@ public sealed class WinClipboard
         Add(ClipFormat.Rtf, raw.Rtf, ClipSyncWire.MaxClipboardText);
         Add(ClipFormat.Html, raw.Html is { } block ? ClipHtml.FromClipboard(block) : null, ClipSyncWire.MaxClipboardText);
         Add(ClipFormat.Png, raw.Png ?? (raw.Dib is { } dib ? PngFromDib(dib) : null), ClipSyncWire.MaxClipboardImage);
-        if (items.Count == 0) return over ? new ClipSnapshot.TooLarge() : new ClipSnapshot.Nothing();
+        if (items.Count == 0) return over ? new ClipSnapshot.TooLarge(Files: false) : new ClipSnapshot.Nothing();
         return new ClipSnapshot.Contents(new ClipPayload(items));
     }
 

@@ -93,15 +93,20 @@ public sealed class ClipSyncViewer : IDisposable
     /// <summary>Files dropped on the window at (<paramref name="x"/>, <paramref name="y"/>), each 0…65535 across the stream.</summary>
     public void Drop(IReadOnlyList<string> paths, ushort x, ushort y)
     {
-        if (!IsActive) { Status($"Clipboard sync isn't on, so files can't go to {_host}."); return; }
-        Status($"Getting {(paths.Count == 1 ? "it" : "them")} ready…", hold: true);
+        if (!IsActive) { Status($"Clipboard sync isn't running, so files can't go to {_host}."); return; }
+        Status(paths.Count == 1 ? "Preparing 1 item…" : $"Preparing {paths.Count} items…", hold: true);
         // A big folder takes a while to count: not on the window's thread.
         _ = Task.Run(() =>
         {
-            var (payload, _) = ClipFiles.Collect(paths);
+            var (payload, failed) = ClipFiles.Collect(paths, maxItems: (int)ClipSyncWire.MaxDropItems);
             ClipSyncSession? session;
             lock (_lock) session = _session;
             if (session is null) { Status(null); return; }
+            if (failed == ClipFiles.Failure.TooLarge)
+            {
+                Status($"That's too many files to drop at once ({ClipSyncWire.MaxDropItems:N0} at most). Try a few folders at a time.");
+                return;
+            }
             if (payload is not { Items.Count: > 0 }) { Status("Those files couldn't be read."); return; }
             var id = session.Send(payload, ClipKind.Drop, x, y);
             lock (_lock) _drops[id] = paths.Count;
@@ -119,7 +124,7 @@ public sealed class ClipSyncViewer : IDisposable
             case ClipSnapshot.Contents { Payload: var payload } when payload.HasFiles && payload.Total > ClipSyncWire.AskAbove:
                 // A big upload nobody asked for: it waits for a yes. A newer copy replaces the question.
                 lock (_lock) _asking = payload;
-                _onStatus(new ClipStatus($"Send {Size(payload.Total)} to {_host}?", true,
+                _onStatus(new ClipStatus($"Send {Size(payload.Total)} of files to {_host}?", true,
                 [
                     new ClipStatusAction("Send", () => Answer(payload, send: true)),
                     new ClipStatusAction("Don't send", () => Answer(payload, send: false)),
@@ -130,9 +135,11 @@ public sealed class ClipSyncViewer : IDisposable
                 lock (_lock) { wasAsking = _asking is not null; _asking = null; }
                 Send(session, payload, cleared: wasAsking);
                 break;
-            case ClipSnapshot.TooLarge:
+            case ClipSnapshot.TooLarge { Files: var files }:
                 lock (_lock) _asking = null;
-                Status("Too large to sync (over 500 MB). Drag it onto the window instead.");
+                Status(files
+                    ? "Too large to sync (files up to 500 MB). Drag them onto the window instead."
+                    : "Too large to sync (text up to 16 MB, pictures up to 64 MB). Save it as a file and drag that onto the window.");
                 break;
         }
     }
@@ -182,7 +189,7 @@ public sealed class ClipSyncViewer : IDisposable
                 lock (_lock) _copyingIn = incoming.Transfer;
                 // A large one can be stopped: it is declined, and what came of it thrown away.
                 var stop = incoming.Total > ClipSyncWire.AskAbove
-                    ? new[] { new ClipStatusAction("Stop", () => session.StopIncoming(incoming.Transfer)) }
+                    ? new[] { new ClipStatusAction("Stop", () => StopIncoming(session, incoming.Transfer)) }
                     : [];
                 _onStatus(new ClipStatus($"Copying {Size(incoming.Total)} from {_host}…", true, stop));
                 break;
@@ -213,24 +220,25 @@ public sealed class ClipSyncViewer : IDisposable
                 Status(outcome.Status switch
                 {
                     ClipResult.Placed => $"Dropped {Things(landed)} on {_host}.",
-                    ClipResult.SavedToDownloads => $"Nothing there took {(landed == 1 ? "it" : "them")}, so {(landed == 1 ? "it's" : "they're")} in {_host}'s Downloads.",
+                    ClipResult.SavedToDownloads => $"{(landed == 1 ? "It" : "They")} went to {_host}'s Downloads instead: nothing took {(landed == 1 ? "it" : "them")} at that spot, or another window came up there.",
                     _ => $"{_host} couldn't take {(landed == 1 ? "that file" : "those files")}.",
                 });
                 break;
             case ClipEvent.Declined declined:
-                string what;
+                int? declinedCount;
                 lock (_lock)
                 {
                     if (_copyingOut == declined.Transfer) _copyingOut = null;
-                    what = _drops.Remove(declined.Transfer, out var n) ? Things(n) : "that copy";
+                    declinedCount = _drops.Remove(declined.Transfer, out var n) ? n : null;
                 }
-                var subject = char.ToUpperInvariant(what[0]) + what[1..];
+                var those = declinedCount switch { null => "That copy", 1 => "That file", var n => $"Those {n} items" };
+                var are = declinedCount is > 1 ? "are" : "is";
                 Status(declined.Reason switch
                 {
-                    ClipDecline.TooLarge => $"{subject} is too large for {_host}.",
-                    ClipDecline.NoRoom => $"{_host} hasn't room for {what}.",
+                    ClipDecline.TooLarge => $"{those} {are} too large for {_host}.",
+                    ClipDecline.NoRoom => $"{_host} doesn't have room for {char.ToLowerInvariant(those[0]) + those[1..]} right now.",
                     ClipDecline.SyncOff => $"{_host} has clipboard sync turned off.",
-                    _ => $"{subject} couldn't go to {_host}.",
+                    _ => $"{those} couldn't go to {_host}.",
                 });
                 break;
             case ClipEvent.Closed closed:
@@ -268,8 +276,15 @@ public sealed class ClipSyncViewer : IDisposable
             if (copy.Folder is { } folder) ClipStaging.Keep(_clipboardFolders, folder, ClipSyncHost.ClipboardsKept);
         }
         if (!placed) Status("This PC's clipboard is busy; that copy didn't land.");
-        else if (copy.Folder is not null) Status($"Copied {Things(copy.TopLevel.Count)} from {_host}. Paste to put {(copy.TopLevel.Count == 1 ? "it" : "them")} somewhere.");
-        else if (wasShown) Status($"Copied from {_host}.");
+        else if (copy.Folder is not null) Status($"Ready to paste: {Things(copy.TopLevel.Count)} from {_host}.");
+        else if (wasShown) Status($"Ready to paste from {_host}.");
+    }
+
+    private void StopIncoming(ClipSyncSession session, uint transfer)
+    {
+        session.StopIncoming(transfer);
+        lock (_lock) if (_copyingIn == transfer) _copyingIn = null;
+        Status($"Stopped. {_host}'s copy wasn't brought over.");
     }
 
     private static void Delete(string? folder)

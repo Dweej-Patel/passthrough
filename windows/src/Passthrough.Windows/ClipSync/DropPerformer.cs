@@ -75,6 +75,18 @@ public static class DropPerformer
     {
         lock (Busy)
         {
+            // Someone holding a mouse button (the viewer, mid-drag on this desktop) would have that drag let go where
+            // ours starts: wait for the button to come up, and if it doesn't, nothing is dragged.
+            var waited = Environment.TickCount64;
+            while (AnyButtonDown())
+            {
+                if (Environment.TickCount64 - waited > ButtonWaitMs)
+                {
+                    log?.Invoke("drop: a mouse button is held down; the files aren't dragged");
+                    return DropOutcome.NotTaken;
+                }
+                Thread.Sleep(50);
+            }
             var run = new Run(paths, x, y, limit, log);
             var thread = new Thread(run.Main) { IsBackground = true, Name = "Passthrough drop" };
             thread.SetApartmentState(ApartmentState.STA);
@@ -322,6 +334,13 @@ public static class DropPerformer
     private static readonly Guid IidDataObject = new("0000010e-0000-0000-C000-000000000046");
     private static readonly Guid Downloads = new("374DE290-123F-4565-9164-39C4925E467B");
 
+    /// <summary>How long a held mouse button is waited for before a drop gives up on dragging.</summary>
+    private const int ButtonWaitMs = 4000;
+
+    /// <summary>Whether any mouse button is down now, as this session's input sees it.</summary>
+    private static bool AnyButtonDown() =>
+        new[] { 0x01, 0x02, 0x04, 0x05, 0x06 }.Any(button => (GetAsyncKeyState(button) & 0x8000) != 0);
+
     private static (int Left, int Top, int Width, int Height) VirtualDesktop() =>
         (GetSystemMetrics(76), GetSystemMetrics(77), Math.Max(GetSystemMetrics(78), 1), Math.Max(GetSystemMetrics(79), 1));
 
@@ -415,6 +434,7 @@ public static class DropPerformer
     [DllImport("shell32.dll")] private static extern int SHGetKnownFolderPath([MarshalAs(UnmanagedType.LPStruct)] Guid folder, uint flags, IntPtr token, out IntPtr path);
     [DllImport("user32.dll")] private static extern uint SendInput(uint count, ref Input inputs, int size);
     [DllImport("user32.dll")] private static extern int GetSystemMetrics(int index);
+    [DllImport("user32.dll")] private static extern short GetAsyncKeyState(int key);
     [DllImport("user32.dll")] private static extern IntPtr WindowFromPoint(Point point);
     [DllImport("user32.dll")] private static extern IntPtr GetAncestor(IntPtr window, uint flags);
     [DllImport("user32.dll")] private static extern uint GetWindowThreadProcessId(IntPtr window, out uint process);
