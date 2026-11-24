@@ -281,6 +281,8 @@ final class RemoteScreenModel: ObservableObject {
     private var browser: NWBrowser?
     private var generation = 0
     private var path: ShellPath?
+    /// Follows the screen stream's path (`watchPath`).
+    private var pathTask: Task<Void, Never>?
     private var buttons: RFBClient.Buttons = []
     private var scrollRemainder = CGPoint.zero
     /// Someone can see the window; kept across reconnects.
@@ -324,6 +326,7 @@ final class RemoteScreenModel: ObservableObject {
         browser?.cancel()
         browser = nil
         self.discovered = discovered
+        ptLog(.info, "remote screen: dialing \(ptPrivate(pass.macName)), \(discovered == nil ? "not found" : "found") on the local network, \(pass.credential.addresses.count) address(es), iroh \(pass.credential.irohID == nil ? "no" : "yes")")
         let credential = pass.credential
         let dialer = credential.irohID.map(IrohInfo.isValidID) == true ? IrohShellDialer() : nil
         self.dialer = dialer
@@ -342,6 +345,8 @@ final class RemoteScreenModel: ObservableObject {
         client = nil
         video?.close()
         video = nil
+        pathTask?.cancel()
+        pathTask = nil
         dialer?.shutdown()
         dialer = nil
         buttons = []
@@ -379,6 +384,7 @@ final class RemoteScreenModel: ObservableObject {
         switch event {
         case let .ready(path):
             self.path = path
+            ptLog(.info, "remote screen: connected, path \(path.rawValue)")
             client?.requestScreen(video: true)
         case let .screen(stream, initialBytes):
             client = nil   // it let go of the stream; the dialer stays up for it
@@ -387,6 +393,7 @@ final class RemoteScreenModel: ObservableObject {
             }
             self.video = video
             video.start()
+            watchPath(of: stream, generation: gen)
         case let .failed(error, _):
             fail(Self.message(for: error, macName: macName))
         case .disconnected:
@@ -404,12 +411,7 @@ final class RemoteScreenModel: ObservableObject {
             let wasLive = phase == .live
             phase = .live
             if !wasLive { startClipSync() }
-            subtitle = switch path {
-            case .relay?: "through a relay"
-            case .direct?: "direct"
-            case .local?: "local network"
-            default: ""
-            }
+            subtitle = Self.subtitle(for: path)
         case let .frame(sample, number):
             if onFrame?(sample) != true { video?.requestKeyframe() }
             video?.shown(number)
@@ -430,6 +432,9 @@ final class RemoteScreenModel: ObservableObject {
         case let .movedAway(name):
             fail("\(name) took over this view of \(macName)'s screen.")
         case let .closed(error):
+            // Nothing left to follow, even when it ended cleanly (no `stop()` then).
+            pathTask?.cancel()
+            pathTask = nil
             if error != nil { fail("The connection to \(macName) ended.") }
         default:
             break
@@ -492,6 +497,49 @@ final class RemoteScreenModel: ObservableObject {
         guard layout.fps != fps else { return }
         layout.fps = fps
         video?.relayout(layout)
+    }
+
+    static func subtitle(for path: ShellPath?) -> String {
+        switch path {
+        case .relay?: "through a relay"
+        case .direct?: "direct"
+        case .local?: "local network"
+        default: ""
+        }
+    }
+
+    /// Follows the stream's path, as the phone's screen view does: iroh starts
+    /// on a relay and moves to a direct path a few seconds later when it can,
+    /// so the path seen at connect is nearly always the relay. Logs iroh's
+    /// paths (when they change, round-trip times aside, else every 30 s) to
+    /// tell why one stays relayed.
+    private func watchPath(of stream: any ByteStream, generation gen: Int) {
+        pathTask?.cancel()
+        guard path != .local, let dialer else { return }
+        pathTask = Task { [weak self, stream] in
+            var ticks = 0
+            var lastReport: String?
+            while !Task.isCancelled {
+                let now = dialer.path(of: stream)
+                // Round-trip times and counters (hole-punch attempts while it's relayed) change between
+                // looks: compared without their numbers, so it's logged on a real change.
+                if let report = dialer.pathReport(of: stream) {
+                    let shape = report.replacingOccurrences(of: #" \d+ ms|=\d+"#, with: "", options: .regularExpression)
+                    if shape != lastReport || ticks % 10 == 0 {
+                        lastReport = shape
+                        ptLog(.info, "remote screen: iroh paths: \(report)")
+                    }
+                }
+                ticks += 1
+                guard let self, gen == self.generation else { return }
+                if now != .unknown, now != self.path {
+                    ptLog(.info, "remote screen: path \(self.path?.rawValue ?? "none") → \(now.rawValue)")
+                    self.path = now
+                    if self.phase == .live { self.subtitle = Self.subtitle(for: now) }
+                }
+                try? await Task.sleep(for: .seconds(3))
+            }
+        }
     }
 
     static func message(for error: ShellError, macName: String) -> String {
