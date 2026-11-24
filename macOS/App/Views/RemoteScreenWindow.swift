@@ -64,6 +64,7 @@ struct RemoteScreenWindow: View {
             }
         }
         .frame(minWidth: 480, minHeight: 300)
+        .modifier(FullScreenToolbarOnHover())
         .navigationTitle(model.macName)
         .navigationSubtitle(model.clipActive && !model.subtitle.isEmpty ? "\(model.subtitle) · clipboard shared" : model.subtitle)
         .toolbar {
@@ -161,12 +162,27 @@ protocol RemoteScreenSource: AnyObject {
     func drop(_ urls: [URL], x: Double, y: Double)
     /// Files are being dragged over the window but can't be dropped there: say why.
     func dropRefused(outsidePicture: Bool)
+    /// The window went full screen (the picture's size in pixels, and the screen's scale) or came out of it (nil).
+    func fullScreenChanged(pixels: CGSize?, scale: CGFloat)
 }
 
 extension RemoteScreenSource {
     var acceptsDrops: Bool { false }
     func drop(_ urls: [URL], x: Double, y: Double) {}
     func dropRefused(outsidePicture: Bool) {}
+    func fullScreenChanged(pixels: CGSize?, scale: CGFloat) {}
+}
+
+/// In full screen the toolbar steps aside and comes back when the pointer reaches the top of the
+/// screen, as the menu bar does, so the remote picture has the whole screen (as Windows App's does).
+struct FullScreenToolbarOnHover: ViewModifier {
+    func body(content: Content) -> some View {
+        if #available(macOS 15.0, *) {
+            content.windowToolbarFullScreenVisibility(.onHover)
+        } else {
+            content
+        }
+    }
 }
 
 /// What clipboard sync is doing, at the top of a screen window, with its buttons when it asks something.
@@ -286,7 +302,7 @@ final class RemoteScreenModel: ObservableObject {
         phase = .connecting
         cursor = nil
         remotePointer = nil
-        layout = Self.fullLayout(visible: visible)
+        layout = wantedLayout()
         // The addresses in the pass are the ones the phone knew when it shared: find
         // the Mac by name on this network too, as the phone does, in case they changed.
         let browser = NWBrowser(for: .bonjour(type: RemoteShell.serviceType, domain: nil), using: .tcp)
@@ -432,6 +448,42 @@ final class RemoteScreenModel: ObservableObject {
         let side = Int(min(max(largest, 1280), 4096))
         return .init(width: side, height: side, fit: .mac, fps: visible ? 60 : 15, quality: .sharp)
     }
+
+    /// Full screen, the picture's size in pixels and the screen's scale; nil in a window.
+    private var fullScreen: (pixels: CGSize, scale: CGFloat)?
+
+    /// What to ask the other Mac for now. In full screen a display made in this screen's shape and size
+    /// (it shows it in place of its own while you're there, as the phone's Fit does), so the picture
+    /// fills the screen with no bars, as Windows App's full screen resizes a PC's desktop; in a window,
+    /// the other Mac's own display.
+    private func wantedLayout() -> ScreenVideoClient.Layout {
+        let fps = visible ? 60 : 15
+        guard let fullScreen else { return Self.fullLayout(visible: visible) }
+        func side(_ pixels: CGFloat) -> Int { Int(min(max(pixels.rounded(), 320), 4096)) & ~1 }
+        // The display's size against the stream's: at 2× pixels its points are this screen's points.
+        let space = Int(min(max((200 / max(fullScreen.scale, 1)).rounded(), 50), 200))
+        return .init(width: side(fullScreen.pixels.width), height: side(fullScreen.pixels.height), fit: .device, fps: fps,
+                     quality: .sharp, space: space)
+    }
+
+    func fullScreenChanged(pixels: CGSize?, scale: CGFloat) {
+        let new = pixels.flatMap { $0.width > 0 && $0.height > 0 ? (pixels: $0, scale: scale) : nil }
+        guard new?.pixels != fullScreen?.pixels || new?.scale != fullScreen?.scale else { return }
+        fullScreen = new
+        // A moment's wait, so going in and straight out of full screen (or the size settling as it goes)
+        // asks the other Mac for one display, not one per step: each is a new capture there.
+        relayoutTask?.cancel()
+        relayoutTask = Task { [weak self] in
+            try? await Task.sleep(for: .milliseconds(400))
+            guard !Task.isCancelled, let self else { return }
+            let wanted = self.wantedLayout()
+            guard wanted != self.layout else { return }
+            self.layout = wanted
+            self.video?.relayout(wanted)
+        }
+    }
+
+    private var relayoutTask: Task<Void, Never>?
 
     /// Whether anyone can see the window (not minimized, hidden or covered).
     func setVisible(_ visible: Bool) {
@@ -691,6 +743,15 @@ final class RemoteScreenView: NSView, NSTextInputClient {
     private var marked = NSMutableAttributedString()
     private var markedSelection = NSRange(location: 0, length: 0)
     private var occlusionObserver: NSObjectProtocol?
+    private var fullScreenObservers: [NSObjectProtocol] = []
+
+    /// Tells the model whether the window is full screen, and how large the picture's area is then.
+    private func reportFullScreen() {
+        guard let window else { return }
+        let scale = window.backingScaleFactor
+        let full = window.styleMask.contains(.fullScreen)
+        model.fullScreenChanged(pixels: full ? CGSize(width: bounds.width * scale, height: bounds.height * scale) : nil, scale: scale)
+    }
     private static let invisibleCursor = NSCursor(image: NSImage(size: NSSize(width: 1, height: 1)), hotSpot: .zero)
 
     init(model: any RemoteScreenSource) {
@@ -746,6 +807,7 @@ final class RemoteScreenView: NSView, NSTextInputClient {
 
     deinit {
         if let occlusionObserver { NotificationCenter.default.removeObserver(occlusionObserver) }
+        for observer in fullScreenObservers { NotificationCenter.default.removeObserver(observer) }
     }
 
     private var isLive: Bool { model.isLive }
@@ -779,7 +841,14 @@ final class RemoteScreenView: NSView, NSTextInputClient {
         super.viewDidMoveToWindow()
         if let occlusionObserver { NotificationCenter.default.removeObserver(occlusionObserver) }
         occlusionObserver = nil
+        for observer in fullScreenObservers { NotificationCenter.default.removeObserver(observer) }
+        fullScreenObservers = []
         guard let window else { return }
+        for name in [NSWindow.didEnterFullScreenNotification, NSWindow.didExitFullScreenNotification] {
+            fullScreenObservers.append(NotificationCenter.default.addObserver(forName: name, object: window, queue: .main) { [weak self] _ in
+                MainActor.assumeIsolated { self?.reportFullScreen() }
+            })
+        }
         model.setVisible(window.occlusionState.contains(.visible))
         occlusionObserver = NotificationCenter.default.addObserver(forName: NSWindow.didChangeOcclusionStateNotification, object: window,
                                                                    queue: .main) { [weak self] _ in
@@ -812,6 +881,8 @@ final class RemoteScreenView: NSView, NSTextInputClient {
         surfaceLayer.frame = pictureRect
         CATransaction.commit()
         updateCursor()
+        // Full screen on another display, or the toolbar's room changed: the display asked for follows.
+        if window?.styleMask.contains(.fullScreen) == true { reportFullScreen() }
     }
 
     func enqueue(_ sample: CMSampleBuffer) -> Bool {
