@@ -34,6 +34,8 @@
 
   <ItemGroup>
     <Content Include="Assets\app.ico" CopyToOutputDirectory="PreserveNewest" />
+    <!-- A pointer shape that draws nothing, for a Mac's screen window (make-blank-cursor.py writes it). -->
+    <Content Include="Assets\blank-cursor.dll" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
   <!-- Publishing (scripts/build-windows.ps1) leaves out the app's own resource index and compiled XAML, though the

@@ -48,7 +48,7 @@ internal sealed class ScreenWindow : Window, IScreenView
     private readonly string _name;
     private readonly Microsoft.UI.Dispatching.DispatcherQueue _ui;
 
-    private readonly Grid _stage = new() { Background = new SolidColorBrush(Colors.Black) };
+    private readonly PointerStage _stage = new() { Background = new SolidColorBrush(Colors.Black) };
     private readonly Image _picture = new() { Stretch = Stretch.Uniform };
     private readonly Canvas _overlay = new() { IsHitTestVisible = false };
     private readonly Image _pointer = new() { Visibility = Visibility.Collapsed, IsHitTestVisible = false };
@@ -174,7 +174,6 @@ internal sealed class ScreenWindow : Window, IScreenView
         {
             _active = e.WindowActivationState != WindowActivationState.Deactivated;
             if (!_active) ReleaseButtons();
-            WatchOwnCursor();
             PlacePointer(); // this PC's own pointer comes back when the window isn't the one in front
             ShowSubtitle();
         };
@@ -1025,56 +1024,48 @@ internal sealed class ScreenWindow : Window, IScreenView
     }
 
     private bool _ownCursorHidden;
-    private readonly HashSet<IntPtr> _cursorWatched = [];
-    private SubclassProc? _cursorProc;
+    private InputCursor? _blankCursor;
+    private bool _blankCursorTried;
 
-    /// <summary>Hides or shows this PC's pointer over this window.</summary>
+    /// <summary>
+    /// Hides or shows this PC's pointer over the picture. WinUI takes its pointer input without window messages, so the
+    /// shape can't be taken away the Win32 way (ShowCursor, or answering WM_SETCURSOR, do nothing here): the picture is
+    /// given a pointer shape of its own that draws nothing, from Assetslank-cursor.dll (WinUI has no "none").
+    /// </summary>
     private void ShowOwnCursor(bool show)
     {
         if (show != _ownCursorHidden) return;
         _ownCursorHidden = !show;
-        if (!show) SetCursor(IntPtr.Zero);
+        _stage.Show(show ? null : BlankCursor());
     }
 
-    /// <summary>
-    /// Watches this window and the windows inside it (where WinUI takes its input) for the moments Windows or WinUI
-    /// set the pointer's shape: a move, and Windows asking for it. While the Mac's pointer is drawn, the shape is
-    /// taken away again there and then, so only one pointer shows. Asked for each time the window comes forward:
-    /// a window watched already isn't watched twice.
-    /// </summary>
-    private void WatchOwnCursor()
+    private InputCursor? BlankCursor()
     {
-        _cursorProc ??= CursorProc;
-        var top = Win32Interop.GetWindowFromWindowId(AppWindow.Id);
-        var windows = new List<IntPtr> { top };
-        EnumChildWindows(top, (child, _) => { windows.Add(child); return true; }, IntPtr.Zero);
-        foreach (var window in windows)
-            if (_cursorWatched.Add(window) && !SetWindowSubclass(window, _cursorProc, 1, 0)) _cursorWatched.Remove(window);
-    }
-
-    private IntPtr CursorProc(IntPtr window, uint message, IntPtr wParam, IntPtr lParam, nuint id, nuint data)
-    {
-        const uint setCursor = 0x0020, ncDestroy = 0x0082, mouseMove = 0x0200, pointerUpdate = 0x0245;
-        if (message == ncDestroy)
+        if (_blankCursorTried) return _blankCursor;
+        _blankCursorTried = true;
+        var module = Path.Combine(AppContext.BaseDirectory, "Assets", "blank-cursor.dll");
+        try
         {
-            RemoveWindowSubclass(window, _cursorProc!, id);
-            _cursorWatched.Remove(window);
-            return DefSubclassProc(window, message, wParam, lParam);
+            // WinUI finds the module among those already loaded (it doesn't load it: asked for one that isn't, it
+            // answers "resource name not found"), so it is loaded here first. It holds one cursor and no code.
+            if (LoadLibraryExW(module, IntPtr.Zero, 0) == IntPtr.Zero) throw new IOException($"error {Marshal.GetLastWin32Error()} loading it");
+            _blankCursor = InputDesktopResourceCursor.CreateFromModule(module, 1);
         }
-        var result = DefSubclassProc(window, message, wParam, lParam);
-        if (!_ownCursorHidden || message is not (setCursor or mouseMove or pointerUpdate)) return result;
-        // Whatever shape was just set, there is none now.
-        SetCursor(IntPtr.Zero);
-        return message == setCursor ? 1 : result;
+        catch (Exception e) when (e is COMException or ArgumentException or IOException or UnauthorizedAccessException)
+        {
+            LogFile.Write($"screen: this PC's pointer stays visible over the picture (the blank pointer didn't load: {e.GetType().Name} {e.HResult:X8} {e.Message})");
+        }
+        return _blankCursor;
     }
 
-    private delegate IntPtr SubclassProc(IntPtr window, uint message, IntPtr wParam, IntPtr lParam, nuint id, nuint data);
-    private delegate bool EnumChildProc(IntPtr window, IntPtr param);
-    [DllImport("user32.dll")] private static extern IntPtr SetCursor(IntPtr cursor);
-    [DllImport("user32.dll")] private static extern bool EnumChildWindows(IntPtr parent, EnumChildProc proc, IntPtr param);
-    [DllImport("comctl32.dll")] private static extern bool SetWindowSubclass(IntPtr window, SubclassProc proc, nuint id, nuint data);
-    [DllImport("comctl32.dll")] private static extern bool RemoveWindowSubclass(IntPtr window, SubclassProc proc, nuint id);
-    [DllImport("comctl32.dll")] private static extern IntPtr DefSubclassProc(IntPtr window, uint message, IntPtr wParam, IntPtr lParam);
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern IntPtr LoadLibraryExW(string name, IntPtr file, uint flags);
+
+    /// <summary>The stage, with the one thing a Grid keeps to itself: the pointer shape shown over it.</summary>
+    private sealed class PointerStage : Grid
+    {
+        public void Show(InputCursor? cursor) => ProtectedCursor = cursor;
+    }
 
     private void PlaceMacPointer()
     {
