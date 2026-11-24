@@ -82,10 +82,12 @@ public final class IrohByteStream: ByteStream, @unchecked Sendable {
 
     /// For the log: each path ("*" selected) with its RTT, then this side's direct
     /// addresses and the endpoint's hole-punch counters when it's the dialler.
+    /// Addresses and relays are `ptPrivate`: where the connection goes.
     public var pathReport: String {
         var parts = [IrohPaths.describe(connection.paths())]
         if let endpoint = dialerEndpoint {
-            parts.append("mine: " + (endpoint.addr().directAddresses().sorted().joined(separator: " ").nonEmpty ?? "none"))
+            let mine = endpoint.addr().directAddresses().sorted().joined(separator: " ")
+            parts.append("mine: " + (mine.isEmpty ? "none" : ptPrivate(mine)))
             let counters = endpoint.stats().filter { key, value in
                 value.value > 0 && (key.contains("holepunch") || key.contains("nat") || key.contains("path") || key.contains("qad"))
             }
@@ -208,12 +210,13 @@ enum IrohPaths {
         return .unknown
     }
 
-    /// "relay https://… 120 ms*, ip 1.2.3.4:5 40 ms" ("*": selected).
+    /// "relay https://… 120 ms*, ip 1.2.3.4:5 40 ms" ("*": selected), the
+    /// addresses `ptPrivate` (Release logs show "relay <private> 120 ms*").
     static func describe(_ paths: [PathSnapshot]) -> String {
         guard !paths.isEmpty else { return "no paths" }
         return paths.map { path in
             let kind = path.isRelay ? "relay" : path.isIp ? "ip" : "other"
-            return "\(kind) \(path.remoteAddr) \(path.rttMs) ms\(path.isSelected ? "*" : "")"
+            return "\(kind) \(ptPrivate(path.remoteAddr)) \(path.rttMs) ms\(path.isSelected ? "*" : "")"
         }.joined(separator: ", ")
     }
 
@@ -241,8 +244,4 @@ enum IrohPaths {
         guard let colon = address.lastIndex(of: ":") else { return nil }
         return String(address[..<colon])
     }
-}
-
-private extension String {
-    var nonEmpty: String? { isEmpty ? nil : self }
 }

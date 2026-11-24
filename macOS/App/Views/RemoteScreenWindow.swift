@@ -432,6 +432,9 @@ final class RemoteScreenModel: ObservableObject {
         case let .movedAway(name):
             fail("\(name) took over this view of \(macName)'s screen.")
         case let .closed(error):
+            // Nothing left to follow, even when it ended cleanly (no `stop()` then).
+            pathTask?.cancel()
+            pathTask = nil
             if error != nil { fail("The connection to \(macName) ended.") }
         default:
             break
@@ -518,9 +521,10 @@ final class RemoteScreenModel: ObservableObject {
             var lastReport: String?
             while !Task.isCancelled {
                 let now = dialer.path(of: stream)
-                // Round-trip times change every look: compared without them, so it's logged on a real change.
+                // Round-trip times and counters (hole-punch attempts while it's relayed) change between
+                // looks: compared without their numbers, so it's logged on a real change.
                 if let report = dialer.pathReport(of: stream) {
-                    let shape = report.replacingOccurrences(of: #" \d+ ms"#, with: "", options: .regularExpression)
+                    let shape = report.replacingOccurrences(of: #" \d+ ms|=\d+"#, with: "", options: .regularExpression)
                     if shape != lastReport || ticks % 10 == 0 {
                         lastReport = shape
                         ptLog(.info, "remote screen: iroh paths: \(report)")
