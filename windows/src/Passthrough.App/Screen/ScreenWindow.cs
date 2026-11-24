@@ -174,6 +174,7 @@ internal sealed class ScreenWindow : Window, IScreenView
         {
             _active = e.WindowActivationState != WindowActivationState.Deactivated;
             if (!_active) ReleaseButtons();
+            PlacePointer(); // this PC's own pointer comes back when the window isn't the one in front
             ShowSubtitle();
         };
         AppWindow.Changed += (_, e) =>
@@ -184,7 +185,12 @@ internal sealed class ScreenWindow : Window, IScreenView
             _minimized = minimized;
             _client?.Relayout(Layout());
         };
-        Closed += (_, _) => Stop(Phase.Closed);
+        Closed += (_, _) =>
+        {
+            Stop(Phase.Closed);
+            ShowOwnCursor(true);
+            if (_fullScreen) TaskbarKeeper.FullScreenEnded();
+        };
     }
 
     private UIElement Build()
@@ -1012,6 +1018,25 @@ internal sealed class ScreenWindow : Window, IScreenView
     /// <summary>The Mac's pointer shape where this PC's pointer is (it leads the echo), else where the Mac says.</summary>
     private void PlacePointer()
     {
+        PlaceMacPointer();
+        // One pointer, not two: while the Mac's is drawn where this PC's is, this PC's own is hidden.
+        ShowOwnCursor(!(_active && _localPointer is not null && _pointer.Visibility == Visibility.Visible));
+    }
+
+    private bool _ownCursorHidden;
+
+    /// <summary>Hides or shows this PC's pointer over this window's thread (Windows counts hides and shows: each is made once).</summary>
+    private void ShowOwnCursor(bool show)
+    {
+        if (show != _ownCursorHidden) return;
+        ShowCursor(show);
+        _ownCursorHidden = !show;
+    }
+
+    [DllImport("user32.dll")] private static extern int ShowCursor(bool show);
+
+    private void PlaceMacPointer()
+    {
         var rect = PictureRect();
         if (_shape is not { } shape || _streamWidth == 0 || _remotePointer is { Visible: false } || _pointer.Source is null)
         {
@@ -1099,6 +1124,8 @@ internal sealed class ScreenWindow : Window, IScreenView
         var entering = AppWindow.Presenter.Kind != AppWindowPresenterKind.FullScreen;
         AppWindow.SetPresenter(entering ? AppWindowPresenterKind.FullScreen : AppWindowPresenterKind.Overlapped);
         _fullScreen = entering;
+        // Windows takes its taskbar off the top for a full-screen window; the keeper mustn't put it back over the picture.
+        if (entering) TaskbarKeeper.FullScreenBegan(); else TaskbarKeeper.FullScreenEnded();
         if (_toolbar is not null) _toolbar.Visibility = entering ? Visibility.Collapsed : Visibility.Visible;
         // What clipboard sync says, and its buttons, are shown wherever there is a bar to show them in.
         var (from, to) = entering ? (_toolbarStatus, _connectionStatus) : (_connectionStatus, _toolbarStatus);

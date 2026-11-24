@@ -13,6 +13,14 @@ internal sealed class TaskbarKeeper : IDisposable
     private readonly Timer _timer;
     private readonly Action<string> _log;
     private bool _logged;
+    private static int _fullScreen;
+
+    /// <summary>
+    /// A window of Passthrough's own (another computer's screen) went full screen, or left it. While one is, the
+    /// taskbar is left where Windows put it: under the picture.
+    /// </summary>
+    public static void FullScreenBegan() => Interlocked.Increment(ref _fullScreen);
+    public static void FullScreenEnded() => Interlocked.Decrement(ref _fullScreen);
 
     public TaskbarKeeper(Action<string> log)
     {
@@ -24,6 +32,7 @@ internal sealed class TaskbarKeeper : IDisposable
     {
         try
         {
+            if (Volatile.Read(ref _fullScreen) > 0) return;
             var taskbar = FindWindowW("Shell_TrayWnd", null);
             if (taskbar == IntPtr.Zero || !IsWindowVisible(taskbar)) return;
             if ((GetWindowLongW(taskbar, GwlExStyle) & WsExTopmost) != 0) return;
