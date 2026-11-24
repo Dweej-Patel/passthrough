@@ -508,7 +508,8 @@ final class RemoteScreenModel: ObservableObject {
     /// Follows the stream's path, as the phone's screen view does: iroh starts
     /// on a relay and moves to a direct path a few seconds later when it can,
     /// so the path seen at connect is nearly always the relay. Logs iroh's
-    /// paths (on change, else every 30 s) to tell why one stays relayed.
+    /// paths (when they change, round-trip times aside, else every 30 s) to
+    /// tell why one stays relayed.
     private func watchPath(of stream: any ByteStream, generation gen: Int) {
         pathTask?.cancel()
         guard path != .local, let dialer else { return }
@@ -517,9 +518,13 @@ final class RemoteScreenModel: ObservableObject {
             var lastReport: String?
             while !Task.isCancelled {
                 let now = dialer.path(of: stream)
-                if let report = dialer.pathReport(of: stream), report != lastReport || ticks % 10 == 0 {
-                    lastReport = report
-                    ptLog(.info, "remote screen: iroh paths: \(report)")
+                // Round-trip times change every look: compared without them, so it's logged on a real change.
+                if let report = dialer.pathReport(of: stream) {
+                    let shape = report.replacingOccurrences(of: #" \d+ ms"#, with: "", options: .regularExpression)
+                    if shape != lastReport || ticks % 10 == 0 {
+                        lastReport = shape
+                        ptLog(.info, "remote screen: iroh paths: \(report)")
+                    }
                 }
                 ticks += 1
                 guard let self, gen == self.generation else { return }
