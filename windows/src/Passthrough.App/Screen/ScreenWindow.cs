@@ -174,6 +174,7 @@ internal sealed class ScreenWindow : Window, IScreenView
         {
             _active = e.WindowActivationState != WindowActivationState.Deactivated;
             if (!_active) ReleaseButtons();
+            WatchOwnCursor();
             PlacePointer(); // this PC's own pointer comes back when the window isn't the one in front
             ShowSubtitle();
         };
@@ -1024,16 +1025,56 @@ internal sealed class ScreenWindow : Window, IScreenView
     }
 
     private bool _ownCursorHidden;
+    private readonly HashSet<IntPtr> _cursorWatched = [];
+    private SubclassProc? _cursorProc;
 
-    /// <summary>Hides or shows this PC's pointer over this window's thread (Windows counts hides and shows: each is made once).</summary>
+    /// <summary>Hides or shows this PC's pointer over this window.</summary>
     private void ShowOwnCursor(bool show)
     {
         if (show != _ownCursorHidden) return;
-        ShowCursor(show);
         _ownCursorHidden = !show;
+        if (!show) SetCursor(IntPtr.Zero);
     }
 
-    [DllImport("user32.dll")] private static extern int ShowCursor(bool show);
+    /// <summary>
+    /// Watches this window and the windows inside it (where WinUI takes its input) for the moments Windows or WinUI
+    /// set the pointer's shape: a move, and Windows asking for it. While the Mac's pointer is drawn, the shape is
+    /// taken away again there and then, so only one pointer shows. Asked for each time the window comes forward:
+    /// a window watched already isn't watched twice.
+    /// </summary>
+    private void WatchOwnCursor()
+    {
+        _cursorProc ??= CursorProc;
+        var top = Win32Interop.GetWindowFromWindowId(AppWindow.Id);
+        var windows = new List<IntPtr> { top };
+        EnumChildWindows(top, (child, _) => { windows.Add(child); return true; }, IntPtr.Zero);
+        foreach (var window in windows)
+            if (_cursorWatched.Add(window) && !SetWindowSubclass(window, _cursorProc, 1, 0)) _cursorWatched.Remove(window);
+    }
+
+    private IntPtr CursorProc(IntPtr window, uint message, IntPtr wParam, IntPtr lParam, nuint id, nuint data)
+    {
+        const uint setCursor = 0x0020, ncDestroy = 0x0082, mouseMove = 0x0200, pointerUpdate = 0x0245;
+        if (message == ncDestroy)
+        {
+            RemoveWindowSubclass(window, _cursorProc!, id);
+            _cursorWatched.Remove(window);
+            return DefSubclassProc(window, message, wParam, lParam);
+        }
+        var result = DefSubclassProc(window, message, wParam, lParam);
+        if (!_ownCursorHidden || message is not (setCursor or mouseMove or pointerUpdate)) return result;
+        // Whatever shape was just set, there is none now.
+        SetCursor(IntPtr.Zero);
+        return message == setCursor ? 1 : result;
+    }
+
+    private delegate IntPtr SubclassProc(IntPtr window, uint message, IntPtr wParam, IntPtr lParam, nuint id, nuint data);
+    private delegate bool EnumChildProc(IntPtr window, IntPtr param);
+    [DllImport("user32.dll")] private static extern IntPtr SetCursor(IntPtr cursor);
+    [DllImport("user32.dll")] private static extern bool EnumChildWindows(IntPtr parent, EnumChildProc proc, IntPtr param);
+    [DllImport("comctl32.dll")] private static extern bool SetWindowSubclass(IntPtr window, SubclassProc proc, nuint id, nuint data);
+    [DllImport("comctl32.dll")] private static extern bool RemoveWindowSubclass(IntPtr window, SubclassProc proc, nuint id);
+    [DllImport("comctl32.dll")] private static extern IntPtr DefSubclassProc(IntPtr window, uint message, IntPtr wParam, IntPtr lParam);
 
     private void PlaceMacPointer()
     {
