@@ -302,10 +302,14 @@ internal sealed class ScreenWindow : Window, IScreenView
     /// <summary>The picture takes the window's shape: asked for with Fit to window, and always in full screen.</summary>
     private bool FitsWindow => _fit || _fullScreen;
 
-    /// <summary>Asks the Mac for a display in the stage's shape once it has stopped changing.</summary>
+    /// <summary>
+    /// Asks the Mac for the display this window wants now (its own shape with Fit to window or in full screen, else
+    /// the Mac's own), once things have stopped changing: each ask can make a new display there, so dragging an edge,
+    /// or going into full screen and straight out again, sends one ask or none.
+    /// </summary>
     private void Refit()
     {
-        _refit ??= new DispatcherQueueTimerWrapper(_ui, RefitAfter, () => { if (FitsWindow && !_minimized) _client?.Relayout(Layout()); });
+        _refit ??= new DispatcherQueueTimerWrapper(_ui, RefitAfter, () => { if (!_minimized) _client?.Relayout(Layout()); });
         _refit.Restart();
     }
 
@@ -1112,7 +1116,7 @@ internal sealed class ScreenWindow : Window, IScreenView
         else
         {
             _connectionBar.Visibility = Visibility.Collapsed;
-            if (_fit) Refit(); else _client?.Relayout(Layout());
+            Refit();
         }
         _typing.Focus(FocusState.Programmatic);
     }
