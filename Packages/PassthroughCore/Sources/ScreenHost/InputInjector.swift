@@ -71,6 +71,9 @@ final class InputInjector: InputSink {
         let before = position
         position = CGPoint(x: display.minX + CGFloat(x) / 65535 * (display.width - 1),
                            y: display.minY + CGFloat(y) / 65535 * (display.height - 1))
+        // During a drop's drag a move or a press is noted, not posted, so the next one starts from where the
+        // viewer is; a release still goes through (held back, the button would stay down here).
+        guard !ScreenInputHold.isHeld || (new & ~buttons & 0b111 == 0 && new != buttons) else { return }
         travel.x += position.x - before.x
         travel.y += position.y - before.y
         let changed = (new ^ buttons) & 0b111
@@ -122,6 +125,7 @@ final class InputInjector: InputSink {
     }
 
     func scroll(dx: Int16, dy: Int16) {
+        guard !ScreenInputHold.isHeld else { return }
         guard let event = CGEvent(scrollWheelEvent2Source: source, units: .pixel, wheelCount: 2, wheel1: Int32(dy), wheel2: Int32(dx), wheel3: 0)
         else { return }
         event.flags = []
@@ -133,6 +137,8 @@ final class InputInjector: InputSink {
     /// them), which AppKit turns into `magnify(with:)` and `rotate(with:)` for the
     /// window under the pointer. Checked on macOS 27: phases and sums arrive intact.
     func gesture(_ gesture: ScreenVideoWire.Gesture, phase: ScreenVideoWire.GesturePhase, value: Double) {
+        // During a drop's drag a gesture can end, not begin or go on (held back, it would never end here).
+        guard !ScreenInputHold.isHeld || phase == .ended || phase == .cancelled else { return }
         switch phase {
         case .began: gestures.insert(gesture)
         case .ended, .cancelled: gestures.remove(gesture)
@@ -151,7 +157,8 @@ final class InputInjector: InputSink {
 
     /// The Fn key as a keyboard sends it: a "modifiers changed" event of its own, down until it's let go.
     func function(_ down: Bool) {
-        guard down != functionDown else { return }
+        // During a drop's drag Fn can come up, not go down (held back, it would stay down here).
+        guard down != functionDown, !(ScreenInputHold.isHeld && down) else { return }
         functionDown = down
         guard let event = CGEvent(keyboardEventSource: source, virtualKey: 63, keyDown: down) else { return }
         event.type = .flagsChanged
@@ -176,6 +183,7 @@ final class InputInjector: InputSink {
     private static let gesturePhaseField = CGEventField(rawValue: 132)!   // kCGEventGesturePhase
 
     func key(keysym: UInt32, modifiers: UInt8) {
+        guard !ScreenInputHold.isHeld else { return }
         let held = ScreenVideoWire.Modifiers(rawValue: modifiers)
         // Plain typing goes as text, which every keyboard layout gets right.
         if held.subtracting(.shift).isEmpty, Self.printable(keysym), let scalar = Unicode.Scalar(Self.codePoint(keysym)) {
@@ -203,6 +211,7 @@ final class InputInjector: InputSink {
     /// as those that read the character. What no key types there, and long text, goes as
     /// characters, which only apps that read them get (`ScreenVideoWire.typedAsKeys`).
     func text(_ text: String) {
+        guard !ScreenInputHold.isHeld else { return }
         guard text.utf16.count <= ScreenVideoWire.typedAsKeys else { return characters(Array(text.utf16)) }
         var unkeyed: [UniChar] = []
         for character in text {

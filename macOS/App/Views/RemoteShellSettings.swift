@@ -1,3 +1,4 @@
+import ClipSync
 import SwiftUI
 import IrohTransport
 import PassthroughCore
@@ -555,6 +556,7 @@ private struct ScreenPassRow: View {
 private struct ComputersWithAccessSection: View {
     @EnvironmentObject private var shell: RemoteShellController
     @State private var removing: Removal?
+    @AppStorage(ClipSyncHost.enabledKey) private var clipSync = true
 
     /// One question for either kind of row.
     enum Removal: Identifiable {
@@ -581,6 +583,15 @@ private struct ComputersWithAccessSection: View {
             ForEach(shell.screenGuests, id: \.phoneID) { guest in
                 ScreenGuestRow(guest: guest, remove: { removing = .pass(guest) })
             }
+            Toggle(isOn: $clipSync) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Share the clipboard with computers viewing this screen")
+                    Text("While one has this screen open, copies on either can be pasted on the other (text, images, files up to 500 MB). Files dragged onto its window are dropped here, so the pointer moves by itself for a moment. What an app marks as secret, as most password managers do, stays here. Phones keep their Copy and Paste buttons.")
+                        .font(.caption).foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            .onChange(of: clipSync) { shell.clipSync.setEnabled(clipSync) }
         } header: {
             Text("Computers with access")
         } footer: {

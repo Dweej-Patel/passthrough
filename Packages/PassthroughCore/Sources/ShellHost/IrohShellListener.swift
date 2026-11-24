@@ -53,6 +53,12 @@ public final class IrohShellListener: @unchecked Sendable {
         set { gate.screenVideoFactory.set(newValue) }
     }
 
+    /// `ShellListener.clipSync`.
+    public var clipSync: (@Sendable (_ id: String, _ label: String) -> Result<any ClipSyncSource, ShellError>)? {
+        get { gate.clipSyncFactory.get() }
+        set { gate.clipSyncFactory.set(newValue) }
+    }
+
     /// As `ShellListener.screenViews`: give both listeners the same one.
     public var screenViews: ScreenViewLimit {
         get { gate.screenViews.get() }

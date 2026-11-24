@@ -55,6 +55,11 @@ public sealed class ShellConnection : IShellAttachment
 
     private volatile bool _opening;
     private volatile bool _looking;
+    private Stream? _clip;
+    private volatile bool _clipping;
+
+    /// <summary>This connection carries clipboard sync now (binary messages to the tray app, no more lines).</summary>
+    internal bool IsClip => _clipping && !IsClosed;
     private int _closed;
 
     internal ShellConnection(ShellGate gate, ISessionHost host, Stream stream, ShellLineReader reader, string phoneId, string label)
@@ -88,7 +93,7 @@ public sealed class ShellConnection : IShellAttachment
             while (await _reader.ReadLineAsync(_closing.Token).ConfigureAwait(false) is { } line)
             {
                 await HandleAsync(line).ConfigureAwait(false);
-                if (_relay is not null) break;
+                if (_relay is not null || _clip is not null) break;
             }
         }
         catch (LineTooLongException) { _gate.Log?.Invoke("shell: a phone sent an overlong line; disconnected"); }
@@ -120,10 +125,98 @@ public sealed class ShellConnection : IShellAttachment
                 EndView(0, 0, "no Network Level Authentication");
             }
         }
+        if (_clip is { } clip && !IsClosed)
+        {
+            // clipSyncReady is written; from here the connection is clipboard sync's bytes, passed to the tray app and back as they are.
+            _outgoing.Writer.TryComplete();
+            await writer.ConfigureAwait(false);
+            _gate.Log?.Invoke($"clipsync: {Label} syncs the clipboard ({PathNow()})");
+            var (fromDevice, toDevice) = await PassAsync(_stream, clip).ConfigureAwait(false);
+            _gate.Log?.Invoke($"clipsync: {Label}'s sync ended ({fromDevice} bytes in, {toDevice} out)");
+        }
         // Closed between rdpReady and the splice: the view's slot is freed all the same.
         EndView(0, 0, "Stop");
         Close();
         await writer.ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Passes bytes both ways until either side ends, each write awaited before the next read: a side that stops
+    /// reading holds the other back, and nothing piles up here. Then both are closed.
+    /// </summary>
+    private static async Task<(long FromA, long FromB)> PassAsync(Stream a, Stream b)
+    {
+        using var stop = new CancellationTokenSource();
+        async Task<long> OneWay(Stream from, Stream to)
+        {
+            var buffer = new byte[64 << 10];
+            long total = 0;
+            try
+            {
+                int n;
+                while ((n = await from.ReadAsync(buffer, stop.Token).ConfigureAwait(false)) > 0)
+                {
+                    await to.WriteAsync(buffer.AsMemory(0, n), stop.Token).ConfigureAwait(false);
+                    await to.FlushAsync(stop.Token).ConfigureAwait(false);
+                    total += n;
+                }
+            }
+            catch (Exception e) when (e is IOException or ObjectDisposedException or OperationCanceledException or InvalidOperationException) { }
+            return total;
+        }
+        var aToB = OneWay(a, b);
+        var bToA = OneWay(b, a);
+        await Task.WhenAny(aToB, bToA).ConfigureAwait(false);
+        stop.Cancel();
+        a.Dispose();
+        b.Dispose();
+        return (await aToB.ConfigureAwait(false), await bToA.ConfigureAwait(false));
+    }
+
+    /// <summary>
+    /// <c>clipSync</c> (protocol/README.md, "Clipboard sync"): between computers only, with the screen scope, while this
+    /// device views the screen. The account's tray app owns the clipboard, so the connection is handed to it: the
+    /// answer is <c>clipSyncReady</c>, then binary messages both ways. A refusal leaves this a shell connection.
+    /// </summary>
+    private async Task ClipSyncAsync()
+    {
+        // A phone keeps its Copy and Paste. A screen pass can't view a PC's screen, so it is never viewing.
+        if (!IsComputer) { Fail(PhoneId.StartsWith("viewer.", StringComparison.Ordinal) ? ShellError.NoScreenView : ShellError.NotAllowed); return; }
+        if (!_gate.Access.ScreenAllowed(PhoneId)) { Fail(ShellError.ScreenNotAllowed); return; }
+        if (!_gate.IsViewing(PhoneId)) { Fail(ShellError.NoScreenView); return; }
+        if (_gate.Hooks.ClipSync is not { } open) { Fail(ShellError.ClipSyncUnavailable); return; }
+        Stream? stream = null;
+        try
+        {
+            using var limit = CancellationTokenSource.CreateLinkedTokenSource(_closing.Token);
+            limit.CancelAfter(TimeSpan.FromSeconds(8));
+            (stream, var error) = await open(PhoneId, Label, limit.Token).ConfigureAwait(false);
+            if (stream is null)
+            {
+                _gate.Log?.Invoke($"clipsync: refused {Label}: {(error ?? ShellError.ClipSyncUnavailable).ToWire()}");
+                Fail(error ?? ShellError.ClipSyncUnavailable);
+                return;
+            }
+            // It must have waited for the answer: anything sent since would be read as clipboard sync unasked.
+            if (_reader.HasBuffered) { Close(); return; }
+            // The view may have ended, or Screen been turned off, meanwhile: asked again, last thing.
+            if (!_gate.Access.ScreenAllowed(PhoneId)) { Fail(ShellError.ScreenNotAllowed); return; }
+            if (!_gate.IsViewing(PhoneId)) { Fail(ShellError.NoScreenView); return; }
+            lock (_lock) _attached = null;
+            _host.Detach(this);
+            var ready = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            Enqueue(new ShellEnvelope(ShellEnvelope.ClipSyncReady).EncodeLine(), ready, last: true);
+            await ready.Task.ConfigureAwait(false);
+            if (IsClosed) return;
+            _clipping = true;
+            _clip = stream;
+            stream = null;
+            _gate.ClipSyncStarted(this);
+            // The last view may have ended between the check and now: nothing else would close this.
+            if (!_gate.IsViewing(PhoneId)) _gate.ViewEnded(PhoneId);
+        }
+        catch (OperationCanceledException) { Fail(ShellError.ClipSyncUnavailable); }
+        finally { stream?.Dispose(); }
     }
 
     private void EndView(long fromPhone, long toPhone, string endedBy)
@@ -131,6 +224,7 @@ public sealed class ShellConnection : IShellAttachment
         if (_view is not { } view) return;
         _view = null;
         _gate.Views.Release(PhoneId);
+        _gate.ViewEnded(PhoneId);
         if (_ticket is { } ticket) _gate.RelayRate.Closed(ticket);
         _gate.Log?.Invoke($"screen: {Label}'s view ended ({endedBy}; {fromPhone} bytes in, {toPhone} out; {PathNow()} at the end)");
         _gate.Hooks.ViewEnded?.Invoke(view with { End = _gate.Time.GetUtcNow(), BytesIn = fromPhone, BytesOut = toPhone, EndedBy = endedBy });
@@ -280,6 +374,7 @@ public sealed class ShellConnection : IShellAttachment
         _closing.Cancel();
         _stream.Dispose();
         _relay?.Dispose();
+        _clip?.Dispose();
         _gate.Log?.Invoke("shell: a phone disconnected");
     }
 
@@ -303,8 +398,8 @@ public sealed class ShellConnection : IShellAttachment
             ShellEnvelope.Ping or ShellEnvelope.Pong => null,
             ShellEnvelope.List or ShellEnvelope.Open or ShellEnvelope.Attach or ShellEnvelope.Input or ShellEnvelope.Resize
                 or ShellEnvelope.Close or ShellEnvelope.Viewing => computer.Shell == true ? null : ShellError.NotAllowed,
-            // rdp: the relay checks the screen scope itself; screen and screenVideo are refused as for anyone on a PC.
-            ShellEnvelope.Rdp or ShellEnvelope.Screen or ShellEnvelope.ScreenVideo => null,
+            // rdp and clipSync check the screen scope themselves; screen and screenVideo are refused as for anyone on a PC.
+            ShellEnvelope.Rdp or ShellEnvelope.Screen or ShellEnvelope.ScreenVideo or ShellEnvelope.ClipSync => null,
             _ => ShellError.NotAllowed,
         };
     }
@@ -416,6 +511,9 @@ public sealed class ShellConnection : IShellAttachment
                 break;
             case ShellEnvelope.Rdp:
                 await RelayAsync().ConfigureAwait(false);
+                break;
+            case ShellEnvelope.ClipSync:
+                await ClipSyncAsync().ConfigureAwait(false);
                 break;
             case ShellEnvelope.ScreenGrant or ShellEnvelope.ScreenPass or ShellEnvelope.ScreenRevoke:
                 Fail(ShellError.BadRequest);
@@ -582,7 +680,7 @@ public sealed class ShellConnection : IShellAttachment
     {
         lock (_lock)
         {
-            if (IsClosed || _relaying || _sealed) { written?.TrySetResult(); return; }
+            if (IsClosed || _relaying || _clipping || _sealed) { written?.TrySetResult(); return; }
             if (last) _sealed = true;
         }
         if (Interlocked.Add(ref _backlog, line.Length) > SendBacklogLimit)

@@ -14,6 +14,7 @@ using Passthrough.Core.Client;
 using Passthrough.Core.Screen;
 using Passthrough.Core.Trust;
 using Passthrough.Media;
+using Passthrough.Windows.ClipSync;
 using Passthrough.Windows.Iroh;
 using Windows.ApplicationModel.DataTransfer;
 using Windows.Graphics;
@@ -27,8 +28,14 @@ namespace Passthrough.App.Screen;
 /// client, signed with this PC's identity), <c>screenVideo</c>, and the stream decoded by <see cref="ScreenPipeline"/>.
 /// The picture keeps its shape in any window size; the pointer is drawn over it, not in it. Pointer, wheel (Ctrl+wheel
 /// pinches), keys (the table in <see cref="ScreenKeys"/>, through XAML key events: the Windows key stays on this PC),
-/// committed text through a hidden text box (so dead keys and input methods compose here), Send clipboard and Copy
-/// from Mac, full screen. A lost connection dims the last picture and redials at 0, 2 and 5 s without asking again.
+/// committed text through a hidden text box (so dead keys and input methods compose here). Full screen fills the
+/// monitor with the picture and nothing else: the Mac is asked for a display in the screen's own shape, and a small
+/// bar (pin, the Mac's name, minimise, restore, close) comes down from the top edge only when the pointer touches it
+/// or there is something to say. While the
+/// picture is live the two clipboards sync on a connection of their own (<see cref="ClipSyncViewer"/>: Ctrl+C here,
+/// ⌘V there and back, files included) and files dropped on the picture land at that point on the Mac; with Sync
+/// clipboard off, or a Mac that can't, Send clipboard and Copy from Mac take its place. A lost connection dims the last
+/// picture and redials at 0, 2 and 5 s without asking again.
 /// </summary>
 internal sealed class ScreenWindow : Window, IScreenView
 {
@@ -41,7 +48,7 @@ internal sealed class ScreenWindow : Window, IScreenView
     private readonly string _name;
     private readonly Microsoft.UI.Dispatching.DispatcherQueue _ui;
 
-    private readonly Grid _stage = new() { Background = new SolidColorBrush(Colors.Black) };
+    private readonly PointerStage _stage = new() { Background = new SolidColorBrush(Colors.Black) };
     private readonly Image _picture = new() { Stretch = Stretch.Uniform };
     private readonly Canvas _overlay = new() { IsHitTestVisible = false };
     private readonly Image _pointer = new() { Visibility = Visibility.Collapsed, IsHitTestVisible = false };
@@ -100,11 +107,54 @@ internal sealed class ScreenWindow : Window, IScreenView
     private string FitKey => "screen.fit." + _computer.HostId;
     private int _toastId;
 
+    // Full screen: the picture alone, with a bar at the top centre that comes when called.
+    private static readonly TimeSpan BarStays = TimeSpan.FromSeconds(2.5);
+    private bool _fullScreen;
+    private bool _barPinned;
+    private bool _overBar;
+    private Grid? _toolbar;
+    private StackPanel? _toolbarStatus;
+    private readonly Border _connectionBar = new()
+    {
+        Visibility = Visibility.Collapsed, HorizontalAlignment = HorizontalAlignment.Center, VerticalAlignment = VerticalAlignment.Top,
+        Padding = new Thickness(8, 4, 8, 4), CornerRadius = new CornerRadius(0, 0, 8, 8),
+        Background = new SolidColorBrush(global::Windows.UI.Color.FromArgb(0xF2, 0x2B, 0x2B, 0x2B)),
+    };
+    private readonly StackPanel _connectionStatus = new() { Orientation = Orientation.Horizontal, Spacing = 8, VerticalAlignment = VerticalAlignment.Center };
+    private DispatcherQueueTimerWrapper? _barHide;
+
+    /// <summary>
+    /// Ctrl acts as ⌘ (and Alt as ⌃), so Ctrl+C and Ctrl+V copy and paste on the Mac as they do here: on unless turned
+    /// off, for this window and ones opened later. Off: by position, Alt is ⌘ and Ctrl is ⌃.
+    /// </summary>
+    internal const string CtrlIsCommandKey = "screen.ctrlIsCommand";
+    private bool _ctrlIsCommand;
+    private readonly Microsoft.UI.Xaml.Controls.Primitives.ToggleButton _ctrlButton = new() { Content = "Ctrl acts as ⌘" };
+
+    // Clipboard sync (a connection of its own beside the screen's, while the picture is live)
+    internal const string ClipSyncKey = "screen.clipSync";
+    private static readonly TimeSpan ClipRetryNoView = TimeSpan.FromSeconds(1.5), ClipRetry = TimeSpan.FromSeconds(3), ClipSettled = TimeSpan.FromSeconds(10);
+    private const int ClipTriesInARow = 5;
+    private readonly Microsoft.UI.Xaml.Controls.Primitives.ToggleButton _clipButton = new() { Content = "Sync clipboard" };
+    private Button? _sendButton, _copyButton;
+    private ClipSyncViewer? _clipViewer;
+    private ShellClient? _clipShell;
+    private bool _clipOn;
+    private bool _clipActive;
+    private int _clipTries;
+    private int _clipGeneration;
+    private Stopwatch? _clipSince;
+    private bool _clipHeld;
+    /// <summary>The buttons a clipboard sync line asks with (Send / Don't send, Stop), beside it.</summary>
+    private readonly StackPanel _clipActions = new() { Orientation = Orientation.Horizontal, Spacing = 6, VerticalAlignment = VerticalAlignment.Center };
+
     public ScreenWindow(ReachableComputer computer, IComputerIdentity identity, Func<Task<bool>> confirm, Passthrough.Core.Storage.ISettingsStore? settings = null)
     {
         _computer = computer;
         _settings = settings;
         _fit = settings?.Get(FitKey) == "true";
+        _clipOn = settings?.Get(ClipSyncKey) != "false";
+        _ctrlIsCommand = settings?.Get(CtrlIsCommandKey) != "false";
         _identity = identity;
         _confirm = confirm;
         _name = ScreenFrame.Clean(computer.Credential.MacName);
@@ -124,6 +174,8 @@ internal sealed class ScreenWindow : Window, IScreenView
         {
             _active = e.WindowActivationState != WindowActivationState.Deactivated;
             if (!_active) ReleaseButtons();
+            PlaceTaskbar();
+            PlacePointer(); // this PC's own pointer comes back when the window isn't the one in front
             ShowSubtitle();
         };
         AppWindow.Changed += (_, e) =>
@@ -134,7 +186,16 @@ internal sealed class ScreenWindow : Window, IScreenView
             _minimized = minimized;
             _client?.Relayout(Layout());
         };
-        Closed += (_, _) => Stop(Phase.Closed);
+        Closed += (_, _) =>
+        {
+            Stop(Phase.Closed);
+            ShowOwnCursor(true);
+            if (_fullScreen)
+            {
+                TaskbarKeeper.FullScreenEnded();
+                TaskbarKeeper.BringBack();
+            }
+        };
     }
 
     private UIElement Build()
@@ -147,6 +208,29 @@ internal sealed class ScreenWindow : Window, IScreenView
         full.Click += (_, _) => ToggleFullScreen();
         _retry.Click += async (_, _) => await StartAsync();
         AutomationName(_retry, "Try again");
+        (_sendButton, _copyButton) = (send, copy);
+        _ctrlButton.IsChecked = _ctrlIsCommand;
+        ToolTipService.SetToolTip(_ctrlButton, "On: Ctrl is the Mac's ⌘, so Ctrl+C, Ctrl+V and Ctrl+Z work there as they do here, and Alt is ⌃. Off: Alt is ⌘ and Ctrl is ⌃, as the keys sit on a Mac keyboard. The Windows key is ⌥ either way.");
+        AutomationName(_ctrlButton, "Ctrl acts as Command");
+        _ctrlButton.Click += (_, _) =>
+        {
+            _ctrlIsCommand = _ctrlButton.IsChecked == true;
+            try { _settings?.Set(CtrlIsCommandKey, _ctrlIsCommand ? "true" : "false"); }
+            catch (Exception e) when (e is IOException or UnauthorizedAccessException or InvalidOperationException) { LogFile.Error(e); } // not remembered, still done
+            _typing.Focus(FocusState.Programmatic);
+        };
+        _clipButton.IsChecked = _clipOn;
+        ToolTipService.SetToolTip(_clipButton, "What you copy here is on the Mac's clipboard and what's copied there is on this PC's: text, pictures and files. Drop files on the picture to put them where you let go. It applies to this window and to ones opened later.");
+        AutomationName(_clipButton, "Sync clipboard");
+        _clipButton.Click += (_, _) =>
+        {
+            _clipOn = _clipButton.IsChecked == true;
+            try { _settings?.Set(ClipSyncKey, _clipOn ? "true" : "false"); }
+            catch (Exception e) when (e is IOException or UnauthorizedAccessException or InvalidOperationException) { LogFile.Error(e); } // not remembered, still done
+            _clipTries = 0;
+            if (_clipOn) StartClipSync(); else StopClipSync(forget: true);
+            _typing.Focus(FocusState.Programmatic);
+        };
         _fitButton.IsChecked = _fit;
         ToolTipService.SetToolTip(_fitButton, "The Mac makes a display in this window's shape, so its picture fills the window. The Mac's own screen shows that display while you're here.");
         AutomationName(_fitButton, "Fit to window");
@@ -160,14 +244,20 @@ internal sealed class ScreenWindow : Window, IScreenView
         };
 
         var bar = new Grid { Padding = new Thickness(12, 6, 12, 6), ColumnSpacing = 8 };
+        _toolbar = bar;
         bar.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
         bar.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
         bar.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
         var left = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 12 };
+        _toolbarStatus = left;
         left.Children.Add(_subtitle);
         left.Children.Add(_toast);
+        left.Children.Add(_clipActions);
+        Microsoft.UI.Xaml.Automation.AutomationProperties.SetLiveSetting(_toast, Microsoft.UI.Xaml.Automation.Peers.AutomationLiveSetting.Polite);
         bar.Children.Add(left);
         var buttons = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 6 };
+        buttons.Children.Add(_ctrlButton);
+        buttons.Children.Add(_clipButton);
         buttons.Children.Add(send);
         buttons.Children.Add(copy);
         buttons.Children.Add(_fitButton);
@@ -189,13 +279,15 @@ internal sealed class ScreenWindow : Window, IScreenView
         _stage.PointerCaptureLost += (_, _) => ReleaseButtons();
         _stage.PointerExited += (_, _) => { _localPointer = null; PlacePointer(); };
         _stage.PointerWheelChanged += OnWheel;
+        _stage.AllowDrop = true;
+        _stage.DragOver += OnDragOver;
+        _stage.Drop += OnDrop;
         _stage.SizeChanged += (_, _) =>
         {
             PlacePointer();
-            if (!_fit || _client is null) return;
+            if (!FitsWindow || _client is null) return;
             // Dragging the edge sends one ask, when it stops: each is a new display on the Mac.
-            _refit ??= new DispatcherQueueTimerWrapper(_ui, RefitAfter, () => { if (_fit && !_minimized) _client?.Relayout(Layout()); });
-            _refit.Restart();
+            Refit();
         };
         _typing.PreviewKeyDown += OnKeyDown;
         _typing.PreviewKeyUp += OnKeyUp;
@@ -210,8 +302,80 @@ internal sealed class ScreenWindow : Window, IScreenView
         root.Children.Add(bar);
         Grid.SetRow(_stage, 1);
         root.Children.Add(_stage);
+        Grid.SetRowSpan(_connectionBar, 2);
+        _connectionBar.Child = BuildConnectionBar();
+        _connectionBar.PointerEntered += (_, _) => { _overBar = true; RevealBar(); };
+        _connectionBar.PointerExited += (_, _) => { _overBar = false; RevealBar(); };
+        root.Children.Add(_connectionBar);
         return root;
     }
+
+    /// <summary>The picture takes the window's shape: asked for with Fit to window, and always in full screen.</summary>
+    private bool FitsWindow => _fit || _fullScreen;
+
+    /// <summary>
+    /// Asks the Mac for the display this window wants now (its own shape with Fit to window or in full screen, else
+    /// the Mac's own), once things have stopped changing: each ask can make a new display there, so dragging an edge,
+    /// or going into full screen and straight out again, sends one ask or none.
+    /// </summary>
+    private void Refit()
+    {
+        _refit ??= new DispatcherQueueTimerWrapper(_ui, RefitAfter, () => { if (!_minimized) _client?.Relayout(Layout()); });
+        _refit.Restart();
+    }
+
+    // MARK: Full screen
+
+    /// <summary>Full screen's bar, as Remote Desktop's: pin, the computer's name, what clipboard sync has to say, minimise, restore, close.</summary>
+    private UIElement BuildConnectionBar()
+    {
+        Button Icon(string glyph, string name, Action click)
+        {
+            var b = new Button { Content = new FontIcon { Glyph = glyph, FontSize = 12 }, Padding = new Thickness(8, 4, 8, 4), Background = new SolidColorBrush(Colors.Transparent), BorderThickness = new Thickness(0) };
+            ToolTipService.SetToolTip(b, name);
+            AutomationName(b, name);
+            b.Click += (_, _) => click();
+            return b;
+        }
+        var pin = new Microsoft.UI.Xaml.Controls.Primitives.ToggleButton
+        {
+            Content = new FontIcon { Glyph = "\uE718", FontSize = 12 }, Padding = new Thickness(8, 4, 8, 4), BorderThickness = new Thickness(0),
+        };
+        ToolTipService.SetToolTip(pin, "Keep this bar on screen");
+        AutomationName(pin, "Keep this bar on screen");
+        pin.Click += (_, _) => { _barPinned = pin.IsChecked == true; RevealBar(); _typing.Focus(FocusState.Programmatic); };
+        var panel = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 4 };
+        panel.Children.Add(pin);
+        panel.Children.Add(new TextBlock { Text = _name, VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(6, 0, 10, 0), MaxWidth = 280, TextTrimming = TextTrimming.CharacterEllipsis });
+        panel.Children.Add(_connectionStatus);
+        panel.Children.Add(Icon("\uE921", "Minimize", () => ShowWindow(Win32Interop.GetWindowFromWindowId(AppWindow.Id), 6 /* SW_MINIMIZE */)));
+        panel.Children.Add(Icon("\uE923", "Leave full screen (Ctrl+Alt+Break)", ToggleFullScreen));
+        panel.Children.Add(Icon("\uE8BB", "Close", Close));
+        return panel;
+    }
+
+    /// <summary>Shows full screen's bar; it goes again in a moment unless pinned, under the pointer, or saying something.</summary>
+    private void RevealBar()
+    {
+        if (!_fullScreen) return;
+        _connectionBar.Visibility = Visibility.Visible;
+        _barHide ??= new DispatcherQueueTimerWrapper(_ui, BarStays, () =>
+        {
+            if (!_fullScreen) return;
+            if (_barPinned || _overBar || _toast.Text.Length > 0 || _clipActions.Children.Count > 0) { _barHide!.Restart(); return; }
+            _connectionBar.Visibility = Visibility.Collapsed;
+        });
+        _barHide.Restart();
+    }
+
+    /// <summary>The line beside the subtitle (in full screen, in its bar, which comes down to say it).</summary>
+    private void SetToast(string text)
+    {
+        _toast.Text = text;
+        if (text.Length > 0) RevealBar();
+    }
+
+    [DllImport("user32.dll")] private static extern bool ShowWindow(IntPtr window, int command);
 
     private static Button ToolButton(string text, string tip)
     {
@@ -298,7 +462,7 @@ internal sealed class ScreenWindow : Window, IScreenView
 
     private ScreenVideoClient.Layout Layout()
     {
-        if (_fit)
+        if (FitsWindow)
         {
             // Minimised or not laid out yet, the stage has no size: the last shape is kept, so only the rate changes.
             if (!_minimized && _stage.ActualWidth >= 1 && _stage.ActualHeight >= 1)
@@ -337,6 +501,8 @@ internal sealed class ScreenWindow : Window, IScreenView
         _picture.Opacity = 1;
         _typing.Focus(FocusState.Programmatic);
         ShowSubtitle();
+        _clipTries = 0;
+        StartClipSync();
     }
 
     /// <summary>
@@ -393,12 +559,211 @@ internal sealed class ScreenWindow : Window, IScreenView
         _shell?.Disconnect();
         _shell = null;
         _buttons = 0;
+        // Sync lasts only while the picture is live; what was received stays for pasting until the window closes.
+        StopClipSync(forget: false);
     }
 
     private void Stop(Phase phase)
     {
         StopStream();
         _phase = phase;
+        if (phase == Phase.Closed)
+        {
+            _clipViewer?.Dispose();
+            _clipViewer = null;
+        }
+    }
+
+    // MARK: Clipboard sync
+
+    /// <summary>Asks the Mac for clipboard sync on a connection of its own, once the picture is live.</summary>
+    private void StartClipSync()
+    {
+        if (!_clipOn || _phase != Phase.Live || _clipShell is not null || _clipActive) return;
+        _clipTries++;
+        var generation = ++_clipGeneration;
+        var c = _computer.Credential;
+        var credential = new ShellCredential(c.MacID, c.MacName, c.CertSHA256, Convert.FromBase64String(c.ShellKey), c.PhoneID, c.Port, c.Addresses,
+            c.IrohID, c.IrohRelay, c.RelayToken, _computer.HostKind);
+        var handed = false;
+        ShellClient? shell = null;
+        shell = new ShellClient(credential, new PinnedTlsDialer(), new IrohShellDialer(), e =>
+        {
+            switch (e)
+            {
+                case ShellClientEvent.Ready:
+                    shell!.RequestClipSync();
+                    break;
+                case ShellClientEvent.ClipSync sync:
+                    handed = true;
+                    OnUi(() => BeginClipSync(generation, sync));
+                    break;
+                case ShellClientEvent.ClipSyncRefused refused:
+                    shell!.Disconnect();
+                    OnUi(() => ClipSyncRefused(generation, refused.Reason));
+                    break;
+                case ShellClientEvent.Disconnected when !handed:
+                    OnUi(() =>
+                    {
+                        if (generation != _clipGeneration || _clipShell is null) return;
+                        _clipShell = null;
+                        RetryClipSync(ClipRetry);
+                    });
+                    break;
+            }
+        }, identity: _identity);
+        _clipShell = shell;
+        shell.Connect();
+    }
+
+    private void BeginClipSync(int generation, ShellClientEvent.ClipSync sync)
+    {
+        if (generation != _clipGeneration || !_clipOn || _phase != Phase.Live)
+        {
+            _ = sync.Stream.DisposeAsync().AsTask();
+            return;
+        }
+        _clipShell = null; // it let go of the stream
+        _clipViewer ??= new ClipSyncViewer(_name, status => OnUi(() => ShowClipStatus(status)), LogFile.Write);
+        _clipActive = true;
+        _clipSince = Stopwatch.StartNew();
+        ShowClipButtons();
+        _clipViewer.Start(sync.Stream.Stream, sync.InitialBytes, sync.Stream, ended: () => OnUi(() =>
+        {
+            if (generation != _clipGeneration) return;
+            _clipActive = false;
+            ShowClipButtons();
+            // The cap counts tries in a row that didn't get through: one that lasted a while starts the count again.
+            if (_clipSince is { } since && since.Elapsed >= ClipSettled) _clipTries = 0;
+            RetryClipSync(ClipRetry);
+        }));
+    }
+
+    private void ClipSyncRefused(int generation, Passthrough.Core.Shell.ShellError reason)
+    {
+        if (generation != _clipGeneration) return;
+        _clipShell = null;
+        switch (reason)
+        {
+            // The view's start hadn't reached it yet: ask again shortly.
+            case Passthrough.Core.Shell.ShellError.NoScreenView: RetryClipSync(ClipRetryNoView); break;
+            case Passthrough.Core.Shell.ShellError.ClipSyncOff:
+                Toast($"{_name} has clipboard sync turned off. Once it's on there, turn Sync clipboard off and on here.");
+                break;
+            case Passthrough.Core.Shell.ShellError.ClipSyncUnavailable:
+                Toast($"{_name} can't share its clipboard right now. Send clipboard and Copy from Mac still work.");
+                break;
+            case Passthrough.Core.Shell.ShellError.NotAllowed or Passthrough.Core.Shell.ShellError.ScreenNotAllowed or Passthrough.Core.Shell.ShellError.ScreenOnly:
+                Toast($"{_name} doesn't let this PC share its clipboard. Send clipboard and Copy from Mac still work.");
+                break;
+            default:
+                // An older build knows no clipSync and answers bad_request.
+                Toast($"{_name} can't sync the clipboard (update Passthrough there). Send clipboard and Copy from Mac still work.");
+                break;
+        }
+    }
+
+    private void RetryClipSync(TimeSpan after)
+    {
+        if (!_clipOn || _phase != Phase.Live) return;
+        if (_clipTries >= ClipTriesInARow)
+        {
+            Toast($"Clipboard sync with {_name} stopped. Turn Sync clipboard off and on to try again.");
+            return;
+        }
+        var generation = _clipGeneration;
+        _ = Task.Delay(after).ContinueWith(_ => OnUi(() => { if (generation == _clipGeneration) StartClipSync(); }), TaskScheduler.Default);
+    }
+
+    /// <summary>Ends the sync and its connection. With <paramref name="forget"/> (turned off) what was received goes too.</summary>
+    private void StopClipSync(bool forget)
+    {
+        _clipGeneration++;
+        _clipShell?.Disconnect();
+        _clipShell = null;
+        _clipViewer?.Stop(forget);
+        _clipActive = false;
+        ShowClipButtons();
+        if (_clipHeld) ShowClipStatus(null);
+    }
+
+    /// <summary>While sync runs, Ctrl+C and ⌘V do the work: the two buttons give way to it.</summary>
+    private void ShowClipButtons()
+    {
+        var visibility = _clipActive ? Visibility.Collapsed : Visibility.Visible;
+        if (_sendButton is not null) _sendButton.Visibility = visibility;
+        if (_copyButton is not null) _copyButton.Visibility = visibility;
+    }
+
+    /// <summary>
+    /// What sync is doing, beside the subtitle: a line that stays until replaced (with its buttons, when it asks
+    /// something), or one that goes after a few seconds.
+    /// </summary>
+    private void ShowClipStatus(ClipStatus? status)
+    {
+        if (_phase == Phase.Closed) return;
+        _clipActions.Children.Clear();
+        if (status is null)
+        {
+            if (_clipHeld) { _toastId++; SetToast(""); }
+            _clipHeld = false;
+            return;
+        }
+        _clipHeld = status.Hold;
+        if (!status.Hold) { Toast(status.Text); return; }
+        _toastId++;
+        SetToast(status.Text);
+        foreach (var action in status.Actions)
+        {
+            var button = new Button { Content = action.Label, Padding = new Thickness(10, 2, 10, 2) };
+            AutomationName(button, action.Label);
+            button.Click += (_, _) =>
+            {
+                // Answered: the question goes at once; what happens next says itself.
+                _clipActions.Children.Clear();
+                _toastId++;
+                SetToast("");
+                _clipHeld = false;
+                action.Run();
+                _typing.Focus(FocusState.Programmatic);
+            };
+            _clipActions.Children.Add(button);
+        }
+    }
+
+    private void OnDragOver(object sender, DragEventArgs e)
+    {
+        var point = e.GetPosition(_stage);
+        var inside = ScreenFrame.StreamPoint(point.X, point.Y, PictureRect()).Inside;
+        // Taken whenever the picture is live, so a drop while sync isn't running can say why nothing went.
+        e.AcceptedOperation = _phase == Phase.Live && inside && e.DataView.Contains(StandardDataFormats.StorageItems)
+            ? DataPackageOperation.Copy : DataPackageOperation.None;
+        if (e.AcceptedOperation == DataPackageOperation.Copy) e.DragUIOverride.Caption = _clipActive ? $"Drop on {_name}" : "Clipboard sync isn't running";
+        e.Handled = true;
+    }
+
+    private async void OnDrop(object sender, DragEventArgs e)
+    {
+        try
+        {
+            if (!e.DataView.Contains(StandardDataFormats.StorageItems)) return;
+            if (!_clipActive || _clipViewer is not { } viewer)
+            {
+                Toast(_clipOn ? $"Clipboard sync with {_name} isn't running, so files can't go there." : $"Turn on Sync clipboard to drop files on {_name}.");
+                return;
+            }
+            var point = e.GetPosition(_stage);
+            var at = ScreenFrame.StreamPoint(point.X, point.Y, PictureRect());
+            if (!at.Inside) return;
+            var deferral = e.GetDeferral();
+            List<string> paths;
+            try { paths = [.. (await e.DataView.GetStorageItemsAsync()).Select(i => i.Path).Where(p => !string.IsNullOrEmpty(p))]; }
+            finally { deferral.Complete(); }
+            if (paths.Count == 0) { Toast("Those can't be sent: only files and folders on this PC."); return; }
+            viewer.Drop(paths, (ushort)Math.Round(Math.Clamp(at.X, 0, 1) * 65535), (ushort)Math.Round(Math.Clamp(at.Y, 0, 1) * 65535));
+        }
+        catch (Exception x) when (x is COMException or UnauthorizedAccessException or InvalidOperationException) { Toast("Those files couldn't be read."); }
+        catch (Exception x) when (x is not OutOfMemoryException) { LogFile.Error(x); LogFile.Flush(); } // async void: anything left here would end the app
     }
 
     private void Status(string text, bool retry, string retryText = "Try again")
@@ -426,10 +791,13 @@ internal sealed class ScreenWindow : Window, IScreenView
 
     private async void Toast(string text)
     {
+        // A passing line replaces a held one, and its buttons with it.
+        _clipActions.Children.Clear();
+        _clipHeld = false;
         var id = ++_toastId;
-        _toast.Text = text;
+        SetToast(text);
         await Task.Delay(TimeSpan.FromSeconds(4));
-        if (id == _toastId) _toast.Text = "";
+        if (id == _toastId) SetToast("");
     }
 
     // MARK: IScreenView
@@ -591,6 +959,8 @@ internal sealed class ScreenWindow : Window, IScreenView
         var rect = PictureRect();
         var at = ScreenFrame.StreamPoint(point.Position.X, point.Position.Y, rect);
         _localPointer = at.Inside ? (point.Position.X, point.Position.Y) : null;
+        // Full screen's bar comes down when the pointer touches the top edge.
+        if (_fullScreen && point.Position.Y <= 2) RevealBar();
         PlacePointer();
         if (_client is null) return;
         var buttons = _buttons == 0 ? (byte)0 : e.Pointer.PointerDeviceType == PointerDeviceType.Mouse ? Buttons(point.Properties) : (byte)1;
@@ -653,6 +1023,57 @@ internal sealed class ScreenWindow : Window, IScreenView
     /// <summary>The Mac's pointer shape where this PC's pointer is (it leads the echo), else where the Mac says.</summary>
     private void PlacePointer()
     {
+        PlaceMacPointer();
+        // One pointer, not two: while the Mac's is drawn where this PC's is, this PC's own is hidden.
+        ShowOwnCursor(!(_active && _localPointer is not null && _pointer.Visibility == Visibility.Visible));
+    }
+
+    private bool _ownCursorHidden;
+    private InputCursor? _blankCursor;
+    private bool _blankCursorTried;
+
+    /// <summary>
+    /// Hides or shows this PC's pointer over the picture. WinUI takes its pointer input without window messages, so the
+    /// shape can't be taken away the Win32 way (ShowCursor, or answering WM_SETCURSOR, do nothing here): the picture is
+    /// given a pointer shape of its own that draws nothing, from Assetslank-cursor.dll (WinUI has no "none").
+    /// </summary>
+    private void ShowOwnCursor(bool show)
+    {
+        if (show != _ownCursorHidden) return;
+        _ownCursorHidden = !show;
+        _stage.Show(show ? null : BlankCursor());
+    }
+
+    private InputCursor? BlankCursor()
+    {
+        if (_blankCursorTried) return _blankCursor;
+        _blankCursorTried = true;
+        var module = Path.Combine(AppContext.BaseDirectory, "Assets", "blank-cursor.dll");
+        try
+        {
+            // WinUI finds the module among those already loaded (it doesn't load it: asked for one that isn't, it
+            // answers "resource name not found"), so it is loaded here first. It holds one cursor and no code.
+            if (LoadLibraryExW(module, IntPtr.Zero, 0) == IntPtr.Zero) throw new IOException($"error {Marshal.GetLastWin32Error()} loading it");
+            _blankCursor = InputDesktopResourceCursor.CreateFromModule(module, 1);
+        }
+        catch (Exception e) when (e is COMException or ArgumentException or IOException or UnauthorizedAccessException)
+        {
+            LogFile.Write($"screen: this PC's pointer stays visible over the picture (the blank pointer didn't load: {e.GetType().Name} {e.HResult:X8} {e.Message})");
+        }
+        return _blankCursor;
+    }
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern IntPtr LoadLibraryExW(string name, IntPtr file, uint flags);
+
+    /// <summary>The stage, with the one thing a Grid keeps to itself: the pointer shape shown over it.</summary>
+    private sealed class PointerStage : Grid
+    {
+        public void Show(InputCursor? cursor) => ProtectedCursor = cursor;
+    }
+
+    private void PlaceMacPointer()
+    {
         var rect = PictureRect();
         if (_shape is not { } shape || _streamWidth == 0 || _remotePointer is { Visible: false } || _pointer.Source is null)
         {
@@ -687,7 +1108,7 @@ internal sealed class ScreenWindow : Window, IScreenView
             e.Handled = true;
             return;
         }
-        var action = ScreenKeys.Down(vk, held, Keyboard.Unshifted(vk), ctrlIsCommand: false, altGr: Keyboard.AltGr(), composing: _composing);
+        var action = ScreenKeys.Down(vk, held, Keyboard.Unshifted(vk), ctrlIsCommand: _ctrlIsCommand, altGr: Keyboard.AltGr(), composing: _composing);
         switch (action)
         {
             case ScreenKeyAction.Key k: _client.Key(k.Keysym, k.Modifiers); e.Handled = true; break;
@@ -731,9 +1152,61 @@ internal sealed class ScreenWindow : Window, IScreenView
         _typing.Focus(FocusState.Programmatic);
     }
 
+    private DispatcherQueueTimerWrapper? _taskbarBehind;
+
+    /// <summary>
+    /// In full screen and in front, the taskbar on this window's monitor goes behind it; in full screen but with another
+    /// window in front, the taskbar is where it always is, so that window has it.
+    /// </summary>
+    private void PlaceTaskbar()
+    {
+        if (!_fullScreen || _phase == Phase.Closed) return;
+        if (_active) TaskbarKeeper.SendBehind(Win32Interop.GetWindowFromWindowId(AppWindow.Id));
+        else TaskbarKeeper.BringBack();
+    }
+
+    /// <summary>
+    /// Full screen and back. In full screen the toolbar goes, the picture has the whole monitor, and the Mac is asked
+    /// for a display in the monitor's shape whatever Fit to window says; leaving it, Fit to window's own choice holds again.
+    /// </summary>
     private void ToggleFullScreen()
     {
-        AppWindow.SetPresenter(AppWindow.Presenter.Kind == AppWindowPresenterKind.FullScreen ? AppWindowPresenterKind.Overlapped : AppWindowPresenterKind.FullScreen);
+        var entering = AppWindow.Presenter.Kind != AppWindowPresenterKind.FullScreen;
+        AppWindow.SetPresenter(entering ? AppWindowPresenterKind.FullScreen : AppWindowPresenterKind.Overlapped);
+        _fullScreen = entering;
+        // Windows takes its taskbar off the top for a full-screen window; the keeper mustn't put it back over the picture.
+        if (entering) TaskbarKeeper.FullScreenBegan(); else TaskbarKeeper.FullScreenEnded();
+        // And Windows is told outright: left to notice by itself, it does so only when the window next comes forward,
+        // and the taskbar stays over the picture until then. Once the window has its new size, so it is taken at its word.
+        var window = Win32Interop.GetWindowFromWindowId(AppWindow.Id);
+        _ui.TryEnqueue(Microsoft.UI.Dispatching.DispatcherQueuePriority.Low, () => TaskbarKeeper.MarkFullScreen(window, _fullScreen));
+        // Telling it isn't enough on every Windows: the taskbar still sat over the picture until the window next came
+        // forward. So it is put behind this window here, once the window has its full-screen size.
+        if (entering)
+        {
+            _taskbarBehind ??= new DispatcherQueueTimerWrapper(_ui, TimeSpan.FromMilliseconds(200), PlaceTaskbar);
+            _taskbarBehind.Restart();
+        }
+        else TaskbarKeeper.BringBack();
+        if (_toolbar is not null) _toolbar.Visibility = entering ? Visibility.Collapsed : Visibility.Visible;
+        // What clipboard sync says, and its buttons, are shown wherever there is a bar to show them in.
+        var (from, to) = entering ? (_toolbarStatus, _connectionStatus) : (_connectionStatus, _toolbarStatus);
+        foreach (var element in new UIElement[] { _toast, _clipActions })
+        {
+            from?.Children.Remove(element);
+            if (to is not null && !to.Children.Contains(element)) to.Children.Add(element);
+        }
+        if (entering)
+        {
+            // Shown for a moment, so it's known to be there; the stage's new size asks the Mac for a display to match.
+            RevealBar();
+            Refit();
+        }
+        else
+        {
+            _connectionBar.Visibility = Visibility.Collapsed;
+            Refit();
+        }
         _typing.Focus(FocusState.Programmatic);
     }
 

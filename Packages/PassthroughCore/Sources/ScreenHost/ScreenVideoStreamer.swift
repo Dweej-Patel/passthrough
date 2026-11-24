@@ -680,6 +680,7 @@ public final class ScreenVideoStreamer: ScreenVideoSource, @unchecked Sendable {
         shownGeneration = generation
         self.fit = fit
         displayRect = display
+        if let viewer { ScreenStreamDisplays.set(display, for: viewer.phoneID, by: self) }
         fullPixels = Double(width * height) / (scale * scale)
         updateMaxBitRate()
         let bitRate = pacer.bitRate
@@ -1036,6 +1037,7 @@ public final class ScreenVideoStreamer: ScreenVideoSource, @unchecked Sendable {
         stopped = true
         ended = nil
         ScreenViewers.shared.leave(viewerID)
+        if let viewer { ScreenStreamDisplays.remove(for: viewer.phoneID, by: self) }
         if let rtt = pacer.minRTT {
             ptLog(.info, "screen: ended; shortest round trip \(Int(rtt * 1000)) ms, last bitrate \(pacer.bitRate / 1000) kb/s of \(pacer.maxBitRate / 1000)")
         }

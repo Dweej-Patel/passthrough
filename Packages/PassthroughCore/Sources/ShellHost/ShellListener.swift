@@ -93,6 +93,15 @@ public final class ShellListener: @unchecked Sendable {
         set { gate.screenVideoFactory.set(newValue) }
     }
 
+    /// Makes clipboard sync for a screen pass's or a computer's `clipSync`
+    /// request, or says why not (`no_screen_view`, `clip_sync_off`,
+    /// `clip_sync_unavailable`). Phones are refused before it's asked. Asked
+    /// on the listener's queue, so it must not block. Unset: unavailable.
+    public var clipSync: (@Sendable (_ id: String, _ label: String) -> Result<any ClipSyncSource, ShellError>)? {
+        get { gate.clipSyncFactory.get() }
+        set { gate.clipSyncFactory.set(newValue) }
+    }
+
     /// A phone started (`viewing`) or stopped seeing the screen. On the listener's queue.
     public var onScreenViewer: (@Sendable (_ phoneID: String, _ label: String, _ viewing: Bool) -> Void)? {
         get { gate.screenHandler.get() }
@@ -546,6 +555,7 @@ final class ShellGate: @unchecked Sendable {
     let screenHandler = Locked<(@Sendable (_ phoneID: String, _ label: String, _ viewing: Bool) -> Void)?>(nil)
     let screenVideoFactory = Locked<(@Sendable (String, String) -> (any ScreenVideoSource)?)?>(nil)
     let screenViews = Locked(ScreenViewLimit())
+    let clipSyncFactory = Locked<(@Sendable (String, String) -> Result<any ClipSyncSource, ShellError>)?>(nil)
     /// `ShellListener.screenSharingVerified`.
     let screenSharingCheck = Locked<(@Sendable () async -> Bool)?>(nil)
     /// Where `screen` requests are relayed; another port in tests.
@@ -946,6 +956,8 @@ final class ShellConnection: ShellAttachment, @unchecked Sendable {
     private var screenVideo: (any ScreenVideoSource)?
     /// The `ScreenViewLimit` it holds a view from, while asking for or showing the screen.
     private var screenView: ScreenViewLimit?
+    /// The connection now carries clipboard sync; no more lines.
+    private var clipSync: (any ClipSyncSource)?
     var onClose: (() -> Void)?
 
     init(gate: ShellGate, stream: any ByteStream, phoneID: String, label: String, role: Role = .phone) {
@@ -1047,7 +1059,7 @@ final class ShellConnection: ShellAttachment, @unchecked Sendable {
         case ShellEnvelope.list, ShellEnvelope.open, ShellEnvelope.attach, ShellEnvelope.input, ShellEnvelope.resize,
              ShellEnvelope.close, ShellEnvelope.viewing:
             return scopes.contains(Computers.scopeShell) ? nil : .notAllowed
-        case ShellEnvelope.screenVideo:
+        case ShellEnvelope.screenVideo, ShellEnvelope.clipSync:
             return scopes.contains(Computers.scopeScreen) ? nil : .screenNotAllowed
         // Never the relay to Screen Sharing: its login would let a computer try the Mac's password.
         case ShellEnvelope.screen:
@@ -1062,7 +1074,7 @@ final class ShellConnection: ShellAttachment, @unchecked Sendable {
     static let controlAnswerDelay: TimeInterval = 1
 
     /// Asked for the screen: being relayed to Screen Sharing, or about to be.
-    var isScreen: Bool { screenChecking || screenDial != nil || screenRelay != nil || screenVideo != nil }
+    var isScreen: Bool { screenChecking || screenDial != nil || screenRelay != nil || screenVideo != nil || clipSync != nil }
 
     /// Ends the connection and stops the manager sending to it. Idempotent.
     func close() {
@@ -1085,6 +1097,8 @@ final class ShellConnection: ShellAttachment, @unchecked Sendable {
             gate?.screenViewer(phoneID, label, viewing: false)
         }
         screenVideo = nil
+        clipSync?.stop()
+        clipSync = nil
         releaseScreenView()
         stream.onTerminated = nil
         stream.cancel()
@@ -1145,7 +1159,7 @@ final class ShellConnection: ShellAttachment, @unchecked Sendable {
         guard let message = try? ShellEnvelope.decode(line) else { return fail(.badRequest) }
         // Only the Mac's own stream: not the tunnel to macOS Screen Sharing,
         // whose login would let a pass try the Mac's account password.
-        if screenOnly, ![ShellEnvelope.screenVideo, ShellEnvelope.ping, ShellEnvelope.pong].contains(message.t) {
+        if screenOnly, ![ShellEnvelope.screenVideo, ShellEnvelope.clipSync, ShellEnvelope.ping, ShellEnvelope.pong].contains(message.t) {
             return fail(.screenOnly, session: message.session, ref: message.ref)
         }
         if let refused = computerRefusal(message.t) {
@@ -1225,6 +1239,15 @@ final class ShellConnection: ShellAttachment, @unchecked Sendable {
                 return fail(.screenVideoUnavailable)
             }
             streamScreen(source)
+        case ShellEnvelope.clipSync:
+            // Between computers only: a phone keeps its Copy and Paste.
+            guard role != .phone else { return fail(.notAllowed) }
+            guard gate?.screenAllowed(phoneID) == true else { return fail(.screenNotAllowed) }
+            guard let factory = gate?.clipSyncFactory.get() else { return fail(.clipSyncUnavailable) }
+            switch factory(phoneID, label) {
+            case let .success(source): syncClipboard(source)
+            case let .failure(reason): fail(reason)
+            }
         case ShellEnvelope.screenGrant:
             guard let name = message.name, let viewer = message.viewer else { return fail(.badRequest) }
             grantScreen(name: name, viewer: viewer)
@@ -1594,6 +1617,26 @@ final class ShellConnection: ShellAttachment, @unchecked Sendable {
         gate?.screenViewer(phoneID, label, viewing: true)
         send(ShellEnvelope(t: ShellEnvelope.screenVideoReady)) { [weak self] in
             guard let self, !self.closed, self.screenVideo === source else { return }
+            let rest = self.lines.takePending()
+            source.start(stream: self.stream, initialBytes: rest) { [weak self] in
+                self?.queue.async { self?.close() }
+            }
+        }
+    }
+
+    /// Hands the connection to clipboard sync after `clipSyncReady`, as `streamScreen` does.
+    private func syncClipboard(_ source: any ClipSyncSource) {
+        busy = true
+        manager.detach(client: self)
+        attached = nil
+        guard inbox.isEmpty else {
+            ptLog(.warning, "shell: a computer sent more after asking for clipboard sync; disconnected")
+            source.stop()
+            return close()
+        }
+        clipSync = source
+        send(ShellEnvelope(t: ShellEnvelope.clipSyncReady)) { [weak self] in
+            guard let self, !self.closed, self.clipSync === source else { return }
             let rest = self.lines.takePending()
             source.start(stream: self.stream, initialBytes: rest) { [weak self] in
                 self?.queue.async { self?.close() }

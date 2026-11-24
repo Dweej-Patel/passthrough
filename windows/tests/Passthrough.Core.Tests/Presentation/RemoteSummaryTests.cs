@@ -14,6 +14,10 @@ public sealed class RemoteSummaryTests
         var here = RemoteSummary.Here([D("iPad"), D("iPhone", connections: 1, shells: 2), D("MacBook", connections: 1, viewing: true, computer: true), D("Pixel", shells: 1)]);
         Assert.Equal(["MacBook", "iPhone", "Pixel"], here.Select(h => h.Name));
         Assert.Equal("Viewing the screen", here[0].Detail);
+        // A computer whose clipboard is synced while it views says so; syncing without a view is never said.
+        Assert.Equal("Viewing the screen · syncing the clipboard · 1 shell open",
+            RemoteSummary.Here([new RemoteDevice("c", "MacBook", true, 2, true, 1, Syncing: true)])[0].Detail);
+        Assert.Equal("Connected", RemoteSummary.Here([new RemoteDevice("c", "MacBook", true, 1, false, 0, Syncing: true)])[0].Detail);
         Assert.Equal("2 shells open", here[1].Detail);
         Assert.Equal("1 shell open", here[2].Detail);
         Assert.Equal("Connected", RemoteSummary.Here([D("iPhone", connections: 1)])[0].Detail);

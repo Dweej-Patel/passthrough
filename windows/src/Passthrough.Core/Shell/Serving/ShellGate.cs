@@ -52,6 +52,13 @@ public sealed class ShellGateHooks
 
     /// <summary>Something a person would want in the log ("iPhone opened a session"). Never secrets.</summary>
     public Action<string>? Event { get; init; }
+
+    /// <summary>
+    /// A computer viewing the screen asked to sync clipboards (<c>clipSync</c>): the stream to whatever owns that
+    /// account's clipboard (the tray app in its session), or why there is none (<c>clip_sync_off</c>,
+    /// <c>clip_sync_unavailable</c>). Asked with the device's id and label. Unset: unavailable.
+    /// </summary>
+    public Func<string, string, CancellationToken, Task<(Stream? Stream, ShellError? Error)>>? ClipSync { get; init; }
 }
 
 /// <summary>
@@ -128,8 +135,38 @@ public sealed class ShellGate
             all = [.. _connections.Where(c => c.PhoneId == phoneId)];
             _stoppedUntil[phoneId] = Time.GetUtcNow().AddSeconds(30);
         }
-        foreach (var c in all.Where(c => c.IsRelaying)) c.Close();
-        foreach (var c in all.Where(c => !c.IsRelaying)) c.SendScreenEnded(reason);
+        // Clipboard sync lasts only while the screen is viewed: it goes with the views.
+        foreach (var c in all.Where(c => c.IsRelaying || c.IsClip)) c.Close();
+        foreach (var c in all.Where(c => !c.IsRelaying && !c.IsClip)) c.SendScreenEnded(reason);
+    }
+
+    /// <summary>How long after a device's last view ends its clipboard sync is closed (within a second: protocol/README.md), so a view that reconnects keeps it.</summary>
+    internal static readonly TimeSpan ClipSyncLinger = TimeSpan.FromMilliseconds(800);
+
+    /// <summary>One clipboard sync per device: a new one replaces the old, which closes.</summary>
+    internal void ClipSyncStarted(ShellConnection started)
+    {
+        List<ShellConnection> old;
+        lock (_lock) old = [.. _connections.Where(c => c != started && c.PhoneId == started.PhoneId && c.IsClip)];
+        old.ForEach(c => c.Close());
+    }
+
+    /// <summary>A view of the screen ended: if that device has none left in a moment, its clipboard sync closes.</summary>
+    internal void ViewEnded(string phoneId)
+    {
+        _ = Task.Delay(ClipSyncLinger, Time).ContinueWith(_ =>
+        {
+            if (IsViewing(phoneId)) return;
+            List<ShellConnection> clips;
+            lock (_lock) clips = [.. _connections.Where(c => c.PhoneId == phoneId && c.IsClip)];
+            clips.ForEach(c => c.Close());
+        }, TaskScheduler.Default);
+    }
+
+    /// <summary>A device is syncing its clipboard with this PC now.</summary>
+    public bool IsSyncingClipboard(string phoneId)
+    {
+        lock (_lock) return _connections.Any(c => c.PhoneId == phoneId && c.IsClip);
     }
 
     /// <summary>A phone or computer is viewing the screen now (one of its connections carries Remote Desktop's bytes).</summary>

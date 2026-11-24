@@ -21,7 +21,7 @@ public sealed class OnThisPcRow(OnThisPc here)
 public sealed class ViewerRow(OnThisPc here)
 {
     public string Id { get; } = here.Id;
-    public string Text { get; } = $"{here.Name} is viewing this screen";
+    public string Text { get; } = here.Syncing ? $"{here.Name} is viewing this screen · syncing the clipboard" : $"{here.Name} is viewing this screen";
     public string StopName { get; } = $"Stop {here.Name}'s view";
 }
 
@@ -124,7 +124,7 @@ public sealed partial class SessionViewModel
     {
         if (_remote is not { } remote) return;
         var devices = remote.Phones.Select(p => new RemoteDevice(p.Phone, p.Label, false, p.Connections, p.Viewing, remote.Sessions.RunningSessions(p.Phone)))
-            .Concat(remote.Computers.Select(c => new RemoteDevice(c.Id, c.Name, true, c.Connections, c.Viewing, remote.Sessions.RunningSessions(c.Id))));
+            .Concat(remote.Computers.Select(c => new RemoteDevice(c.Id, c.Name, true, c.Connections, c.Viewing, remote.Sessions.RunningSessions(c.Id), remote.IsSyncingClipboard(c.Id))));
         var here = RemoteSummary.Here(devices);
         OnThisPc.Clear();
         foreach (var h in here) OnThisPc.Add(new OnThisPcRow(h));

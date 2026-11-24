@@ -103,6 +103,9 @@ struct PCScreenWindow: View {
         }
         .animation(.easeInOut(duration: 0.25), value: model.showsLockedNote)
         .frame(minWidth: 480, minHeight: 300)
+        // Full screen: the toolbar comes back only at the top edge, so the PC's desktop (which takes the
+        // picture's size) is the whole screen, as in Windows App.
+        .modifier(FullScreenToolbarOnHover())
         .focusedSceneValue(\.pcScreen, model)
         .onChange(of: viewPoints) { _, _ in model.viewChanged(pixels: viewPixels, scale: displayScale) }
         // Moved to a display with another scale: the same points are other pixels.

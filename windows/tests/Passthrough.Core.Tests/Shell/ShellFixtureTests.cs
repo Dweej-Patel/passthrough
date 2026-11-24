@@ -65,7 +65,9 @@ public class ShellFixtureTests
     [Fact]
     public void ErrorReasons_MatchFixtures()
     {
-        var wire = S.GetProperty("errors").EnumerateArray().Select(e => e.GetString()!).ToList();
+        // Clipboard sync's three reasons are only ever said between computers: they are in the clipSync section, which the phones' suites don't read.
+        var wire = S.GetProperty("errors").EnumerateArray().Concat(Fixtures.Root.GetProperty("clipSync").GetProperty("errors").EnumerateArray())
+            .Select(e => e.GetString()!).ToList();
         Assert.Equal(wire.OrderBy(w => w, StringComparer.Ordinal), ShellErrorWire.All.OrderBy(w => w, StringComparer.Ordinal));
         foreach (var w in wire) Assert.Equal(w, ShellErrorWire.Parse(w).ToWire());
         foreach (var e in Enum.GetValues<ShellError>()) Assert.Contains(e.ToWire(), wire);

@@ -136,6 +136,29 @@ these steps as written and check each one before building.
 
 ### Added
 
+* **Two Macs share a clipboard while one views the other's screen.** Copy on
+  either and paste on the other: text, images and files (up to 500 MB a copy;
+  a copy of more than 50 MB of files asks first). Only what you copy after
+  the window opens goes across. Drag files onto the window and the other Mac
+  drops them right where you let go: a folder, the desktop, an app (its
+  pointer moves by itself for a moment; drops have no size limit). Files that
+  come across are marked as downloaded. **Sync Clipboard** in the window's
+  toolbar turns it off; on the shared Mac the panel says who is syncing, a
+  notice says when files are dropped, and Settings ▸ Remote Shell ▸
+  *Computers with access* has a switch. What an app marks as secret, as most
+  password managers do, never goes across, and phones keep their Copy and
+  Paste buttons. Both Macs need this build (an older one answers that it
+  can't sync).
+
+* **A PC shares a clipboard with a Mac too (Windows).** While a Mac's screen
+  is open in a window on the PC, copy on either and paste on the other, and
+  drag files from Explorer onto the picture to drop them on the Mac.
+  **Sync clipboard** in the window's toolbar turns it off. A PC being viewed
+  syncs its clipboard with the computer viewing it and takes the files it
+  drops, once that computer's build asks for it; the switch is under
+  Settings ▸ *Computers with access*. What a password manager marks as secret
+  never goes across.
+
 * **The Mac's menu-bar panel, in two tabs.**
   - Above the tabs, always: the header, shells waiting on a question, and anyone viewing this Mac's screen (with **Stop**).
   - *This Mac*: pairing, the three switches and Details (the flow map, speeds, top apps), as before.

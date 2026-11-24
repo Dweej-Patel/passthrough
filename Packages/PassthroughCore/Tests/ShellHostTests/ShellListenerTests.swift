@@ -1874,3 +1874,59 @@ extension ShellListenerTests {
     }
 }
 #endif
+
+// MARK: - Clipboard sync
+
+private final class FakeClipSource: ClipSyncSource, @unchecked Sendable {
+    let stream = Locked<(any ByteStream)?>(nil)
+    let stopped = Locked(false)
+
+    func start(stream: any ByteStream, initialBytes: Data, ended: @escaping @Sendable () -> Void) {
+        self.stream.set(stream)
+    }
+
+    func stop() { stopped.set(true) }
+}
+
+@available(macOS 15, *)
+extension ShellListenerTests {
+    /// Between computers only: a phone's `clipSync` is refused before the app is asked.
+    func testAPhoneIsRefusedClipSync() {
+        let asked = Locked(false)
+        let listener = startListener()
+        listener.screenAllowed = { _ in true }
+        listener.clipSync = { _, _ in asked.set(true); return .success(FakeClipSource()) }
+        let (stream, rest) = rawAuthorized(listener)
+        stream.send(Data("{\"t\":\"clipSync\"}\n{\"t\":\"ping\"}\n".utf8), isComplete: false) { _ in }
+        let replies = Self.lines(rest + read(stream, "replies") { Self.lines(rest + $0).contains { $0.t == "pong" } })
+        XCTAssertEqual(replies.filter { $0.t == "error" }.map(\.reason), ["not_allowed"])
+        XCTAssertFalse(asked.get())
+    }
+
+    /// A screen pass gets the connection handed to clipboard sync after `clipSyncReady`.
+    func testAPassGetsClipSync() {
+        let source = FakeClipSource()
+        let listener = startListener()
+        listener.screenOnly = { $0 == "phone-1" }
+        listener.screenAllowed = { _ in true }
+        listener.clipSync = { id, _ in XCTAssertEqual(id, "phone-1"); return .success(source) }
+        let (stream, _) = rawAuthorized(listener)
+        stream.send(Data("{\"t\":\"clipSync\"}\n".utf8), isComplete: false) { _ in }
+        _ = read(stream, "clipSyncReady") { $0.firstRange(of: Data("{\"t\":\"clipSyncReady\"}\n".utf8)) != nil }
+        waitUntil("the source started") { source.stream.get() != nil }
+        listener.disconnect(phoneID: "phone-1")
+        waitUntil("closing stops the source") { source.stopped.get() }
+    }
+
+    /// The app's reason reaches the viewer, and the connection stays a shell connection.
+    func testClipSyncRefusalIsPassedOn() {
+        let listener = startListener()
+        listener.screenOnly = { $0 == "phone-1" }
+        listener.screenAllowed = { _ in true }
+        listener.clipSync = { _, _ in .failure(.noScreenView) }
+        let (stream, rest) = rawAuthorized(listener)
+        stream.send(Data("{\"t\":\"clipSync\"}\n{\"t\":\"ping\"}\n".utf8), isComplete: false) { _ in }
+        let replies = Self.lines(rest + read(stream, "replies") { Self.lines(rest + $0).contains { $0.t == "pong" } })
+        XCTAssertEqual(replies.filter { $0.t == "error" }.map(\.reason), ["no_screen_view"])
+    }
+}

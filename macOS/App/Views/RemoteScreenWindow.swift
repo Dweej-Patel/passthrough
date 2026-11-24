@@ -1,6 +1,7 @@
 import AppKit
 import IOSurface
 import AVFoundation
+import ClipSync
 import CoreMedia
 import Network
 import SwiftUI
@@ -56,17 +57,34 @@ struct RemoteScreenWindow: View {
                 .padding(24)
             }
         }
+        .overlay(alignment: .top) {
+            // At the top, clear of the other Mac's Dock.
+            if model.phase == .live, let status = model.clipStatus {
+                ClipStatusBadge(status: status)
+            }
+        }
         .frame(minWidth: 480, minHeight: 300)
+        .modifier(FullScreenToolbarOnHover())
         .navigationTitle(model.macName)
-        .navigationSubtitle(model.subtitle)
+        .navigationSubtitle(model.clipActive && !model.subtitle.isEmpty ? "\(model.subtitle) · clipboard shared" : model.subtitle)
         .toolbar {
             ToolbarItemGroup(placement: .primaryAction) {
-                Button { model.sendClipboard() } label: { Label("Send Clipboard", systemImage: "doc.on.clipboard") }
-                    .help("Put this Mac's clipboard text on \(model.macName)'s clipboard")
-                    .disabled(model.phase != .live)
-                Button { model.copyFromMac() } label: { Label("Copy from Mac", systemImage: "square.and.arrow.down.on.square") }
-                    .help("Press ⌘C on \(model.macName) and put what it copied on this Mac's clipboard")
-                    .disabled(model.phase != .live)
+                Toggle(isOn: $model.clipSyncOn) { Label("Sync Clipboard", systemImage: "list.clipboard") }
+                    .help(model.clipActive
+                          ? "Copies here and on \(model.macName) can be pasted on the other, and files dropped on the window land there. Click to stop."
+                          : model.clipSyncOn
+                            ? "Clipboard sync with \(model.macName) isn't running right now"
+                            : "Share the clipboard with \(model.macName), and drop files on it")
+                    .accessibilityLabel("Sync Clipboard")
+                    .accessibilityValue(model.clipActive ? "On, running" : model.clipSyncOn ? "On, not running" : "Off")
+                if !model.clipActive {
+                    Button { model.sendClipboard() } label: { Label("Send Clipboard", systemImage: "doc.on.clipboard") }
+                        .help("Put this Mac's clipboard text on \(model.macName)'s clipboard")
+                        .disabled(model.phase != .live)
+                    Button { model.copyFromMac() } label: { Label("Copy from Mac", systemImage: "square.and.arrow.down.on.square") }
+                        .help("Press ⌘C on \(model.macName) and put what it copied on this Mac's clipboard")
+                        .disabled(model.phase != .live)
+                }
             }
         }
         .onAppear {
@@ -76,7 +94,7 @@ struct RemoteScreenWindow: View {
         }
         .onDisappear {
             shown = false
-            model.stop()
+            model.close()
         }
         .onReceive(NotificationCenter.default.publisher(for: .passthroughScreenPassChanged)) { note in
             guard note.userInfo?["macID"] as? String == macID else { return }
@@ -138,6 +156,69 @@ protocol RemoteScreenSource: AnyObject {
     func key(_ keysym: UInt32, modifiers: ScreenVideoWire.Modifiers)
     func text(_ text: String)
     func gesture(_ gesture: ScreenVideoWire.Gesture, phase: ScreenVideoWire.GesturePhase, value: Double)
+    /// Files dropped on the picture are sent to land there (clipboard sync is on).
+    var acceptsDrops: Bool { get }
+    /// Files dropped at (`x`, `y`), each 0…1 across the stream.
+    func drop(_ urls: [URL], x: Double, y: Double)
+    /// Files are being dragged over the window but can't be dropped there: say why.
+    func dropRefused(outsidePicture: Bool)
+    /// The window went full screen (the picture's size in pixels, and the screen's scale) or came out of it (nil).
+    func fullScreenChanged(pixels: CGSize?, scale: CGFloat)
+}
+
+extension RemoteScreenSource {
+    var acceptsDrops: Bool { false }
+    func drop(_ urls: [URL], x: Double, y: Double) {}
+    func dropRefused(outsidePicture: Bool) {}
+    func fullScreenChanged(pixels: CGSize?, scale: CGFloat) {}
+}
+
+/// In full screen the toolbar steps aside and comes back when the pointer reaches the top of the
+/// screen, as the menu bar does, so the remote picture has the whole screen (as Windows App's does).
+struct FullScreenToolbarOnHover: ViewModifier {
+    func body(content: Content) -> some View {
+        if #available(macOS 15.0, *) {
+            content.windowToolbarFullScreenVisibility(.onHover)
+        } else {
+            content
+        }
+    }
+}
+
+/// What clipboard sync is doing, at the top of a screen window, with its buttons when it asks something.
+struct ClipStatusBadge: View {
+    let status: ClipStatus
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Text(status.text)
+                .font(.callout)
+                .fixedSize(horizontal: false, vertical: true)
+            ForEach(Array(status.actions.enumerated()), id: \.offset) { index, action in
+                // No Return or Escape for these: the picture has the keyboard, and a key meant for the other
+                // Mac mustn't answer Send for it.
+                Button(action.title) { action.run() }
+                    .controlSize(.small)
+                    .accessibilityHint(index == 0 ? status.text : "")
+            }
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 7)
+        .background(.regularMaterial, in: Capsule())
+        .padding(.top, 12)
+        .padding(.horizontal, 16)
+        .transition(.opacity)
+        .allowsHitTesting(!status.actions.isEmpty)
+        .accessibilityElement(children: .contain)
+        .onAppear { announce() }
+        .onChange(of: status.text) { announce() }
+    }
+
+    private func announce() {
+        guard status.announce else { return }
+        NSAccessibility.post(element: NSApp as Any, notification: .announcementRequested,
+                             userInfo: [.announcement: status.text, .priority: NSAccessibilityPriorityLevel.high.rawValue])
+    }
 }
 
 extension RemoteScreenModel: RemoteScreenSource {
@@ -171,6 +252,32 @@ final class RemoteScreenModel: ObservableObject {
     private var client: ShellClient?
     private var dialer: IrohShellDialer?
     private var video: ScreenVideoClient?
+    /// What clipboard sync is doing, shown for a while (nil: nothing to say).
+    @Published private(set) var clipStatus: ClipStatus?
+    /// Sync this Mac's clipboard with the other one's while the window is open. Remembered for every window.
+    @Published var clipSyncOn = UserDefaults.standard.object(forKey: RemoteScreenModel.clipSyncKey) as? Bool ?? true {
+        didSet {
+            guard clipSyncOn != oldValue else { return }
+            UserDefaults.standard.set(clipSyncOn, forKey: Self.clipSyncKey)
+            clipTries = 0
+            if clipSyncOn { startClipSync() } else { stopClipSync() }
+        }
+    }
+    static let clipSyncKey = "clipSyncViewer"
+    private var pass: ReceivedScreenPass?
+    private var discovered: NWEndpoint?
+    private var clipClient: ShellClient?
+    private var clipDialer: IrohShellDialer?
+    private var clipViewer: ClipSyncViewer?
+    /// Tries in a row that didn't get through, so a host that keeps refusing isn't asked forever.
+    private var clipTries = 0
+    /// The client asking for sync now: events from any other are ignored.
+    private var clipToken: UUID?
+    /// The sync session now, to tell whether it's still the one that started a while ago.
+    private var clipSession: UUID?
+    /// Sync is running: drops are taken, and the Copy and Send buttons give way to it.
+    @Published private(set) var clipActive = false
+    private var clipStatusClear: DispatchWorkItem?
     private var browser: NWBrowser?
     private var generation = 0
     private var path: ShellPath?
@@ -185,6 +292,8 @@ final class RemoteScreenModel: ObservableObject {
 
     func start(_ pass: ReceivedScreenPass) {
         stop()
+        self.pass = pass
+        clipTries = 0
         generation += 1
         let gen = generation
         macName = pass.macName
@@ -193,7 +302,7 @@ final class RemoteScreenModel: ObservableObject {
         phase = .connecting
         cursor = nil
         remotePointer = nil
-        layout = Self.fullLayout(visible: visible)
+        layout = wantedLayout()
         // The addresses in the pass are the ones the phone knew when it shared: find
         // the Mac by name on this network too, as the phone does, in case they changed.
         let browser = NWBrowser(for: .bonjour(type: RemoteShell.serviceType, domain: nil), using: .tcp)
@@ -214,6 +323,7 @@ final class RemoteScreenModel: ObservableObject {
         guard gen == generation, client == nil, video == nil else { return }
         browser?.cancel()
         browser = nil
+        self.discovered = discovered
         let credential = pass.credential
         let dialer = credential.irohID.map(IrohInfo.isValidID) == true ? IrohShellDialer() : nil
         self.dialer = dialer
@@ -235,6 +345,14 @@ final class RemoteScreenModel: ObservableObject {
         dialer?.shutdown()
         dialer = nil
         buttons = []
+        // The screen is reconnecting or stopped: sync pauses, and what it received stays (it may be on this clipboard).
+        pauseClipSync()
+    }
+
+    /// The window closed: sync ends for good.
+    func close() {
+        stop()
+        stopClipSync()
     }
 
     /// Waiting for Touch ID or the password before connecting to `macName`.
@@ -283,7 +401,9 @@ final class RemoteScreenModel: ObservableObject {
         switch event {
         case let .size(width, height):
             streamSize = CGSize(width: width, height: height)
+            let wasLive = phase == .live
             phase = .live
+            if !wasLive { startClipSync() }
             subtitle = switch path {
             case .relay?: "through a relay"
             case .direct?: "direct"
@@ -328,6 +448,42 @@ final class RemoteScreenModel: ObservableObject {
         let side = Int(min(max(largest, 1280), 4096))
         return .init(width: side, height: side, fit: .mac, fps: visible ? 60 : 15, quality: .sharp)
     }
+
+    /// Full screen, the picture's size in pixels and the screen's scale; nil in a window.
+    private var fullScreen: (pixels: CGSize, scale: CGFloat)?
+
+    /// What to ask the other Mac for now. In full screen a display made in this screen's shape and size
+    /// (it shows it in place of its own while you're there, as the phone's Fit does), so the picture
+    /// fills the screen with no bars, as Windows App's full screen resizes a PC's desktop; in a window,
+    /// the other Mac's own display.
+    private func wantedLayout() -> ScreenVideoClient.Layout {
+        let fps = visible ? 60 : 15
+        guard let fullScreen else { return Self.fullLayout(visible: visible) }
+        func side(_ pixels: CGFloat) -> Int { Int(min(max(pixels.rounded(), 320), 4096)) & ~1 }
+        // The display's size against the stream's: at 2× pixels its points are this screen's points.
+        let space = Int(min(max((200 / max(fullScreen.scale, 1)).rounded(), 50), 200))
+        return .init(width: side(fullScreen.pixels.width), height: side(fullScreen.pixels.height), fit: .device, fps: fps,
+                     quality: .sharp, space: space)
+    }
+
+    func fullScreenChanged(pixels: CGSize?, scale: CGFloat) {
+        let new = pixels.flatMap { $0.width > 0 && $0.height > 0 ? (pixels: $0, scale: scale) : nil }
+        guard new?.pixels != fullScreen?.pixels || new?.scale != fullScreen?.scale else { return }
+        fullScreen = new
+        // A moment's wait, so going in and straight out of full screen (or the size settling as it goes)
+        // asks the other Mac for one display, not one per step: each is a new capture there.
+        relayoutTask?.cancel()
+        relayoutTask = Task { [weak self] in
+            try? await Task.sleep(for: .milliseconds(400))
+            guard !Task.isCancelled, let self else { return }
+            let wanted = self.wantedLayout()
+            guard wanted != self.layout else { return }
+            self.layout = wanted
+            self.video?.relayout(wanted)
+        }
+    }
+
+    private var relayoutTask: Task<Void, Never>?
 
     /// Whether anyone can see the window (not minimized, hidden or covered).
     func setVisible(_ visible: Bool) {
@@ -390,6 +546,162 @@ final class RemoteScreenModel: ObservableObject {
     }
 
     func copyFromMac() { video?.copySelection() }
+
+    // MARK: Clipboard sync
+
+    var acceptsDrops: Bool { clipActive }
+
+    func drop(_ urls: [URL], x: Double, y: Double) {
+        clipViewer?.drop(urls, x: UInt16(min(max(x, 0), 1) * 65535), y: UInt16(min(max(y, 0), 1) * 65535))
+    }
+
+    /// Asks the other Mac for clipboard sync on a connection of its own, once the view is live.
+    private func startClipSync() {
+        guard clipSyncOn, phase == .live, clipClient == nil, clipViewer?.isActive != true, let pass else { return }
+        clipTries += 1
+        let gen = generation
+        // Events from a client this model has since let go of (it disconnects with a late
+        // `.disconnected`) are ignored: they mustn't end or retry the current one.
+        let token = UUID()
+        clipToken = token
+        let credential = pass.credential
+        let dialer = credential.irohID.map(IrohInfo.isValidID) == true ? IrohShellDialer() : nil
+        clipDialer = dialer
+        let client = ShellClient(credential: credential, queue: .main, iroh: dialer, mode: .automatic) { [weak self] event in
+            MainActor.assumeIsolated { self?.handleClip(event, generation: gen, token: token) }
+        }
+        clipClient = client
+        client.connect(discovered: discovered)
+    }
+
+    /// Ends this connection's sync but keeps the window's viewer and what it received.
+    private func pauseClipSync() {
+        dropClipClient()
+        clipViewer?.disconnect()
+        clipActive = false
+        clipSession = nil
+        clipStatusClear?.cancel()
+        clipStatus = nil
+    }
+
+    private func stopClipSync() {
+        clipToken = nil
+        clipClient?.disconnect()
+        clipClient = nil
+        clipViewer?.stop()
+        clipViewer = nil
+        clipActive = false
+        clipDialer?.shutdown()
+        clipDialer = nil
+        clipStatusClear?.cancel()
+        clipStatus = nil
+    }
+
+    /// Lets go of the client asking for sync (its later events are ignored).
+    private func dropClipClient() {
+        clipToken = nil
+        clipClient?.disconnect()
+        clipClient = nil
+        clipDialer?.shutdown()
+        clipDialer = nil
+    }
+
+    private func handleClip(_ event: ShellClient.Event, generation gen: Int, token: UUID) {
+        guard gen == generation, token == clipToken else {
+            if case let .clipSync(stream, _) = event { stream.cancel() }
+            return
+        }
+        switch event {
+        case .ready:
+            clipClient?.requestClipSync()
+        case let .clipSync(stream, initialBytes):
+            clipToken = nil
+            clipClient = nil   // it let go of the stream; the dialer stays up for it
+            // One per window, across reconnects: the copies it received stay where its clipboard points.
+            let viewer = clipViewer ?? ClipSyncViewer(hostName: macName) { [weak self] in self?.showClipStatus($0) }
+            clipViewer = viewer
+            clipActive = true
+            // The cap counts tries in a row that didn't hold: one that lasts a while starts it again,
+            // a host that accepts and closes at once doesn't.
+            let session = UUID()
+            clipSession = session
+            DispatchQueue.main.asyncAfter(deadline: .now() + 10) { [weak self] in
+                guard let self, self.clipSession == session, self.clipActive else { return }
+                self.clipTries = 0
+            }
+            // Only what's copied from now on goes over: opening the window doesn't change the other Mac's clipboard.
+            viewer.start(stream: stream, initialBytes: initialBytes) { [weak self, weak viewer] in
+                guard let self, let viewer, self.clipViewer === viewer else { return }
+                self.clipEnded(generation: gen)
+            }
+        case let .clipSyncRefused(reason):
+            dropClipClient()
+            switch reason {
+            // The view's start hadn't reached it yet: ask again shortly.
+            case .noScreenView: retryClipSync(after: 1.5, generation: gen)
+            case .clipSyncOff: showClipStatus("Clipboard sync is off on \(macName). Send Clipboard and Copy from Mac still work.", timed: 8)
+            case .clipSyncUnavailable: showClipStatus("\(macName) can't sync its clipboard right now.", timed: 8)
+            // Too old to know the request.
+            default: showClipStatus("\(macName) needs a newer Passthrough to sync the clipboard.", timed: 8)
+            }
+        case .failed(_, _), .disconnected:
+            dropClipClient()
+            retryClipSync(after: 3, generation: gen)
+        default:
+            break
+        }
+    }
+
+    private func clipEnded(generation gen: Int) {
+        guard gen == generation else { return }
+        clipSession = nil
+        clipActive = false
+        clipDialer?.shutdown()
+        clipDialer = nil
+        retryClipSync(after: 3, generation: gen)
+    }
+
+    private func retryClipSync(after delay: TimeInterval, generation gen: Int) {
+        guard clipTries < 5 else {
+            return showClipStatus("Clipboard sync with \(macName) stopped. Turn Sync Clipboard off and on to try again.", timed: 8)
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+            guard let self, gen == self.generation else { return }
+            self.startClipSync()
+        }
+    }
+
+    /// A line at the top of the window: the viewer's (it clears its own), or one of the model's that
+    /// goes after `timed` seconds.
+    private func showClipStatus(_ status: ClipStatus?) {
+        clipStatusClear?.cancel()
+        clipStatusClear = nil
+        clipStatus = status
+    }
+
+    private func showClipStatus(_ text: String, timed seconds: TimeInterval) {
+        clipStatusClear?.cancel()
+        clipStatus = ClipStatus(text)
+        let clear = DispatchWorkItem { [weak self] in
+            self?.clipStatus = nil
+            self?.clipStatusClear = nil
+        }
+        clipStatusClear = clear
+        DispatchQueue.main.asyncAfter(deadline: .now() + seconds, execute: clear)
+    }
+
+    func dropRefused(outsidePicture: Bool) {
+        // Only over nothing, or over another of these timed lines: never over the viewer's (a question,
+        // a Stop button, a copy's progress).
+        guard clipStatus == nil || clipStatusClear != nil else { return }
+        if outsidePicture, clipActive {
+            showClipStatus("Drop on the picture to put them there on \(macName).", timed: 3)
+        } else if !clipSyncOn {
+            showClipStatus("Turn on Sync Clipboard to drop files on \(macName).", timed: 3)
+        } else if !clipActive {
+            showClipStatus("Clipboard sync with \(macName) isn't running, so files can't go there.", timed: 3)
+        }
+    }
 }
 
 // MARK: - Canvas
@@ -431,6 +743,15 @@ final class RemoteScreenView: NSView, NSTextInputClient {
     private var marked = NSMutableAttributedString()
     private var markedSelection = NSRange(location: 0, length: 0)
     private var occlusionObserver: NSObjectProtocol?
+    private var fullScreenObservers: [NSObjectProtocol] = []
+
+    /// Tells the model whether the window is full screen, and how large the picture's area is then.
+    private func reportFullScreen() {
+        guard let window else { return }
+        let scale = window.backingScaleFactor
+        let full = window.styleMask.contains(.fullScreen)
+        model.fullScreenChanged(pixels: full ? CGSize(width: bounds.width * scale, height: bounds.height * scale) : nil, scale: scale)
+    }
     private static let invisibleCursor = NSCursor(image: NSImage(size: NSSize(width: 1, height: 1)), hotSpot: .zero)
 
     init(model: any RemoteScreenSource) {
@@ -450,6 +771,35 @@ final class RemoteScreenView: NSView, NSTextInputClient {
         pointer.isHidden = true
         pointer.actions = ["position": NSNull(), "bounds": NSNull(), "contents": NSNull(), "hidden": NSNull()]
         layer?.addSublayer(pointer)
+        registerForDraggedTypes([.fileURL])
+    }
+
+    // MARK: Dropping files
+
+    private func dropOperation(_ info: NSDraggingInfo) -> NSDragOperation {
+        guard isLive, model.acceptsDrops,
+              info.draggingPasteboard.canReadObject(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true]),
+              pictureRect.contains(convert(info.draggingLocation, from: nil)) else { return [] }
+        return .copy
+    }
+
+    override func draggingEntered(_ info: NSDraggingInfo) -> NSDragOperation {
+        let operation = dropOperation(info)
+        // Not taken: say why rather than only showing the no-entry pointer.
+        if operation.isEmpty, isLive, info.draggingPasteboard.canReadObject(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true]) {
+            model.dropRefused(outsidePicture: !pictureRect.contains(convert(info.draggingLocation, from: nil)))
+        }
+        return operation
+    }
+    override func draggingUpdated(_ info: NSDraggingInfo) -> NSDragOperation { dropOperation(info) }
+
+    override func performDragOperation(_ info: NSDraggingInfo) -> Bool {
+        guard !dropOperation(info).isEmpty,
+              let urls = info.draggingPasteboard.readObjects(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true]) as? [URL],
+              !urls.isEmpty else { return false }
+        let point = streamPoint(convert(info.draggingLocation, from: nil))
+        model.drop(urls, x: point.x, y: point.y)
+        return true
     }
 
     @available(*, unavailable)
@@ -457,6 +807,7 @@ final class RemoteScreenView: NSView, NSTextInputClient {
 
     deinit {
         if let occlusionObserver { NotificationCenter.default.removeObserver(occlusionObserver) }
+        for observer in fullScreenObservers { NotificationCenter.default.removeObserver(observer) }
     }
 
     private var isLive: Bool { model.isLive }
@@ -490,7 +841,14 @@ final class RemoteScreenView: NSView, NSTextInputClient {
         super.viewDidMoveToWindow()
         if let occlusionObserver { NotificationCenter.default.removeObserver(occlusionObserver) }
         occlusionObserver = nil
+        for observer in fullScreenObservers { NotificationCenter.default.removeObserver(observer) }
+        fullScreenObservers = []
         guard let window else { return }
+        for name in [NSWindow.didEnterFullScreenNotification, NSWindow.didExitFullScreenNotification] {
+            fullScreenObservers.append(NotificationCenter.default.addObserver(forName: name, object: window, queue: .main) { [weak self] _ in
+                MainActor.assumeIsolated { self?.reportFullScreen() }
+            })
+        }
         model.setVisible(window.occlusionState.contains(.visible))
         occlusionObserver = NotificationCenter.default.addObserver(forName: NSWindow.didChangeOcclusionStateNotification, object: window,
                                                                    queue: .main) { [weak self] _ in
@@ -523,6 +881,8 @@ final class RemoteScreenView: NSView, NSTextInputClient {
         surfaceLayer.frame = pictureRect
         CATransaction.commit()
         updateCursor()
+        // Full screen on another display, or the toolbar's room changed: the display asked for follows.
+        if window?.styleMask.contains(.fullScreen) == true { reportFullScreen() }
     }
 
     func enqueue(_ sample: CMSampleBuffer) -> Bool {

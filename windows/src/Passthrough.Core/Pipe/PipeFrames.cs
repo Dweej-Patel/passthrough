@@ -19,7 +19,7 @@ public static class PipeKind
 
     // Service → tray app.
     public const byte Open = 0x40, Attach = 0x41, Detach = 0x42, Input = 0x43, Resize = 0x44, Close = 0x45, SetViewing = 0x46, History = 0x47,
-        Transcript = 0x48, Lock = 0x49, SavePass = 0x4A, ConnClosed = 0x4B, PhoneGone = 0x4C, AdminReply = 0x50, AdminEvent = 0x51, ServicePing = 0x4E, ServicePong = 0x4F;
+        Transcript = 0x48, Lock = 0x49, SavePass = 0x4A, ConnClosed = 0x4B, PhoneGone = 0x4C, ClipOpen = 0x4D, AdminReply = 0x50, AdminEvent = 0x51, ServicePing = 0x4E, ServicePong = 0x4F;
 
     /// <summary>Kinds whose payload is binary (<c>conn</c> u32, <c>session</c> as a length byte and UTF-8, then bytes); every other payload is UTF-8 JSON.</summary>
     public static bool IsBinary(byte kind) => kind is Output or Input;
@@ -125,6 +125,11 @@ public sealed record PipeHello
     public int MinProto { get; init; } = PipeProtocol.MinimumVersion;
     public string Build { get; init; } = "";
     public int Pid { get; init; }
+    /// <summary>
+    /// Set on a second connection the tray app opens for one clipboard sync (the token the service gave in
+    /// <see cref="PipeKind.ClipOpen"/>): after <c>Welcome</c> that pipe carries clipboard sync's bytes, not frames.
+    /// </summary>
+    public string? Clip { get; init; }
 }
 
 /// <summary>The service's answer when it takes the tray app.</summary>

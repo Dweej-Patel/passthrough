@@ -37,6 +37,8 @@ public sealed record PipeMessage
     public List<string>? Scopes { get; init; }
     public List<string>? Pending { get; init; }
     public string? HostKind { get; init; }
+    /// <summary>ClipOpen: what the tray app says in the hello of the pipe it opens for this clipboard sync.</summary>
+    public string? Token { get; init; }
 }
 
 /// <summary>What the tray app says about its account's side of the PC (<see cref="PipeKind.HostState"/>): the service builds <c>host</c> and <c>macState</c> from it.</summary>

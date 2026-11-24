@@ -224,6 +224,10 @@ public enum HostCopy {
         // Sharing access with another computer (stage 7).
         case .tooManyComputers: "\(w.That) already lets in as many other computers as it allows. Remove one in its settings first."
         case .passConflict: "\(w.That) already has access to one with this name but different details. Remove it there, then try again."
+        // Clipboard sync: shown by the viewer window, not a phone.
+        case .noScreenView: "\(w.Your) isn't showing its screen to this computer right now."
+        case .clipSyncOff: "\(w.Your) has clipboard sync turned off."
+        case .clipSyncUnavailable: "\(w.Your) can't sync its clipboard right now."
         case .notAuthorized: nil
         }
     }

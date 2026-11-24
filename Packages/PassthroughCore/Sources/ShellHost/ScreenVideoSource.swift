@@ -13,3 +13,11 @@ public protocol ScreenVideoSource: AnyObject, Sendable {
     /// Stops capturing and sending. Idempotent; `ended` is not called after.
     func stop()
 }
+
+/// One computer's clipboard sync with this Mac (protocol/README.md,
+/// "Clipboard sync"), made by the app for a `clipSync` request: the same
+/// contract as `ScreenVideoSource`.
+public protocol ClipSyncSource: AnyObject, Sendable {
+    func start(stream: any ByteStream, initialBytes: Data, ended: @escaping @Sendable () -> Void)
+    func stop()
+}

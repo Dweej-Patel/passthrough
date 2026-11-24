@@ -274,6 +274,22 @@ public sealed partial class SettingsWindow : Window
         ComputersWithAccess.Clear();
         foreach (var computer in _remote.Computers) ComputersWithAccess.Add(new ComputerAccessRow(computer));
         NoComputersText.Visibility = ComputersWithAccess.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
+        _settingClipSync = true;
+        ClipSyncSwitch.IsOn = _remote.ClipSyncOn;
+        _settingClipSync = false;
+    }
+
+    private bool _settingClipSync;
+
+    private void OnClipSyncToggled(object sender, RoutedEventArgs e)
+    {
+        if (_settingClipSync || _remote is null) return;
+        try { _remote.ClipSyncOn = ClipSyncSwitch.IsOn; }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or InvalidOperationException)
+        {
+            LogFile.Error(ex);
+            ShowError("Could not change clipboard sync. See the log for details.");
+        }
     }
 
     private bool _settingAwake;

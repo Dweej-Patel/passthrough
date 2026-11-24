@@ -106,7 +106,9 @@ push_key_of() { (cd "$1/Contents/Resources" 2>/dev/null && ls AuthKey_*.p8 2>/de
 # Passthrough, but runs from …/Passthrough.app/Passthrough, not Contents/MacOS.
 app_pids() {
   local p
-  for p in $(pgrep -x Passthrough 2>/dev/null || true); do
+  # -a: pgrep leaves out its own ancestors otherwise, so run from a shell the app hosts (a phone's
+  # session, a terminal it shows) it wouldn't see the app at all, and would swap it while it runs.
+  for p in $(pgrep -a -x Passthrough 2>/dev/null || true); do
     case "$(ps -o comm= -p "$p" 2>/dev/null)" in */Contents/MacOS/Passthrough) echo "$p" ;; esac
   done
 }

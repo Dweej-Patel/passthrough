@@ -229,6 +229,22 @@
                         </DataTemplate>
                     </ItemsControl.ItemTemplate>
                 </ItemsControl>
+                <Border Style="{StaticResource PtCardStyle}" Padding="16,12">
+                    <Grid ColumnSpacing="12">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="Auto" />
+                        </Grid.ColumnDefinitions>
+                        <StackPanel VerticalAlignment="Center">
+                            <TextBlock Text="Share the clipboard with computers viewing this screen" TextWrapping="Wrap" />
+                            <TextBlock Text="While one has this screen open, copies on either can be pasted on the other (text, pictures, files up to 500 MB). Files dragged onto its window are dropped here, so the pointer moves by itself for a moment. What an app marks as secret, as most password managers do, stays here. Phones keep their Copy and Paste buttons."
+                                       Style="{StaticResource CaptionTextBlockStyle}" TextWrapping="Wrap"
+                                       Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                        </StackPanel>
+                        <ToggleSwitch x:Name="ClipSyncSwitch" Grid.Column="1" MinWidth="0" OnContent="" OffContent=""
+                                      AutomationProperties.Name="Share the clipboard with computers viewing this screen" Toggled="OnClipSyncToggled" />
+                    </Grid>
+                </Border>
                 <TextBlock Text="Computers this PC can reach are in the tray: Remote ▸ Your computers."
                            Style="{StaticResource CaptionTextBlockStyle}" TextWrapping="Wrap" Margin="0,12,0,0"
                            Foreground="{ThemeResource TextFillColorSecondaryBrush}" />

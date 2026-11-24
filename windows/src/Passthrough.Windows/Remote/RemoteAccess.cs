@@ -72,6 +72,12 @@ public sealed class RemoteAccess : IAccessAdmin, IDisposable
         _password = new Passthrough.Windows.Trust.PasswordSigner(secrets, "Type your Windows password to confirm it's you. Passthrough asks before it uses your other computers from this PC.", log);
         Reach = new Passthrough.Core.Trust.ComputerReachStore(secrets, new Passthrough.Windows.Trust.HelloSigner(), _password);
         _server.SavePass = KeepPassAsync;
+        // Clipboard sync with the computers viewing this account's screen: the service hands each one's connection here.
+        ClipSync.ClipStaging.ClearAtLaunch();
+        _clipHost = new ClipSync.ClipSyncHost(() => ClipSyncOn, OpenClipPipeAsync, log);
+        _clipHost.Changed += () => StatusChanged?.Invoke();
+        _clipHost.Notice += (title, text) => ClipNotice?.Invoke(title, text);
+        _server.ClipOpen = _clipHost.OpenAsync;
         _server.LinkChanged += linked =>
         {
             if (linked) _ = Task.Run(AfterLinkAsync);
@@ -81,6 +87,50 @@ public sealed class RemoteAccess : IAccessAdmin, IDisposable
         _pruner = new Timer(_ => PruneHistory(), null, TimeSpan.FromSeconds(30), TimeSpan.FromHours(1));
         // The PC's own monitor, for host.display: phones are told again when it changes.
         _displayCheck = new Timer(_ => CheckDisplay(), null, TimeSpan.FromSeconds(5), TimeSpan.FromSeconds(30));
+    }
+
+    private readonly ClipSync.ClipSyncHost _clipHost;
+    internal const string ClipSyncSetting = "clipSync";
+
+    /// <summary>
+    /// Sync this account's clipboard with the computers viewing its screen (on unless turned off). Off: their
+    /// <c>clipSync</c> is answered <c>clip_sync_off</c>, and any sync running ends.
+    /// </summary>
+    public bool ClipSyncOn
+    {
+        get => _settings.Get(ClipSyncSetting) != "false";
+        set
+        {
+            _settings.Set(ClipSyncSetting, value ? "true" : "false");
+            _log?.Invoke($"clipsync: syncing with computers viewing this screen turned {(value ? "on" : "off")}");
+            if (!value) _clipHost.EndAll();
+        }
+    }
+
+    /// <summary>Whether a computer with access is syncing its clipboard with this account's now (the flyout says so beside its view).</summary>
+    public bool IsSyncingClipboard(string id) => _clipHost.IsSyncing(id);
+
+    /// <summary>Fires, on any thread, with a title and a sentence when a viewer drops files on this PC.</summary>
+    public event Action<string, string>? ClipNotice;
+
+    private static string BuildName() =>
+        typeof(RemoteAccess).Assembly.GetCustomAttributes(typeof(System.Reflection.AssemblyInformationalVersionAttribute), false)
+            .OfType<System.Reflection.AssemblyInformationalVersionAttribute>().FirstOrDefault()?.InformationalVersion ?? "dev";
+
+    /// <summary>A second pipe to the service for one clipboard sync: checked to be the service's, as the link is, then it says the token.</summary>
+    private static async Task<Stream> OpenClipPipeAsync(string token, CancellationToken cancel)
+    {
+        var pipe = ServicePipe.Connect();
+        try
+        {
+            await PipeHandshakes.ClientAsync(pipe, new PipeHello { Build = BuildName(), Pid = Environment.ProcessId, Clip = token }, cancel).ConfigureAwait(false);
+            return pipe;
+        }
+        catch
+        {
+            pipe.Dispose();
+            throw;
+        }
     }
 
     private readonly ConsoleDisplay _display = ConsoleDisplay.ForThisAccount();
@@ -226,9 +276,7 @@ public sealed class RemoteAccess : IAccessAdmin, IDisposable
         }
         if (_link is null)
         {
-            var build = typeof(RemoteAccess).Assembly.GetCustomAttributes(typeof(System.Reflection.AssemblyInformationalVersionAttribute), false)
-                .OfType<System.Reflection.AssemblyInformationalVersionAttribute>().FirstOrDefault()?.InformationalVersion ?? "dev";
-            _link = new ServiceLink(_server, build, _log);
+            _link = new ServiceLink(_server, BuildName(), _log);
             _link.Changed += () => StatusChanged?.Invoke();
             _link.Start();
         }
@@ -570,6 +618,7 @@ public sealed class RemoteAccess : IAccessAdmin, IDisposable
     {
         _pruner.Dispose();
         _displayCheck.Dispose();
+        _clipHost.Dispose();
         _link?.Dispose();
         Sessions.CloseAll();
     }

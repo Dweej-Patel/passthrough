@@ -63,6 +63,12 @@ public sealed class ShellEnvelope
     /// <summary>The screen through the host's Remote Desktop: answered <c>rdpReady</c> (<c>certSHA256</c>), then raw bytes.</summary>
     public const string Rdp = "rdp";
     public const string RdpReady = "rdpReady";
+    /// <summary>
+    /// Clipboard sync between computers (<see cref="ClipSync.ClipSyncWire"/>), on a connection of its own while the
+    /// asker views the screen: answered <c>clipSyncReady</c>, then binary messages both ways.
+    /// </summary>
+    public const string ClipSync = "clipSync";
+    public const string ClipSyncReady = "clipSyncReady";
     /// <summary>A view of the screen on this device's other connection ended (<c>reason</c>: <c>switched_off</c>, <c>stopped</c>, <c>taken</c>).</summary>
     public const string ScreenEnded = "screenEnded";
     /// <summary>

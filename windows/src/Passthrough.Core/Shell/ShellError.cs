@@ -33,4 +33,10 @@ public enum ShellError
     TooManyComputers,
     /// <summary>A hand-over would replace access to a host with different details (its certificate or iroh id).</summary>
     PassConflict,
+    /// <summary><c>clipSync</c> from a device that isn't viewing the screen right now.</summary>
+    NoScreenView,
+    /// <summary>The host's owner turned clipboard sync off.</summary>
+    ClipSyncOff,
+    /// <summary>The host can't sync its clipboard now (no tray app for that account, or its session isn't the one being viewed).</summary>
+    ClipSyncUnavailable,
 }
