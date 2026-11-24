@@ -28,7 +28,10 @@ namespace Passthrough.App.Screen;
 /// client, signed with this PC's identity), <c>screenVideo</c>, and the stream decoded by <see cref="ScreenPipeline"/>.
 /// The picture keeps its shape in any window size; the pointer is drawn over it, not in it. Pointer, wheel (Ctrl+wheel
 /// pinches), keys (the table in <see cref="ScreenKeys"/>, through XAML key events: the Windows key stays on this PC),
-/// committed text through a hidden text box (so dead keys and input methods compose here), full screen. While the
+/// committed text through a hidden text box (so dead keys and input methods compose here). Full screen fills the
+/// monitor with the picture and nothing else: the Mac is asked for a display in the screen's own shape, and a small
+/// bar (pin, the Mac's name, minimise, restore, close) comes down from the top edge only when the pointer touches it
+/// or there is something to say. While the
 /// picture is live the two clipboards sync on a connection of their own (<see cref="ClipSyncViewer"/>: Ctrl+C here,
 /// ⌘V there and back, files included) and files dropped on the picture land at that point on the Mac; with Sync
 /// clipboard off, or a Mac that can't, Send clipboard and Copy from Mac take its place. A lost connection dims the last
@@ -103,6 +106,22 @@ internal sealed class ScreenWindow : Window, IScreenView
 
     private string FitKey => "screen.fit." + _computer.HostId;
     private int _toastId;
+
+    // Full screen: the picture alone, with a bar at the top centre that comes when called.
+    private static readonly TimeSpan BarStays = TimeSpan.FromSeconds(2.5);
+    private bool _fullScreen;
+    private bool _barPinned;
+    private bool _overBar;
+    private Grid? _toolbar;
+    private StackPanel? _toolbarStatus;
+    private readonly Border _connectionBar = new()
+    {
+        Visibility = Visibility.Collapsed, HorizontalAlignment = HorizontalAlignment.Center, VerticalAlignment = VerticalAlignment.Top,
+        Padding = new Thickness(8, 4, 8, 4), CornerRadius = new CornerRadius(0, 0, 8, 8),
+        Background = new SolidColorBrush(global::Windows.UI.Color.FromArgb(0xF2, 0x2B, 0x2B, 0x2B)),
+    };
+    private readonly StackPanel _connectionStatus = new() { Orientation = Orientation.Horizontal, Spacing = 8, VerticalAlignment = VerticalAlignment.Center };
+    private DispatcherQueueTimerWrapper? _barHide;
 
     /// <summary>
     /// Ctrl acts as ⌘ (and Alt as ⌃), so Ctrl+C and Ctrl+V copy and paste on the Mac as they do here: on unless turned
@@ -214,10 +233,12 @@ internal sealed class ScreenWindow : Window, IScreenView
         };
 
         var bar = new Grid { Padding = new Thickness(12, 6, 12, 6), ColumnSpacing = 8 };
+        _toolbar = bar;
         bar.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
         bar.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
         bar.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
         var left = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 12 };
+        _toolbarStatus = left;
         left.Children.Add(_subtitle);
         left.Children.Add(_toast);
         left.Children.Add(_clipActions);
@@ -253,10 +274,9 @@ internal sealed class ScreenWindow : Window, IScreenView
         _stage.SizeChanged += (_, _) =>
         {
             PlacePointer();
-            if (!_fit || _client is null) return;
+            if (!FitsWindow || _client is null) return;
             // Dragging the edge sends one ask, when it stops: each is a new display on the Mac.
-            _refit ??= new DispatcherQueueTimerWrapper(_ui, RefitAfter, () => { if (_fit && !_minimized) _client?.Relayout(Layout()); });
-            _refit.Restart();
+            Refit();
         };
         _typing.PreviewKeyDown += OnKeyDown;
         _typing.PreviewKeyUp += OnKeyUp;
@@ -271,8 +291,76 @@ internal sealed class ScreenWindow : Window, IScreenView
         root.Children.Add(bar);
         Grid.SetRow(_stage, 1);
         root.Children.Add(_stage);
+        Grid.SetRowSpan(_connectionBar, 2);
+        _connectionBar.Child = BuildConnectionBar();
+        _connectionBar.PointerEntered += (_, _) => { _overBar = true; RevealBar(); };
+        _connectionBar.PointerExited += (_, _) => { _overBar = false; RevealBar(); };
+        root.Children.Add(_connectionBar);
         return root;
     }
+
+    /// <summary>The picture takes the window's shape: asked for with Fit to window, and always in full screen.</summary>
+    private bool FitsWindow => _fit || _fullScreen;
+
+    /// <summary>Asks the Mac for a display in the stage's shape once it has stopped changing.</summary>
+    private void Refit()
+    {
+        _refit ??= new DispatcherQueueTimerWrapper(_ui, RefitAfter, () => { if (FitsWindow && !_minimized) _client?.Relayout(Layout()); });
+        _refit.Restart();
+    }
+
+    // MARK: Full screen
+
+    /// <summary>Full screen's bar, as Remote Desktop's: pin, the computer's name, what clipboard sync has to say, minimise, restore, close.</summary>
+    private UIElement BuildConnectionBar()
+    {
+        Button Icon(string glyph, string name, Action click)
+        {
+            var b = new Button { Content = new FontIcon { Glyph = glyph, FontSize = 12 }, Padding = new Thickness(8, 4, 8, 4), Background = new SolidColorBrush(Colors.Transparent), BorderThickness = new Thickness(0) };
+            ToolTipService.SetToolTip(b, name);
+            AutomationName(b, name);
+            b.Click += (_, _) => click();
+            return b;
+        }
+        var pin = new Microsoft.UI.Xaml.Controls.Primitives.ToggleButton
+        {
+            Content = new FontIcon { Glyph = "\uE718", FontSize = 12 }, Padding = new Thickness(8, 4, 8, 4), BorderThickness = new Thickness(0),
+        };
+        ToolTipService.SetToolTip(pin, "Keep this bar on screen");
+        AutomationName(pin, "Keep this bar on screen");
+        pin.Click += (_, _) => { _barPinned = pin.IsChecked == true; RevealBar(); _typing.Focus(FocusState.Programmatic); };
+        var panel = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 4 };
+        panel.Children.Add(pin);
+        panel.Children.Add(new TextBlock { Text = _name, VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(6, 0, 10, 0), MaxWidth = 280, TextTrimming = TextTrimming.CharacterEllipsis });
+        panel.Children.Add(_connectionStatus);
+        panel.Children.Add(Icon("\uE921", "Minimize", () => ShowWindow(Win32Interop.GetWindowFromWindowId(AppWindow.Id), 6 /* SW_MINIMIZE */)));
+        panel.Children.Add(Icon("\uE923", "Leave full screen (Ctrl+Alt+Break)", ToggleFullScreen));
+        panel.Children.Add(Icon("\uE8BB", "Close", Close));
+        return panel;
+    }
+
+    /// <summary>Shows full screen's bar; it goes again in a moment unless pinned, under the pointer, or saying something.</summary>
+    private void RevealBar()
+    {
+        if (!_fullScreen) return;
+        _connectionBar.Visibility = Visibility.Visible;
+        _barHide ??= new DispatcherQueueTimerWrapper(_ui, BarStays, () =>
+        {
+            if (!_fullScreen) return;
+            if (_barPinned || _overBar || _toast.Text.Length > 0 || _clipActions.Children.Count > 0) { _barHide!.Restart(); return; }
+            _connectionBar.Visibility = Visibility.Collapsed;
+        });
+        _barHide.Restart();
+    }
+
+    /// <summary>The line beside the subtitle (in full screen, in its bar, which comes down to say it).</summary>
+    private void SetToast(string text)
+    {
+        _toast.Text = text;
+        if (text.Length > 0) RevealBar();
+    }
+
+    [DllImport("user32.dll")] private static extern bool ShowWindow(IntPtr window, int command);
 
     private static Button ToolButton(string text, string tip)
     {
@@ -359,7 +447,7 @@ internal sealed class ScreenWindow : Window, IScreenView
 
     private ScreenVideoClient.Layout Layout()
     {
-        if (_fit)
+        if (FitsWindow)
         {
             // Minimised or not laid out yet, the stage has no size: the last shape is kept, so only the rate changes.
             if (!_minimized && _stage.ActualWidth >= 1 && _stage.ActualHeight >= 1)
@@ -602,14 +690,14 @@ internal sealed class ScreenWindow : Window, IScreenView
         _clipActions.Children.Clear();
         if (status is null)
         {
-            if (_clipHeld) { _toastId++; _toast.Text = ""; }
+            if (_clipHeld) { _toastId++; SetToast(""); }
             _clipHeld = false;
             return;
         }
         _clipHeld = status.Hold;
         if (!status.Hold) { Toast(status.Text); return; }
         _toastId++;
-        _toast.Text = status.Text;
+        SetToast(status.Text);
         foreach (var action in status.Actions)
         {
             var button = new Button { Content = action.Label, Padding = new Thickness(10, 2, 10, 2) };
@@ -619,7 +707,7 @@ internal sealed class ScreenWindow : Window, IScreenView
                 // Answered: the question goes at once; what happens next says itself.
                 _clipActions.Children.Clear();
                 _toastId++;
-                _toast.Text = "";
+                SetToast("");
                 _clipHeld = false;
                 action.Run();
                 _typing.Focus(FocusState.Programmatic);
@@ -692,9 +780,9 @@ internal sealed class ScreenWindow : Window, IScreenView
         _clipActions.Children.Clear();
         _clipHeld = false;
         var id = ++_toastId;
-        _toast.Text = text;
+        SetToast(text);
         await Task.Delay(TimeSpan.FromSeconds(4));
-        if (id == _toastId) _toast.Text = "";
+        if (id == _toastId) SetToast("");
     }
 
     // MARK: IScreenView
@@ -856,6 +944,8 @@ internal sealed class ScreenWindow : Window, IScreenView
         var rect = PictureRect();
         var at = ScreenFrame.StreamPoint(point.Position.X, point.Position.Y, rect);
         _localPointer = at.Inside ? (point.Position.X, point.Position.Y) : null;
+        // Full screen's bar comes down when the pointer touches the top edge.
+        if (_fullScreen && point.Position.Y <= 2) RevealBar();
         PlacePointer();
         if (_client is null) return;
         var buttons = _buttons == 0 ? (byte)0 : e.Pointer.PointerDeviceType == PointerDeviceType.Mouse ? Buttons(point.Properties) : (byte)1;
@@ -996,9 +1086,34 @@ internal sealed class ScreenWindow : Window, IScreenView
         _typing.Focus(FocusState.Programmatic);
     }
 
+    /// <summary>
+    /// Full screen and back. In full screen the toolbar goes, the picture has the whole monitor, and the Mac is asked
+    /// for a display in the monitor's shape whatever Fit to window says; leaving it, Fit to window's own choice holds again.
+    /// </summary>
     private void ToggleFullScreen()
     {
-        AppWindow.SetPresenter(AppWindow.Presenter.Kind == AppWindowPresenterKind.FullScreen ? AppWindowPresenterKind.Overlapped : AppWindowPresenterKind.FullScreen);
+        var entering = AppWindow.Presenter.Kind != AppWindowPresenterKind.FullScreen;
+        AppWindow.SetPresenter(entering ? AppWindowPresenterKind.FullScreen : AppWindowPresenterKind.Overlapped);
+        _fullScreen = entering;
+        if (_toolbar is not null) _toolbar.Visibility = entering ? Visibility.Collapsed : Visibility.Visible;
+        // What clipboard sync says, and its buttons, are shown wherever there is a bar to show them in.
+        var (from, to) = entering ? (_toolbarStatus, _connectionStatus) : (_connectionStatus, _toolbarStatus);
+        foreach (var element in new UIElement[] { _toast, _clipActions })
+        {
+            from?.Children.Remove(element);
+            if (to is not null && !to.Children.Contains(element)) to.Children.Add(element);
+        }
+        if (entering)
+        {
+            // Shown for a moment, so it's known to be there; the stage's new size asks the Mac for a display to match.
+            RevealBar();
+            Refit();
+        }
+        else
+        {
+            _connectionBar.Visibility = Visibility.Collapsed;
+            if (_fit) Refit(); else _client?.Relayout(Layout());
+        }
         _typing.Focus(FocusState.Programmatic);
     }
 
