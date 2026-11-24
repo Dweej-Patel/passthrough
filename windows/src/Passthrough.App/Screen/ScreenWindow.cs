@@ -104,6 +104,14 @@ internal sealed class ScreenWindow : Window, IScreenView
     private string FitKey => "screen.fit." + _computer.HostId;
     private int _toastId;
 
+    /// <summary>
+    /// Ctrl acts as ⌘ (and Alt as ⌃), so Ctrl+C and Ctrl+V copy and paste on the Mac as they do here: on unless turned
+    /// off, for this window and ones opened later. Off: by position, Alt is ⌘ and Ctrl is ⌃.
+    /// </summary>
+    internal const string CtrlIsCommandKey = "screen.ctrlIsCommand";
+    private bool _ctrlIsCommand;
+    private readonly Microsoft.UI.Xaml.Controls.Primitives.ToggleButton _ctrlButton = new() { Content = "Ctrl acts as ⌘" };
+
     // Clipboard sync (a connection of its own beside the screen's, while the picture is live)
     internal const string ClipSyncKey = "screen.clipSync";
     private static readonly TimeSpan ClipRetryNoView = TimeSpan.FromSeconds(1.5), ClipRetry = TimeSpan.FromSeconds(3), ClipSettled = TimeSpan.FromSeconds(10);
@@ -127,6 +135,7 @@ internal sealed class ScreenWindow : Window, IScreenView
         _settings = settings;
         _fit = settings?.Get(FitKey) == "true";
         _clipOn = settings?.Get(ClipSyncKey) != "false";
+        _ctrlIsCommand = settings?.Get(CtrlIsCommandKey) != "false";
         _identity = identity;
         _confirm = confirm;
         _name = ScreenFrame.Clean(computer.Credential.MacName);
@@ -170,6 +179,16 @@ internal sealed class ScreenWindow : Window, IScreenView
         _retry.Click += async (_, _) => await StartAsync();
         AutomationName(_retry, "Try again");
         (_sendButton, _copyButton) = (send, copy);
+        _ctrlButton.IsChecked = _ctrlIsCommand;
+        ToolTipService.SetToolTip(_ctrlButton, "On: Ctrl is the Mac's ⌘, so Ctrl+C, Ctrl+V and Ctrl+Z work there as they do here, and Alt is ⌃. Off: Alt is ⌘ and Ctrl is ⌃, as the keys sit on a Mac keyboard. The Windows key is ⌥ either way.");
+        AutomationName(_ctrlButton, "Ctrl acts as Command");
+        _ctrlButton.Click += (_, _) =>
+        {
+            _ctrlIsCommand = _ctrlButton.IsChecked == true;
+            try { _settings?.Set(CtrlIsCommandKey, _ctrlIsCommand ? "true" : "false"); }
+            catch (Exception e) when (e is IOException or UnauthorizedAccessException or InvalidOperationException) { LogFile.Error(e); } // not remembered, still done
+            _typing.Focus(FocusState.Programmatic);
+        };
         _clipButton.IsChecked = _clipOn;
         ToolTipService.SetToolTip(_clipButton, "What you copy here is on the Mac's clipboard and what's copied there is on this PC's: text, pictures and files. Drop files on the picture to put them where you let go. It applies to this window and to ones opened later.");
         AutomationName(_clipButton, "Sync clipboard");
@@ -205,6 +224,7 @@ internal sealed class ScreenWindow : Window, IScreenView
         Microsoft.UI.Xaml.Automation.AutomationProperties.SetLiveSetting(_toast, Microsoft.UI.Xaml.Automation.Peers.AutomationLiveSetting.Polite);
         bar.Children.Add(left);
         var buttons = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 6 };
+        buttons.Children.Add(_ctrlButton);
         buttons.Children.Add(_clipButton);
         buttons.Children.Add(send);
         buttons.Children.Add(copy);
@@ -932,7 +952,7 @@ internal sealed class ScreenWindow : Window, IScreenView
             e.Handled = true;
             return;
         }
-        var action = ScreenKeys.Down(vk, held, Keyboard.Unshifted(vk), ctrlIsCommand: false, altGr: Keyboard.AltGr(), composing: _composing);
+        var action = ScreenKeys.Down(vk, held, Keyboard.Unshifted(vk), ctrlIsCommand: _ctrlIsCommand, altGr: Keyboard.AltGr(), composing: _composing);
         switch (action)
         {
             case ScreenKeyAction.Key k: _client.Key(k.Keysym, k.Modifiers); e.Handled = true; break;
