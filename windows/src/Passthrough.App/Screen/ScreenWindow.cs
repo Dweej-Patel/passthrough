@@ -174,6 +174,7 @@ internal sealed class ScreenWindow : Window, IScreenView
         {
             _active = e.WindowActivationState != WindowActivationState.Deactivated;
             if (!_active) ReleaseButtons();
+            PlaceTaskbar();
             PlacePointer(); // this PC's own pointer comes back when the window isn't the one in front
             ShowSubtitle();
         };
@@ -189,7 +190,11 @@ internal sealed class ScreenWindow : Window, IScreenView
         {
             Stop(Phase.Closed);
             ShowOwnCursor(true);
-            if (_fullScreen) TaskbarKeeper.FullScreenEnded();
+            if (_fullScreen)
+            {
+                TaskbarKeeper.FullScreenEnded();
+                TaskbarKeeper.BringBack();
+            }
         };
     }
 
@@ -1147,6 +1152,19 @@ internal sealed class ScreenWindow : Window, IScreenView
         _typing.Focus(FocusState.Programmatic);
     }
 
+    private DispatcherQueueTimerWrapper? _taskbarBehind;
+
+    /// <summary>
+    /// In full screen and in front, the taskbar on this window's monitor goes behind it; in full screen but with another
+    /// window in front, the taskbar is where it always is, so that window has it.
+    /// </summary>
+    private void PlaceTaskbar()
+    {
+        if (!_fullScreen || _phase == Phase.Closed) return;
+        if (_active) TaskbarKeeper.SendBehind(Win32Interop.GetWindowFromWindowId(AppWindow.Id));
+        else TaskbarKeeper.BringBack();
+    }
+
     /// <summary>
     /// Full screen and back. In full screen the toolbar goes, the picture has the whole monitor, and the Mac is asked
     /// for a display in the monitor's shape whatever Fit to window says; leaving it, Fit to window's own choice holds again.
@@ -1158,6 +1176,18 @@ internal sealed class ScreenWindow : Window, IScreenView
         _fullScreen = entering;
         // Windows takes its taskbar off the top for a full-screen window; the keeper mustn't put it back over the picture.
         if (entering) TaskbarKeeper.FullScreenBegan(); else TaskbarKeeper.FullScreenEnded();
+        // And Windows is told outright: left to notice by itself, it does so only when the window next comes forward,
+        // and the taskbar stays over the picture until then. Once the window has its new size, so it is taken at its word.
+        var window = Win32Interop.GetWindowFromWindowId(AppWindow.Id);
+        _ui.TryEnqueue(Microsoft.UI.Dispatching.DispatcherQueuePriority.Low, () => TaskbarKeeper.MarkFullScreen(window, _fullScreen));
+        // Telling it isn't enough on every Windows: the taskbar still sat over the picture until the window next came
+        // forward. So it is put behind this window here, once the window has its full-screen size.
+        if (entering)
+        {
+            _taskbarBehind ??= new DispatcherQueueTimerWrapper(_ui, TimeSpan.FromMilliseconds(200), PlaceTaskbar);
+            _taskbarBehind.Restart();
+        }
+        else TaskbarKeeper.BringBack();
         if (_toolbar is not null) _toolbar.Visibility = entering ? Visibility.Collapsed : Visibility.Visible;
         // What clipboard sync says, and its buttons, are shown wherever there is a bar to show them in.
         var (from, to) = entering ? (_toolbarStatus, _connectionStatus) : (_connectionStatus, _toolbarStatus);

@@ -22,6 +22,77 @@ internal sealed class TaskbarKeeper : IDisposable
     public static void FullScreenBegan() => Interlocked.Increment(ref _fullScreen);
     public static void FullScreenEnded() => Interlocked.Decrement(ref _fullScreen);
 
+    /// <summary>
+    /// Tells Windows' shell that a window is (or is no longer) full screen, so the taskbar goes behind it at once
+    /// (<c>ITaskbarList2::MarkFullscreenWindow</c>). Call on the window's own thread.
+    /// </summary>
+    public static void MarkFullScreen(IntPtr window, bool fullScreen)
+    {
+        try
+        {
+            var list = (ITaskbarList2)new TaskbarList();
+            try
+            {
+                if (list.HrInit() == 0) list.MarkFullscreenWindow(window, fullScreen);
+            }
+            finally { Marshal.ReleaseComObject(list); }
+        }
+        catch (Exception e) when (e is COMException or InvalidCastException or UnauthorizedAccessException) { }
+    }
+
+    /// <summary>
+    /// Puts the taskbar that is on <paramref name="window"/>'s monitor directly behind that window, as Windows itself
+    /// does for a full-screen window once it has noticed one. No window moves or changes size.
+    /// </summary>
+    public static void SendBehind(IntPtr window)
+    {
+        try
+        {
+            var monitor = MonitorFromWindow(window, MonitorDefaultToNearest);
+            foreach (var taskbar in Taskbars().Where(t => MonitorFromWindow(t, MonitorDefaultToNearest) == monitor))
+                SetWindowPos(taskbar, window, 0, 0, 0, 0, SwpNoMove | SwpNoSize | SwpNoActivate | SwpNoOwnerZOrder);
+        }
+        catch (Exception e) when (e is DllNotFoundException or EntryPointNotFoundException) { }
+    }
+
+    /// <summary>Puts every taskbar back above other windows, where it always is.</summary>
+    public static void BringBack()
+    {
+        try
+        {
+            foreach (var taskbar in Taskbars()) SetWindowPos(taskbar, HwndTopmost, 0, 0, 0, 0, SwpNoMove | SwpNoSize | SwpNoActivate | SwpNoOwnerZOrder);
+        }
+        catch (Exception e) when (e is DllNotFoundException or EntryPointNotFoundException) { }
+    }
+
+    /// <summary>The taskbar, and the ones Windows shows on other monitors.</summary>
+    private static List<IntPtr> Taskbars()
+    {
+        var found = new List<IntPtr>();
+        if (FindWindowW("Shell_TrayWnd", null) is var main && main != IntPtr.Zero) found.Add(main);
+        for (var next = FindWindowExW(IntPtr.Zero, IntPtr.Zero, "Shell_SecondaryTrayWnd", null); next != IntPtr.Zero && found.Count < 16;
+             next = FindWindowExW(IntPtr.Zero, next, "Shell_SecondaryTrayWnd", null))
+            found.Add(next);
+        return found;
+    }
+
+    private const uint MonitorDefaultToNearest = 2;
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)] private static extern IntPtr FindWindowExW(IntPtr parent, IntPtr after, string cls, string? name);
+
+    [ComImport, Guid("56FDF344-FD6D-11d0-958A-006097C9A090")]
+    private class TaskbarList;
+
+    [ComImport, Guid("602D4995-B13A-429b-A66E-1935E44F4317"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+    private interface ITaskbarList2
+    {
+        [PreserveSig] int HrInit();
+        [PreserveSig] int AddTab(IntPtr window);
+        [PreserveSig] int DeleteTab(IntPtr window);
+        [PreserveSig] int ActivateTab(IntPtr window);
+        [PreserveSig] int SetActiveAlt(IntPtr window);
+        [PreserveSig] int MarkFullscreenWindow(IntPtr window, [MarshalAs(UnmanagedType.Bool)] bool fullScreen);
+    }
+
     public TaskbarKeeper(Action<string> log)
     {
         _log = log;
