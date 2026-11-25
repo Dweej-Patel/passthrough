@@ -8,6 +8,8 @@ struct RemoteShellCard: View {
     @ObservedObject var shell: ShellModel
     @EnvironmentObject private var model: AppModel
     @EnvironmentObject private var router: ShellRouter
+    /// The session being renamed, while the prompt is up.
+    @State private var renaming: ShellSessionInfo?
 
     private var selectedMacName: String {
         shell.macs.first { $0.macID == shell.selectedMacID }?.macName ?? shell.words.your
@@ -27,6 +29,7 @@ struct RemoteShellCard: View {
             .frame(maxWidth: .infinity, alignment: .leading)
         }
         .animation(.easeInOut(duration: 0.2), value: shell.reach)
+        .shellRenamePrompt($renaming, shell: shell)
     }
 
     /// Which Mac, and how it's reached: "● MacBook Pro ⌃⌄ · via relay".
@@ -173,7 +176,7 @@ struct RemoteShellCard: View {
                         PTStatusDot(color: session.running ? PTColor.tint : .secondary.opacity(0.5), live: session.running)
                     }
                     VStack(alignment: .leading, spacing: 2) {
-                        Text(session.title).font(.subheadline.weight(.semibold)).lineLimit(1)
+                        Text(shell.title(of: session)).font(.subheadline.weight(.semibold)).lineLimit(1)
                         Text(Self.status(session, now: now, kind: shell.selectedKind)).font(.caption).foregroundStyle(.secondary)
                     }
                     Spacer(minLength: 0)
@@ -182,9 +185,11 @@ struct RemoteShellCard: View {
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
-            .accessibilityHint("Opens the terminal")
+            .shellPeek(session, shell: shell, open: { router.terminal = .attach(session.id) }, rename: { renaming = session })
+            .accessibilityHint("Opens the terminal. Touch and hold to peek at its output.")
             Menu {
                 Button { router.terminal = .attach(session.id) } label: { Label("Open", systemImage: "terminal") }
+                Button { renaming = session } label: { Label("Rename", systemImage: "pencil") }
                 if session.running {
                     Button(role: .destructive) { shell.close(session.id) } label: { Label("End session", systemImage: "xmark") }
                 } else {
@@ -197,7 +202,7 @@ struct RemoteShellCard: View {
                     .frame(width: 44, height: 44)
                     .contentShape(Rectangle())
             }
-            .accessibilityLabel("More for \(session.title)")
+            .accessibilityLabel("More for \(shell.title(of: session))")
         }
         .frame(minHeight: 44)
     }

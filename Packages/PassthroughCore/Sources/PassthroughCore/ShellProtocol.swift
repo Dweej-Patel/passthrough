@@ -103,6 +103,9 @@ public struct ShellEnvelope: Codable, Equatable, Sendable {
     public var sig: String?
     /// computerList: the computers this phone gave access to the host (`ComputerAccess`).
     public var computers: [ComputerAccess]?
+    /// transcript: send at most this many bytes of its last output (a glance at a
+    /// session), not `TranscriptStore.readLimit`; hosts that predate it send it all.
+    public var tail: Int?
 
     public init(t: String) { self.t = t }
 

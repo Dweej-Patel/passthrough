@@ -26,6 +26,8 @@ struct MacHomeView: View {
     @State private var showShareScreen = false
     /// Letting another computer use this one (`ShareComputerSheet`).
     @State private var showShareComputer = false
+    /// A recent shell being renamed, while the prompt is up.
+    @State private var renaming: ShellSessionInfo?
     @ObservedObject private var links = PendingLinks.shared
 
     /// The Mac on screen: the shell's selection, else the first paired Mac.
@@ -79,6 +81,7 @@ struct MacHomeView: View {
         } message: {
             Text(runningShells == 1 ? "1 running shell pauses until it wakes." : "\(runningShells) running shells pause until it wakes.")
         }
+        .shellRenamePrompt($renaming, shell: shell)
         .sheet(isPresented: $showSwitcher, onDismiss: runAfterSwitcher) {
             MacSwitcherSheet(shell: shell, then: $afterSwitcher)
         }
@@ -203,7 +206,7 @@ struct MacHomeView: View {
                 HStack(spacing: 12) {
                     NeedsYouDot()
                     VStack(alignment: .leading, spacing: 3) {
-                        Text("\(session.title) is asking").font(.subheadline.weight(.semibold)).lineLimit(1)
+                        Text("\(shell.title(of: session)) is asking").font(.subheadline.weight(.semibold)).lineLimit(1)
                         Text(session.waiting ?? "")
                             .font(.system(.caption, design: .monospaced))
                             .foregroundStyle(.secondary)
@@ -734,7 +737,7 @@ struct MacHomeView: View {
             HStack(spacing: 12) {
                 Circle().fill(session.running ? PTColor.tint : Color.secondary.opacity(0.4)).frame(width: 8, height: 8)
                 VStack(alignment: .leading, spacing: 2) {
-                    Text(session.title).font(.subheadline.weight(.semibold)).lineLimit(1)
+                    Text(shell.title(of: session)).font(.subheadline.weight(.semibold)).lineLimit(1)
                     Text(RemoteShellCard.status(session, now: now, kind: shell.selectedKind)).font(.caption).foregroundStyle(.secondary)
                 }
                 Spacer(minLength: 0)
@@ -744,7 +747,8 @@ struct MacHomeView: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .accessibilityHint("Opens the terminal")
+        .shellPeek(session, shell: shell, open: { router.terminal = .attach(session.id) }, rename: { renaming = session })
+        .accessibilityHint("Opens the terminal. Touch and hold to peek at its output.")
     }
 
     // MARK: Setup

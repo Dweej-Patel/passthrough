@@ -71,6 +71,8 @@ final class ShellModel: ObservableObject {
         guard let mac = clientMacID ?? selectedMacID else { return sessions }
         return hiddenSessions.visible(sessions, on: mac)
     }
+    /// Names given to sessions on this phone, per Mac (`title(of:)`).
+    @Published private(set) var sessionNames: ShellSessionNames
     /// Sessions that have ended: their tabs show a read-only log of their output.
     @Published private(set) var ended = ShellEndedSessions()
     /// The last thing the Mac refused (too many sessions, no such session…).
@@ -147,6 +149,7 @@ final class ShellModel: ObservableObject {
     private static let tabMemoryKey = "shell.tabMemory"
     private static let lastMacKey = "shell.lastMac"
     private static let hiddenSessionsKey = "shell.hiddenSessions"
+    private static let sessionNamesKey = "shell.sessionNames"
     private static let hostFactsKey = "shell.hostFacts"
     private static let farewellsKey = "shell.farewells"
     private static let lastShellKey = "shell.lastShell"
@@ -219,6 +222,8 @@ final class ShellModel: ObservableObject {
             .flatMap { try? JSONDecoder().decode(MacTabMemory.self, from: $0) } ?? MacTabMemory()
         hiddenSessions = UserDefaults.standard.data(forKey: Self.hiddenSessionsKey)
             .flatMap { try? JSONDecoder().decode(ShellHiddenSessions.self, from: $0) } ?? ShellHiddenSessions()
+        sessionNames = UserDefaults.standard.data(forKey: Self.sessionNamesKey)
+            .flatMap { try? JSONDecoder().decode(ShellSessionNames.self, from: $0) } ?? ShellSessionNames()
         // Kept cleaned (`HostInfo.cleaned`), so what comes back is what was shown.
         factsByMac = (UserDefaults.standard.data(forKey: Self.hostFactsKey)
             .flatMap { try? JSONDecoder().decode([String: HostInfo].self, from: $0) } ?? [:]).compactMapValues { $0.cleaned() }
@@ -575,6 +580,8 @@ final class ShellModel: ObservableObject {
         saveTabMemory()
         hiddenSessions.forget(macID)
         saveHiddenSessions()
+        sessionNames.forget(macID)
+        saveSessionNames()
         endedByMac[macID] = nil
         forgetHostFacts(macID)
         if UserDefaults.standard.string(forKey: Self.lastMacKey) == macID {
@@ -598,6 +605,8 @@ final class ShellModel: ObservableObject {
         UserDefaults.standard.removeObject(forKey: Self.lastMacKey)
         hiddenSessions = ShellHiddenSessions()
         UserDefaults.standard.removeObject(forKey: Self.hiddenSessionsKey)
+        sessionNames = ShellSessionNames()
+        UserDefaults.standard.removeObject(forKey: Self.sessionNamesKey)
         forgetHostFacts(keeping: [])
     }
 
@@ -769,6 +778,27 @@ final class ShellModel: ObservableObject {
         UserDefaults.standard.set(data, forKey: Self.hiddenSessionsKey)
     }
 
+    /// What this phone shows a session as: the name given it here, else the Mac's title.
+    func title(of id: String, fallback: String) -> String {
+        sessionNames.title(id, on: clientMacID ?? selectedMacID, fallback: fallback)
+    }
+
+    func title(of session: ShellSessionInfo) -> String { title(of: session.id, fallback: session.title) }
+
+    /// Names a session of the selected Mac on this phone; an empty name, or the
+    /// Mac's own title, goes back to the Mac's title.
+    func rename(_ id: String, to name: String) {
+        guard let mac = clientMacID ?? selectedMacID else { return }
+        let title = sessions.first { $0.id == id }?.title ?? history.first { $0.id == id }?.title ?? ""
+        sessionNames.rename(id, on: mac, to: name, title: title)
+        saveSessionNames()
+    }
+
+    private func saveSessionNames() {
+        guard let data = try? JSONEncoder().encode(sessionNames) else { return }
+        UserDefaults.standard.set(data, forKey: Self.sessionNamesKey)
+    }
+
     func loadHistory() { client?.requestHistory() }
 
     /// Asks the Mac what happened since `since`; `timeline` follows.
@@ -843,8 +873,9 @@ final class ShellModel: ObservableObject {
 
     /// The saved transcript of a session, with the terminal sizes it was drawn
     /// at (none from an older Mac), or nil when there's no connection, the Mac
-    /// refused, or nothing arrived within 30 seconds.
-    func transcript(_ id: String) async -> [ShellReplayChunk]? {
+    /// refused, or nothing arrived within 30 seconds. `tail` asks for only the
+    /// last that many bytes of output (an older host sends it all).
+    func transcript(_ id: String, tail: Int? = nil) async -> [ShellReplayChunk]? {
         #if DEBUG
         if Self.demoState != nil { return [.resize(cols: 64, rows: 20), .output(Self.demoOutput)] }
         #endif
@@ -853,7 +884,7 @@ final class ShellModel: ObservableObject {
         let token = UUID()
         return await withCheckedContinuation { continuation in
             pendingTranscript = (id, token, ShellReplay.Collector(), continuation)
-            client.requestTranscript(id)
+            client.requestTranscript(id, tail: tail)
             Task { [weak self] in
                 try? await Task.sleep(for: .seconds(30))
                 // Only this request's timer ends it, not an earlier one for the same session.
@@ -961,6 +992,12 @@ final class ShellModel: ObservableObject {
         case let .history(entries):
             history = entries
             historyLoaded = true
+            // A name lasts while the Mac still knows the session: listed, or in its history.
+            if let mac = clientMacID {
+                var names = sessionNames
+                names.keep(Set(entries.map(\.id) + sessions.map(\.id)), on: mac)
+                if names != sessionNames { sessionNames = names; saveSessionNames() }
+            }
         case let .transcriptResize(session, cols, rows):
             guard pendingTranscript?.id == session else { return }
             pendingTranscript?.replay.add(Data(), cols: cols, rows: rows)
@@ -1121,6 +1158,9 @@ final class ShellModel: ObservableObject {
         var hidden = hiddenSessions
         hidden.keepOnly(paired)
         if hidden != hiddenSessions { hiddenSessions = hidden; saveHiddenSessions() }
+        var names = sessionNames
+        names.keepOnly(paired)
+        if names != sessionNames { sessionNames = names; saveSessionNames() }
         endedByMac = endedByMac.filter { paired.contains($0.key) }
         forgetHostFacts(keeping: paired)
         let defaults = UserDefaults.standard

@@ -22,6 +22,30 @@ final class ShellReplayTests: XCTestCase {
         }
     }
 
+    func testTailKeepsWholeReplayThatFits() {
+        XCTAssertEqual(ShellReplay.tail(recording, maxBytes: 1 << 20), recording)
+        XCTAssertEqual(ShellReplay.tail([], maxBytes: 10), [])
+    }
+
+    func testTailCutsOutputAtALineAfterTheSizeItWasDrawnAt() {
+        let old = Data(repeating: UInt8(ascii: "a"), count: 100)
+        let recent = Data("xx\nline two\nline three\n".utf8)
+        let chunks: [ShellReplayChunk] = [.resize(cols: 80, rows: 24), .output(old), .resize(cols: 48, rows: 20), .output(recent)]
+        // The cut lands inside "xx": the tail starts at the next line, at 48 columns.
+        XCTAssertEqual(ShellReplay.tail(chunks, maxBytes: recent.count - 1),
+                       [.resize(cols: 48, rows: 20), .output(Data("line two\nline three\n".utf8))])
+        // Spanning both outputs keeps the later size where it was.
+        let tail = ShellReplay.tail(chunks, maxBytes: recent.count + 10)
+        XCTAssertEqual(tail, [.resize(cols: 80, rows: 24), .output(old.suffix(10)), .resize(cols: 48, rows: 20), .output(recent)])
+        // Exactly the last output: the size before it comes along.
+        XCTAssertEqual(ShellReplay.tail(chunks, maxBytes: recent.count), [.resize(cols: 48, rows: 20), .output(recent)])
+    }
+
+    func testTailWithoutSizes() {
+        let chunks: [ShellReplayChunk] = [.output(Data("one\ntwo\n".utf8))]
+        XCTAssertEqual(ShellReplay.tail(chunks, maxBytes: 5), [.output(Data("two\n".utf8))])
+    }
+
     func testLargestGrid() {
         XCTAssertNil(ShellReplay.largestGrid([.output(Data("x".utf8))]))
         let grid = ShellReplay.largestGrid([.resize(cols: 48, rows: 40), .output(Data()), .resize(cols: 100, rows: 20)])

@@ -668,6 +668,26 @@ final class ShellListenerTests: XCTestCase {
         XCTAssertEqual(sessions, ["no-such-session"])
     }
 
+    /// `tail` asks for the end of a transcript only: the latest output, not the start.
+    func testTranscriptTail() {
+        let listener = startListener()
+        let (c, probe) = readyClient(listener)
+        let id = openSession(c, probe)
+        c.input(Data("echo first-$((6*7)); i=0; while [ $i -lt 400 ]; do echo filler-$i-xxxxxxxxxxxxxxxxxxxx; i=$((i+1)); done; echo last-$((6*7))\nexit\n".utf8))
+        wait(for: [probe.expect(self, "ended") { $0.contains { if case .ended(id, _) = $0 { return true } else { return false } } }],
+             timeout: 20)
+        c.requestTranscript(id, tail: 2048)
+        wait(for: [probe.expect(self, "transcript done") { events in
+            events.contains { if case .transcript(id, _, true) = $0 { return true } else { return false } }
+        }], timeout: 5)
+        let text = probe.events.get().reduce(Data()) { acc, e in
+            if case .transcript(id, let d, _) = e { return acc + d } else { return acc }
+        }
+        XCTAssertLessThanOrEqual(text.count, 2048)
+        XCTAssertTrue(String(decoding: text, as: UTF8.self).contains("last-42\r\n"))
+        XCTAssertFalse(String(decoding: text, as: UTF8.self).contains("first-42\r\n"))
+    }
+
     /// Output larger than one chunk arrives in several `output` lines and in full.
     func testLargeOutputIsChunked() {
         let listener = startListener()
