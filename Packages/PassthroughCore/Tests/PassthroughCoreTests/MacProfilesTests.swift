@@ -46,6 +46,40 @@ final class MacProfilesTests: XCTestCase {
         XCTAssertEqual(Set(hidden.byMac.keys), ["m1"])
     }
 
+    func testSessionNames() throws {
+        var names = ShellSessionNames()
+        XCTAssertEqual(names.title("s1", on: "m1", fallback: "zsh"), "zsh")
+        names.rename("s1", on: "m1", to: "  deploy\nbox  ", title: "zsh")
+        XCTAssertEqual(names.title("s1", on: "m1", fallback: "zsh"), "deploy box")
+        XCTAssertEqual(names.title("s1", on: "m2", fallback: "zsh"), "zsh")
+        XCTAssertEqual(names.title("s1", on: nil, fallback: "zsh"), "zsh")
+        names.rename("s2", on: "m1", to: String(repeating: "x", count: 100), title: "zsh")
+        XCTAssertEqual(names.name("s2", on: "m1")?.count, ShellSessionNames.maxLength)
+        let decoded = try JSONDecoder().decode(ShellSessionNames.self, from: JSONEncoder().encode(names))
+        XCTAssertEqual(decoded, names)
+        // Empty, or the Mac's own title, goes back to the Mac's title.
+        names.rename("s2", on: "m1", to: "   ", title: "zsh")
+        XCTAssertNil(names.name("s2", on: "m1"))
+        names.rename("s1", on: "m1", to: "zsh", title: "zsh")
+        XCTAssertNil(names.byMac["m1"])
+    }
+
+    func testSessionNamesPruned() {
+        var names = ShellSessionNames()
+        names.rename("s1", on: "m1", to: "a", title: "t")
+        names.rename("s2", on: "m1", to: "b", title: "t")
+        names.rename("s3", on: "m2", to: "c", title: "t")
+        names.keep(["s2"], on: "m1")
+        XCTAssertEqual(names.byMac["m1"], ["s2": "b"])
+        names.keep([], on: "m1")
+        XCTAssertNil(names.byMac["m1"])
+        names.rename("s1", on: "m1", to: "a", title: "t")
+        names.keepOnly(["m1"])
+        XCTAssertEqual(Set(names.byMac.keys), ["m1"])
+        names.forget("m1")
+        XCTAssertTrue(names.byMac.isEmpty)
+    }
+
     func testOnlyFinishedSessionsCanBeRemoved() {
         let hidden = ShellHiddenSessions()
         let list = [info("run"), info("done", running: false)]

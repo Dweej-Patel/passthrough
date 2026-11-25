@@ -668,6 +668,77 @@ final class ShellListenerTests: XCTestCase {
         XCTAssertEqual(sessions, ["no-such-session"])
     }
 
+    /// A pasted image arrives whole in the paste folder, and the phone hears its path.
+    func testUploadSavesTheFileAndAnswersItsPath() throws {
+        let listener = startListener()
+        let folder = FileManager.default.temporaryDirectory.appendingPathComponent("paste-\(UUID().uuidString)")
+        addTeardownBlock { try? FileManager.default.removeItem(at: folder) }
+        listener.pasteFolder = PasteFolder(directory: folder, keep: 2)
+        let (c, probe) = readyClient(listener)
+        let image = Data((0..<(RemoteShell.uploadChunk * 2 + 77)).map { UInt8(truncatingIfNeeded: $0 &* 31) })
+        let id = c.upload(image, name: "Screenshot.PNG")
+        wait(for: [probe.expect(self, "uploaded") { events in
+            events.contains { if case .uploaded(id, _, _) = $0 { return true } else { return false } }
+        }], timeout: 10)
+        let answer = probe.events.get().compactMap { e -> (String?, String?)? in
+            if case .uploaded(id, let path, let reason) = e { return (path, reason) } else { return nil }
+        }.first
+        let path = try XCTUnwrap(answer?.0, "refused: \(answer?.1 ?? "")")
+        XCTAssertTrue(path.hasPrefix(folder.path))
+        XCTAssertTrue(path.hasSuffix(".png"))
+        XCTAssertFalse(path.contains(" "))
+        XCTAssertEqual(try Data(contentsOf: URL(fileURLWithPath: path)), image)
+
+        // Only the newest `keep` stay.
+        for n in 0..<3 {
+            let more = c.upload(Data([UInt8(n)]), name: "x.jpg")
+            wait(for: [probe.expect(self, "uploaded \(n)") { events in
+                events.contains { if case .uploaded(more, _, _) = $0 { return true } else { return false } }
+            }], timeout: 5)
+        }
+        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: folder.path).count, 2)
+    }
+
+    func testUploadRefusesWhatCantBePasted() {
+        let listener = startListener()
+        let folder = FileManager.default.temporaryDirectory.appendingPathComponent("paste-\(UUID().uuidString)")
+        addTeardownBlock { try? FileManager.default.removeItem(at: folder) }
+        listener.pasteFolder = PasteFolder(directory: folder)
+        let (c, probe) = readyClient(listener)
+        let script = c.upload(Data("echo hi".utf8), name: "run.sh")
+        let huge = c.upload(Data(count: RemoteShell.maxUpload + 1), name: "big.png")
+        wait(for: [probe.expect(self, "both refused") { events in
+            let ids = events.compactMap { e -> String? in if case .uploaded(let id, nil, _) = e { return id } else { return nil } }
+            return ids.contains(script) && ids.contains(huge)
+        }], timeout: 10)
+        let reasons = Dictionary(uniqueKeysWithValues: probe.events.get().compactMap { e -> (String, String)? in
+            if case .uploaded(let id, nil, let reason?) = e { return (id, reason) } else { return nil }
+        })
+        XCTAssertEqual(reasons[script], ShellUpload.badRequest)
+        XCTAssertEqual(reasons[huge], ShellUpload.tooLarge)
+        XCTAssertEqual((try? FileManager.default.contentsOfDirectory(atPath: folder.path))?.count ?? 0, 0)
+    }
+
+    /// `tail` asks for the end of a transcript only: the latest output, not the start.
+    func testTranscriptTail() {
+        let listener = startListener()
+        let (c, probe) = readyClient(listener)
+        let id = openSession(c, probe)
+        c.input(Data("echo first-$((6*7)); i=0; while [ $i -lt 400 ]; do echo filler-$i-xxxxxxxxxxxxxxxxxxxx; i=$((i+1)); done; echo last-$((6*7))\nexit\n".utf8))
+        wait(for: [probe.expect(self, "ended") { $0.contains { if case .ended(id, _) = $0 { return true } else { return false } } }],
+             timeout: 20)
+        c.requestTranscript(id, tail: 2048)
+        wait(for: [probe.expect(self, "transcript done") { events in
+            events.contains { if case .transcript(id, _, true) = $0 { return true } else { return false } }
+        }], timeout: 5)
+        let text = probe.events.get().reduce(Data()) { acc, e in
+            if case .transcript(id, let d, _) = e { return acc + d } else { return acc }
+        }
+        XCTAssertLessThanOrEqual(text.count, 2048)
+        XCTAssertTrue(String(decoding: text, as: UTF8.self).contains("last-42\r\n"))
+        XCTAssertFalse(String(decoding: text, as: UTF8.self).contains("first-42\r\n"))
+    }
+
     /// Output larger than one chunk arrives in several `output` lines and in full.
     func testLargeOutputIsChunked() {
         let listener = startListener()

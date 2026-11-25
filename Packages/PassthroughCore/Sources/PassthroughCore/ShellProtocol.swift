@@ -24,6 +24,10 @@ public enum RemoteShell {
     public static let outputChunk = 16_384
     /// Longest line either side accepts.
     public static let lineLimit = 262_144
+    /// Largest file a phone sends to paste (`upload`), in bytes.
+    public static let maxUpload = 32 << 20
+    /// Largest piece of a file (before base64) in one `uploadData` line.
+    public static let uploadChunk = 131_072
     /// Where macOS Screen Sharing listens; a `screen` request is relayed to it on loopback.
     public static let screenSharingPort: UInt16 = 5900
 
@@ -34,6 +38,31 @@ public enum RemoteShell {
 
     public static func proofIsValid(_ mac: Data, shellKey: Data, nonce: Data) -> Bool {
         HMAC<SHA256>.isValidAuthenticationCode(mac, authenticating: Data(proofLabel.utf8) + nonce, using: SymmetricKey(data: shellKey))
+    }
+}
+
+/// A file a phone pastes into a session (`upload`): the rules both sides keep.
+public enum ShellUpload {
+    /// What may be pasted, by extension: images programs in a terminal read (Claude Code: PNG, JPEG, GIF, WebP).
+    public static let extensions: Set<String> = ["png", "jpg", "jpeg", "gif", "webp", "heic"]
+    /// Most uploads one connection has unfinished at once.
+    public static let maxInFlight = 2
+    /// `uploaded` reasons: over `RemoteShell.maxUpload`, too many at once, couldn't save, or not well formed.
+    public static let tooLarge = "too_large"
+    public static let busy = "busy"
+    public static let failed = "failed"
+    public static let badRequest = "bad_request"
+
+    /// 1 to 64 ASCII letters, digits and dashes.
+    public static func isValidID(_ id: String) -> Bool {
+        (1...64).contains(id.utf8.count) && id.utf8.allSatisfy { $0 == 0x2D || (0x30...0x39).contains($0) || (0x41...0x5A).contains($0) || (0x61...0x7A).contains($0) }
+    }
+
+    /// The name's extension, lowercased, when it's one that may be pasted.
+    public static func fileExtension(_ name: String) -> String? {
+        guard let dot = name.lastIndex(of: ".") else { return nil }
+        let ext = name[name.index(after: dot)...].lowercased()
+        return extensions.contains(ext) ? ext : nil
     }
 }
 
@@ -103,6 +132,15 @@ public struct ShellEnvelope: Codable, Equatable, Sendable {
     public var sig: String?
     /// computerList: the computers this phone gave access to the host (`ComputerAccess`).
     public var computers: [ComputerAccess]?
+    /// transcript: send at most this many bytes of its last output (a glance at a
+    /// session), not `TranscriptStore.readLimit`; hosts that predate it send it all.
+    public var tail: Int?
+    /// upload, uploadReady, uploadData, uploaded: the phone's id for the file it sends (1 to 64 characters).
+    public var upload: String?
+    /// upload: the file's size in bytes.
+    public var size: Int?
+    /// uploaded: where the host saved the file (an absolute path); absent when it refused (`reason`).
+    public var path: String?
 
     public init(t: String) { self.t = t }
 
@@ -128,6 +166,13 @@ public struct ShellEnvelope: Codable, Equatable, Sendable {
     public static let historyList = "historyList"
     public static let transcript = "transcript"
     public static let transcriptData = "transcriptData"
+    /// A file a phone pastes into a session (an image): `upload` (`upload`, `name`, `size`),
+    /// answered `uploadReady`, then its bytes in `uploadData` lines (`done` on the last),
+    /// answered `uploaded` with the `path` it was saved at, or a `reason` it wasn't.
+    public static let upload = "upload"
+    public static let uploadReady = "uploadReady"
+    public static let uploadData = "uploadData"
+    public static let uploaded = "uploaded"
     public static let screen = "screen"
     public static let screenReady = "screenReady"
     /// The Mac's own H.264 stream of its screen (`ScreenVideoWire`), rather than Screen Sharing.

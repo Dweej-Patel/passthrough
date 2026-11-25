@@ -65,6 +65,12 @@ public final class IrohShellListener: @unchecked Sendable {
         set { gate.screenViews.set(newValue) }
     }
 
+    /// As `ShellListener.pasteFolder`.
+    public var pasteFolder: PasteFolder {
+        get { gate.pasteFolder.get() }
+        set { gate.pasteFolder.set(newValue) }
+    }
+
     /// As `ShellListener.onScreenViewer`.
     public var onScreenViewer: (@Sendable (_ phoneID: String, _ label: String, _ viewing: Bool) -> Void)? {
         get { gate.screenHandler.get() }

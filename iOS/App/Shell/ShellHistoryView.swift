@@ -20,7 +20,9 @@ struct ShellHistoryView: View {
                             if !shell.history.isEmpty {
                                 let sorted = shell.history.sorted { $0.startedAt > $1.startedAt }
                                 ForEach(sorted, id: \.id) { entry in
-                                    NavigationLink(value: entry.id) { HistoryRow(entry: entry, running: isRunning(entry)) }
+                                    NavigationLink(value: entry.id) {
+                                        HistoryRow(entry: entry, title: shell.title(of: entry.id, fallback: entry.title), running: isRunning(entry))
+                                    }
                                         .buttonStyle(.plain)
                                     if entry.id != sorted.last?.id { Divider().opacity(0.5) }
                                 }
@@ -74,6 +76,7 @@ struct ShellHistoryView: View {
 
 private struct HistoryRow: View {
     let entry: ShellHistoryEntry
+    let title: String
     let running: Bool
 
     private var started: Date { Date(timeIntervalSince1970: entry.startedAt) }
@@ -96,7 +99,7 @@ private struct HistoryRow: View {
             PTStatusDot(color: running ? PTTheme.success : .secondary.opacity(0.5), live: running)
             VStack(alignment: .leading, spacing: 3) {
                 HStack(alignment: .firstTextBaseline, spacing: 8) {
-                    Text(entry.title).font(.subheadline.weight(.semibold)).lineLimit(1)
+                    Text(title).font(.subheadline.weight(.semibold)).lineLimit(1)
                     Spacer(minLength: 4)
                     Text(status.text).font(.caption.weight(.semibold)).foregroundStyle(status.tint)
                         .fixedSize()
@@ -161,7 +164,7 @@ private struct TranscriptScreen: View {
         .toolbarColorScheme(.dark, for: .navigationBar)
         .toolbarBackground(SwiftUI.Color(TerminalStyle.background), for: .navigationBar)
         .toolbarBackground(.visible, for: .navigationBar)
-        .navigationTitle(entry?.title ?? "Session")
+        .navigationTitle(entry.map { shell.title(of: $0.id, fallback: $0.title) } ?? "Session")
         .navigationBarTitleDisplayMode(.inline)
         .task { await load() }
     }
@@ -223,12 +226,16 @@ private struct TranscriptScreen: View {
 /// something else. A recording narrower than the screen sits at the left; a
 /// larger one gets a smaller font (down to `minimumFontSize`) and, past that,
 /// scrolls sideways. Without sizes it fills the screen as before.
-private struct ReplayTerminalHost: UIViewRepresentable {
+struct ReplayTerminalHost: UIViewRepresentable {
     let driver: TerminalDriver
     let replay: [ShellReplayChunk]
+    /// The smallest font a large recording shrinks to before it scrolls sideways.
+    var minimumFontSize = ReplayTerminalContainer.minimumFontSize
+    /// A glance: the recording fills the width and its latest rows end at the bottom (`ReplayTerminalContainer.glance`).
+    var glance = false
 
     func makeUIView(context: Context) -> ReplayTerminalContainer {
-        ReplayTerminalContainer(driver: driver, replay: replay)
+        ReplayTerminalContainer(driver: driver, replay: replay, minimumFontSize: minimumFontSize, glance: glance)
     }
 
     func updateUIView(_ view: ReplayTerminalContainer, context: Context) {}
@@ -247,12 +254,21 @@ final class ReplayTerminalContainer: UIScrollView {
     private var terminal: ShellTerminalView { driver.view }
     private let replay: [ShellReplayChunk]
     private let fixedGrid: Bool
+    private let minimumFont: CGFloat
+    /// For a glance at a session (a peek): the font fits the width alone,
+    /// and once drawn the grid moves up so its latest rows end at the bottom
+    /// (`finished`), as they do on the screen it was drawn on.
+    private let glance: Bool
+    /// How far up the grid is moved (glance only).
+    private var shift: CGFloat = 0
     private var started = false
     private var cancelled = false
 
-    init(driver: TerminalDriver, replay: [ShellReplayChunk]) {
+    init(driver: TerminalDriver, replay: [ShellReplayChunk], minimumFontSize: CGFloat = minimumFontSize, glance: Bool = false) {
         self.driver = driver
         self.replay = replay
+        minimumFont = minimumFontSize
+        self.glance = glance
         fixedGrid = ShellReplay.largestGrid(replay) != nil
         super.init(frame: .zero)
         backgroundColor = TerminalStyle.background
@@ -302,17 +318,33 @@ final class ReplayTerminalContainer: UIScrollView {
         terminal.getTerminal().resize(cols: largest.cols, rows: largest.rows)
         let needed = terminal.getOptimalFrameSize().size
         let base = terminal.font.pointSize
+        if glance {
+            // The width alone, a little larger than the usual size at most; fractional, so no band is left at the side.
+            let scale = min(1.15, bounds.width / max(1, needed.width))
+            terminal.frame = .zero
+            terminal.font = UIFont.monospacedSystemFont(ofSize: max(minimumFont, base * scale - 0.05), weight: .regular)
+            return
+        }
         let scale = ShellReplay.fitScale(neededWidth: needed.width, neededHeight: needed.height,
                                          availableWidth: bounds.width, availableHeight: bounds.height,
-                                         minimum: Self.minimumFontSize / base)
+                                         minimum: minimumFont / base)
         guard scale < 1 else { return }
         terminal.frame = .zero   // so the font change keeps the grid
-        terminal.font = UIFont.monospacedSystemFont(ofSize: max(Self.minimumFontSize, (base * scale + 1e-6).rounded(.down)), weight: .regular)
+        terminal.font = UIFont.monospacedSystemFont(ofSize: max(minimumFont, (base * scale + 1e-6).rounded(.down)), weight: .regular)
     }
 
     /// Exactly the grid's size (a little over, so SwiftTerm's own sizing from
     /// the frame lands on the same grid), or the whole view without sizes.
     private func place() {
+        // What shows around the grid is the terminal's own background (a Mac window's colours, say).
+        if let background = terminal.backgroundColor, backgroundColor != background { backgroundColor = background }
+        if glance, fixedGrid {
+            let size = terminal.getOptimalFrameSize().size
+            let frame = CGRect(x: 0, y: -shift, width: size.width + 0.5, height: size.height + 0.5)
+            if terminal.frame != frame { terminal.frame = frame }
+            contentSize = bounds.size
+            return
+        }
         guard fixedGrid else {
             terminal.frame = CGRect(origin: .zero, size: bounds.size)
             contentSize = bounds.size
@@ -344,7 +376,27 @@ final class ReplayTerminalContainer: UIScrollView {
                 if end == data.count { index += 1; offset = 0 } else { offset = end }
             }
         }
-        guard !cancelled, index < replay.count else { return }
+        guard !cancelled else { return }
+        guard index < replay.count else { return finished() }
         DispatchQueue.main.async { [weak self] in self?.feed(from: index, offset: offset) }
+    }
+
+    /// The replay is drawn: a glance moves the grid up so its last row with
+    /// anything on it (or the cursor's, if lower) ends at the bottom. A program's
+    /// status lines often sit below its cursor (Claude Code's under its input).
+    private func finished() {
+        guard glance, fixedGrid else { return }
+        let grid = terminal.getTerminal()
+        guard grid.rows > 0 else { return }
+        let rowHeight = terminal.getOptimalFrameSize().height / CGFloat(grid.rows)
+        let visibleRows = Int((bounds.height / rowHeight).rounded(.down))
+        var lastRow = grid.getCursorLocation().y
+        for row in stride(from: grid.rows - 1, to: lastRow, by: -1)
+        where !(grid.getLine(row: row)?.translateToString(trimRight: true).isEmpty ?? true) {
+            lastRow = row
+            break
+        }
+        shift = CGFloat(max(0, lastRow + 1 - visibleRows)) * rowHeight
+        place()
     }
 }

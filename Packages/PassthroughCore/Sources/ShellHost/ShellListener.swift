@@ -102,6 +102,12 @@ public final class ShellListener: @unchecked Sendable {
         set { gate.clipSyncFactory.set(newValue) }
     }
 
+    /// Where files phones paste into sessions are saved (`upload`).
+    public var pasteFolder: PasteFolder {
+        get { gate.pasteFolder.get() }
+        set { gate.pasteFolder.set(newValue) }
+    }
+
     /// A phone started (`viewing`) or stopped seeing the screen. On the listener's queue.
     public var onScreenViewer: (@Sendable (_ phoneID: String, _ label: String, _ viewing: Bool) -> Void)? {
         get { gate.screenHandler.get() }
@@ -550,6 +556,8 @@ final class ShellGate: @unchecked Sendable {
     let accepting = Locked(true)
     let manager: ShellSessionManager
     let transcripts: TranscriptStore
+    /// Where pasted files (`upload`) are saved.
+    let pasteFolder = Locked(PasteFolder())
     let eventHandler = Locked<(@Sendable (String) -> Void)?>(nil)
     let screenAccess = Locked<(@Sendable (String) -> Bool)?>(nil)
     let screenHandler = Locked<(@Sendable (_ phoneID: String, _ label: String, _ viewing: Bool) -> Void)?>(nil)
@@ -1057,7 +1065,7 @@ final class ShellConnection: ShellAttachment, @unchecked Sendable {
         case ShellEnvelope.ping, ShellEnvelope.pong:
             return nil
         case ShellEnvelope.list, ShellEnvelope.open, ShellEnvelope.attach, ShellEnvelope.input, ShellEnvelope.resize,
-             ShellEnvelope.close, ShellEnvelope.viewing:
+             ShellEnvelope.close, ShellEnvelope.viewing, ShellEnvelope.upload, ShellEnvelope.uploadData:
             return scopes.contains(Computers.scopeShell) ? nil : .notAllowed
         case ShellEnvelope.screenVideo, ShellEnvelope.clipSync:
             return scopes.contains(Computers.scopeScreen) ? nil : .screenNotAllowed
@@ -1100,6 +1108,8 @@ final class ShellConnection: ShellAttachment, @unchecked Sendable {
         clipSync?.stop()
         clipSync = nil
         releaseScreenView()
+        // A file half sent is no use to anyone.
+        for id in Array(uploads.keys) { dropUpload(id, reason: nil) }
         stream.onTerminated = nil
         stream.cancel()
         let onClose = self.onClose
@@ -1226,7 +1236,7 @@ final class ShellConnection: ShellAttachment, @unchecked Sendable {
             sendHistory()
         case ShellEnvelope.transcript:
             guard let id = message.session else { return fail(.badRequest) }
-            sendTranscript(id)
+            sendTranscript(id, maxBytes: message.tail.map { min(max($0, 1), TranscriptStore.readLimit) } ?? TranscriptStore.readLimit)
         case ShellEnvelope.screen:
             guard gate?.screenAllowed(phoneID) == true else { return fail(.screenNotAllowed) }
             guard takeScreenView() else { return fail(.tooManyScreens) }
@@ -1275,6 +1285,10 @@ final class ShellConnection: ShellAttachment, @unchecked Sendable {
             guard role == .phone else { return fail(.notAllowed) }
             listsComputers = true
             sendComputerList()
+        case ShellEnvelope.upload:
+            beginUpload(message)
+        case ShellEnvelope.uploadData:
+            continueUpload(message)
         case ShellEnvelope.ping:
             send(ShellEnvelope(t: ShellEnvelope.pong))
         case ShellEnvelope.pong:
@@ -1282,6 +1296,75 @@ final class ShellConnection: ShellAttachment, @unchecked Sendable {
         default:
             fail(.badRequest)
         }
+    }
+
+    // MARK: Pasted files
+
+    /// A file being received (`upload`), written as its pieces arrive.
+    private struct Upload {
+        let url: URL
+        let handle: FileHandle
+        let size: Int
+        var written = 0
+    }
+
+    private var uploads: [String: Upload] = [:]
+
+    private func beginUpload(_ message: ShellEnvelope) {
+        guard let id = message.upload, ShellUpload.isValidID(id) else { return fail(.badRequest) }
+        guard uploads[id] == nil, let ext = message.name.flatMap(ShellUpload.fileExtension), let size = message.size, size > 0 else {
+            return uploaded(id, reason: ShellUpload.badRequest)
+        }
+        guard size <= RemoteShell.maxUpload else { return uploaded(id, reason: ShellUpload.tooLarge) }
+        guard uploads.count < ShellUpload.maxInFlight, let folder = gate?.pasteFolder.get() else { return uploaded(id, reason: ShellUpload.busy) }
+        do {
+            let (url, handle) = try folder.create(extension: ext)
+            uploads[id] = Upload(url: url, handle: handle, size: size)
+            var reply = ShellEnvelope(t: ShellEnvelope.uploadReady)
+            reply.upload = id
+            send(reply)
+        } catch {
+            ptLog(.warning, "shell: couldn't save a pasted file: \(error.localizedDescription)")
+            uploaded(id, reason: ShellUpload.failed)
+        }
+    }
+
+    private func continueUpload(_ message: ShellEnvelope) {
+        // Pieces of an upload already refused or ended are dropped: they were in flight.
+        guard let id = message.upload, var upload = uploads[id] else { return }
+        guard let data = message.data.flatMap({ Data(base64Encoded: $0) }), upload.written + data.count <= upload.size else {
+            return dropUpload(id, reason: ShellUpload.badRequest)
+        }
+        do {
+            try upload.handle.write(contentsOf: data)
+        } catch {
+            return dropUpload(id, reason: ShellUpload.failed)
+        }
+        upload.written += data.count
+        uploads[id] = upload
+        guard message.done == true else { return }
+        guard upload.written == upload.size else { return dropUpload(id, reason: ShellUpload.badRequest) }
+        try? upload.handle.close()
+        uploads[id] = nil
+        gate?.pasteFolder.get().prune()
+        gate?.event("\(label) pasted a file")
+        uploaded(id, path: upload.url.path)
+    }
+
+    /// Ends an unfinished upload, removing what was written, and says why (nil: says nothing).
+    private func dropUpload(_ id: String, reason: String?) {
+        guard let upload = uploads.removeValue(forKey: id) else { return }
+        try? upload.handle.close()
+        try? FileManager.default.removeItem(at: upload.url)
+        if let reason { uploaded(id, reason: reason) }
+    }
+
+    private func uploaded(_ id: String, path: String? = nil, reason: String? = nil) {
+        var reply = ShellEnvelope(t: ShellEnvelope.uploaded)
+        reply.upload = id
+        reply.path = path
+        reply.reason = reason
+        send(reply)
     }
 
     /// Issues a screen pass on the work queue (it writes the Keychain), then answers.
@@ -1495,13 +1578,13 @@ final class ShellConnection: ShellAttachment, @unchecked Sendable {
         return reply(count)
     }
 
-    /// Reads the transcript's end (at most `TranscriptStore.readLimit`, with
-    /// the terminal's sizes) off the queue, then sends it a line at a time,
-    /// each after the previous one was taken by the network.
-    private func sendTranscript(_ id: String) {
+    /// Reads the transcript's end (at most `maxBytes`, with the terminal's
+    /// sizes) off the queue, then sends it a line at a time, each after the
+    /// previous one was taken by the network.
+    private func sendTranscript(_ id: String, maxBytes: Int) {
         DispatchQueue.global(qos: .utility).async { [weak self] in
             guard let self else { return }
-            let lines = (try? self.transcripts.replay(of: id, maxBytes: TranscriptStore.readLimit))
+            let lines = (try? self.transcripts.replay(of: id, maxBytes: maxBytes))
                 .map { ShellReplay.transcriptLines(session: id, $0) }
             self.queue.async {
                 guard let lines else { return self.fail(.noSuchSession, session: id) }
