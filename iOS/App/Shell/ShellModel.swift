@@ -1001,6 +1001,13 @@ final class ShellModel: ObservableObject {
         case let .transcriptResize(session, cols, rows):
             guard pendingTranscript?.id == session else { return }
             pendingTranscript?.replay.add(Data(), cols: cols, rows: rows)
+        case let .uploaded(id, path, reason):
+            if let path { return finishUpload(id, .success(path)) }
+            switch reason {
+            case "unsupported": finishUpload(id, .failure(.unsupported))
+            case ShellUpload.tooLarge: finishUpload(id, .failure(.tooLarge))
+            default: finishUpload(id, .failure(.failed))
+            }
         case let .transcript(session, data, done):
             guard pendingTranscript?.id == session else { return }
             pendingTranscript?.replay.add(data)
@@ -1086,6 +1093,36 @@ final class ShellModel: ObservableObject {
         macs[i].relayToken = grant.irohID == nil ? nil : registry.relayToken(clientID: macID)
     }
 
+    /// Why a file couldn't be pasted (`upload`).
+    enum UploadFailure: Error, Equatable {
+        case notConnected, unsupported, tooLarge, failed
+    }
+
+    /// Files sent to paste, waiting for the host's answer.
+    private var pendingUploads: [String: CheckedContinuation<Result<String, UploadFailure>, Never>] = [:]
+
+    /// Sends a file (an image) to the computer to paste into a session: the
+    /// path it was saved at there, or why not. Gives up after two minutes.
+    func upload(_ data: Data, name: String) async -> Result<String, UploadFailure> {
+        #if DEBUG
+        if Self.demoState != nil { return .success("/Users/me/Library/Caches/com.nerdevs.passthrough/Pasted/pasted-demo.png") }
+        #endif
+        guard let client, reach == .ready else { return .failure(.notConnected) }
+        guard data.count <= RemoteShell.maxUpload else { return .failure(.tooLarge) }
+        return await withCheckedContinuation { continuation in
+            let id = client.upload(data, name: name)
+            pendingUploads[id] = continuation
+            Task { [weak self] in
+                try? await Task.sleep(for: .seconds(120))
+                self?.finishUpload(id, .failure(.failed))
+            }
+        }
+    }
+
+    private func finishUpload(_ id: String, _ result: Result<String, UploadFailure>) {
+        pendingUploads.removeValue(forKey: id)?.resume(returning: result)
+    }
+
     private func finishTranscript(_ replay: [ShellReplayChunk]?) {
         guard let pending = pendingTranscript else { return }
         pendingTranscript = nil
@@ -1103,6 +1140,7 @@ final class ShellModel: ObservableObject {
         controlMisses = [:]
         timelineLoading = false
         finishTranscript(nil)
+        for id in Array(pendingUploads.keys) { finishUpload(id, .failure(.failed)) }
     }
 
     /// Another Mac's turn: clears what the last one said and brings back the

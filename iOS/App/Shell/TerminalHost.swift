@@ -31,6 +31,34 @@ enum MacClipboard {
     }
 }
 
+/// An image on this iPhone's clipboard, as a file to paste into a shell:
+/// PNG, JPEG, GIF or WebP as they are, anything else (a HEIC photo) as JPEG,
+/// which every program reads, made smaller if it's over `RemoteShell.maxUpload`.
+enum ClipboardImage {
+    /// The clipboard holds an image and no text (text pastes as it always did).
+    static var isWaiting: Bool { UIPasteboard.general.hasImages && !UIPasteboard.general.hasStrings }
+
+    static func read() -> (data: Data, name: String)? {
+        let board = UIPasteboard.general
+        for (type, ext) in [(UTType.png, "png"), (.jpeg, "jpg"), (.gif, "gif"), (.webP, "webp")] {
+            if let data = board.data(forPasteboardType: type.identifier), !data.isEmpty, data.count <= RemoteShell.maxUpload {
+                return (data, "image.\(ext)")
+            }
+        }
+        guard let image = board.image else { return nil }
+        if let data = image.jpegData(compressionQuality: 0.9), data.count <= RemoteShell.maxUpload { return (data, "image.jpg") }
+        let longest = max(image.size.width, image.size.height)
+        guard longest > 0 else { return nil }
+        let scale = min(1, 4096 / longest)
+        let size = CGSize(width: (image.size.width * scale).rounded(), height: (image.size.height * scale).rounded())
+        let format = UIGraphicsImageRendererFormat()
+        format.scale = 1
+        let smaller = UIGraphicsImageRenderer(size: size, format: format).image { _ in image.draw(in: CGRect(origin: .zero, size: size)) }
+        guard let data = smaller.jpegData(compressionQuality: 0.8), data.count <= RemoteShell.maxUpload else { return nil }
+        return (data, "image.jpg")
+    }
+}
+
 /// Owns one SwiftTerm `TerminalView` and relays its input and size changes.
 /// Nothing here logs what passes through it.
 @MainActor
@@ -45,6 +73,8 @@ final class TerminalDriver: NSObject, ObservableObject, TerminalViewDelegate {
     /// A paste would run as it arrives (`ShellTerminalView.confirmPaste`):
     /// call `paste` if the user says yes. Unset, it's pasted.
     var onConfirmPaste: ((_ lineBreaks: Int, _ paste: @escaping () -> Void) -> Void)?
+    /// Paste found an image on the clipboard and no text (`ClipboardImage`).
+    var onPasteImage: (() -> Void)?
     /// Output being fed is a replay: the terminal's answers to queries in it
     /// (device attributes, cursor position, colors…) and clipboard writes are dropped.
     var replaying = false
@@ -65,6 +95,7 @@ final class TerminalDriver: NSObject, ObservableObject, TerminalViewDelegate {
             guard let onConfirmPaste = self?.onConfirmPaste else { return paste() }
             onConfirmPaste(lineBreaks, paste)
         }
+        view.pasteImage = { [weak self] in self?.onPasteImage?() }
         view.backgroundColor = TerminalStyle.background
         view.layer.backgroundColor = TerminalStyle.background.cgColor
         view.nativeBackgroundColor = TerminalStyle.background
@@ -206,6 +237,8 @@ final class ShellTerminalView: TerminalView {
     /// Asked before a paste with line breaks goes to a program that hasn't
     /// turned on bracketed paste, which would run each line as it arrives.
     var confirmPaste: ((_ lineBreaks: Int, _ paste: @escaping () -> Void) -> Void)?
+    /// Paste with only an image on the clipboard: it's sent to the computer and its path pasted.
+    var pasteImage: (() -> Void)?
     private var reported = false
     private lazy var programScroll = UIPanGestureRecognizer(target: self, action: #selector(programScrolled(_:)))
     /// Drag not yet sent, short of a whole line.
@@ -244,7 +277,15 @@ final class ShellTerminalView: TerminalView {
     /// The phone's clipboard, made safe to send (`TerminalPaste`): bracketed
     /// when the program asked for that, asked about first when its lines would run.
     override func paste(_ sender: Any?) {
-        guard !readOnly, let raw = UIPasteboard.general.string else { return }
+        guard !readOnly else { return }
+        if ClipboardImage.isWaiting, let pasteImage { return pasteImage() }
+        guard let raw = UIPasteboard.general.string else { return }
+        pasteText(raw)
+    }
+
+    /// Text pasted as the clipboard's is (`paste`).
+    func pasteText(_ raw: String) {
+        guard !readOnly else { return }
         let paste = TerminalPaste(raw)
         guard !paste.text.isEmpty else { return }
         let deliver = { [weak self] in

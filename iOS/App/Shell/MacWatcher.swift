@@ -136,7 +136,7 @@ final class MacWatcher: ObservableObject {
             stream.cancel()
         case .rdpRefused, .clipSyncRefused, .screenEnded, .macInfo, .host, .goingAway, .events, .pushState, .screenGranted, .screenPassSaved, .screenRevoked,
              .computerGranted, .computerPassSaved, .computerRevoked, .computerList, .opened, .openedDetached, .openFailed, .output, .replaying, .attached,
-             .ended, .detached, .history, .transcript, .transcriptResize, .failed:
+             .ended, .detached, .history, .transcript, .transcriptResize, .uploaded, .failed:
             // Nothing a watch asks for (`ended` is followed by a fresh `sessions`).
             break
         }

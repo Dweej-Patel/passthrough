@@ -191,6 +191,9 @@ public final class ShellClient: @unchecked Sendable {
         case computerRevoked
         /// `computerList`: the computers this device gave access to the host, cleaned (`ComputerAccess.cleaned`).
         case computerList([ComputerAccess])
+        /// The answer to `upload`: where the host saved the file, or why it didn't
+        /// (a `ShellUpload` reason; `unsupported` from a host that predates pasting files).
+        case uploaded(id: String, path: String?, reason: String?)
     }
 
     public enum ConnectError: Error, Sendable {
@@ -295,6 +298,8 @@ public final class ShellClient: @unchecked Sendable {
     private var rdpRequested = false
     /// `requestClipSync` was called and not yet answered: an `error` now is its refusal.
     private var clipRequested = false
+    /// Uploads asked for (`upload`) whose bytes wait for `uploadReady`. On `work`.
+    private var uploadsWaiting: [String: Data] = [:]
     /// When the winner last delivered anything.
     private var lastHeard = DispatchTime.now()
     /// A ping is out because the winner's path failed; cleared by anything heard.
@@ -585,6 +590,38 @@ public final class ShellClient: @unchecked Sendable {
     /// whenever the list changes while this connection lasts. An older host answers `.failed(.badRequest)`.
     public func listComputers() {
         command(ShellEnvelope(t: ShellEnvelope.listComputers))
+    }
+
+    /// Sends a file to paste (`upload`): asked first, its bytes once the host is
+    /// ready for them. Answered `.uploaded` with the returned id.
+    @discardableResult
+    public func upload(_ data: Data, name: String) -> String {
+        let id = UUID().uuidString.lowercased()
+        var m = ShellEnvelope(t: ShellEnvelope.upload)
+        m.upload = id
+        m.name = name
+        m.size = data.count
+        work.async { [self] in
+            guard active else { return emit(.uploaded(id: id, path: nil, reason: ShellUpload.failed)) }
+            uploadsWaiting[id] = data
+            enqueue(m)
+        }
+        return id
+    }
+
+    /// The host is ready for an upload's bytes: they go in `uploadData` lines, `done` on the last.
+    private func sendUpload(_ id: String) {
+        guard let data = uploadsWaiting.removeValue(forKey: id) else { return }
+        var offset = 0
+        repeat {
+            let end = min(offset + RemoteShell.uploadChunk, data.count)
+            var m = ShellEnvelope(t: ShellEnvelope.uploadData)
+            m.upload = id
+            m.data = data.subdata(in: (data.startIndex + offset)..<(data.startIndex + end)).base64EncodedString()
+            if end == data.count { m.done = true }
+            enqueue(m)
+            offset = end
+        } while offset < data.count
     }
 
     /// Asks for a session's recorded output; `tail` (bytes) asks for its end only.
@@ -914,6 +951,18 @@ public final class ShellClient: @unchecked Sendable {
                 emit(.transcriptResize(session: id, cols: cols, rows: rows))
             }
             emit(.transcript(session: id, data, done: message.done ?? false))
+        case ShellEnvelope.uploadReady:
+            if let id = message.upload { sendUpload(id) }
+        case ShellEnvelope.uploaded:
+            guard let id = message.upload else { return }
+            uploadsWaiting[id] = nil
+            emit(.uploaded(id: id, path: message.path, reason: message.path == nil ? (message.reason ?? ShellUpload.failed) : nil))
+        case ShellEnvelope.error where !uploadsWaiting.isEmpty && message.ref == nil && message.session == nil
+                                      && message.reason == ShellError.badRequest.rawValue:
+            // A host that predates `upload` refuses it like any unknown line.
+            let waiting = uploadsWaiting.keys
+            uploadsWaiting = [:]
+            for id in waiting { emit(.uploaded(id: id, path: nil, reason: "unsupported")) }
         case ShellEnvelope.error where clipRequested && message.ref == nil && message.session == nil:
             clipRequested = false
             screenRequested = false
@@ -1082,6 +1131,8 @@ public final class ShellClient: @unchecked Sendable {
         current = nil
         goneSessions = []
         probing = false
+        for id in uploadsWaiting.keys { emit(.uploaded(id: id, path: nil, reason: ShellUpload.failed)) }
+        uploadsWaiting = [:]
     }
 
     private func emit(_ event: Event) {

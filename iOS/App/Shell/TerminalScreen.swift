@@ -31,6 +31,11 @@ final class ShellTerminalController: ObservableObject {
     @Published private(set) var copiedNotice = false
     /// A paste that would run as it arrives, waiting for the user's yes.
     @Published var pendingPaste: PendingPaste?
+    /// A pasted image is on its way to the computer.
+    @Published private(set) var sendingImage = false
+    /// Why the last pasted image didn't make it, shown for a few seconds.
+    @Published private(set) var imageProblem: ShellModel.UploadFailure?
+    private var imageProblemTask: Task<Void, Never>?
     private var noticeTask: Task<Void, Never>?
     private var subscriptions: Set<AnyCancellable> = []
     /// The colours the terminal draws with now (the shown session's; nil: the app's own).
@@ -119,6 +124,36 @@ final class ShellTerminalController: ObservableObject {
         driver.onClipboardCopy = { [weak self] in self?.showCopiedNotice() }
         driver.onConfirmPaste = { [weak self] lineBreaks, paste in
             self?.pendingPaste = PendingPaste(lineBreaks: lineBreaks, paste: paste)
+        }
+        driver.onPasteImage = { [weak self] in self?.pasteImage() }
+    }
+
+    /// Sends the clipboard's image to the computer, then pastes the path it
+    /// was saved at, as dropping the file on a terminal there would: Claude
+    /// Code attaches it, a shell gets its path.
+    private func pasteImage() {
+        guard !sendingImage else { return }
+        guard let image = ClipboardImage.read() else { return showImageProblem(.failed) }
+        sendingImage = true
+        imageProblem = nil
+        Task { [weak self] in
+            guard let self else { return }
+            let result = await self.shell.upload(image.data, name: image.name)
+            self.sendingImage = false
+            switch result {
+            case let .success(path): self.driver.view.pasteText(path)
+            case let .failure(problem): self.showImageProblem(problem)
+            }
+        }
+    }
+
+    private func showImageProblem(_ problem: ShellModel.UploadFailure) {
+        imageProblem = problem
+        imageProblemTask?.cancel()
+        imageProblemTask = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(5))
+            guard !Task.isCancelled else { return }
+            self?.imageProblem = nil
         }
     }
 
@@ -234,6 +269,8 @@ struct TerminalScreen: View {
                             statusBanner("Loading session…", busy: true)
                         }
                         if let message = shell.lastError?.message { errorBanner(message) }
+                        if controller.sendingImage { statusBanner("Sending the image to \(macName)…", busy: true) }
+                        if let problem = controller.imageProblem { errorBanner(imageMessage(problem)) }
                     }
                     .padding(.horizontal, 12)
                     .padding(.top, 8)
@@ -434,6 +471,15 @@ struct TerminalScreen: View {
             if shell.reach == .ready { controller.attach(next) }
         } else {
             close()
+        }
+    }
+
+    private func imageMessage(_ problem: ShellModel.UploadFailure) -> String {
+        switch problem {
+        case .notConnected: "Connect to \(macName) to paste an image."
+        case .unsupported: "\(macName) needs a newer Passthrough to take pasted images."
+        case .tooLarge: "That image is too large to paste (32 MB at most)."
+        case .failed: "Couldn't paste the image. Try again."
         }
     }
 
