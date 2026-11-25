@@ -468,7 +468,7 @@ opened is told `not_sharing` that way, so its own shell runs that command.
 | `detached` | Mac | `session`, `reason`? | Another phone's connection took the session over (a terminal window on the Mac never does). |
 | `history` | phone | none | Ask for past sessions. |
 | `historyList` | Mac | `history` | `ShellHistoryEntry` objects `id`, `title`, `phoneLabel`, `startedAt`, `endedAt`?, `exitStatus`?, `bytes`, `cols`?, `rows`? (the terminal's size when the session started; absent from older Macs); newest first. At most the newest 500, and fewer (the oldest dropped) if the line would otherwise exceed 262144 bytes. |
-| `transcript` | phone | `session` | Ask for a past session's recorded output: at most its last 8 MiB. |
+| `transcript` | phone | `session`, `tail`? | Ask for a past session's recorded output: at most its last 8 MiB, or its last `tail` bytes of output when given (a glance at a session; at least 1). A host that predates `tail` sends up to 8 MiB, so a phone trims what it shows itself. |
 | `transcriptData` | Mac | `session`, `data`, `cols`?, `rows`?, `done`? | A piece of the transcript (same chunk size); `done: true` on the last. `cols`/`rows`, when present, are the size the recorded terminal had from this piece on: set it before feeding `data` (which may be empty when a size change ends the transcript). The first piece always carries the size its first byte was drawn at; older Macs send none. |
 | `screen` | phone | none | See and control the screen: the connection becomes a relay to Screen Sharing (below). |
 | `screenReady` | Mac | none | Reply to `screen`; every later byte, both ways, is Screen Sharing's. |

@@ -587,9 +587,11 @@ public final class ShellClient: @unchecked Sendable {
         command(ShellEnvelope(t: ShellEnvelope.listComputers))
     }
 
-    public func requestTranscript(_ session: String) {
+    /// Asks for a session's recorded output; `tail` (bytes) asks for its end only.
+    public func requestTranscript(_ session: String, tail: Int? = nil) {
         var m = ShellEnvelope(t: ShellEnvelope.transcript)
         m.session = session
+        m.tail = tail
         command(m)
     }
 

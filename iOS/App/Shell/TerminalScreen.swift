@@ -202,6 +202,8 @@ struct TerminalScreen: View {
     var onClose: (() -> Void)?
     @StateObject private var controller: ShellTerminalController
     @Environment(\.dismiss) private var dismiss
+    /// The tab being renamed, while the prompt is up.
+    @State private var renaming: ShellSessionInfo?
 
     init(shell: ShellModel, intent: TerminalIntent, onClose: (() -> Void)? = nil) {
         self.shell = shell
@@ -251,6 +253,7 @@ struct TerminalScreen: View {
         } message: { pending in
             Text("This shell runs each line of a paste as soon as it arrives. The text has \(pending.lineBreaks == 1 ? "a line break" : "\(pending.lineBreaks) line breaks"), so it runs without a chance to check it first.")
         }
+        .shellRenamePrompt($renaming, shell: shell)
         .hiddenWhileCaptured { covered in
             // Typing into a terminal no one can see would be blind.
             if covered { _ = controller.driver.view.resignFirstResponder() }
@@ -338,7 +341,7 @@ struct TerminalScreen: View {
                 Circle()
                     .fill(running ? Self.dotColor(info) : Color.secondary.opacity(0.5))
                     .frame(width: 6, height: 6)
-                Text(info?.title ?? "Session")
+                Text(shell.title(of: id, fallback: info?.title ?? "Session"))
                     .font(.caption.weight(.semibold))
                     .lineLimit(1)
             }
@@ -355,6 +358,7 @@ struct TerminalScreen: View {
         .accessibilityValue(isEnded ? "Ended" : (selected ? "Selected" : ""))
         .accessibilityHint("Touch and hold for more")
         .contextMenu {
+            if let info { Button { renaming = info } label: { Label("Rename", systemImage: "pencil") } }
             if isEnded {
                 Button { closeTab(id) } label: { Label("Remove", systemImage: "trash") }
             } else {

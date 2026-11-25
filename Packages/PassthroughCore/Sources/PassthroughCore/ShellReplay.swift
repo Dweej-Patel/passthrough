@@ -97,6 +97,33 @@ public enum ShellReplay {
         return lines
     }
 
+    /// The end of a replay, for a glance at a session: at most `maxBytes` of
+    /// its last output (from the start of a line, if one begins within 4 KiB
+    /// of the cut), after the size that output was drawn at. Whole when it fits.
+    public static func tail(_ chunks: [ShellReplayChunk], maxBytes: Int) -> [ShellReplayChunk] {
+        var budget = max(0, maxBytes)
+        var start = chunks.endIndex
+        var cutFirst: ShellReplayChunk?
+        while start > chunks.startIndex, budget > 0 {
+            let index = start - 1
+            start = index
+            guard case let .output(data) = chunks[index] else { continue }
+            if data.count <= budget { budget -= data.count; continue }
+            var cut = data.endIndex - budget
+            if let newline = data[cut..<min(data.endIndex, cut + 4096)].firstIndex(of: 0x0A) { cut = newline + 1 }
+            cutFirst = .output(Data(data[cut...]))
+            budget = 0
+        }
+        if start == chunks.startIndex, cutFirst == nil { return chunks }
+        var kept = Array(chunks[(cutFirst == nil ? start : start + 1)...])
+        if let cutFirst { kept.insert(cutFirst, at: 0) }
+        let isResize: (ShellReplayChunk) -> Bool = { if case .resize = $0 { true } else { false } }
+        if kept.first.map(isResize) != true, let size = chunks[..<start].last(where: isResize) {
+            kept.insert(size, at: 0)
+        }
+        return kept
+    }
+
     /// The phone's side: a replay rebuilt from `transcriptData` lines, in order.
     public struct Collector: Sendable {
         private var done: [ShellReplayChunk] = []

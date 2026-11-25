@@ -33,6 +33,52 @@ public struct MacTabMemory: Codable, Equatable, Sendable {
     }
 }
 
+/// Names this phone gave sessions, per Mac, shown in place of the title the
+/// Mac sends. Kept on this phone only: the Mac and other phones go on
+/// showing its own title.
+public struct ShellSessionNames: Codable, Equatable, Sendable {
+    /// Longest name kept, in characters.
+    public static let maxLength = 60
+    public private(set) var byMac: [String: [String: String]] = [:]
+
+    public init() {}
+
+    public func name(_ id: String, on macID: String) -> String? { byMac[macID]?[id] }
+
+    /// The name to show for a session: the one given here, else the Mac's title.
+    public func title(_ id: String, on macID: String?, fallback: String) -> String {
+        macID.flatMap { name(id, on: $0) } ?? fallback
+    }
+
+    /// Names the session `name`, on one line, trimmed and at most `maxLength`
+    /// characters. A name that's empty, or the Mac's own `title`, forgets it.
+    public mutating func rename(_ id: String, on macID: String, to name: String, title: String) {
+        let cleaned = Self.cleaned(name)
+        var names = byMac[macID] ?? [:]
+        names[id] = cleaned.isEmpty || cleaned == title ? nil : cleaned
+        byMac[macID] = names.isEmpty ? nil : names
+    }
+
+    /// One line, no surrounding space, at most `maxLength` characters.
+    public static func cleaned(_ name: String) -> String {
+        let line = name.components(separatedBy: .newlines).joined(separator: " ")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return String(line.prefix(maxLength)).trimmingCharacters(in: .whitespaces)
+    }
+
+    /// Forgets names of sessions the Mac no longer knows: neither listed nor in its history.
+    public mutating func keep(_ known: Set<String>, on macID: String) {
+        guard let names = byMac[macID] else { return }
+        let kept = names.filter { known.contains($0.key) }
+        byMac[macID] = kept.isEmpty ? nil : kept
+    }
+
+    public mutating func forget(_ macID: String) { byMac[macID] = nil }
+
+    /// Drops Macs no longer paired.
+    public mutating func keepOnly(_ macIDs: Set<String>) { byMac = byMac.filter { macIDs.contains($0.key) } }
+}
+
 /// Sessions the phone hid from a Mac's list, per Mac.
 public struct ShellHiddenSessions: Codable, Equatable, Sendable {
     public private(set) var byMac: [String: Set<String>] = [:]

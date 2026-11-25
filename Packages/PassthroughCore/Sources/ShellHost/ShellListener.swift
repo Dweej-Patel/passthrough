@@ -1226,7 +1226,7 @@ final class ShellConnection: ShellAttachment, @unchecked Sendable {
             sendHistory()
         case ShellEnvelope.transcript:
             guard let id = message.session else { return fail(.badRequest) }
-            sendTranscript(id)
+            sendTranscript(id, maxBytes: message.tail.map { min(max($0, 1), TranscriptStore.readLimit) } ?? TranscriptStore.readLimit)
         case ShellEnvelope.screen:
             guard gate?.screenAllowed(phoneID) == true else { return fail(.screenNotAllowed) }
             guard takeScreenView() else { return fail(.tooManyScreens) }
@@ -1283,7 +1283,6 @@ final class ShellConnection: ShellAttachment, @unchecked Sendable {
             fail(.badRequest)
         }
     }
-
     /// Issues a screen pass on the work queue (it writes the Keychain), then answers.
     private func grantScreen(name: String, viewer: String) {
         guard let gate, let handler = gate.screenGrant.get() else { return fail(.badRequest) }
@@ -1495,13 +1494,13 @@ final class ShellConnection: ShellAttachment, @unchecked Sendable {
         return reply(count)
     }
 
-    /// Reads the transcript's end (at most `TranscriptStore.readLimit`, with
-    /// the terminal's sizes) off the queue, then sends it a line at a time,
-    /// each after the previous one was taken by the network.
-    private func sendTranscript(_ id: String) {
+    /// Reads the transcript's end (at most `maxBytes`, with the terminal's
+    /// sizes) off the queue, then sends it a line at a time, each after the
+    /// previous one was taken by the network.
+    private func sendTranscript(_ id: String, maxBytes: Int) {
         DispatchQueue.global(qos: .utility).async { [weak self] in
             guard let self else { return }
-            let lines = (try? self.transcripts.replay(of: id, maxBytes: TranscriptStore.readLimit))
+            let lines = (try? self.transcripts.replay(of: id, maxBytes: maxBytes))
                 .map { ShellReplay.transcriptLines(session: id, $0) }
             self.queue.async {
                 guard let lines else { return self.fail(.noSuchSession, session: id) }
